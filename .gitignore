@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 构建/诊断产物（保留打包配置）
+build/*
+!build/electron-builder.yml
+
+# 测试临时产物（保留脚本与用例）
+test/_chrome_profile/
+test/node_modules/
+test/*.png
+test/*.jpg
+test/*.jpeg
+test/*.pdf
+test/*.svg
+test/*.vsdx
+test/_*.py
+test/_*.js
+
+# 根目录生成的 Visio 样例/临时文件
+*.vsdx

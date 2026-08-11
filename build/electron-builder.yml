@@ -1,0 +1,24 @@
+appId: com.nettopo.app
+productName: NetTopo 网络拓扑设计器
+electronDist: node_modules/electron/dist
+directories:
+  output: dist/portable
+  buildResources: build
+files:
+  - index.html
+  - electron-main.js
+  - package.json
+  - icon.ico
+  - icon.png
+  - css/**/*
+  - js/**/*
+  - lib/**/*
+win:
+  icon: icon.ico
+  target:
+    - target: portable
+      arch:
+        - x64
+portable:
+  artifactName: NetTopo-${version}-portable.exe
+npmRebuild: false

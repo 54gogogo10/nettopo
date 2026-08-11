@@ -1,0 +1,2585 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<VisioDocument start='190' metric='0' xml:space='preserve' xmlns='http://schemas.microsoft.com/visio/2003/core'>
+  <DocumentProperties>
+    <Creator>NetTopo 网络拓扑设计器</Creator>
+    <Company>NetTopo</Company>
+    <Desc>由 NetTopo 导出的网络拓扑图，可在 Visio 中继续编辑</Desc>
+    <BuildNumberCreated>805312791</BuildNumberCreated>
+    <BuildNumberEdited>805312791</BuildNumberEdited>
+  </DocumentProperties>
+  <DocumentSettings>
+    <GlueSettings>9</GlueSettings>
+    <SnapSettings>15</SnapSettings>
+  </DocumentSettings>
+  <Colors>
+    <ColorEntry IX='0' RGB='#000000'/>
+    <ColorEntry IX='1' RGB='#FFFFFF'/>
+    <ColorEntry IX='2' RGB='#FF0000'/>
+    <ColorEntry IX='3' RGB='#00FF00'/>
+    <ColorEntry IX='4' RGB='#0000FF'/>
+  </Colors>
+  <FaceNames>
+    <FaceName ID='1' Name='Arial Unicode MS' UnicodeRanges='-1 -369098753 63 0' CharSets='1614742015 -65536' Panos='2 11 6 4 2 2 2 2 2 4' Flags='357'/>
+    <FaceName ID='4' Name='Arial' UnicodeRanges='-536859905 -1073711037 9 0' CharSets='1073742335 -65536' Panos='2 11 6 4 2 2 2 2 2 4' Flags='325'/>
+    <FaceName ID='5' Name='SimSun' UnicodeRanges='3 680460288 6 0' CharSets='262145 0' Panos='2 1 6 0 3 1 1 1 1 1' Flags='421'/>
+    <FaceName ID='6' Name='Microsoft YaHei' UnicodeRanges='-536859905 -1073711037 9 0' CharSets='1073742335 -65536' Panos='2 1 6 0 3 1 1 1 1 1' Flags='325'/>
+  </FaceNames>
+  <StyleSheets>
+    <StyleSheet ID='0' NameU='No Style' Name='No Style'>
+      <StyleProp>
+        <EnableLineProps>1</EnableLineProps>
+        <EnableFillProps>1</EnableFillProps>
+        <EnableTextProps>1</EnableTextProps>
+        <HideForApply>0</HideForApply>
+      </StyleProp>
+      <Line>
+        <LineWeight>0.01</LineWeight>
+        <LineColor>0</LineColor>
+        <LineColorTrans>0</LineColorTrans>
+        <LinePattern>1</LinePattern>
+        <Rounding>0</Rounding>
+        <BeginArrow>0</BeginArrow>
+        <EndArrow>0</EndArrow>
+        <BeginArrowSize>2</BeginArrowSize>
+        <EndArrowSize>2</EndArrowSize>
+      </Line>
+      <Fill>
+        <FillForegnd>0</FillForegnd>
+        <FillBkgnd>1</FillBkgnd>
+        <FillForegndTrans>0</FillForegndTrans>
+        <FillBkgndTrans>0</FillBkgndTrans>
+        <FillPattern>1</FillPattern>
+        <ShapeShdwType>1</ShapeShdwType>
+        <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+        <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+      </Fill>
+      <Char IX='0'>
+        <Font>4</Font>
+        <Color>0</Color>
+        <Style>0</Style>
+        <Size>0.1666666666666667</Size>
+      </Char>
+      <Para IX='0'>
+        <HorzAlign>0</HorzAlign>
+      </Para>
+    </StyleSheet>
+  </StyleSheets>
+  <Pages>
+    <Page ID='0' Name='网络拓扑图'>
+      <PageSheet LineStyle='0' FillStyle='0' TextStyle='0'>
+        <PageProps>
+      <PageWidth Unit='IN'>12.738</PageWidth>
+      <PageHeight Unit='IN'>12.167</PageHeight>
+
+          <PageScale>1</PageScale>
+          <DrawingScale>1</DrawingScale>
+          <DrawingSizeType>4</DrawingSizeType>
+          <DrawingScaleType>0</DrawingScaleType>
+        </PageProps>
+      </PageSheet>
+      <Shapes>
+  <Shape ID='2' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>7.866</PinX>
+      <PinY Unit='IN'>1.448</PinY>
+      <Width Unit='IN'>1.719</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.859</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.719</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.719</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.859</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.616</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.808</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#4338ca</FillForegnd>
+      <FillBkgnd>#6366f1</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#3730a3</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>路由器</Label>
+      <Value>路由器</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value>上联运营商</Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>核心路由器R1</Text>
+  </Shape>
+  <Shape ID='3' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>11.264</PinX>
+      <PinY Unit='IN'>3.084</PinY>
+      <Width Unit='IN'>1.948</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.974</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.948</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.948</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.974</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.831</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.916</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#334155</FillForegnd>
+      <FillBkgnd>#64748b</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#1e293b</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>云/外网</Label>
+      <Value>云/外网</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value></Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>互联网出口Cloud</Text>
+  </Shape>
+  <Shape ID='4' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>5.455</PinX>
+      <PinY Unit='IN'>4.259</PinY>
+      <Width Unit='IN'>1.792</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.896</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.792</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.792</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.896</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.684</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.842</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#0f766e</FillForegnd>
+      <FillBkgnd>#14b8a6</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#115e59</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>交换机</Label>
+      <Value>交换机</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value>核心互联</Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>核心交换机SW1</Text>
+  </Shape>
+  <Shape ID='5' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>4.154</PinX>
+      <PinY Unit='IN'>0.792</PinY>
+      <Width Unit='IN'>1.667</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.833</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.667</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.667</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.833</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.567</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.783</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#c2410c</FillForegnd>
+      <FillBkgnd>#f97316</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#9a3412</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>防火墙</Label>
+      <Value>防火墙</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value>安全出口</Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>防火墙FW1</Text>
+  </Shape>
+  <Shape ID='6' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>5.159</PinX>
+      <PinY Unit='IN'>7.849</PinY>
+      <Width Unit='IN'>1.792</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.896</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.792</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.792</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.896</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.684</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.842</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#0f766e</FillForegnd>
+      <FillBkgnd>#14b8a6</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#115e59</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>交换机</Label>
+      <Value>交换机</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value>办公区A</Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>接入交换机SW2</Text>
+  </Shape>
+  <Shape ID='7' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>1.396</PinX>
+      <PinY Unit='IN'>6.15</PinY>
+      <Width Unit='IN'>1.792</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.896</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.792</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.792</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.896</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.684</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.842</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#6d28d9</FillForegnd>
+      <FillBkgnd>#8b5cf6</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#5b21b6</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>服务器</Label>
+      <Value>服务器</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value>文件服务</Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>文件服务器FS1</Text>
+  </Shape>
+  <Shape ID='8' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>2.3</PinX>
+      <PinY Unit='IN'>10.464</PinY>
+      <Width Unit='IN'>1.938</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.969</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.938</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.938</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.969</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.821</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.911</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#6d28d9</FillForegnd>
+      <FillBkgnd>#8b5cf6</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#5b21b6</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>服务器</Label>
+      <Value>服务器</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value>数据库</Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>数据库服务器DB1</Text>
+  </Shape>
+  <Shape ID='9' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>6.955</PinX>
+      <PinY Unit='IN'>11.375</PinY>
+      <Width Unit='IN'>1.667</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.833</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.667</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.667</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.833</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.567</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.783</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#0369a1</FillForegnd>
+      <FillBkgnd>#0ea5e9</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#075985</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>终端</Label>
+      <Value>终端</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value>行政部</Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>办公PC1</Text>
+  </Shape>
+  <Shape ID='10' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm>
+      <PinX Unit='IN'>9.239</PinX>
+      <PinY Unit='IN'>7.928</PinY>
+      <Width Unit='IN'>1.667</Width>
+      <Height Unit='IN'>0.583</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>0.833</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.292</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X Unit='IN' F='Width*1'>1.667</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X Unit='IN' F='Width*1'>1.667</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*1'>0.583</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X Unit='IN' F='Width*0'>0</X>
+      <Y Unit='IN' F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <TextXForm>
+      <TxtPinX Unit='IN' F='Width*0.5'>0.833</TxtPinX>
+      <TxtPinY Unit='IN' F='Height*0.5'>0.292</TxtPinY>
+      <TxtWidth Unit='IN' F='Width*0.94'>1.567</TxtWidth>
+      <TxtHeight Unit='IN' F='Height*0.86'>0.502</TxtHeight>
+      <TxtLocPinX Unit='IN' F='TxtWidth*0.5'>0.783</TxtLocPinX>
+      <TxtLocPinY Unit='IN' F='TxtHeight*0.5'>0.251</TxtLocPinY>
+
+      <TxtAngle>0</TxtAngle>
+    </TextXForm>
+    <Fill>
+      <FillForegnd>#0369a1</FillForegnd>
+      <FillBkgnd>#0ea5e9</FillBkgnd>
+      <FillForegndTrans>0</FillForegndTrans>
+      <FillBkgndTrans>0</FillBkgndTrans>
+      <FillPattern>1</FillPattern>
+      <ShapeShdwType>1</ShapeShdwType>
+      <ShapeShdwOffsetX>0.08</ShapeShdwOffsetX>
+      <ShapeShdwOffsetY>0.08</ShapeShdwOffsetY>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#075985</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0.08</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#FFFFFF</Color>
+      <Style>1</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.166667</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Prop Name='type'>
+      <Label>终端</Label>
+      <Value>终端</Value>
+
+    </Prop>
+    <Prop Name='note'>
+      <Label>备注</Label>
+      <Value>财务部</Value>
+
+    </Prop>
+    <Text><pp IX='0'/><cp IX='0'/>办公PC2</Text>
+  </Shape>
+  <Shape ID='11' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>8.472</BeginX>
+      <BeginY Unit='IN'>1.74</BeginY>
+      <EndX Unit='IN'>10.658</EndX>
+      <EndY Unit='IN'>2.792</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>2.426</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>9.565</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>2.266</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.213</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.426</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10011' Type='Shape' NameU='Label10011' Name='标注-GE0/0/0-eth0'>
+    <XForm>
+      <PinX Unit='IN'>9.565</PinX>
+      <PinY Unit='IN'>2.586</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE0/0/0  203.0.113.1&#10;<pp IX='1'/>eth0  203.0.113.254&#10;<pp IX='2'/>带宽: 万兆</Text>
+  </Shape>
+  <Shape ID='12' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>7.616</BeginX>
+      <BeginY Unit='IN'>1.74</BeginY>
+      <EndX Unit='IN'>5.705</EndX>
+      <EndY Unit='IN'>3.967</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>2.934</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>6.661</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>2.853</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.467</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.934</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10012' Type='Shape' NameU='Label10012' Name='标注-GE0/0/1-GE1/0/1'>
+    <XForm>
+      <PinX Unit='IN'>6.661</PinX>
+      <PinY Unit='IN'>3.173</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE0/0/1  10.0.0.1&#10;<pp IX='1'/>GE1/0/1  10.0.0.2&#10;<pp IX='2'/>带宽: 万兆</Text>
+  </Shape>
+  <Shape ID='13' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>7.007</BeginX>
+      <BeginY Unit='IN'>1.296</BeginY>
+      <EndX Unit='IN'>4.988</EndX>
+      <EndY Unit='IN'>0.939</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>2.05</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>5.997</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>1.118</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.025</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.05</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10013' Type='Shape' NameU='Label10013' Name='标注-GE0/0/2-eth0'>
+    <XForm>
+      <PinX Unit='IN'>5.997</PinX>
+      <PinY Unit='IN'>1.438</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE0/0/2  10.0.0.9&#10;<pp IX='1'/>eth0  10.0.0.10&#10;<pp IX='2'/>带宽: 万兆</Text>
+  </Shape>
+  <Shape ID='14' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>4.264</BeginX>
+      <BeginY Unit='IN'>1.083</BeginY>
+      <EndX Unit='IN'>5.346</EndX>
+      <EndY Unit='IN'>3.967</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>3.08</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>4.805</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>2.525</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.54</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>3.08</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10014' Type='Shape' NameU='Label10014' Name='标注-eth1-GE1/0/2'>
+    <XForm>
+      <PinX Unit='IN'>4.805</PinX>
+      <PinY Unit='IN'>2.845</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>eth1  172.16.0.1&#10;<pp IX='1'/>GE1/0/2  172.16.0.2&#10;<pp IX='2'/>带宽: 万兆</Text>
+  </Shape>
+  <Shape ID='15' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>5.431</BeginX>
+      <BeginY Unit='IN'>4.55</BeginY>
+      <EndX Unit='IN'>5.183</EndX>
+      <EndY Unit='IN'>7.558</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>3.018</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>5.307</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>6.054</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.509</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>3.018</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10015' Type='Shape' NameU='Label10015' Name='标注-GE1/0/24-GE0/0/24'>
+    <XForm>
+      <PinX Unit='IN'>5.307</PinX>
+      <PinY Unit='IN'>6.374</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE1/0/24  192.168.1.1&#10;<pp IX='1'/>GE0/0/24  192.168.1.2&#10;<pp IX='2'/>带宽: 千兆</Text>
+  </Shape>
+  <Shape ID='16' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>5.431</BeginX>
+      <BeginY Unit='IN'>4.55</BeginY>
+      <EndX Unit='IN'>5.183</EndX>
+      <EndY Unit='IN'>7.558</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>3.018</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>5.307</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>6.054</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.509</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>3.018</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10016' Type='Shape' NameU='Label10016' Name='标注-GE1/0/23-GE0/0/23'>
+    <XForm>
+      <PinX Unit='IN'>5.307</PinX>
+      <PinY Unit='IN'>6.374</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE1/0/23  192.168.2.1&#10;<pp IX='1'/>GE0/0/23  192.168.2.2&#10;<pp IX='2'/>带宽: 千兆</Text>
+  </Shape>
+  <Shape ID='17' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>4.513</BeginX>
+      <BeginY Unit='IN'>7.558</BeginY>
+      <EndX Unit='IN'>2.041</EndX>
+      <EndY Unit='IN'>6.441</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>2.712</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>3.277</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>6.999</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.356</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.712</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10017' Type='Shape' NameU='Label10017' Name='标注-GE0/0/1-eth0'>
+    <XForm>
+      <PinX Unit='IN'>3.277</PinX>
+      <PinY Unit='IN'>7.319</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE0/0/1  192.168.1.10&#10;<pp IX='1'/>eth0  192.168.1.10&#10;<pp IX='2'/>带宽: 千兆</Text>
+  </Shape>
+  <Shape ID='18' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>4.84</BeginX>
+      <BeginY Unit='IN'>8.141</BeginY>
+      <EndX Unit='IN'>2.619</EndX>
+      <EndY Unit='IN'>10.172</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>3.01</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>3.729</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>9.157</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.505</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>3.01</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10018' Type='Shape' NameU='Label10018' Name='标注-GE0/0/2-eth0'>
+    <XForm>
+      <PinX Unit='IN'>3.729</PinX>
+      <PinY Unit='IN'>9.477</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE0/0/2  192.168.1.20&#10;<pp IX='1'/>eth0  192.168.1.20&#10;<pp IX='2'/>带宽: 千兆</Text>
+  </Shape>
+  <Shape ID='19' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>5.307</BeginX>
+      <BeginY Unit='IN'>8.141</BeginY>
+      <EndX Unit='IN'>6.807</EndX>
+      <EndY Unit='IN'>11.084</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>3.302</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>6.057</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>9.612</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.651</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>3.302</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10019' Type='Shape' NameU='Label10019' Name='标注-GE0/0/3-eth0'>
+    <XForm>
+      <PinX Unit='IN'>6.057</PinX>
+      <PinY Unit='IN'>9.932</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE0/0/3  192.168.1.30&#10;<pp IX='1'/>eth0  192.168.1.30&#10;<pp IX='2'/>带宽: 百兆</Text>
+  </Shape>
+  <Shape ID='20' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+    <XForm1D>
+      <BeginX Unit='IN'>6.055</BeginX>
+      <BeginY Unit='IN'>7.867</BeginY>
+      <EndX Unit='IN'>8.406</EndX>
+      <EndY Unit='IN'>7.912</EndY>
+
+    </XForm1D>
+    <XForm>
+      <Width Unit='IN' F='SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'>2.352</Width>
+
+      <Height>0.02</Height>
+      <PinX Unit='IN' F='(BeginX+EndX)/2'>7.23</PinX>
+      <PinY Unit='IN' F='(BeginY+EndY)/2'>7.889</PinY>
+      <LocPinX Unit='IN' F='Width*0.5'>1.176</LocPinX>
+
+      <LocPinY>0.01</LocPinY>
+      <Angle F='ATAN2(EndY-BeginY,EndX-BeginX)'>3.142</Angle>
+
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>#8fa0b8</LineColor>
+      <LineColorTrans>0</LineColorTrans>
+      <LinePattern>1</LinePattern>
+      <Rounding>0</Rounding>
+      <BeginArrow>0</BeginArrow>
+      <EndArrow>0</EndArrow>
+      <BeginArrowSize>2</BeginArrowSize>
+      <EndArrowSize>2</EndArrowSize>
+    </Line>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.352</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+  </Shape>
+  <Shape ID='10020' Type='Shape' NameU='Label10020' Name='标注-GE0/0/4-eth0'>
+    <XForm>
+      <PinX Unit='IN'>7.23</PinX>
+      <PinY Unit='IN'>8.209</PinY>
+      <Width Unit='IN'>2.3</Width>
+      <Height Unit='IN'>0.55</Height>
+      <LocPinX Unit='IN' F='Width*0.5'>1.15</LocPinX>
+      <LocPinY Unit='IN' F='Height*0.5'>0.275</LocPinY>
+
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </MoveTo>
+      <LineTo IX='2'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+      <LineTo IX='3'>
+      <X F='Width*1'>2.3</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='4'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*1'>0.55</Y>
+      </LineTo>
+      <LineTo IX='5'>
+      <X F='Width*0'>0</X>
+      <Y F='Height*0'>0</Y>
+      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+    <Char IX='0'>
+      <Font>6</Font>
+      <Color>#334155</Color>
+      <Style>0</Style>
+      <Case>0</Case>
+      <Pos>0</Pos>
+      <Size>0.125</Size>
+      <Strikethru>0</Strikethru>
+      <ColorTrans>0</ColorTrans>
+      <AsianFont>6</AsianFont>
+      <ComplexScriptFont>6</ComplexScriptFont>
+    </Char>
+    <Para IX='0'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='1'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <Para IX='2'>
+      <IndFirst>0</IndFirst>
+      <IndLeft>0</IndLeft>
+      <IndRight>0</IndRight>
+      <SpLine Unit='DT'>-1.2</SpLine>
+      <SpBefore>0</SpBefore>
+      <SpAfter>0</SpAfter>
+      <HorzAlign>1</HorzAlign>
+      <Bullet>0</Bullet>
+    </Para>
+    <TextBlock>
+      <LeftMargin>0.05</LeftMargin>
+      <RightMargin>0.05</RightMargin>
+      <TopMargin>0.02</TopMargin>
+      <BottomMargin>0.02</BottomMargin>
+      <VerticalAlign>1</VerticalAlign>
+    </TextBlock>
+    <Text><pp IX='0'/><cp IX='0'/>GE0/0/4  192.168.1.31&#10;<pp IX='1'/>eth0  192.168.1.31&#10;<pp IX='2'/>带宽: 百兆</Text>
+  </Shape>
+      </Shapes>
+      <Connects>
+  <Connect FromSheet='11' FromCell='BeginX' ToSheet='2' ToCell='PinX'/>
+  <Connect FromSheet='11' FromCell='EndX' ToSheet='3' ToCell='PinX'/>
+  <Connect FromSheet='12' FromCell='BeginX' ToSheet='2' ToCell='PinX'/>
+  <Connect FromSheet='12' FromCell='EndX' ToSheet='4' ToCell='PinX'/>
+  <Connect FromSheet='13' FromCell='BeginX' ToSheet='2' ToCell='PinX'/>
+  <Connect FromSheet='13' FromCell='EndX' ToSheet='5' ToCell='PinX'/>
+  <Connect FromSheet='14' FromCell='BeginX' ToSheet='5' ToCell='PinX'/>
+  <Connect FromSheet='14' FromCell='EndX' ToSheet='4' ToCell='PinX'/>
+  <Connect FromSheet='15' FromCell='BeginX' ToSheet='4' ToCell='PinX'/>
+  <Connect FromSheet='15' FromCell='EndX' ToSheet='6' ToCell='PinX'/>
+  <Connect FromSheet='16' FromCell='BeginX' ToSheet='4' ToCell='PinX'/>
+  <Connect FromSheet='16' FromCell='EndX' ToSheet='6' ToCell='PinX'/>
+  <Connect FromSheet='17' FromCell='BeginX' ToSheet='6' ToCell='PinX'/>
+  <Connect FromSheet='17' FromCell='EndX' ToSheet='7' ToCell='PinX'/>
+  <Connect FromSheet='18' FromCell='BeginX' ToSheet='6' ToCell='PinX'/>
+  <Connect FromSheet='18' FromCell='EndX' ToSheet='8' ToCell='PinX'/>
+  <Connect FromSheet='19' FromCell='BeginX' ToSheet='6' ToCell='PinX'/>
+  <Connect FromSheet='19' FromCell='EndX' ToSheet='9' ToCell='PinX'/>
+  <Connect FromSheet='20' FromCell='BeginX' ToSheet='6' ToCell='PinX'/>
+  <Connect FromSheet='20' FromCell='EndX' ToSheet='10' ToCell='PinX'/>
+      </Connects>
+    </Page>
+  </Pages>
+</VisioDocument>
