@@ -166,8 +166,8 @@ async function handleImport(file) {
   loadGraph(graph, `已导入 ${graph.nodes.length} 台设备、${graph.links.length} 条链路`);
 }
 
-function loadGraph(graph, msg) {
-  if (state.nodes.length && !confirm('导入将替换当前拓扑，是否继续？')) return;
+async function loadGraph(graph, msg) {
+  if (state.nodes.length && !(await confirmBox('导入将替换当前拓扑，是否继续？'))) return;
   layoutCancel = true;
   setMode('normal');
   state.nodes = graph.nodes;
@@ -467,10 +467,12 @@ function openConfigTemplateManager(done) {
       item.querySelector('[data-act=edit]').onclick = () => editCfgTemplate(k);
       const del = item.querySelector('[data-act=del]');
       if (del) del.onclick = () => {
-        if (!confirm('删除自定义模板「' + (U.cfgTemplates()[k] || {}).label + '」？')) return;
-        delete (U.customCfgTemplates || {})[k];
-        U.saveCustomCfgTemplates();
-        render();
+        confirmBox('删除自定义模板「' + (U.cfgTemplates()[k] || {}).label + '」？').then(ok => {
+          if (!ok) return;
+          delete (U.customCfgTemplates || {})[k];
+          U.saveCustomCfgTemplates();
+          render();
+        });
       };
     });
   };
@@ -1082,7 +1084,7 @@ async function loadProject(file) {
   if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) {
     toast('工程文件格式不正确'); return;
   }
-  if (state.nodes.length && !confirm('打开工程将替换当前拓扑，是否继续？')) return;
+  if (state.nodes.length && !(await confirmBox('打开工程将替换当前拓扑，是否继续？'))) return;
   if (Array.isArray(data.customTypes)) { U.customTypes = data.customTypes; U.saveCustomTypes(); }
   if (data.typeOverrides && typeof data.typeOverrides === 'object') { U.typeOverrides = data.typeOverrides; U.saveTypeOverrides(); }
   state.nodes = data.nodes;
@@ -1160,12 +1162,13 @@ function locateIssue(issue) {
 }
 
 /* ================= 新建 ================= */
-function newGraph() {
-  if (state.nodes.length && !confirm('新建将清空当前拓扑，是否继续？')) return;
+async function newGraph() {
+  if (state.nodes.length && !(await confirmBox('新建将清空当前拓扑，是否继续？'))) return;
   layoutCancel = true;
   setMode('normal');
   state.nodes = [];
   state.links = [];
+  state.texts = []; // 空白画布不保留旧文本框
   state.sel = { kind: null, id: null };
   state.undoStack = [];
   state.redoStack = [];
@@ -1695,6 +1698,7 @@ function openModal(opts) {
       </form>
     </div>`;
   root.appendChild(ov);
+  try { window.focus(); } catch (e) {} // 确保窗口有键盘焦点（原生 confirm/对话框后可能失焦）
 
   const close = () => ov.remove();
   const form = ov.querySelector('form');
@@ -1723,7 +1727,8 @@ function openModal(opts) {
     if (e.key === 'Escape') { e.stopPropagation(); close(); }
   });
   const first = form.querySelector('input, select, textarea');
-  if (first) setTimeout(() => first.focus(), 30);
+  // 弹窗动画（rise .2s）完成后再聚焦，避免个别环境下动画期间聚焦被重置
+  if (first) setTimeout(() => { if (document.body.contains(ov)) first.focus(); }, 250);
 }
 
 function toast(msg) {
@@ -1738,6 +1743,31 @@ function toast(msg) {
   t.style.opacity = '1';
   clearTimeout(t._h);
   t._h = setTimeout(() => { t.style.opacity = '0'; }, 2600);
+}
+
+/* ================= 应用内确认框（替代原生 confirm，避免 Electron 原生对话框后的焦点问题） ================= */
+function confirmBox(message) {
+  return new Promise((resolve) => {
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal" role="dialog" style="width:380px">
+        <h3>请确认</h3>
+        <div class="m-sub">${U.escHtml(message)}</div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="no">取消</button>
+          <button type="button" class="tb primary" data-act="yes">确定</button>
+        </div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = (val) => { ov.remove(); resolve(val); };
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(false); });
+    ov.querySelector('[data-act=no]').onclick = () => close(false);
+    ov.querySelector('[data-act=yes]').onclick = () => close(true);
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(false); } });
+  });
 }
 
 /* ================= 右键菜单 ================= */
@@ -2211,12 +2241,14 @@ function openTypeManager() {
       });
       const del = row.querySelector('[data-act=del]');
       if (del) del.addEventListener('click', () => {
-        if (!confirm(`删除类型「${U.customTypes.find(t => t.key === key).label}」？`)) return;
-        U.removeCustomType(key);
-        for (const n of state.nodes) {
-          if (n.type === key) { n.type = 'other'; }
-        }
-        afterChange();
+        confirmBox(`删除类型「${U.customTypes.find(t => t.key === key).label}」？`).then(ok => {
+          if (!ok) return;
+          U.removeCustomType(key);
+          for (const n of state.nodes) {
+            if (n.type === key) { n.type = 'other'; }
+          }
+          afterChange();
+        });
       });
     });
   };
@@ -2303,8 +2335,7 @@ function wire() {
 
   // ---- 工具栏下拉菜单（文件 / 编辑 / 布局 / 导出） ----
   const loadSample = () => {
-    if (state.nodes.length && !confirm('导入将替换当前拓扑，是否继续？')) return;
-    loadGraph(M.textToGraph(M.SAMPLE_CSV), '已载入示例拓扑：9 台设备、10 条链路');
+    loadGraph(M.textToGraph(M.SAMPLE_CSV), '已载入示例拓扑：9 台设备、10 条链路'); // 是否覆盖由 loadGraph 内确认框处理
   };
   const togglePlace = () => setMode(state.mode === 'place' ? 'normal' : 'place');
   const toggleLink = () => setMode(state.mode === 'link' ? 'normal' : 'link');

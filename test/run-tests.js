@@ -572,6 +572,14 @@ console.log('== Visio VSDX 导出（2012 格式） ==');
     ok(sT.includes('ID=\'50000') && sT.includes("<Cell N='Color' V='#dc2626'") && sT.includes("<Cell N='Style' V='1'") && sT.includes("<Cell N='Para.HorzAlign' V='1'"), 'VSDX 文本框字体样式（颜色/粗体/居中）');
   }
   ok(s.includes("<Cell N='Angle' V='") && s.includes('LineColor'), 'VSDX 连线 Angle/线色（2-D 直线）');
+  // 设备保持色块 + 白字（已回退图标替换改动）：内置类型不嵌入图片，默认色块；自定义图片仍嵌入
+  {
+    const bufN = V2.buildVSDX({ nodes: nodes2, links: links2 }, {});
+    const sN = Buffer.from(bufN).toString('latin1');
+    ok(sN.includes("N='FillPattern' V='1'") && sN.includes("Color' V='#FFFFFF'"), 'VSDX 设备色块 + 白字');
+    ok(!sN.includes('visio/media/') || sN.indexOf('visio/media/') === -1, 'VSDX 内置类型不嵌入图片（无 media 部件）');
+    ok(!sN.includes("N='TxtWidth'"), 'VSDX 设备不使用右侧文字框（居中）');
+  }
   // 双链路平行偏移：同一对设备的两条连线 PinY 必须不同（与画布显示一致）
   {
     const pinY = [...s.matchAll(/<Cell N='PinY' V='([^']+)'/g)].map(m => parseFloat(m[1]));

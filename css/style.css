@@ -331,8 +331,9 @@ body:not(.panel-off) #panelOpen { display: none; }
 /* ============ 弹窗 ============ */
 #modalRoot:empty { display: none; }
 .overlay {
-  position: fixed; inset: 0; z-index: 80; background: rgba(2, 6, 23, .45);
-  backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center;
+  position: fixed; inset: 0; z-index: 110; background: rgba(2, 6, 23, .45);
+  /* 不使用 backdrop-filter：个别环境（Electron/GPU）会导致弹窗内输入框无法点击/聚焦 */
+  display: flex; align-items: center; justify-content: center;
   animation: fade .15s ease;
 }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
