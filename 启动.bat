@@ -5,6 +5,8 @@ cd /d %~dp0
 echo ============================================
 echo   NetTopo Network Topology Designer
 echo   Starting local server: http://localhost:8765
+echo   Note: Web Shell (SSH/Telnet) is desktop-only.
+echo   Please use dist\NetTopo-*-portable.exe for full features.
 echo ============================================
 echo.
 echo   The browser will open automatically.

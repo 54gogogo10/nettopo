@@ -227,6 +227,20 @@ console.log('== 类型覆盖（颜色/图片） ==');
   ok(U.getType('不存在的类型').key === 'other', '未知类型回退 other');
 }
 
+console.log('== 带宽单位解析 / 工程数据清洗 ==');
+{
+  ok(U.normalizeBw('2g') === 2000 && U.normalizeBw('2.5g') === 2500 && U.normalizeBw('500m') === 500 && U.normalizeBw('800mbps') === 800, '带宽通用单位解析（2g/2.5g/500m/800mbps）');
+  ok(U.formatBw(40000) === '40G' && U.formatBw(50000) === '50G' && U.formatBw(2500) === '2.5G', '带宽格式化（40G/50G/2.5G）');
+  const sg = U.sanitizeGraph(
+    [{ id: 'n1' }, { id: 'n2', name: 'R1', x: 'abc', y: 10, w: 0, h: 0, type: 123, mgmt: null, note: 5 }],
+    [{ id: 'l1', a: 'n1', b: 'n2', aIf: 1, aIp: null }],
+    [{ id: 't1', x: 'x', size: 0, color: 'red', bg: '#fff', align: 'up', text: 42 }]
+  );
+  ok(sg.nodes.length === 2 && sg.nodes[1].x === 0 && sg.nodes[1].w >= 40 && sg.nodes[1].type === 'other' && sg.nodes[1].name === 'R1' && sg.nodes[1].mgmt === '', '清洗节点缺失/畸形字段（坐标回退、宽度下限、类型回退）');
+  ok(sg.links.length === 1 && sg.links[0].aIf === '1' && sg.links[0].aIp === '', '清洗连线字段为字符串');
+  ok(sg.texts.length === 1 && sg.texts[0].x === 0 && sg.texts[0].size === 8 && sg.texts[0].color === '#1e293b' && sg.texts[0].bg === '' && sg.texts[0].align === 'left' && sg.texts[0].text === '42', '清洗文本框字段（颜色/对齐/字号回退）');
+}
+
 console.log('== 布局 ==');
 const posBefore = g1.nodes.map(n => [n.x, n.y]);
 Layout.layoutNow(g1.nodes, g1.links, 200);
@@ -958,11 +972,14 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const port = server.address().port;
     const mgr = new ShellManager();
     const outs = [];
+    const statuses = [];
     mgr.on('output', (id, d) => outs.push(d));
+    mgr.on('status', (id, info) => statuses.push(info));
     const r = mgr.connect({ protocol: 'ssh', host: '127.0.0.1', port, username: 'admin', password: 'secret', cols: 80, rows: 24 });
     ok(r.ok, 'SSH 发起连接成功');
     await waitFor(() => outs.join('').includes('SSH-READY'), 5000);
     ok(outs.join('').includes('SSH-READY'), 'SSH 打开远程 Shell 并收到欢迎信息');
+    ok(statuses.some(s => s.state === 'info' && s.text.includes('指纹')), 'SSH 展示主机密钥 SHA256 指纹');
     mgr.write(r.id, 'ping\r\n');
     await waitFor(() => got.some(g => g[0] === 'data' && g[1].includes('ping')), 3000);
     ok(got.some(g => g[0] === 'data' && g[1].includes('ping')), 'SSH 输入转发到服务器');

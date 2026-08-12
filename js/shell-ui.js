@@ -12,6 +12,11 @@
     const state = info && info.state;
     s.dotEl.className = 'dot' + (state === 'error' ? ' err' : state === 'connected' ? ' ok' : '');
     s.tabEl.title = (info && info.text) || s.tabEl.title;
+    // info 类状态（如 SSH 主机密钥指纹）写入终端，便于人工核对
+    if (state === 'info' && info.text && s.term && !s._fpShown) {
+      s._fpShown = true;
+      s.term.write('\r\n\x1b[90m' + info.text + '\x1b[0m\r\n');
+    }
   }
   function applyEnd(s, reason) {
     s.ended = true;
@@ -107,6 +112,8 @@
     if (!s.ended) window.topoShell.close(sid);
     s.tabEl.remove();
     s.wrapEl.remove();
+    try { if (s.fit && s.fit.dispose) s.fit.dispose(); } catch (e) { /* ignore */ }
+    try { s.term && s.term.dispose(); } catch (e) { /* ignore */ }
     sessions.delete(sid);
     if (sessions.size === 0) emptyEl.classList.remove('hidden');
     else activate([...sessions.keys()][0]);

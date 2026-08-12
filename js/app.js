@@ -1097,9 +1097,10 @@ async function loadProject(file) {
     if (Array.isArray(data.customTypes)) { U.customTypes = cleaned.customTypes; U.saveCustomTypes(); }
     if (data.typeOverrides && typeof data.typeOverrides === 'object') { U.typeOverrides = cleaned.overrides; U.saveTypeOverrides(); }
   }
-  state.nodes = data.nodes;
-  state.links = Array.isArray(data.links) ? data.links : [];
-  state.texts = Array.isArray(data.texts) ? data.texts : [];
+  const cleaned = U.sanitizeGraph(data.nodes, data.links, data.texts);
+  state.nodes = cleaned.nodes;
+  state.links = cleaned.links;
+  state.texts = cleaned.texts;
   state.sel = { kind: null, id: null };
   state.undoStack = [];
   state.redoStack = [];
@@ -2127,9 +2128,10 @@ function restoreGraph() {
     if (!raw) return false;
     const d = JSON.parse(raw);
     if (!d.nodes || !d.nodes.length) return false;
-    state.nodes = d.nodes;
-    state.links = d.links;
-    state.texts = Array.isArray(d.texts) ? d.texts : [];
+    const cleaned = U.sanitizeGraph(d.nodes, d.links, d.texts);
+    state.nodes = cleaned.nodes;
+    state.links = cleaned.links;
+    state.texts = cleaned.texts;
     U.seedCounters(state.nodes, state.links, state.texts); // 避免新 ID 与恢复节点/文本框冲突
     state.sel = { kind: null, id: null };
     state.undoStack = []; // 初始状态无需撤销
@@ -2618,7 +2620,10 @@ function openWebShell(id) {
 }
 
 /* ================= 启动 ================= */
-console.log('[NetTopo] 版本 v20260812l');
+// 版本号统一取自 U.APP_VERSION（唯一来源），并同步到界面显示
+console.log('[NetTopo] 版本 ' + U.APP_VERSION);
+$('#statVer').textContent = U.APP_VERSION;
+document.title = 'NetTopo · 网络拓扑设计器 ' + U.APP_VERSION;
 // 启动时强制隐藏悬浮层（避免上次会话残留的黑点/提示条）
 $('#tooltip').classList.add('hidden');
 $('#hintBar').classList.add('hidden');

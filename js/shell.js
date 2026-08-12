@@ -103,8 +103,17 @@ class ShellManager extends EventEmitter {
       port: o.port,
       username: o.username,
       readyTimeout: 12000,
-      // 设备通常使用自签/未知主机密钥，暂不做指纹校验（适合实验室/内网设备）
-      hostVerifier: () => true
+      hostHash: 'sha256',
+      // 设备通常使用自签/未知主机密钥：默认信任（适合实验室/内网设备），
+      // 同时把主机密钥 SHA256 指纹作为 info 状态展示，便于人工核对
+      hostVerifier: (key) => {
+        try {
+          const hex = String(key).toLowerCase();
+          const fp = hex.replace(/(.{2})(?=.)/g, '$1:');
+          em.emit('status', { state: 'info', text: '主机密钥 SHA256 指纹: ' + fp });
+        } catch (e) { /* ignore */ }
+        return true;
+      }
     };
     if (o.password) { cfg.password = o.password; cfg.tryKeyboard = true; }
     client.connect(cfg);

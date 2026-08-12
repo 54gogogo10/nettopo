@@ -11,15 +11,22 @@
 - **导出 PDF / 图片**：PDF 矢量高清交付；PNG 高清图片 / SVG 矢量图便于发群与文档
 - **拓扑校验**：一键检查重复 IP、重复接口、孤立设备、环路、平行链路、跨网段等，并可定位到画布
 - **多选 / 批量**：Ctrl 点选、Shift 框选，整体拖动、批量删除与批量编辑（设备与连线）
-- **导出 Visio**：生成 `.vsdx`（Visio 2013+ 原生格式），可在 Visio 中直接打开继续编辑；自定义类型图片一并嵌入，**连线为动态连接线，拖动设备自动跟随**
+- **导出 Visio**：生成 `.vsdx`（Visio 2013+ 原生格式），可在 Visio 中直接打开继续编辑；自定义类型图片作为图片形状嵌入，**连线为 2-D 直线，拖动设备端点跟随**
 - **复制到剪贴板**：一键把拓扑图复制成图片，直接粘贴到聊天/文档
 - **布局预设**：环形布局、分层布局（按类型）、网格布局一键摆放
 - **路径分析**：选两台设备高亮最优路径（按带宽优选，显示瓶颈带宽）与经过的接口
 - **设备模板库**：预置路由器/交换机/防火墙等模板，一键添加到画布中心
+- **Web Shell（桌面版）**：选中设备右键「Web Shell（SSH/Telnet）」连接管理口；在**独立窗口**以**多标签**方式管理多台设备，主界面不锁定可继续操作拓扑
+- **网络故障模拟**：右键连线「标记链路故障（模拟断链）」，路径分析自动绕行
 
 ## 使用
 
-直接双击打开 `index.html`（Chrome / Edge 等现代浏览器），或部署到任意静态服务器。
+**推荐使用桌面版**（`dist/` 下的 `NetTopo-...-portable.exe`，免安装、零后端）：
+
+- 支持全部功能，包括 **Web Shell（SSH/Telnet）独立多标签窗口**、工程自动备份
+- 启动后左上角状态栏显示版本号（如 `v20260812m`）
+
+也可直接用浏览器打开 `index.html`（Chrome / Edge）或部署到任意静态服务器——画布编辑、导入导出等核心功能均可用，**Web Shell 为桌面版专属**（浏览器无本地网络能力）。
 
 1. 点「导入表格」选择连线关系表、点「示例」体验内置数据，或点「新建空白画布」直接手动画
 2. 自动布局后即可拖拽调整；双击设备/连线编辑接口与 IP
@@ -61,32 +68,40 @@
 | 路径分析           | 「布局 ▾ 路径分析」，按带宽优选并高亮 |
 | 模板添加           | 「编辑 ▾ 从模板添加设备…」          |
 | 拓扑校验           | 「布局 ▾ 拓扑校验」，报告内可点击定位 |
+| Web Shell           | 右键设备「Web Shell（SSH/Telnet）…」，独立窗口多标签（桌面版） |
 | 自动布局 / 适应视图 | L / F                             |
 
 ## 项目结构
 
 ```
 nettopo/
-├── index.html         # 应用入口（双击打开）
-├── css/style.css      # 样式（明暗双主题）
+├── index.html         # 主窗口入口（浏览器/Electron 通用）
+├── shell.html         # Web Shell 独立窗口（多标签终端）
+├── electron-main.js   # Electron 主进程（窗口管理、Shell IPC、事件队列）
+├── preload.js         # 渲染层↔主进程安全桥（contextBridge）
+├── css/style.css      # 主界面样式（明暗双主题）
+├── css/shell.css      # Web Shell 窗口样式
 ├── js/
-│   ├── util.js        # 工具、CSV、几何、图标、配色、自定义类型注册表
-│   ├── model.js       # 表头映射、表格⇄图转换
+│   ├── util.js        # 工具、CSV、几何、图标、配色、类型注册表、数据清洗
+│   ├── model.js       # 表头映射、表格⇄图转换、拓扑校验
 │   ├── layout.js      # 力导向布局 + 矩形碰撞分离（零遮挡）
 │   ├── render.js      # SVG 渲染、视口、交互、定位脉冲
 │   ├── visio.js       # VDX 导出（2003 格式，备用）
 │   ├── vsdx.js        # VSDX 导出（2012 原生格式 + 内置 ZIP 写入器）
 │   ├── pdf.js         # PDF 导出（SVG 渲染 + 手写 PDF 生成器）
+│   ├── shell.js       # SSH/Telnet 会话管理（主进程，纯 Node）
+│   ├── shell-ui.js    # Web Shell 窗口标签/终端逻辑
 │   └── app.js         # 主逻辑（UI、撤销、面板、类型管理、导入导出）
-├── lib/xlsx.full.min.js  # SheetJS（离线 Excel 解析）
-└── test/              # 单元测试、schema 校验、无头浏览器 e2e
+├── lib/               # xlsx（离线 Excel）、xterm（终端模拟器）
+└── test/              # 单元测试、schema 校验、无头浏览器 e2e、Electron 冒烟
 ```
 
 ## 开发测试
 
 ```bash
-node test/run-tests.js        # 187 项单元测试（含 VSDX 结构校验/图片嵌入、标注防碰撞、多行文字、拓扑校验、最宽路径、带宽数值化、布局预设、坐标回环）
+node test/run-tests.js        # 292 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、数据清洗、布局、路径、性能）
 cd test && npm i && node e2e.js   # 无头 Chrome 端到端（需本机 Chrome）
+node test/smoke-shell.js          # Electron 端到端冒烟（Web Shell 独立窗口/多标签，需本机桌面环境）
 python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备用格式）
 ```
 
@@ -94,5 +109,6 @@ python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备�
 
 - Excel 解析依赖本地内置 SheetJS，**完全离线可用**
 - 浏览器无法覆盖写入磁盘原文件，「保存回表格」以导出文件形式提供
-- 自定义类型与图片保存在浏览器 localStorage（本机）——清理浏览器数据会丢失
-- 自定义类型图片暂不嵌入 Visio 导出（VDX 中以类型颜色标识）
+- 自定义类型与图片保存在浏览器 localStorage（本机）——清理浏览器数据会丢失，建议用「保存工程」备份
+- 桌面版 Web Shell 支持 SSH（密码/keyboard-interactive）与 Telnet（RFC854 协商 + 窗口尺寸 NAWS），SSH 主机密钥以 SHA256 指纹展示（内网实验环境默认信任）
+- 版本号统一由 `js/util.js` 的 `U.APP_VERSION` 维护，界面标题/状态栏/控制台同步显示

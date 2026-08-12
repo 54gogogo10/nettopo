@@ -39,6 +39,7 @@ function createShellWindow() {
     shellWin = null;
     shellReady = false;
     shellQueue.length = 0;
+    pendingTabs.length = 0; // 丢弃未送达的标签消息，避免下次打开出现死标签
     shell.closeAll(); // 窗口关闭即结束全部会话
   });
   shellWin.webContents.once('did-finish-load', () => {
@@ -106,7 +107,6 @@ ipcMain.handle('shell:connect', (e, opts) => {
 ipcMain.on('shell:data', (e, id, data) => shell.write(id, data));
 ipcMain.on('shell:resize', (e, id, cols, rows) => shell.resize(id, cols, rows));
 ipcMain.on('shell:close', (e, id) => shell.close(id));
-ipcMain.on('shell:quit', () => { if (shellWin && !shellWin.isDestroyed()) shellWin.close(); });
 
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框

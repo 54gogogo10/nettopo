@@ -6,6 +6,9 @@
 
 const U = {};
 
+/* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
+U.APP_VERSION = 'v20260812m';
+
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
 U.$$ = (s, el) => Array.from((el || document).querySelectorAll(s));
@@ -298,6 +301,45 @@ U.sanitizeTypeData = (overrides, customTypes) => {
   return { overrides: ov, customTypes: ct };
 };
 
+/* 清洗工程图数据：保证节点/连线/文本框字段类型正确（防缺失字段、NaN 坐标、畸形数据） */
+U.sanitizeGraph = (nodes, links, texts) => {
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  const str = (v) => typeof v === 'string' ? v : String(v == null ? '' : v);
+  const cleanNodes = (Array.isArray(nodes) ? nodes : []).map(n => {
+    if (!n || typeof n !== 'object') return null;
+    const id = str(n.id);
+    if (!id) return null;
+    return {
+      id, name: str(n.name).slice(0, 200), type: typeof n.type === 'string' && n.type ? n.type : 'other',
+      x: num(n.x, 0), y: num(n.y, 0),
+      w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
+      mgmt: str(n.mgmt), note: str(n.note)
+    };
+  }).filter(Boolean);
+  const cleanLinks = (Array.isArray(links) ? links : []).map(l => {
+    if (!l || typeof l !== 'object') return null;
+    const id = str(l.id), a = str(l.a), b = str(l.b);
+    if (!id || !a || !b) return null;
+    return { id, a, b, aIf: str(l.aIf), aIp: str(l.aIp), bIf: str(l.bIf), bIp: str(l.bIp), bw: str(l.bw), note: str(l.note) };
+  }).filter(Boolean);
+  const cleanTexts = (Array.isArray(texts) ? texts : []).map(t => {
+    if (!t || typeof t !== 'object') return null;
+    const id = str(t.id);
+    if (!id) return null;
+    return {
+      id, x: num(t.x, 0), y: num(t.y, 0),
+      w: Math.max(num(t.w, 220), 40), h: Math.max(num(t.h, 56), 24),
+      text: str(t.text), font: str(t.font) || 'Microsoft YaHei',
+      size: Math.max(num(t.size, 16), 8),
+      color: U.isValidColor(t.color) ? t.color : '#1e293b',
+      bold: !!t.bold, italic: !!t.italic,
+      align: ['left', 'center', 'right'].includes(t.align) ? t.align : 'left',
+      bg: U.isValidColor(t.bg) ? t.bg : ''
+    };
+  }).filter(Boolean);
+  return { nodes: cleanNodes, links: cleanLinks, texts: cleanTexts };
+};
+
 /* 修改类型颜色（内置/自定义均可） */
 U.setTypeColor = (key, c1, c2) => {
   if (!/^#[0-9a-fA-F]{6}$/.test(String(c1 || ''))) return; // 仅接受 #rrggbb
@@ -540,6 +582,12 @@ U.normalizeBw = (v) => {
     [/^10m|10mbps/, 10]
   ];
   for (const [re, val] of table) if (re.test(s)) return val;
+  // 通用单位：2g / 2.5g / 200m / 800mbps 等（表内未列出的取值）
+  const un = /^(\d+(?:\.\d+)?)\s*(g|gbps|m|mbps)$/.exec(s);
+  if (un) {
+    const n = parseFloat(un[1]);
+    if (Number.isFinite(n) && n > 0) return Math.round(un[2][0] === 'g' ? n * 1000 : n);
+  }
   const n = parseFloat(s);
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return '';
@@ -547,9 +595,6 @@ U.normalizeBw = (v) => {
 U.formatBw = (v) => {
   const n = U.normalizeBw(v);
   if (!n) return '';
-  if (n >= 100000) return '100G';
-  if (n >= 40000) return '40G';
-  if (n >= 10000) return (n / 1000).toFixed(n % 1000 ? 1 : 0) + 'G';
   if (n >= 1000) return (n / 1000).toFixed(n % 1000 ? 1 : 0) + 'G';
   return n + 'M';
 };
