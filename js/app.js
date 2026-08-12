@@ -2574,19 +2574,28 @@ function openWebShell(id) {
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.innerHTML = `
-    <div class="modal" role="dialog" style="width:430px">
+    <div class="modal ws-dialog" role="dialog" style="width:440px">
       <h3>Web Shell — ${U.escHtml(n.name)}</h3>
-      <div class="m-sub">通过 SSH 或 Telnet 连接设备的管理口地址（${n.mgmt ? U.escHtml(n.mgmt) : '该设备未设置管理地址，请手动填写主机'}）。</div>
-      <div class="m-row"><label>协议</label>
+      <div class="m-sub">通过 SSH 或 Telnet 连接设备的管理口地址${n.mgmt ? ` <b class="ws-mgmt">${U.escHtml(n.mgmt)}</b>` : '（该设备未设置管理地址，请手动填写）'}。</div>
+      <div class="frow">
+        <label>连接协议</label>
         <select id="wsProto">
           <option value="ssh"${(saved.protocol || 'ssh') === 'ssh' ? ' selected' : ''}>SSH（默认端口 22）</option>
           <option value="telnet"${saved.protocol === 'telnet' ? ' selected' : ''}>Telnet（默认端口 23）</option>
         </select>
       </div>
-      <div class="m-row"><label>主机</label><input id="wsHost" type="text" placeholder="例如 10.255.0.1" value="${U.escHtml(n.mgmt || '')}"/></div>
-      <div class="m-row"><label>端口</label><input id="wsPort" type="number" min="1" max="65535" placeholder="留空自动（22/23）" value="${U.escHtml(saved.port || '')}"/></div>
-      <div class="m-row"><label>用户名</label><input id="wsUser" type="text" placeholder="admin" value="${U.escHtml(saved.username || 'admin')}" autocomplete="off"/></div>
-      <div class="m-row"><label>密码</label><input id="wsPass" type="password" placeholder="SSH 密码；Telnet 通常可留空" autocomplete="off"/></div>
+      <div class="frow">
+        <label>主机 / 管理口</label>
+        <input id="wsHost" type="text" placeholder="例如 10.255.0.1" value="${U.escHtml(n.mgmt || '')}" autocomplete="off"/>
+      </div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>端口</label><input id="wsPort" type="number" min="1" max="65535" value="${U.escHtml(saved.port || '')}"/></div>
+        <div class="frow"><label>用户名</label><input id="wsUser" type="text" placeholder="admin" value="${U.escHtml(saved.username || 'admin')}" autocomplete="off"/></div>
+      </div></div>
+      <div class="frow">
+        <label>密码</label>
+        <input id="wsPass" type="password" placeholder="SSH 密码；Telnet 通常可留空" autocomplete="new-password"/>
+      </div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="cancel">取消</button>
         <button type="button" class="tb primary" data-act="connect">连接</button>
@@ -2600,9 +2609,13 @@ function openWebShell(id) {
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   const protoEl = ov.querySelector('#wsProto');
   const portEl = ov.querySelector('#wsPort');
+  const autoPort = () => protoEl.value === 'telnet' ? '23' : '22';
   protoEl.addEventListener('change', () => {
-    portEl.placeholder = protoEl.value === 'telnet' ? '留空自动（23）' : '留空自动（22）';
+    const cur = portEl.value.trim();
+    const otherDefault = autoPort() === '23' ? '22' : '23';
+    if (!cur || cur === otherDefault) portEl.value = autoPort();
   });
+  if (!portEl.value.trim()) portEl.value = autoPort();
   const doConnect = async () => {
     const cfg = {
       protocol: protoEl.value,
@@ -2626,9 +2639,11 @@ function openWebShell(id) {
     openTerminal(res.id, n, cfg);
   };
   ov.querySelector('[data-act=connect]').onclick = doConnect;
-  for (const sel of ['#wsHost', '#wsPass']) {
+  for (const sel of ['#wsHost', '#wsPort', '#wsUser', '#wsPass']) {
     ov.querySelector(sel).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doConnect(); } });
   }
+  // 弹窗动画完成后聚焦主机输入框（避免动画期间焦点被重置）
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#wsHost').focus(); }, 250);
 }
 
 function openTerminal(sid, node, cfg) {
@@ -2689,7 +2704,7 @@ function openTerminal(sid, node, cfg) {
 }
 
 /* ================= 启动 ================= */
-console.log('[NetTopo] 版本 v20260812i');
+console.log('[NetTopo] 版本 v20260812j');
 // 启动时强制隐藏悬浮层（避免上次会话残留的黑点/提示条）
 $('#tooltip').classList.add('hidden');
 $('#hintBar').classList.add('hidden');

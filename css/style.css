@@ -491,3 +491,11 @@ body:not(.panel-off) #panelOpen { display: none; }
 }
 .shell-ov .tb.icon { color: #94a3b8; }
 .shell-ov .tb.icon:hover { color: #fff; background: rgba(255, 255, 255, .08); }
+
+/* Web Shell 连接弹窗：内联行内的 frow 不再产生额外下边距 */
+.ws-dialog .frow-inline .frow { margin-bottom: 0; }
+.ws-dialog .ws-mgmt {
+  font: 600 12px/1.6 Consolas, monospace;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid var(--accent-soft); border-radius: 6px; padding: 1px 7px; margin: 0 2px;
+}
