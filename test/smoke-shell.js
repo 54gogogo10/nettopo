@@ -1,8 +1,9 @@
-/* NetTopo Web Shell 冒烟测试（Electron 端到端）
- * 用法：node test/smoke-shell.js
- * 1) 本地起 mock Telnet 服务器（127.0.0.1:2323）
- * 2) 启动 Electron（--remote-debugging-port=9333）
- * 3) 载入示例拓扑 → 右键设备 → Web Shell → Telnet 连接 → 校验 xterm 输出
+/* NetTopo Web Shell 冒烟测试（Electron 端到端 · 独立窗口多标签）
+ * 用法：node test/smoke-shell.js [SMOKE_APP=可执行文件]
+ * 1) 本地 mock Telnet 服务器（127.0.0.1:2323）
+ * 2) 启动应用（--remote-debugging-port=9333）
+ * 3) 主窗口：右键设备 → Web Shell → 连接 → 不应锁定主界面
+ * 4) 独立 Shell 窗口：标签出现、xterm 输出、输入回显、多标签切换、关闭标签
  */
 'use strict';
 const { spawn } = require('child_process');
@@ -16,51 +17,57 @@ let failed = 0;
 const ok = (cond, name) => { console.log((cond ? '  ✓ ' : '  ✗ ') + name); if (!cond) failed++; };
 
 /* ---- mock telnet 服务器 ---- */
+const mockSocks = new Set();
 const mockServer = net.createServer((sock) => {
+  mockSocks.add(sock);
+  sock.on('close', () => mockSocks.delete(sock));
+  sock.on('error', () => {});
   sock.on('data', (d) => {
     const txt = d.toString('utf8');
     if (txt.includes('show version')) sock.write('v9.9.9 MOCK\r\n> ');
   });
   sock.write('\r\nWelcome to MOCK-TELNET-READY\r\n> ');
 });
-function listen(server) {
-  return new Promise((res, rej) => { server.once('error', rej); server.listen(2323, '127.0.0.1', res); });
-}
+mockServer.on('error', () => {});
+function listen(server) { return new Promise((res, rej) => { server.once('error', rej); server.listen(2323, '127.0.0.1', res); }); }
 
-/* ---- 简易 CDP 客户端 ---- */
 class CDP {
-  constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map(); this.onEvent = null;
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.id && this.pending.has(msg.id)) { const { resolve, reject } = this.pending.get(msg.id); this.pending.delete(msg.id); msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result); }
-      else if (msg.method && this.onEvent) this.onEvent(msg);
-    };
+  constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map();
+    ws.onmessage = (ev) => { const m = JSON.parse(ev.data);
+      if (m.id && this.pending.has(m.id)) { const p = this.pending.get(m.id); this.pending.delete(m.id); m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result); } };
   }
-  send(method, params = {}) {
-    const id = ++this.id;
-    return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.ws.send(JSON.stringify({ id, method, params })); });
-  }
-  async eval(expression) {
-    const r = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  send(method, params = {}) { const id = ++this.id;
+    return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.ws.send(JSON.stringify({ id, method, params })); }); }
+  async eval(expression) { const r = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
     if (r.exceptionDetails) throw new Error('页面执行异常: ' + JSON.stringify(r.exceptionDetails).slice(0, 300));
-    return r.result && r.result.value;
-  }
+    return r.result && r.result.value; }
 }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-async function getPageTarget() {
-  for (let i = 0; i < 60; i++) {
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+async function listTargets() {
+  return await new Promise((resolve, reject) => {
+    http.get('http://127.0.0.1:' + CDP_PORT + '/json/list', (res) => {
+      let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { resolve([]); } });
+    }).on('error', reject);
+  });
+}
+async function waitTarget(contains, timeoutMs = 30000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
     try {
-      const list = await new Promise((resolve, reject) => {
-        http.get('http://127.0.0.1:' + CDP_PORT + '/json/list', (res) => {
-          let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(JSON.parse(d)));
-        }).on('error', reject);
-      });
-      const page = list.find(t => t.type === 'page');
-      if (page && page.webSocketDebuggerUrl) return page;
+      const list = await listTargets();
+      const t = list.find(x => x.type === 'page' && x.url.includes(contains));
+      if (t && t.webSocketDebuggerUrl) return t;
     } catch (e) { /* 未就绪 */ }
-    await sleep(500);
+    await sleep(300);
   }
-  throw new Error('未能连接 CDP');
+  throw new Error('未找到目标窗口: ' + contains);
+}
+async function connectCDP(target) {
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  const cdp = new CDP(ws);
+  await cdp.send('Runtime.enable');
+  return cdp;
 }
 
 (async () => {
@@ -68,101 +75,116 @@ async function getPageTarget() {
   console.log('mock telnet 127.0.0.1:2323 就绪');
 
   const appExe = process.env.SMOKE_APP || path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe');
-  const appArgs = appExe.endsWith('.exe') && appExe.includes('portable') ? [] : ['.'];
+  const appArgs = appExe.includes('portable') ? [] : ['.'];
+  const profileDir = path.join(root, 'build', 'smoke_profile');
+  try { require('fs').rmSync(profileDir, { recursive: true, force: true }); } catch (e) {}
   const proc = spawn(appExe,
-    [...appArgs, '--remote-debugging-port=' + CDP_PORT, '--no-sandbox', '--user-data-dir=' + path.join(root, 'build', 'smoke_profile')],
+    [...appArgs, '--remote-debugging-port=' + CDP_PORT, '--no-sandbox', '--user-data-dir=' + profileDir],
     { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NETTOPO_SMOKE: '1' } });
   let appLog = '';
   proc.stdout.on('data', d => { appLog += d.toString(); });
   proc.stderr.on('data', d => { appLog += d.toString(); });
 
   try {
-    const target = await getPageTarget();
-    const ws = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
-    const cdp = new CDP(ws);
-    await cdp.send('Runtime.enable');
-
-    // 载入示例拓扑
-    await cdp.eval('__topo.loadSample(); true');
+    const main = await connectCDP(await waitTarget('index.html'));
+    // 等待应用脚本完成（__topo 为 app.js 末尾注入的调试钩子）
+    const t0 = Date.now();
+    while (!(await main.eval('typeof __topo !== "undefined"')) && Date.now() - t0 < 15000) await sleep(300);
+    ok(await main.eval('typeof __topo !== "undefined"'), '主窗口应用脚本就绪');
+    await main.eval('__topo.loadSample(); true');
+    await sleep(500);
+    await main.eval(`(() => { const b = document.querySelector('[data-act=yes]'); if (b) b.click(); return true; })()`);
     await sleep(800);
-    const nodeCount = await cdp.eval('document.querySelectorAll(".node").length');
-    ok(nodeCount > 0, '示例拓扑已载入（节点数=' + nodeCount + '）');
+    ok(await main.eval('document.querySelectorAll(".node").length') > 0, '示例拓扑已载入');
 
-    // 右键 R1（第一个带管理地址的节点）
-    const hasNode = await cdp.eval(`(() => {
-      const el = document.querySelector('.node[data-id]');
-      if (!el) return false;
-      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 }));
-      return true;
-    })()`);
-    ok(hasNode, '触发设备右键菜单');
+    // 主窗口：右键设备 → Web Shell → 连接
+    await main.eval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);
     await sleep(300);
-    const hasMenu = await cdp.eval(`(() => {
-      const m = document.getElementById('ctx');
-      return m && !m.classList.contains('hidden') && m.textContent.includes('Web Shell');
-    })()`);
-    ok(hasMenu, '右键菜单含 Web Shell 项');
-    await cdp.eval(`(() => {
-      const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('Web Shell'));
-      b && b.click();
-      return !!b;
-    })()`);
+    ok(await main.eval(`(() => { const m = document.getElementById('ctx'); return m && !m.classList.contains('hidden') && m.textContent.includes('Web Shell'); })()`), '右键菜单含 Web Shell 项');
+    await main.eval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('Web Shell')); b && b.click(); return !!b; })()`);
     await sleep(300);
-    const hasModal = await cdp.eval(`!!document.getElementById('wsProto')`);
-    ok(hasModal, '连接参数弹窗已打开');
-
-    // 填写 Telnet 参数并连接
-    const filled = await cdp.eval(`(() => {
+    ok(await main.eval(`!!document.getElementById('wsProto')`), '主窗口连接参数弹窗已打开');
+    await main.eval(`(() => {
       const proto = document.getElementById('wsProto');
       const setVal = (el, v) => { const s = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('change', { bubbles: true })); };
       setVal(proto, 'telnet');
-      const host = document.getElementById('wsHost'); host.value = '127.0.0.1';
-      const port = document.getElementById('wsPort'); port.value = '2323';
+      document.getElementById('wsHost').value = '127.0.0.1';
+      document.getElementById('wsPort').value = '2323';
       document.querySelector('[data-act=connect]').click();
       return true;
     })()`);
-    ok(filled, '填写 Telnet 参数并点击连接');
     await sleep(2500);
+    const overlayInfo = await main.eval(`(() => { const o = document.querySelector('.overlay'); return o ? o.outerHTML.slice(0, 160) : ''; })()`);
+    ok(overlayInfo === '', '主窗口连接后无遮罩（界面不锁定）' + (overlayInfo ? '（残留: ' + overlayInfo + '）' : ''));
+    ok(await main.eval(`document.querySelectorAll('.node').length > 0`), '主窗口画布仍可交互（节点仍在）');
 
-    const shellState = await cdp.eval(`(() => {
-      const ov = document.querySelector('.shell-ov');
-      if (!ov) return { open: false };
-      return {
-        open: true,
-        status: (ov.querySelector('.shell-status') || {}).textContent || '',
-        text: (ov.querySelector('.xterm-rows') || {}).textContent || ''
-      };
-    })()`);
-    ok(shellState.open, '终端面板已打开');
-    ok(shellState.status && shellState.status.includes('已连接'), '状态显示已连接（实际：' + shellState.status + '）');
-    ok(shellState.text.includes('MOCK-TELNET-READY'), 'xterm 渲染服务器欢迎信息');
+    // 独立 Shell 窗口出现
+    const shellTarget = await waitTarget('shell.html');
+    const shell = await connectCDP(shellTarget);
+    await sleep(600);
+    const tabInfo = await shell.eval(`(() => ({
+      count: document.querySelectorAll('.sh-tab').length,
+      title: (document.querySelector('.sh-tab .tt') || {}).textContent || '',
+      text: (document.querySelector('.xterm-rows') || {}).textContent || ''
+    }))()`);
+    ok(tabInfo.count === 1, '独立 Shell 窗口出现 1 个标签');
+    ok(tabInfo.title.includes('R1') && tabInfo.title.includes('TELNET'), '标签标题含设备名与协议（' + tabInfo.title + '）');
+    const waitText = async (cdp, sel, needle, ms) => {
+      const t = Date.now();
+      while (Date.now() - t < ms) {
+        if ((await cdp.eval(`(${sel} || {}).textContent || ''`)).includes(needle)) return true;
+        await sleep(200);
+      }
+      return false;
+    };
+    ok(await waitText(shell, `document.querySelector('.xterm-rows')`, 'MOCK-TELNET-READY', 5000), 'xterm 渲染服务器欢迎信息');
 
-    // 输入命令并验证回显（通过 xterm 输入辅助 textarea）
-    const typed = await cdp.eval(`(() => {
-      const ta = document.querySelector('.xterm-helper-textarea') || document.querySelector('.xterm-rows textarea');
-      if (!ta) return false;
-      ta.value = 'show version\\r';
-      ta.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'show version\\r', inputType: 'insertText' }));
+    // 输入命令 → 回显
+    await shell.eval(`(() => { const ta = document.querySelector('.xterm-helper-textarea') || document.querySelector('.xterm-rows textarea'); if (!ta) return false; ta.value = 'show version\\r'; ta.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'show version\\r', inputType: 'insertText' })); return true; })()`);
+    await sleep(1200);
+    ok((await shell.eval(`(document.querySelector('.xterm-rows') || {}).textContent || ''`)).includes('v9.9.9 MOCK'), '收到命令回显');
+
+    // 新建第二个连接（Shell 窗口内发起）
+    await shell.eval(`document.getElementById('shNew').click()`);
+    await sleep(300);
+    ok(await shell.eval(`!!document.getElementById('wsProto')`), 'Shell 窗口内可打开新建连接弹窗');
+    await shell.eval(`(() => {
+      const proto = document.getElementById('wsProto');
+      const setVal = (el, v) => { const s = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('change', { bubbles: true })); };
+      setVal(proto, 'telnet');
+      document.getElementById('wsHost').value = '127.0.0.1';
+      document.getElementById('wsPort').value = '2323';
+      document.querySelector('[data-act=connect]').click();
       return true;
     })()`);
-    ok(typed, '向终端输入命令');
-    await sleep(1500);
-    const echo = await cdp.eval(`(document.querySelector('.xterm-rows') || {}).textContent || ''`);
-    ok(echo.includes('v9.9.9 MOCK'), '收到命令回显（v9.9.9 MOCK）');
+    await sleep(2500);
+    const tabs2 = await shell.eval(`({
+      count: document.querySelectorAll('.sh-tab').length,
+      activeText: (document.querySelector('.sh-term-wrap.active .xterm-rows') || {}).textContent || '',
+      titles: [...document.querySelectorAll('.sh-tab .tt')].map(x => x.textContent)
+    })`);
+    ok(tabs2.count === 2, '多标签：共 2 个连接标签');
+    ok(tabs2.activeText.includes('MOCK-TELNET-READY'), '第二个标签自动激活并渲染输出');
+    ok(tabs2.titles[0].includes('R1') && tabs2.titles[1].includes('127.0.0.1'), '两个标签标题正确（' + tabs2.titles.join(' | ') + '）');
 
-    // 关闭终端
-    await cdp.eval(`(() => { const b = document.getElementById('shellClose'); if (b) b.click(); return true; })()`);
+    // 切换回第一个标签
+    await shell.eval(`document.querySelectorAll('.sh-tab')[0].dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`);
+    ok(await waitText(shell, `document.querySelector('.sh-term-wrap.active .xterm-rows')`, 'MOCK-TELNET-READY', 4000), '切换回第一个标签仍显示输出');
+
+    // 关闭一个标签
+    await shell.eval(`document.querySelectorAll('.sh-tab')[1].querySelector('.x').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))`);
     await sleep(400);
-    const closed = await cdp.eval(`!document.querySelector('.shell-ov')`);
-    ok(closed, '关闭终端面板');
+    ok(await shell.eval(`document.querySelectorAll('.sh-tab').length === 1`), '关闭标签后剩余 1 个');
+    ok(await shell.eval(`document.querySelectorAll('.sh-term-wrap.active').length === 1`), '关闭后自动激活剩余标签');
 
-    ws.close();
+    shell.ws.close();
+    main.ws.close();
   } catch (e) {
     console.error('冒烟测试异常：', e);
     failed++;
   } finally {
     proc.kill();
+    for (const s of mockSocks) s.destroy();
     mockServer.close();
     await sleep(500);
     console.log('');

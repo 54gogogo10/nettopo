@@ -6,6 +6,7 @@ directories:
   buildResources: build
 files:
   - index.html
+  - shell.html
   - electron-main.js
   - preload.js
   - package.json

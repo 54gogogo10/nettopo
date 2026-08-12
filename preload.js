@@ -9,5 +9,6 @@ contextBridge.exposeInMainWorld('topoShell', {
   close: (id) => ipcRenderer.send('shell:close', id),
   onOutput: (cb) => ipcRenderer.on('shell:output', (_e, id, data) => cb(id, data)),
   onStatus: (cb) => ipcRenderer.on('shell:status', (_e, id, info) => cb(id, info)),
-  onEnd: (cb) => ipcRenderer.on('shell:end', (_e, id, reason) => cb(id, reason))
+  onEnd: (cb) => ipcRenderer.on('shell:end', (_e, id, reason) => cb(id, reason)),
+  onNewTab: (cb) => ipcRenderer.on('shell:newtab', (_e, info) => cb(info))
 });
