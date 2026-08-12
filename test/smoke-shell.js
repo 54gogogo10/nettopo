@@ -67,8 +67,10 @@ async function getPageTarget() {
   await listen(mockServer);
   console.log('mock telnet 127.0.0.1:2323 就绪');
 
-  const proc = spawn(path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe'),
-    ['.', '--remote-debugging-port=' + CDP_PORT, '--no-sandbox'],
+  const appExe = process.env.SMOKE_APP || path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe');
+  const appArgs = appExe.endsWith('.exe') && appExe.includes('portable') ? [] : ['.'];
+  const proc = spawn(appExe,
+    [...appArgs, '--remote-debugging-port=' + CDP_PORT, '--no-sandbox', '--user-data-dir=' + path.join(root, 'build', 'smoke_profile')],
     { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NETTOPO_SMOKE: '1' } });
   let appLog = '';
   proc.stdout.on('data', d => { appLog += d.toString(); });

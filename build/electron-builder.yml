@@ -7,6 +7,7 @@ directories:
 files:
   - index.html
   - electron-main.js
+  - preload.js
   - package.json
   - icon.ico
   - icon.png

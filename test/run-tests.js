@@ -821,7 +821,15 @@ console.log('== 性能：复杂拓扑（核心-汇聚-接入-终端 分层网络
   console.log('性能耗时明细：' + report.join(' | '));
 }
 
+console.log('== 打包配置 ==');
+{
+  const yml = fs.readFileSync(path.join(root, 'build', 'electron-builder.yml'), 'utf8');
+  ok(yml.includes('- preload.js'), 'electron-builder 打包清单包含 preload.js（Web Shell IPC 桥）');
+  ok(yml.includes('- js/**/*'), 'electron-builder 打包清单包含 js/**/*');
+}
+
 console.log('== Web Shell（SSH/Telnet 会话） ==');
+
 (async () => {
   const net = require('net');
   const fs = require('fs');
