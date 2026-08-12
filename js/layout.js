@@ -156,5 +156,96 @@ function layoutNow(nodes, links, steps) {
   sim.apply();
 }
 
-global.TopoLayout = { simulate, runLayout, layoutNow };
+/* ---------- 布局预设（直接设置节点 x/y） ---------- */
+function ringLayout(nodes, opts) {
+  opts = opts || {};
+  const n = nodes.length;
+  if (!n) return;
+  const R = opts.radius || Math.max(280, Math.sqrt(n) * 150);
+  const sorted = [...nodes].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
+  const cx = opts.cx != null ? opts.cx : 0, cy = opts.cy != null ? opts.cy : 0;
+  sorted.forEach((nd, i) => {
+    const ang = (i / n) * Math.PI * 2 - Math.PI / 2;
+    nd.x = cx + Math.cos(ang) * R - nd.w / 2;
+    nd.y = cy + Math.sin(ang) * R - nd.h / 2;
+  });
+}
+
+function gridLayout(nodes, opts) {
+  opts = opts || {};
+  const n = nodes.length;
+  if (!n) return;
+  const cols = opts.cols || Math.ceil(Math.sqrt(n));
+  const gap = opts.gap != null ? opts.gap : 60;
+  const sorted = [...nodes].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
+  const cellW = Math.max(...nodes.map(x => x.w)) + gap;
+  const cellH = Math.max(...nodes.map(x => x.h)) + gap;
+  const cx0 = opts.cx != null ? opts.cx - ((cols - 1) * cellW) / 2 : 0;
+  const cy0 = opts.cy != null ? opts.cy - (Math.ceil(n / cols) - 1) * cellH / 2 : 0;
+  sorted.forEach((nd, i) => {
+    nd.x = cx0 + (i % cols) * cellW;
+    nd.y = cy0 + Math.floor(i / cols) * cellH;
+  });
+}
+
+const TYPE_ORDER = ['router', 'switch', 'firewall', 'server', 'pc', 'cloud', 'other'];
+function layerLayout(nodes, opts) {
+  opts = opts || {};
+  const n = nodes.length;
+  if (!n) return;
+  const gap = opts.gap != null ? opts.gap : 70;
+  const groups = new Map();
+  for (const nd of nodes) {
+    const t = nd.type && TYPE_ORDER.includes(nd.type) ? nd.type : 'other';
+    if (!groups.has(t)) groups.set(t, []);
+    groups.get(t).push(nd);
+  }
+  const cx = opts.cx != null ? opts.cx : 0;
+  const cy0 = opts.cy != null ? opts.cy : 0;
+  const cellH = Math.max(...nodes.map(x => x.h)) + gap;
+  let row = 0;
+  for (const type of TYPE_ORDER) {
+    const list = (groups.get(type) || []).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
+    if (!list.length) continue;
+    const cellW = Math.max(...list.map(x => x.w)) + gap;
+    const totalW = (list.length - 1) * cellW;
+    list.forEach((nd, i) => {
+      nd.x = cx - totalW / 2 + i * cellW;
+      nd.y = cy0 + row * cellH;
+    });
+    row++;
+  }
+}
+
+/* 三层架构布局：核心层（路由/云）→ 汇聚层（交换/防火墙）→ 接入层（服务器/终端） */
+function tierLayout(nodes, opts) {
+  opts = opts || {};
+  const n = nodes.length;
+  if (!n) return;
+  const gap = opts.gap != null ? opts.gap : 90;
+  const tiers = [
+    { name: '核心层', types: ['router', 'cloud'] },
+    { name: '汇聚层', types: ['switch', 'firewall'] },
+    { name: '接入层', types: ['server', 'pc', 'other'] }
+  ];
+  const cx = opts.cx != null ? opts.cx : 0;
+  const cy0 = opts.cy != null ? opts.cy : 0;
+  const cellH = Math.max(...nodes.map(x => x.h)) + gap;
+  let row = 0;
+  for (const t of tiers) {
+    const list = nodes
+      .filter(nd => t.types.includes(nd.type))
+      .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
+    if (!list.length) continue;
+    const cellW = Math.max(...list.map(x => x.w)) + gap;
+    const totalW = (list.length - 1) * cellW;
+    list.forEach((nd, i) => {
+      nd.x = cx - totalW / 2 + i * cellW;
+      nd.y = cy0 + row * cellH;
+    });
+    row++;
+  }
+}
+
+global.TopoLayout = { simulate, runLayout, layoutNow, ringLayout, gridLayout, layerLayout, tierLayout };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

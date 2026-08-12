@@ -48,9 +48,14 @@ function normHeader(h) {
   return String(h == null ? '' : h).replace(/[\s_\-／/\\（）()【】\[\]·.：:]/g, '').toLowerCase();
 }
 
+const RE_COORD = [
+  [/^(源设备|设备a|设备1)x$/i, 'sax'], [/^(源设备|设备a|设备1)y$/i, 'say'],
+  [/^(目标设备|设备b|设备2)x$/i, 'sbx'], [/^(目标设备|设备b|设备2)y$/i, 'sby']
+];
 function mapHeader(raw) {
   const h = normHeader(raw);
   if (!h) return null;
+  for (const [re, role] of RE_COORD) if (re.test(h)) return role;
   for (const [role, arr] of Object.entries(ROLE_SETS)) {
     if (arr.includes(h)) return role;
   }
@@ -85,7 +90,7 @@ function parseRows(rows) {
   const records = [];
   data.forEach((cells, ri) => {
     if (!cells || !cells.some(c => String(c).trim() !== '')) return;
-    const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '' };
+    const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '', sax: '', say: '', sbx: '', sby: '' };
     cells.forEach((c, ci) => {
       const role = roles[ci];
       if (role && rec[role] !== undefined) rec[role] = String(c).trim();
@@ -101,7 +106,7 @@ function recordsToGraph(records) {
   const links = [];
   const nodeMap = new Map(); // name -> node
 
-  const getNode = (name) => {
+  const getNode = (name, x, y) => {
     const n = String(name || '').trim();
     if (!n) return null;
     if (nodeMap.has(n)) return nodeMap.get(n);
@@ -109,7 +114,8 @@ function recordsToGraph(records) {
       id: U.uid('n'),
       name: n,
       type: U.typeOf(n),
-      x: 0, y: 0,
+      x: Number.isFinite(x) ? x : 0,
+      y: Number.isFinite(y) ? y : 0,
       w: U.nodeWidthForName(n), h: U.NODE_H,
       note: '',
       mgmt: ''
@@ -119,8 +125,10 @@ function recordsToGraph(records) {
     return node;
   };
 
+  const num = (v) => { const f = parseFloat(String(v == null ? '' : v).replace(/[^\d.\-]/g, '')); return Number.isFinite(f) ? f : NaN; };
+
   for (const r of records) {
-    const a = getNode(r.sa), b = getNode(r.sb);
+    const a = getNode(r.sa, num(r.sax), num(r.say)), b = getNode(r.sb, num(r.sbx), num(r.sby));
     if (!a || !b) continue;
     if (a === b) continue; // 自环忽略
     const link = {
@@ -128,7 +136,7 @@ function recordsToGraph(records) {
       a: a.id, b: b.id,
       aIf: r.si, aIp: r.sip,
       bIf: r.sii, bIp: r.sib,
-      bw: r.bw, note: r.note
+      bw: U.normalizeBw(r.bw), note: r.note
     };
     if (r.mgmt) {
       if (!a.mgmt) { a.mgmt = r.mgmt; a.h = U.nodeHeightFor(a); }
@@ -144,8 +152,8 @@ function recordsToGraph(records) {
 }
 
 /* ---------- 图 → 表格行 ---------- */
-const EXPORT_HEAD = ['源设备', '源接口', '源IP', '目标设备', '目标接口', '目标IP', '带宽', '管理地址', '备注'];
-const EXPORT_KEYS = ['sa', 'si', 'sip', 'sb', 'sii', 'sib', 'bw', 'mgmt', 'note'];
+const EXPORT_HEAD = ['源设备', '源接口', '源IP', '目标设备', '目标接口', '目标IP', '带宽', '管理地址', '备注', '源设备X', '源设备Y', '目标设备X', '目标设备Y'];
+const EXPORT_KEYS = ['sa', 'si', 'sip', 'sb', 'sii', 'sib', 'bw', 'mgmt', 'note', 'sax', 'say', 'sbx', 'sby'];
 
 function graphToRecords(nodes, links) {
   const byId = {};
@@ -164,7 +172,9 @@ function graphToRecords(nodes, links) {
       sb: b ? b.name : '', sii: l.bIf, sib: l.bIp,
       bw: l.bw,
       mgmt,
-      note: l.note
+      note: l.note,
+      sax: a ? Math.round(a.x * 10) / 10 : '', say: a ? Math.round(a.y * 10) / 10 : '',
+      sbx: b ? Math.round(b.x * 10) / 10 : '', sby: b ? Math.round(b.y * 10) / 10 : ''
     };
   });
 }
@@ -192,17 +202,163 @@ function xlsxToGraph(buffer) {
 /* ---------- 示例数据 ---------- */
 const SAMPLE_CSV = [
   '源设备,源接口,源IP,目标设备,目标接口,目标IP,带宽,管理地址,备注',
-  '核心路由器R1,GE0/0/0,203.0.113.1,互联网出口Cloud,eth0,203.0.113.254,万兆,10.255.0.1,上联运营商',
-  '核心路由器R1,GE0/0/1,10.0.0.1,核心交换机SW1,GE1/0/1,10.0.0.2,万兆,10.255.0.2,核心互联',
-  '核心路由器R1,GE0/0/2,10.0.0.9,防火墙FW1,eth0,10.0.0.10,万兆,10.255.0.254,安全出口',
-  '防火墙FW1,eth1,172.16.0.1,核心交换机SW1,GE1/0/2,172.16.0.2,万兆,,业务区入口',
-  '核心交换机SW1,GE1/0/24,192.168.1.1,接入交换机SW2,GE0/0/24,192.168.1.2,千兆,10.255.0.3,办公区A',
-  '核心交换机SW1,GE1/0/23,192.168.2.1,接入交换机SW2,GE0/0/23,192.168.2.2,千兆,,办公区B',
-  '接入交换机SW2,GE0/0/1,192.168.1.10,文件服务器FS1,eth0,192.168.1.10,千兆,,文件服务',
-  '接入交换机SW2,GE0/0/2,192.168.1.20,数据库服务器DB1,eth0,192.168.1.20,千兆,,数据库',
-  '接入交换机SW2,GE0/0/3,192.168.1.30,办公PC1,eth0,192.168.1.30,百兆,,行政部',
-  '接入交换机SW2,GE0/0/4,192.168.1.31,办公PC2,eth0,192.168.1.31,百兆,,财务部'
+  '核心路由器R1,GE0/0/0,203.0.113.1,互联网出口Cloud,eth0,203.0.113.254,10000,10.255.0.1,上联运营商',
+  '核心路由器R1,GE0/0/1,10.0.0.1,核心交换机SW1,GE1/0/1,10.0.0.2,10000,10.255.0.2,核心互联',
+  '核心路由器R1,GE0/0/2,10.0.0.9,防火墙FW1,eth0,10.0.0.10,10000,10.255.0.254,安全出口',
+  '防火墙FW1,eth1,172.16.0.1,核心交换机SW1,GE1/0/2,172.16.0.2,10000,,业务区入口',
+  '核心交换机SW1,GE1/0/24,192.168.1.1,接入交换机SW2,GE0/0/24,192.168.1.2,1000,10.255.0.3,办公区A',
+  '核心交换机SW1,GE1/0/23,192.168.2.1,接入交换机SW2,GE0/0/23,192.168.2.2,1000,,办公区B',
+  '接入交换机SW2,GE0/0/1,192.168.1.10,文件服务器FS1,eth0,192.168.1.10,1000,,文件服务',
+  '接入交换机SW2,GE0/0/2,192.168.1.20,数据库服务器DB1,eth0,192.168.1.20,1000,,数据库',
+  '接入交换机SW2,GE0/0/3,192.168.1.30,办公PC1,eth0,192.168.1.30,100,,行政部',
+  '接入交换机SW2,GE0/0/4,192.168.1.31,办公PC2,eth0,192.168.1.31,100,,财务部'
 ].join('\r\n');
+
+
+/* ================= 拓扑校验 =================
+ * 返回问题列表，每项 { level: error|warning|info, kind, msg, nodeIds?, linkIds? }
+ */
+function validateTopology(nodes, links) {
+  nodes = nodes || []; links = links || [];
+  const issues = [];
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const nameOf = (id) => { const n = byId.get(id); return n ? n.name : id; };
+
+  // 1. 设备名重复
+  const nameMap = new Map();
+  for (const n of nodes) {
+    const k = (n.name || '').trim();
+    if (!k) continue;
+    if (!nameMap.has(k)) nameMap.set(k, []);
+    nameMap.get(k).push(n);
+  }
+  for (const [name, list] of nameMap) {
+    if (list.length > 1) issues.push({
+      level: 'error', kind: 'dup-name', nodeIds: list.map(n => n.id),
+      msg: `设备名重复：${name}（${list.length} 台）`
+    });
+  }
+
+  // 2. 管理地址重复
+  const mgmtMap = new Map();
+  for (const n of nodes) {
+    const ip = (n.mgmt || '').trim();
+    if (!ip) continue;
+    if (!mgmtMap.has(ip)) mgmtMap.set(ip, []);
+    mgmtMap.get(ip).push(n);
+  }
+  for (const [ip, list] of mgmtMap) {
+    if (list.length > 1) issues.push({
+      level: 'error', kind: 'dup-mgmt', nodeIds: list.map(n => n.id),
+      msg: `管理地址重复：${ip}（${list.map(n => n.name).join('、')}）`
+    });
+  }
+
+  // 3. 同一设备同一接口被多条链路使用
+  const ifMap = new Map();
+  for (const l of links) {
+    for (const side of ['a', 'b']) {
+      const ifn = (l[side + 'If'] || '').trim();
+      if (!ifn) continue;
+      const k = l[side] + '|' + ifn;
+      if (!ifMap.has(k)) ifMap.set(k, []);
+      ifMap.get(k).push(l.id);
+    }
+  }
+  for (const [k, lids] of ifMap) {
+    if (lids.length > 1) {
+      const sep = k.indexOf('|');
+      const nid = k.slice(0, sep), ifn = k.slice(sep + 1);
+      issues.push({
+        level: 'error', kind: 'dup-if', nodeIds: [nid], linkIds: lids,
+        msg: `设备「${nameOf(nid)}」接口重复：${ifn}（${lids.length} 条链路）`
+      });
+    }
+  }
+
+  // 4. 链路 IP 全局重复（同一 IP 出现在多条链路）
+  const ipOwner = new Map();
+  for (const l of links) {
+    for (const side of ['a', 'b']) {
+      const ip = (l[side + 'Ip'] || '').trim();
+      if (!ip) continue;
+      const owner = ipOwner.get(ip);
+      if (owner) {
+        issues.push({
+          level: 'error', kind: 'dup-ip', linkIds: [owner.linkId, l.id],
+          nodeIds: [owner.nodeId, l[side]],
+          msg: `IP 重复：${ip}（${owner.nodeName}/${owner.ifName} 与 ${nameOf(l[side])}/${l[side + 'If'] || ''}）`
+        });
+      } else {
+        ipOwner.set(ip, { linkId: l.id, nodeId: l[side], nodeName: nameOf(l[side]), ifName: l[side + 'If'] || '' });
+      }
+    }
+  }
+
+  // 5. 孤立设备
+  const linked = new Set();
+  for (const l of links) { linked.add(l.a); linked.add(l.b); }
+  for (const n of nodes) {
+    if (!linked.has(n.id)) issues.push({
+      level: 'warning', kind: 'isolated', nodeIds: [n.id],
+      msg: `孤立设备：${n.name}（没有连线）`
+    });
+  }
+
+  // 6. 环路检测（无向图存在环）
+  const adj = new Map();
+  for (const n of nodes) adj.set(n.id, []);
+  for (const l of links) { adj.get(l.a).push(l.b); adj.get(l.b).push(l.a); }
+  const visited = new Set();
+  let hasCycle = false;
+  const dfs = (u, parent) => {
+    visited.add(u);
+    for (const v of adj.get(u) || []) {
+      if (v === parent) continue;
+      if (visited.has(v)) hasCycle = true;
+      else dfs(v, u);
+    }
+  };
+  for (const n of nodes) if (!visited.has(n.id)) dfs(n.id, null);
+  if (hasCycle && nodes.length) issues.push({
+    level: 'info', kind: 'cycle', nodeIds: [],
+    msg: '检测到环路（可能存在冗余链路，允许但请注意）'
+  });
+
+  // 7. 平行链路
+  const pairCount = new Map();
+  for (const l of links) {
+    const k = l.a < l.b ? l.a + '|' + l.b : l.b + '|' + l.a;
+    pairCount.set(k, (pairCount.get(k) || 0) + 1);
+  }
+  for (const [k, c] of pairCount) {
+    if (c > 1) {
+      const sep = k.indexOf('|');
+      const a = k.slice(0, sep), b = k.slice(sep + 1);
+      issues.push({
+        level: 'info', kind: 'multi', nodeIds: [a, b],
+        msg: `「${nameOf(a)}」与「${nameOf(b)}」之间有 ${c} 条平行链路`
+      });
+    }
+  }
+
+  // 8. 链路两端 IP 不同网段（按 /24 判断）
+  const netOf = (ip) => { const p = String(ip).split('.'); return p.length >= 3 ? p[0] + '.' + p[1] + '.' + p[2] : null; };
+  for (const l of links) {
+    const aip = (l.aIp || '').trim(), bip = (l.bIp || '').trim();
+    if (aip && bip && aip !== bip) {
+      const an = netOf(aip), bn = netOf(bip);
+      if (an && bn && an !== bn) issues.push({
+        level: 'warning', kind: 'net-mismatch', linkIds: [l.id],
+        msg: `链路 ${nameOf(l.a)}⇄${nameOf(l.b)} 两端 IP 不在同一网段（${aip} / ${bip}）`
+      });
+    }
+  }
+
+  const rank = { error: 0, warning: 1, info: 2 };
+  issues.sort((x, y) => rank[x.level] - rank[y.level] || x.msg.localeCompare(y.msg, 'zh'));
+  return issues;
+}
 
 const Model = {
   mapHeader,
@@ -212,6 +368,7 @@ const Model = {
   graphToTableRows,
   textToGraph,
   xlsxToGraph,
+  validateTopology,
   SAMPLE_CSV,
   EXPORT_HEAD,
   EXPORT_KEYS

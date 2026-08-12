@@ -115,6 +115,31 @@ function buildZip(entries) {
   return out;
 }
 
+/* ================= 图片嵌入工具 ================= */
+function b64ToBytes(b64) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const map = {};
+  for (let i = 0; i < chars.length; i++) map[chars[i]] = i;
+  b64 = String(b64).replace(/=+$/, '');
+  const out = [];
+  let buf = 0, bits = 0;
+  for (const ch of b64) {
+    if (map[ch] === undefined) continue;
+    buf = (buf << 6) | map[ch];
+    bits += 6;
+    if (bits >= 8) { bits -= 8; out.push((buf >> bits) & 0xff); }
+  }
+  return new Uint8Array(out);
+}
+function parseDataUrl(dataUrl) {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(String(dataUrl || ''));
+  if (!m) return null;
+  const mime = m[1].toLowerCase();
+  const ext = mime.indexOf('png') >= 0 ? 'png' : mime.indexOf('jpeg') >= 0 || mime.indexOf('jpg') >= 0 ? 'jpg' : null;
+  if (!ext) return null;
+  return { bytes: b64ToBytes(m[2]), mime, ext };
+}
+
 /* ================= XML 工具 ================= */
 const X = (v) => U.escXml(String(v));
 const XRAW = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -138,6 +163,10 @@ function buildVSDX(graph, opts) {
     minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
     maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h);
   }
+  for (const t of (graph.texts || [])) {
+    minX = Math.min(minX, t.x); minY = Math.min(minY, t.y);
+    maxX = Math.max(maxX, t.x + (t.w || 160)); maxY = Math.max(maxY, t.y + (t.h || 40));
+  }
   if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 800; maxY = 600; }
   const pad = margin / scale;
   minX -= pad; minY -= pad; maxX += pad; maxY += pad;
@@ -156,12 +185,67 @@ function buildVSDX(graph, opts) {
   const shapes = [];
 
   // 设备
+  const imageParts = new Map(); // dataURL -> {rId, idx, ext, bytes}
+  let imgSid = 30000;
   for (const n of nodes) {
     const t = U.getType(n.type);
     const cx = (n.x + n.w / 2 - minX) * scale;
     const cy = Y(n.y + n.h / 2);
     const w = n.w * scale, h = n.h * scale;
     const id = nodeShape.get(n.id);
+    // 自定义类型图片：以 Foreign 图片形状叠加在设备图标区（左上 6px、宽 44px、垂直居中）
+    if (t && t.img) {
+      const parsed = parseDataUrl(t.img);
+      if (parsed) {
+        let part = imageParts.get(t.img);
+        if (!part) {
+          const idx = imageParts.size + 1;
+          part = { rId: 'rIdImg' + idx, idx, ext: parsed.ext, bytes: parsed.bytes };
+          imageParts.set(t.img, part);
+        }
+        const imgW = 44 * scale, imgH = (n.h - 12) * scale;
+        const pinX = (n.x - minX) * scale + 28 * scale; // 图标中心 x = 左边界 + 28px
+        const pinY = cy; // 图标垂直居中
+        const isid = imgSid++;
+        shapes.push(`    <Shape ID='${isid}' Type='Foreign' LineStyle='0' FillStyle='0' TextStyle='0'>
+      ${cell('PinX', IN(pinX))}
+      ${cell('PinY', IN(pinY))}
+      ${cell('Width', IN(imgW))}
+      ${cell('Height', IN(imgH))}
+      ${cell('LocPinX', IN(imgW / 2), "F='Width*0.5'")}
+      ${cell('LocPinY', IN(imgH / 2), "F='Height*0.5'")}
+      ${cell('Angle', 0)}
+      ${cell('FlipX', 0)}
+      ${cell('FlipY', 0)}
+      ${cell('ResizeMode', 0)}
+      ${cell('ImgOffsetX', 0, "F='ImgWidth*0'")}
+      ${cell('ImgOffsetY', 0, "F='ImgHeight*0'")}
+      ${cell('ImgWidth', IN(imgW), "F='Width*1'")}
+      ${cell('ImgHeight', IN(imgH), "F='Height*1'")}
+      <Cell N='ClippingPath' V='' F='""' E='#N/A'/>
+      ${cell('TxtPinX', IN(imgW / 2), "F='Width*0.5'")}
+      ${cell('TxtPinY', 0, "F='Height*0'")}
+      ${cell('TxtWidth', IN(imgW), "F='Width*1'")}
+      ${cell('TxtHeight', 0, "F='Height*0'")}
+      ${cell('TxtLocPinX', IN(imgW / 2), "F='TxtWidth*0.5'")}
+      ${cell('TxtLocPinY', 0, "F='TxtHeight*0.5'")}
+      ${cell('TxtAngle', 0)}
+      ${cell('VerticalAlign', 0)}
+      <Section N='Geometry' IX='0'>
+        ${cell('NoFill', 0)}
+        ${cell('NoLine', 0)}
+        ${cell('NoShow', 0)}
+        ${cell('NoSnap', 0)}
+        ${ROW_REL('RelMoveTo', 1, 0, 0)}
+        ${ROW_REL('RelLineTo', 2, 1, 0)}
+        ${ROW_REL('RelLineTo', 3, 1, 1)}
+        ${ROW_REL('RelLineTo', 4, 0, 1)}
+        ${ROW_REL('RelLineTo', 5, 0, 0)}
+      </Section>
+      <ForeignData ForeignType='Bitmap' CompressionType='${part.ext === 'jpg' ? 'JPEG' : 'PNG'}'><Rel r:id='${part.rId}'/></ForeignData>
+    </Shape>`);
+      }
+    }
     shapes.push(`    <Shape ID='${id}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(cx))}
       ${cell('PinY', IN(cy))}
@@ -233,7 +317,7 @@ function buildVSDX(graph, opts) {
     const id = linkShape.get(l.id);
 
     // 独立 2D 文本框（永远水平）：先收集，全部算完后统一防碰撞
-    const lines = U.labelLines(l);
+    const lines = opts.showLabels === false ? [] : U.labelLines(l);
     if (lines.length) {
       const FONT = 10; // pt
       const tw = Math.max(0.7, U.measureText(lines.reduce((a, b) => a.length > b.length ? a : b, ''), FONT) / 96 + 0.3);
@@ -249,8 +333,9 @@ function buildVSDX(graph, opts) {
       });
     }
 
-    // 连线用 2-D 形状（Pin + Angle 旋转 + 直线几何）：裸 1-D 形状在 Visio 中渲染不可靠，
-    // 2-D 方式与节点一致，保证线按 Begin/End 方向正确绘制。
+    // 连线用 2-D 直线形状（Pin + Angle 旋转 + 直线几何）：
+    // 裸 1-D 动态连接线在 Visio 中渲染不可靠（多连线时端点不跟随/线被截短），
+    // 2-D 方式与节点一致，保证线严格按 Begin/End 方向正确绘制、按带宽着色。
     const angle = Math.atan2(ey - by, ex - bx);
     shapes.push(`    <Shape ID='${id}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(mx))}
@@ -264,7 +349,7 @@ function buildVSDX(graph, opts) {
       ${cell('FlipY', 0)}
       ${cell('ResizeMode', 0)}
       ${cell('LineWeight', 0.025)}
-      ${cell('LineColor', '#8fa0b8')}
+      ${cell('LineColor', U.bwColor(l.bw))}
       ${cell('LinePattern', 1)}
       ${cell('BeginArrow', 0)}
       ${cell('EndArrow', 0)}
@@ -272,6 +357,7 @@ function buildVSDX(graph, opts) {
         ${cell('NoFill', 1)}
         ${cell('NoLine', 0)}
         ${cell('NoShow', 0)}
+        ${cell('NoSnap', 0)}
         <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
         <Row T='LineTo' IX='2'><Cell N='X' V='${IN(len)}'/><Cell N='Y' V='0'/></Row>
       </Section>
@@ -279,10 +365,12 @@ function buildVSDX(graph, opts) {
   }
 
   // 标注防碰撞：推开重叠的文本框后再生成
-  U.resolveLabelCollisions(labelBoxes, {
-    pad: 0.08,
-    obstacles: nodes.map(n => ({ x: (n.x - minX) * scale, y: Y(n.y + n.h), w: n.w * scale, h: n.h * scale }))
-  });
+  if (labelBoxes.length) {
+    U.resolveLabelCollisions(labelBoxes, {
+      pad: 0.08,
+      obstacles: nodes.map(n => ({ x: (n.x - minX) * scale, y: Y(n.y + n.h), w: n.w * scale, h: n.h * scale }))
+    });
+  }
   for (const lb of labelBoxes) {
     const tw = lb.w, th = lb.h, tpx = lb.x, tpy = lb.y, tid = lb.id;
     const text = lb.text;
@@ -325,17 +413,143 @@ function buildVSDX(graph, opts) {
     </Shape>`);
   }
 
-  // 连线端点直接落在设备边框（anchorPoint 计算），不粘到中心——避免线穿过节点遮挡名称/接口文字
-  // （若需要 Visio 中拖拽设备线跟随，可在此处改为连接点粘合）
+  // 画布文本框（自定义字体样式）
+  {
+    let tsid = 50000;
+    for (const t of (graph.texts || [])) {
+      const tw = (t.w || 160) * scale, th = (t.h || 40) * scale;
+      const tpx = (t.x + (t.w || 160) / 2 - minX) * scale;
+      const tpy = Y(t.y + (t.h || 40) / 2);
+      const size = t.size || 16;
+      const style = (t.bold ? 1 : 0) | (t.italic ? 2 : 0);
+      const hAlign = t.align === 'center' ? 1 : (t.align === 'right' ? 2 : 0);
+      const textRuns = "<cp IX='0'/><pp IX='0'/>" + String(t.text || '').split('\n').map(XRAW).join('\r\n') + '\r\n';
+      shapes.push(`    <Shape ID='${tsid++}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+      ${cell('PinX', IN(tpx))}
+      ${cell('PinY', IN(tpy))}
+      ${cell('Width', IN(tw))}
+      ${cell('Height', IN(th))}
+      ${cell('LocPinX', IN(tw / 2), "F='Width*0.5'")}
+      ${cell('LocPinY', IN(th / 2), "F='Height*0.5'")}
+      ${cell('Angle', 0)}
+      ${cell('FlipX', 0)}
+      ${cell('FlipY', 0)}
+      ${cell('ResizeMode', 0)}
+      ${cell('Para.HorzAlign', hAlign)}
+      ${cell('VerticalAlign', 0)}
+      ${cell('FillPattern', t.bg ? 1 : 0)}
+      ${cell('FillForegnd', t.bg || '#ffffff')}
+      ${cell('LinePattern', 0)}
+      <Section N='Geometry' IX='0'>
+        ${cell('NoFill', t.bg ? 0 : 1)}
+        ${cell('NoLine', 1)}
+        ${cell('NoShow', 0)}
+        ${cell('NoSnap', 0)}
+        ${ROW_REL('RelMoveTo', 1, 0, 0)}
+        ${ROW_REL('RelLineTo', 2, 1, 0)}
+        ${ROW_REL('RelLineTo', 3, 1, 1)}
+        ${ROW_REL('RelLineTo', 4, 0, 1)}
+        ${ROW_REL('RelLineTo', 5, 0, 0)}
+      </Section>
+      <Section N='Character'>
+        <Row IX='0'>
+          ${cell('Font', 1)}
+          ${cell('Color', t.color || '#1e293b')}
+          ${cell('Size', IN(size / 96))}
+          ${cell('Style', style)}
+        </Row>
+      </Section>
+      <Text>${textRuns}</Text>
+    </Shape>`);
+    }
+  }
+
+  // 带宽图例：颜色标识带宽大小（不显示带宽文字）
+  {
+    const bwSet = new Map();
+    for (const l of links) { const n = U.normalizeBw(l.bw); if (n && !bwSet.has(n)) bwSet.set(n, U.bwColor(n)); }
+    if (bwSet.size) {
+      let lx = 0.5, ly = 0.5;
+      const sorted = [...bwSet.entries()].sort((a, b) => b[0] - a[0]);
+      sorted.forEach((entry, i) => {
+        const n = entry[0], color = entry[1];
+        const lsid = 40000 + i * 2;
+        shapes.push(`    <Shape ID='${lsid}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+      ${cell('PinX', IN(lx + 0.35))}
+      ${cell('PinY', IN(ly))}
+      ${cell('Width', 0.7)}
+      ${cell('Height', 0.02)}
+      ${cell('LocPinX', 0.35)}
+      ${cell('LocPinY', 0.01)}
+      ${cell('Angle', 0)}
+      ${cell('FlipX', 0)}
+      ${cell('FlipY', 0)}
+      ${cell('ResizeMode', 0)}
+      ${cell('LineWeight', 0.025)}
+      ${cell('LineColor', color)}
+      ${cell('LinePattern', 1)}
+      <Section N='Geometry' IX='0'>
+        ${cell('NoFill', 1)}
+        ${cell('NoLine', 0)}
+        ${cell('NoShow', 0)}
+        ${cell('NoSnap', 0)}
+        <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+        <Row T='LineTo' IX='2'><Cell N='X' V='0.7'/><Cell N='Y' V='0'/></Row>
+      </Section>
+    </Shape>`);
+        const tsid = lsid + 1;
+        const lab = U.formatBw(n);
+        shapes.push(`    <Shape ID='${tsid}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+      ${cell('PinX', IN(lx + 0.95))}
+      ${cell('PinY', IN(ly))}
+      ${cell('Width', 0.9)}
+      ${cell('Height', 0.25)}
+      ${cell('LocPinX', 0.45)}
+      ${cell('LocPinY', 0.125)}
+      ${cell('Angle', 0)}
+      ${cell('FlipX', 0)}
+      ${cell('FlipY', 0)}
+      ${cell('ResizeMode', 0)}
+      ${cell('FillPattern', 0)}
+      ${cell('LinePattern', 0)}
+      <Section N='Geometry' IX='0'>
+        ${cell('NoFill', 1)}
+        ${cell('NoLine', 1)}
+        ${cell('NoShow', 0)}
+        ${cell('NoSnap', 0)}
+        ${ROW_REL('RelMoveTo', 1, 0, 0)}
+        ${ROW_REL('RelLineTo', 2, 1, 0)}
+        ${ROW_REL('RelLineTo', 3, 1, 1)}
+        ${ROW_REL('RelLineTo', 4, 0, 1)}
+        ${ROW_REL('RelLineTo', 5, 0, 0)}
+      </Section>
+      <Section N='Character'>
+        <Row IX='0'>
+          ${cell('Font', 1)}
+          ${cell('Color', '#334155')}
+          ${cell('Size', 0.111)}
+          ${cell('Style', 0)}
+        </Row>
+      </Section>
+      <Text><cp IX='0'/><pp IX='0'/>${XRAW(lab)}\r\n</Text>
+    </Shape>`);
+        ly += 0.35;
+      });
+    }
+  }
+
+  // 2-D 直线不参与动态粘合（避免 Visio 对裸 1-D 连接线渲染不可靠），
+  // 端点已直接落在设备边框上（anchorPoint 计算）。
   const connects = '';
 
   /* ---- 部件 ---- */
   const enc = new TextEncoder();
-  const entry = (name, xml) => ({ name, data: enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xml) });
+  const entry = (name, xml) => ({ name, data: xml instanceof Uint8Array ? xml : enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xml) });
 
   const contentTypes = `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
+${[...imageParts.values()].map(p => `<Default Extension="${p.ext}" ContentType="${p.ext === 'jpg' ? 'image/jpeg' : 'image/png'}"/>`).join('')}
 <Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>
 <Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
 <Override PartName="/visio/pages/page1.xml" ContentType="application/vnd.ms-visio.page+xml"/>
@@ -439,6 +653,9 @@ function buildVSDX(graph, opts) {
 <Shapes>
 ${shapes.join('\n')}
 </Shapes>
+${connects ? `<Connects>
+${connects}
+</Connects>` : ''}
 </PageContents>`;
 
   const windowsXml = `<Windows ClientWidth='1280' ClientHeight='720' xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships' xml:space='preserve'>
@@ -465,6 +682,11 @@ ${shapes.join('\n')}
     entry('visio/pages/pages.xml', pagesXml),
     entry('visio/pages/_rels/pages.xml.rels', pagesRels),
     entry('visio/pages/page1.xml', page1),
+    ...(imageParts.size ? [
+      entry('visio/pages/_rels/page1.xml.rels', [...imageParts.values()].map(p =>
+        `<Relationship Id="${p.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${p.idx}.${p.ext}"/>`).join('\n')),
+      ...[...imageParts.values()].map(p => entry(`visio/media/image${p.idx}.${p.ext}`, p.bytes))
+    ] : []),
     entry('visio/windows.xml', windowsXml)
   ];
 

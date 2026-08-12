@@ -214,7 +214,7 @@ U.linkGeom = (nodes, links) => {
         mid: {
           x: (x1 + x2) / 2 + px * 8,
           y: (y1 + y2) / 2 + py * 8,
-          text: (l.bw || '').trim() ? U.truncate(l.bw, 16) : '',
+          text: String(l.bw || '').trim() ? U.truncate(String(l.bw), 16) : '',
           anchor: 'middle'
         }
       };
@@ -374,7 +374,19 @@ const I = {
   pdf: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6z"/><path d="M14 3v6h6"/><path d="M9 13l1.5 4 1.5-4M8 17h5"/></svg>',
   fileplus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6z"/><path d="M14 3v6h6"/><path d="M12 13v5M9.5 15.5h5"/></svg>',
   tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12V5a2 2 0 0 1 2-2h7l9 9-9 9-9-9z"/><circle cx="8.5" cy="8.5" r="1.4" fill="currentColor" stroke="none"/></svg>',
-  image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 18l5-5 3.5 3.5L16 13l4 4"/></svg>'
+  image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 18l5-5 3.5 3.5L16 13l4 4"/></svg>',
+  save: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h8V4M8 20v-6h8v6"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.5h9A1.5 1.5 0 0 1 21 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5v-11z"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.6-2.9 7.6-7 9-4.1-1.4-7-4.4-7-9V6l7-3z"/><path d="M9 12l2.2 2.2L15.5 9.5"/></svg>',
+  caret: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 19h16"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/></svg>',
+  eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>',
+  layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>',
+  code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 7L4 12l4.5 5M15.5 7L20 12l-4.5 5M13.5 4l-3 16"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>',
+  git: '<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"6\" cy=\"6\" r=\"2.4\"/><circle cx=\"18\" cy=\"6\" r=\"2.4\"/><circle cx=\"6\" cy=\"18\" r=\"2.4\"/><path d=\"M8.2 7.4v9.2M15.8 7.4v9.2M8.4 6h7.2M6 8.4v7.2M18 8.4v7.2\"/></svg>',
+  clock: '<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v5l3.5 2\"/></svg>'
 };
 U.ICONS = I;
 
@@ -414,17 +426,59 @@ U.resolveLabelCollisions = (labels, opts) => {
     if (!lockB) { b.x -= sx; b.y -= sy; }
     return true;
   };
+  // 大输入（大量标注/节点）使用空间哈希只检查邻近对，避免 O(n²×迭代)；小输入保持原逻辑（行为不变）
+  const maxDim = (() => {
+    let m = 0;
+    for (const lb of labels) m = Math.max(m, lb.w, lb.h);
+    for (const ob of obstacles) m = Math.max(m, ob.w, ob.h);
+    return m;
+  })();
+  const big = labels.length * (labels.length + obstacles.length) > 60000;
+  if (!big) {
+    for (let iter = 0; iter < 200; iter++) {
+      let moved = false;
+      for (let i = 0; i < labels.length; i++) {
+        for (let j = i + 1; j < labels.length; j++) {
+          if (push(labels[i], labels[j], false)) moved = true;
+        }
+      }
+      for (const lb of labels) {
+        for (const ob of obstacles) {
+          if (push(lb, ob, true)) moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    return labels;
+  }
+  const CELL = Math.max(1, Math.ceil(maxDim + pad + 1));
+  const cellKey = (x, y) => Math.floor(x / CELL) + ',' + Math.floor(y / CELL);
+  const grid = new Map();
+  const items = labels.map((lb, idx) => ({ lb, idx, kind: 0 }));
+  for (const ob of obstacles) items.push({ lb: ob, idx: -1, kind: 1 });
+  for (const it of items) {
+    const k = cellKey(it.lb.x, it.lb.y);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(it);
+  }
+  const near = (it) => {
+    const kx = Math.floor(it.lb.x / CELL), ky = Math.floor(it.lb.y / CELL);
+    const out = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const arr = grid.get((kx + dx) + ',' + (ky + dy));
+        if (arr) for (const o of arr) if (o !== it) out.push(o);
+      }
+    }
+    return out;
+  };
   for (let iter = 0; iter < 200; iter++) {
     let moved = false;
     for (let i = 0; i < labels.length; i++) {
-      for (let j = i + 1; j < labels.length; j++) {
-        if (push(labels[i], labels[j], false)) moved = true;
-      }
-    }
-    // 标注避开节点：把节点当作固定矩形，仅推开标注
-    for (const lb of labels) {
-      for (const ob of obstacles) {
-        if (push(lb, ob, true)) moved = true;
+      const it = { lb: labels[i] };
+      for (const o of near(it)) {
+        if (o.kind === 1) { if (push(labels[i], o.lb, true)) moved = true; }
+        else if (o.idx > i) { if (push(labels[i], o.lb, false)) moved = true; }
       }
     }
     if (!moved) break;
@@ -432,12 +486,579 @@ U.resolveLabelCollisions = (labels, opts) => {
   return labels;
 };
 
-/* 标注三行文本（接口IP / 对端接口IP / 带宽） */
+/* ---------- 带宽：统一为 Mbps 数值，图上用颜色标识 ---------- */
+U.BW_LEVELS = [
+  { min: 100000, label: '100G', color: '#dc2626' },
+  { min: 40000,  label: '40G',  color: '#f59e0b' },
+  { min: 10000,  label: '10G',  color: '#8b5cf6' },
+  { min: 1000,   label: '1G',   color: '#0ea5e9' },
+  { min: 100,    label: '100M', color: '#64748b' },
+  { min: 10,     label: '10M',  color: '#94a3b8' }
+];
+/* 把文字/数字带宽归一化为 Mbps 数值；无法识别返回 '' */
+U.normalizeBw = (v) => {
+  if (v == null) return '';
+  const s = String(v).trim().toLowerCase();
+  if (!s) return '';
+  const table = [
+    [/^100g|100gbps|100000m/, 100000],
+    [/^40g|40gbps|40000m/, 40000],
+    [/^10g|10gbps|10000m|万兆/, 10000],
+    [/^1g|1gbps|1000m|千兆/, 1000],
+    [/^100m|100mbps|百兆/, 100],
+    [/^10m|10mbps/, 10]
+  ];
+  for (const [re, val] of table) if (re.test(s)) return val;
+  const n = parseFloat(s);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return '';
+};
+U.formatBw = (v) => {
+  const n = U.normalizeBw(v);
+  if (!n) return '';
+  if (n >= 100000) return '100G';
+  if (n >= 40000) return '40G';
+  if (n >= 10000) return (n / 1000).toFixed(n % 1000 ? 1 : 0) + 'G';
+  if (n >= 1000) return (n / 1000).toFixed(n % 1000 ? 1 : 0) + 'G';
+  return n + 'M';
+};
+U.bwColor = (v) => {
+  const n = U.normalizeBw(v);
+  if (!n) return '#8fa0b8';
+  for (const lv of U.BW_LEVELS) if (n >= lv.min) return lv.color;
+  return '#94a3b8';
+};
+
+/* 标注两行文本（接口IP / 对端接口IP）；带宽用线色+图例标识，不再显示文字 */
 U.labelLines = (l) => [
   [l.aIf, l.aIp].filter(Boolean).join('  '),
-  [l.bIf, l.bIp].filter(Boolean).join('  '),
-  l.bw ? '带宽: ' + l.bw : ''
+  [l.bIf, l.bIp].filter(Boolean).join('  ')
 ].filter(Boolean);
+
+/* ---------- 子网分组（按 /24 网段归类设备） ---------- */
+U.ipv4ToInt = (ip) => {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip || '').trim());
+  if (!m) return null;
+  const p = m.slice(1).map(Number);
+  if (p.some(v => v > 255)) return null;
+  return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
+};
+U.intToIpv4 = (n) => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+U.subnetOf = (ip, bits) => {
+  bits = bits == null ? 24 : bits;
+  const n = U.ipv4ToInt(ip);
+  if (n == null) return null;
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+  return U.intToIpv4((n & mask) >>> 0) + '/' + bits;
+};
+/* 子网分组配色（按组序号循环取色） */
+U.SUBNET_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316', '#84cc16', '#ec4899', '#06b6d4', '#a3e635'];
+/* 按接口 IP 网段（优先）/ 管理 IP 网段（兜底）把设备归组，返回可绘制区域 */
+U.subnetGroups = (nodes, links, names) => {
+  names = names || {};
+  const linkIps = new Map(); // nodeId -> [ip...]
+  for (const l of links || []) {
+    if (!linkIps.has(l.a)) linkIps.set(l.a, []);
+    if (!linkIps.has(l.b)) linkIps.set(l.b, []);
+    if (l.aIp) linkIps.get(l.a).push(l.aIp);
+    if (l.bIp) linkIps.get(l.b).push(l.bIp);
+  }
+  const primaryOf = (n) => {
+    // 优先接口 IP：出现次数最多的网段；其次管理 IP 网段
+    const ips = linkIps.get(n.id) || [];
+    const cnt = new Map();
+    for (const ip of ips) { const s = U.subnetOf(ip); if (s) cnt.set(s, (cnt.get(s) || 0) + 1); }
+    let best = null, bestC = 0;
+    for (const [s, c] of cnt) {
+      if (c > bestC || (c === bestC && (best == null || s < best))) { best = s; bestC = c; }
+    }
+    if (best) return best;
+    return n.mgmt ? U.subnetOf(n.mgmt) : null;
+  };
+  const groups = new Map();
+  for (const n of nodes) {
+    const s = primaryOf(n);
+    if (!s) continue;
+    if (!groups.has(s)) groups.set(s, { key: s, nodeIds: [] });
+    groups.get(s).nodeIds.push(n.id);
+  }
+  const pad = 26;
+  const out = [...groups.values()]
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map((g, i) => {
+      const rects = g.nodeIds.map(id => nodes.find(n => n.id === id)).filter(Boolean);
+      const x0 = Math.min(...rects.map(r => r.x)) - pad;
+      const y0 = Math.min(...rects.map(r => r.y)) - pad;
+      const x1 = Math.max(...rects.map(r => r.x + r.w)) + pad;
+      const y1 = Math.max(...rects.map(r => r.y + r.h)) + pad;
+      const custom = names[g.key];
+      const n = g.nodeIds.length;
+      return {
+        key: g.key,
+        cidr: g.key,
+        name: custom ? custom + '（' + g.key + '·' + n + '台）' : g.key + ' · ' + n + '台',
+        color: U.SUBNET_COLORS[i % U.SUBNET_COLORS.length],
+        nodeIds: g.nodeIds,
+        x: x0, y: y0, w: x1 - x0, h: y1 - y0
+      };
+    });
+  return out;
+};
+
+/* ---------- 设备配置生成（模板驱动，支持自定义厂家风格） ---------- */
+/* 内置模板：huawei / cisco；占位符（模板中未提供的占位符原样保留）：
+   设备级（设备头/无接口行/接口行可用）：
+     {name}    设备名称
+     {mgmt}    管理地址（无则显示 —）
+     {type}    设备类型中文名（如 路由器）
+     {comment} 注释符（如 # / !）
+   接口级（接口块/接入端口行可用）：
+     {iface}    本端接口名（如 GE0/0/1）
+     {ip}       本端接口 IP
+     {mask}     子网掩码（255.255.255.0）
+     {peer}     对端设备名
+     {peerIf}   对端接口名（如 GE1/0/1）
+     {peerSuffix} 对端接口前缀（:GE1/0/1，无对端接口则为空，兼容旧模板）
+     {bw}       链路带宽（如 1G）
+     {vlan}     自动分配的 VLAN 号
+   路由级（路由行可用）：
+     {subnet}   远端网段 CIDR（如 192.168.1.0/24）
+     {nextHop}  下一跳 IP（对端接口 IP） */
+U.CONFIG_TEMPLATES = {
+  huawei: {
+    key: 'huawei', label: '华为', builtin: true, comment: '#',
+    deviceHeader: '{comment} {name}  管理: {mgmt}  [{type}]',
+    noIface: '{comment} （无接口配置）',
+    interface: [
+      'interface {iface}',
+      ' ip address {ip} 255.255.255.0',
+      ' description -> {peer}{peerSuffix}'
+    ],
+    switchAccess: [
+      ' port link-type access',
+      ' port default vlan {vlan}'
+    ],
+    route: 'ip route-static {subnet} {mask} {nextHop}',
+    vlanLine: 'vlan {vlan}'
+  },
+  cisco: {
+    key: 'cisco', label: '思科', builtin: true, comment: '!',
+    deviceHeader: '{comment} {name}  管理: {mgmt}  [{type}]',
+    noIface: '{comment} （无接口配置）',
+    interface: [
+      'interface {iface}',
+      ' ip address {ip} 255.255.255.0',
+      ' description -> {peer}{peerSuffix}',
+      ' no shutdown'
+    ],
+    switchAccess: [
+      ' switchport mode access',
+      ' switchport access vlan {vlan}'
+    ],
+    route: 'ip route {subnet} {mask} {nextHop}',
+    vlanLine: 'vlan {vlan}'
+  }
+};
+U.cfgTemplates = () => Object.assign({}, U.CONFIG_TEMPLATES, U.customCfgTemplates || {});
+U.getCfgTemplate = (key) => U.cfgTemplates()[key] || U.cfgTemplates().huawei;
+U.saveCustomCfgTemplates = () => {
+  try { localStorage.setItem('nettopo.cfgTemplates', JSON.stringify(U.customCfgTemplates || {})); } catch (e) {}
+};
+U.loadCustomCfgTemplates = () => {
+  try { U.customCfgTemplates = JSON.parse(localStorage.getItem('nettopo.cfgTemplates') || '{}') || {}; } catch (e) { U.customCfgTemplates = {}; }
+};
+U.generateConfigs = (nodes, links, vendor, opts) => {
+  vendor = vendor || 'huawei';
+  opts = opts || {};
+  const tpl = typeof vendor === 'object' ? vendor : U.getCfgTemplate(vendor);
+  if (!tpl) return '';
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const fill = (s, map) => String(s).replace(/\{(\w+)\}/g, (m, k) => map[k] != null ? map[k] : m);
+  const maskOf = (ip) => '255.255.255.0';
+  // 子网 -> VLAN 号（接入端口按网段分配）
+  const vlanMap = new Map();
+  const subnetList = [];
+  const ensureSubnet = (ip) => {
+    const s = U.subnetOf(ip);
+    if (!s || vlanMap.has(s)) return;
+    vlanMap.set(s, 10 + subnetList.length);
+    subnetList.push(s);
+  };
+  for (const l of links) { if (l.aIp) ensureSubnet(l.aIp); if (l.bIp) ensureSubnet(l.bIp); }
+  // 直连子网 / 邻居子网（用于静态路由）
+  const linkOf = new Map();
+  for (const n of nodes) linkOf.set(n.id, []);
+  for (const l of links) { linkOf.get(l.a).push(l); linkOf.get(l.b).push(l); }
+  const out = [];
+  for (const n of nodes) {
+    const sec = [];
+    sec.push(fill(tpl.deviceHeader, { comment: tpl.comment, name: n.name || '', mgmt: n.mgmt || '—', type: U.getType(n.type).label }));
+    const intfs = [];
+    for (const l of links) {
+      let ifn, ip, peerId, peerIf, bw;
+      if (l.a === n.id) { ifn = l.aIf; ip = l.aIp; peerId = l.b; peerIf = l.bIf; bw = l.bw; }
+      else if (l.b === n.id) { ifn = l.bIf; ip = l.bIp; peerId = l.a; peerIf = l.aIf; bw = l.bw; }
+      else continue;
+      if (!ifn) continue;
+      const peer = byId.get(peerId);
+      intfs.push({ ifn, ip, peer: peer ? peer.name : '?', peerIf, bw, peerIsAccess: peer ? ['pc', 'server', 'other'].includes(peer.type) : false, subnet: U.subnetOf(ip) });
+    }
+    if (!intfs.length) {
+      sec.push(fill(tpl.noIface, { comment: tpl.comment, name: n.name || '', mgmt: n.mgmt || '—', type: U.getType(n.type).label }));
+    } else {
+      for (const it of intfs) {
+        sec.push('');
+        const map = {
+          iface: it.ifn, ip: it.ip || '未配置', mask: maskOf(it.ip), peer: it.peer,
+          peerIf: it.peerIf || '', peerSuffix: it.peerIf ? ':' + it.peerIf : '',
+          bw: U.formatBw(it.bw) || '', vlan: vlanMap.get(it.subnet) || '',
+          comment: tpl.comment, name: n.name || '', mgmt: n.mgmt || '—', type: U.getType(n.type).label
+        };
+        for (const line of (tpl.interface || [])) sec.push(fill(line, map));
+        // 交换机接入端口 VLAN
+        if (opts.vlan !== false && tpl.switchAccess && n.type === 'switch' && it.peerIsAccess && it.subnet && vlanMap.has(it.subnet)) {
+          for (const line of tpl.switchAccess) sec.push(fill(line, { vlan: vlanMap.get(it.subnet), ...map }));
+        }
+      }
+    }
+    // VLAN 定义（交换机）
+    if (opts.vlan !== false && tpl.vlanLine && n.type === 'switch') {
+      const used = new Set();
+      for (const it of intfs) if (it.subnet && vlanMap.has(it.subnet)) used.add(vlanMap.get(it.subnet));
+      for (const v of [...used].sort((a, b) => a - b)) sec.push('', fill(tpl.vlanLine, { vlan: v, comment: tpl.comment }));
+    }
+    // 静态路由（路由器/防火墙/云）：经直连邻居到达其直连网段
+    if (opts.routes && tpl.route) {
+      const mine = new Set(intfs.filter(i => i.subnet).map(i => i.subnet));
+      const routes = [];
+      for (const l of linkOf.get(n.id) || []) {
+        const otherId = l.a === n.id ? l.b : l.a;
+        const other = byId.get(otherId);
+        const peerIp = l.a === n.id ? l.bIp : l.aIp; // 下一跳 = 对端接口 IP
+        if (!other || !peerIp) continue;
+        for (const ol of linkOf.get(otherId) || []) {
+          const oIp = ol.a === otherId ? ol.aIp : ol.bIp;
+          const oSub = U.subnetOf(oIp);
+          if (oSub && !mine.has(oSub)) {
+            routes.push(fill(tpl.route, { subnet: oSub, mask: '255.255.255.0', nextHop: peerIp, comment: tpl.comment }));
+          }
+        }
+      }
+      const uniq = [...new Set(routes)];
+      if (uniq.length) { sec.push('', tpl.comment + ' 静态路由（自动推导）'); for (const r of uniq) sec.push(r); }
+    }
+    out.push(sec.join('\n'));
+  }
+  return out.join('\n\n');
+};
+
+/* ---------- 拓扑对比（工程 diff） ---------- */
+U.diffProjects = (a, b) => {
+  const keyOf = (n) => n.name || '';
+  const linkKey = (l, byName) => {
+    const an = byName.get(l.a) || '', bn = byName.get(l.b) || '';
+    const k = [an, bn].sort().join('|');
+    const ifs = [l.aIf || '', l.aIp || '', l.bIf || '', l.bIp || '', String(l.bw || '')].join('/');
+    return k + '#' + ifs;
+  };
+  const byNameA = new Map(a.nodes.map(n => [n.id, n.name]));
+  const byNameB = new Map(b.nodes.map(n => [n.id, n.name]));
+  const nameA = new Map(a.nodes.map(n => [n.name, n]));
+  const nameB = new Map(b.nodes.map(n => [n.name, n]));
+  const addedNodes = [], removedNodes = [], changedNodes = [];
+  for (const n of a.nodes) {
+    const m = nameB.get(n.name);
+    if (!m) removedNodes.push(n.name);
+    else if (n.mgmt !== m.mgmt || n.type !== m.type || (n.note || '') !== (m.note || '')) changedNodes.push({ name: n.name, from: { mgmt: n.mgmt, type: n.type, note: n.note }, to: { mgmt: m.mgmt, type: m.type, note: m.note } });
+  }
+  for (const n of b.nodes) if (!nameA.has(n.name)) addedNodes.push(n.name);
+  const linkSetA = new Set(a.links.map(l => linkKey(l, byNameA)));
+  const linkSetB = new Set(b.links.map(l => linkKey(l, byNameB)));
+  const addedLinks = [], removedLinks = [];
+  const keyToText = (k) => { const [pair, rest] = k.split('#'); const [x, y] = pair.split('|'); const [aIf, aIp, bIf, bIp, bw] = rest.split('/'); return x + ' ⇄ ' + y + (aIf ? ' ' + aIf + ' ' + aIp + ' / ' + bIf + ' ' + bIp : '') + (bw ? ' ' + bw : ''); };
+  for (const k of linkSetB) if (!linkSetA.has(k)) addedLinks.push(keyToText(k));
+  for (const k of linkSetA) if (!linkSetB.has(k)) removedLinks.push(keyToText(k));
+  return { addedNodes, removedNodes, changedNodes, addedLinks, removedLinks };
+};
+
+/* ---------- 设备批量重命名 ---------- */
+U.renameNodes = (nodes, opts) => {
+  opts = opts || {};
+  const prefix = opts.prefix || '', suffix = opts.suffix || '';
+  const mode = opts.mode || 'keep'; // keep | number
+  const start = opts.start != null ? Number(opts.start) : 1;
+  const pad = opts.pad || 0;
+  const sep = opts.sep || '';
+  const sorted = [...nodes].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
+  sorted.forEach((n, i) => {
+    const base = mode === 'number' ? '' : (n.name || '').trim();
+    const num = mode === 'number' ? String(start + i).padStart(pad, '0') : '';
+    n.name = (prefix + (base || num) + (num && base ? sep : '') + suffix).trim() || n.name;
+  });
+};
+
+/* ---------- IP 规划清单（设备/接口/网段） ---------- */
+U.ipPlan = (nodes, links) => {
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const rows = [];
+  const subnetMap = new Map(); // 网段 -> Set(设备名)
+  const addSubnet = (ip, devName) => {
+    const s = U.subnetOf(ip);
+    if (!s) return;
+    if (!subnetMap.has(s)) subnetMap.set(s, new Set());
+    subnetMap.get(s).add(devName);
+  };
+  const typeLabel = (id) => { const nd = byId.get(id); return nd ? U.getType(nd.type).label : ''; };
+  // 按设备聚合：同一台设备的“管理地址 + 全部接口”连续排列，便于 Excel 合并设备名列
+  const sorted = [...nodes].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
+  for (const n of sorted) {
+    if (n.mgmt) {
+      rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: '管理', IP: n.mgmt, 对端设备: '', 对端接口: '', 带宽: '', 网段: U.subnetOf(n.mgmt) || '', 备注: n.note || '' });
+      addSubnet(n.mgmt, n.name);
+    }
+    for (const l of links) {
+      const other = l.a === n.id ? byId.get(l.b) : (l.b === n.id ? byId.get(l.a) : null);
+      if (!other) continue;
+      const myIf = l.a === n.id ? l.aIf : l.bIf;
+      const myIp = l.a === n.id ? l.aIp : l.bIp;
+      const otIf = l.a === n.id ? l.bIf : l.aIf;
+      if (myIp) {
+        rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: myIf || '', IP: myIp, 对端设备: other.name, 对端接口: otIf || '', 带宽: U.formatBw(l.bw), 网段: U.subnetOf(myIp) || '', 备注: l.note || '' });
+        addSubnet(myIp, n.name);
+      }
+    }
+  }
+  const subnets = [...subnetMap.entries()]
+    .map(([cidr, names]) => ({ cidr, devices: [...names].sort((a, b) => a.localeCompare(b, 'zh')) }))
+    .sort((a, b) => (a.cidr < b.cidr ? -1 : a.cidr > b.cidr ? 1 : 0));
+  return { rows, subnets };
+};
+
+/* Excel 设备名合并区间：同一台设备的连续行合并（数据行从第 1 行起，设备名列 = 0） */
+U.deviceMergeRanges = (rows) => {
+  const merges = [];
+  let excelRow = 1;
+  let idx = 0;
+  while (idx < rows.length) {
+    const name = rows[idx].设备;
+    let j = idx;
+    while (j < rows.length && rows[j].设备 === name) j++;
+    if (j - idx > 1) merges.push({ s: { r: excelRow, c: 0 }, e: { r: excelRow + (j - idx) - 1, c: 0 } });
+    excelRow += (j - idx);
+    idx = j;
+  }
+  return merges;
+};
+
+/* ---------- IP 批量改段 ---------- */
+U.cidrInfo = (cidr) => {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(String(cidr || '').trim());
+  if (!m) return null;
+  const p = m.slice(1, 5).map(Number);
+  const prefix = Number(m[5]);
+  if (p.some(v => v > 255) || prefix < 0 || prefix > 32) return null;
+  const ip = ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  return { ip, mask, prefix, base: (ip & mask) >>> 0 };
+};
+/* 把 ip 从 oldCidr 段改到 newCidr 段（保留主机位）；不在段内返回原值 */
+U.renumberIp = (ip, oldCidr, newCidr) => {
+  const a = U.cidrInfo(oldCidr), b = U.cidrInfo(newCidr);
+  const n = U.ipv4ToInt(ip);
+  if (!a || !b || n == null) return ip;
+  if (((n & a.mask) >>> 0) !== a.base) return ip; // 不在原网段
+  const host = (n & (~a.mask >>> 0)) >>> 0;
+  // 新网段主机位不足时保留可用部分
+  const newHost = (host & (~b.mask >>> 0)) >>> 0;
+  return U.intToIpv4((b.base | newHost) >>> 0);
+};
+
+/* ---------- 多选对齐 / 分布 ---------- */
+U.alignNodes = (nodes, mode) => {
+  if (!nodes || nodes.length < 2) return;
+  const xs = nodes.map(n => n.x), ys = nodes.map(n => n.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs.map((x, i) => x + nodes[i].w));
+  const minY = Math.min(...ys), maxY = Math.max(...ys.map((y, i) => y + nodes[i].h));
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  if (mode === 'left') nodes.forEach(n => { n.x = minX; });
+  else if (mode === 'right') nodes.forEach(n => { n.x = maxX - n.w; });
+  else if (mode === 'hcenter') nodes.forEach(n => { n.x = cx - n.w / 2; });
+  else if (mode === 'top') nodes.forEach(n => { n.y = minY; });
+  else if (mode === 'bottom') nodes.forEach(n => { n.y = maxY - n.h; });
+  else if (mode === 'vcenter') nodes.forEach(n => { n.y = cy - n.h / 2; });
+  else if (mode === 'hdist' || mode === 'vdist') {
+    const sorted = [...nodes].sort((a, b) => mode === 'hdist' ? a.x - b.x : a.y - b.y);
+    const first = sorted[0], last = sorted[sorted.length - 1];
+    const dims = sorted.map(n => mode === 'hdist' ? n.w : n.h);
+    const firstEdge = mode === 'hdist' ? first.x : first.y;
+    const lastEdge = mode === 'hdist' ? last.x + last.w : last.y + last.h;
+    const gaps = sorted.length - 1;
+    const gap = (lastEdge - firstEdge - dims.reduce((s, w) => s + w, 0)) / gaps;
+    let cur = firstEdge;
+    for (let i = 0; i < sorted.length; i++) {
+      if (mode === 'hdist') sorted[i].x = cur; else sorted[i].y = cur;
+      cur += dims[i] + gap;
+    }
+  }
+};
+
+/* ---------- 拓扑设计报告（自包含 HTML） ---------- */
+U.buildReportHtml = (nodes, links, opts) => {
+  opts = opts || {};
+  const { rows, subnets } = U.ipPlan(nodes, links);
+  const esc = U.escHtml;
+  const bwMap = new Map();
+  for (const l of links) { const n = U.normalizeBw(l.bw); if (n) bwMap.set(n, (bwMap.get(n) || 0) + 1); }
+  const bwRows = [...bwMap.entries()].sort((a, b) => b[0] - a[0])
+    .map(([n, c]) => `<tr><td>${esc(U.formatBw(n))}</td><td>${c}</td></tr>`).join('');
+  // IP 规划表：设备名列按设备合并（rowspan）
+  const ipRows = [];
+  let i = 0;
+  while (i < rows.length) {
+    const name = rows[i].设备;
+    let j = i;
+    while (j < rows.length && rows[j].设备 === name) j++;
+    const span = j - i;
+    for (let k = i; k < j; k++) {
+      const r = rows[k];
+      ipRows.push(`<tr>${k === i ? `<td rowspan="${span}"><b>${esc(name)}</b></td>` : ''}
+        <td>${esc(r.类型)}</td><td>${esc(r.接口)}</td><td>${esc(r.IP)}</td>
+        <td>${esc(r.对端设备)}</td><td>${esc(r.对端接口)}</td><td>${esc(r.带宽)}</td><td>${esc(r.网段)}</td><td>${esc(r.备注)}</td></tr>`);
+    }
+    i = j;
+  }
+  const linkRows = links.map(l => {
+    const a = nodes.find(n => n.id === l.a), b = nodes.find(n => n.id === l.b);
+    return `<tr><td>${esc(a ? a.name : '?')}</td><td>${esc(l.aIf || '')}</td><td>${esc(l.aIp || '')}</td>
+      <td>${esc(b ? b.name : '?')}</td><td>${esc(l.bIf || '')}</td><td>${esc(l.bIp || '')}</td>
+      <td>${esc(l.bw ? U.formatBw(l.bw) : '')}</td><td>${esc(l.note || '')}</td></tr>`;
+  }).join('');
+  const devRows = nodes.map(n => {
+    const t = U.getType(n.type);
+    const cnt = links.filter(l => l.a === n.id || l.b === n.id).length;
+    return `<tr><td><b>${esc(n.name)}</b></td><td>${esc(t.label)}</td><td>${esc(n.mgmt || '')}</td><td>${cnt}</td><td>${esc(n.note || '')}</td></tr>`;
+  }).join('');
+  const subRows = subnets.map(s => `<tr><td><b>${esc(s.cidr)}</b></td><td>${s.devices.length}</td><td>${esc(s.devices.join('、'))}</td></tr>`).join('');
+  const cfg = opts.includeConfig ? U.generateConfigs(nodes, links, 'huawei') : '';
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>网络拓扑设计报告</title>
+<style>
+body{font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif;color:#1e293b;margin:32px auto;max-width:980px;padding:0 16px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 8px;border-left:4px solid #4f46e5;padding-left:8px}
+.meta{color:#64748b;font-size:12px;margin-bottom:20px}
+table{border-collapse:collapse;width:100%;margin:6px 0 10px;font-size:12.5px}
+th,td{border:1px solid #dbe2ec;padding:5px 8px;text-align:left;vertical-align:top}
+th{background:#f1f5f9;font-weight:600}tr:nth-child(even) td{background:#f8fafc}
+.stats{display:flex;gap:24px;flex-wrap:wrap;margin:14px 0}
+.stat{background:#f1f5f9;border-radius:10px;padding:10px 18px;text-align:center}
+.stat b{display:block;font-size:20px;color:#4f46e5}
+pre{background:#0f172a;color:#e2e8f0;padding:12px 14px;border-radius:10px;font:12px/1.55 Consolas,monospace;overflow:auto;white-space:pre}
+</style></head><body>
+<h1>网络拓扑设计报告</h1>
+<div class="meta">生成时间：${esc(new Date().toLocaleString('zh-CN'))} · 设备 ${nodes.length} 台 · 连线 ${links.length} 条 · 网段 ${subnets.length} 个</div>
+<div class="stats">
+  <div class="stat"><b>${nodes.length}</b>设备</div>
+  <div class="stat"><b>${links.length}</b>链路</div>
+  <div class="stat"><b>${subnets.length}</b>网段</div>
+  <div class="stat"><b>${rows.length}</b>接口/IP</div>
+</div>
+<h2>设备清单</h2>
+<table><tr><th>设备名</th><th>类型</th><th>管理地址</th><th>接口数</th><th>备注</th></tr>${devRows}</table>
+<h2>IP 规划</h2>
+<table><tr><th>设备名</th><th>类型</th><th>接口</th><th>IP</th><th>对端设备</th><th>对端接口</th><th>带宽</th><th>网段</th><th>备注</th></tr>${ipRows}</table>
+<h2>子网统计</h2>
+<table><tr><th>网段</th><th>设备数</th><th>设备</th></tr>${subRows}</table>
+<h2>链路明细</h2>
+<table><tr><th>A设备</th><th>A接口</th><th>A IP</th><th>B设备</th><th>B接口</th><th>B IP</th><th>带宽</th><th>备注</th></tr>${linkRows}</table>
+${bwRows ? `<h2>带宽汇总</h2><table><tr><th>带宽</th><th>链路数</th></tr>${bwRows}</table>` : ''}
+${cfg ? `<h2>设备配置（华为风格）</h2><pre>${esc(cfg)}</pre>` : ''}
+</body></html>`;
+};
+
+/* ---------- 最短路径（BFS，无向） ---------- */
+U.shortestPath = (nodes, links, fromId, toId) => {
+  const adj = new Map();
+  for (const n of nodes) adj.set(n.id, []);
+  const linkOf = new Map(); // "a|b" -> link
+  for (const l of links) {
+    adj.get(l.a).push(l.b); adj.get(l.b).push(l.a);
+    const k1 = l.a + '|' + l.b, k2 = l.b + '|' + l.a;
+    if (!linkOf.has(k1)) linkOf.set(k1, l.id);
+    if (!linkOf.has(k2)) linkOf.set(k2, l.id);
+  }
+  if (!adj.has(fromId) || !adj.has(toId)) return null;
+  if (fromId === toId) return { nodeIds: [fromId], linkIds: [] };
+  const prev = new Map(); // node -> {node, link}
+  const seen = new Set([fromId]);
+  const q = [fromId];
+  while (q.length) {
+    const u = q.shift();
+    if (u === toId) break;
+    for (const v of adj.get(u) || []) {
+      if (seen.has(v)) continue;
+      seen.add(v);
+      prev.set(v, { node: u, link: linkOf.get(u + '|' + v) });
+      q.push(v);
+    }
+  }
+  if (!prev.has(toId)) return null; // 不可达
+  const nodeIds = [];
+  const linkIds = [];
+  let cur = toId;
+  while (cur !== fromId) {
+    nodeIds.unshift(cur);
+    const p = prev.get(cur);
+    linkIds.unshift(p.link);
+    cur = p.node;
+  }
+  nodeIds.unshift(fromId);
+  return { nodeIds, linkIds };
+};
+
+/* ---------- 最宽路径（Dijkstra 最大瓶颈带宽） ---------- */
+U.bestPath = (nodes, links, fromId, toId, opts) => {
+  opts = opts || {};
+  const exclude = opts.exclude || null; // 故障链路 id 集合（Set）
+  const adj = new Map();
+  for (const n of nodes) adj.set(n.id, []);
+  for (const l of links) {
+    if (exclude && exclude.has(l.id)) continue; // 故障链路不参与路径
+    const cap = U.normalizeBw(l.bw) || 1; // 未设置带宽视为最低
+    adj.get(l.a).push({ to: l.b, cap, lid: l.id });
+    adj.get(l.b).push({ to: l.a, cap, lid: l.id });
+  }
+  if (!adj.has(fromId) || !adj.has(toId)) return null;
+  if (fromId === toId) return { nodeIds: [fromId], linkIds: [], bottleneck: Infinity };
+  const best = new Map([[fromId, Infinity]]);
+  const prev = new Map();
+  const done = new Set();
+  for (;;) {
+    let u = null, ub = -1;
+    for (const [id, b] of best) if (!done.has(id) && b > ub) { ub = b; u = id; }
+    if (u == null) break;
+    done.add(u);
+    if (u === toId) break;
+    for (const e of adj.get(u) || []) {
+      if (done.has(e.to)) continue;
+      const nb = Math.min(ub, e.cap);
+      if (nb > (best.get(e.to) || 0)) {
+        best.set(e.to, nb);
+        prev.set(e.to, { node: u, link: e.lid });
+      }
+    }
+  }
+  if (!prev.has(toId)) return null;
+  const nodeIds = [];
+  const linkIds = [];
+  let cur = toId;
+  while (cur !== fromId) {
+    nodeIds.unshift(cur);
+    const p = prev.get(cur);
+    linkIds.unshift(p.link);
+    cur = p.node;
+  }
+  nodeIds.unshift(fromId);
+  return { nodeIds, linkIds, bottleneck: best.get(toId) };
+};
 
 /* ---------- 节点默认尺寸 ---------- */
 U.NODE_W = 160;

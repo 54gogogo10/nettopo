@@ -21,12 +21,20 @@ class Renderer {
     this.zoom = 1;
     this.nodes = [];
     this.links = [];
+    this.texts = [];            // 画布文本框（自定义字体样式）
     this.nodeEls = new Map();
     this.linkEls = new Map();
+    this.textEls = new Map();
     this.sel = { kind: null, id: null };
+    this.selIds = new Set(); // 多选（仅节点）
+    this.selLinkIds = new Set(); // 多选（连线）
     this.allowDrag = true;   // 由 app 根据模式控制
     this._drag = null;
     this._panning = false;
+    this.showLabels = true;      // 链路标注显示开关
+    this.showSubnets = false;    // 子网分组显示开关
+    this.subnetNames = {};       // 子网 -> 自定义名称
+    this.downLinks = new Set();  // 故障链路 id 集合（模拟断链）
 
     this._buildDefs();
     this.world = el('g', { id: 'world' }, this.svg);
@@ -34,8 +42,10 @@ class Renderer {
     const grid = el('g', { id: 'gridLayer' }, this.world);
     el('rect', { x: -100000, y: -100000, width: 200000, height: 200000, fill: 'url(#gridP)' }, grid);
 
+    this.groupLayer = el('g', { id: 'groupLayer' }, this.world);
     this.linkLayer = el('g', { id: 'linkLayer' }, this.world);
     this.nodeLayer = el('g', { id: 'nodeLayer' }, this.world);
+    this.textLayer = el('g', { id: 'textLayer' }, this.world);
 
     this._bind();
     this.applyView();
@@ -118,14 +128,19 @@ class Renderer {
     el('circle', { cx: 1.4, cy: 1.4, r: 1.25, class: 'grid-dot' }, p);
   }
 
-  setData(nodes, links) {
+  setData(nodes, links, texts) {
     this.nodes = nodes;
     this.links = links;
+    this.texts = texts || [];
     this.nodeEls.clear();
     this.linkEls.clear();
+    this.textEls.clear();
     this.nodeLayer.innerHTML = '';
     this.linkLayer.innerHTML = '';
+    this.textLayer.innerHTML = '';
     this.sel = { kind: null, id: null };
+    this.selIds = new Set();
+    this.selLinkIds = new Set();
     this._buildDefs(); // 同步自定义类型的渐变
     // 平行链路分组（标注垂直错开）
     this._pairIdx = new Map();
@@ -137,7 +152,69 @@ class Renderer {
     }
     for (const n of nodes) this._buildNode(n);
     for (const l of links) this._buildLink(l);
+    for (const t of this.texts) this._buildText(t);
     this.update();
+  }
+
+  /* ---------- 文本框构建 ---------- */
+  _buildText(t) {
+    const g = el('g', { class: 'ann', 'data-id': t.id }, this.textLayer);
+    if (t.bg) el('rect', { class: 'ann-bg', x: 0, y: 0, width: t.w || 160, height: t.h || 40, rx: 8, fill: t.bg }, g);
+    const lines = String(t.text || '').split('\n');
+    const anchor = t.align === 'center' ? 'middle' : (t.align === 'right' ? 'end' : 'start');
+    const tx = t.align === 'center' ? (t.w || 160) / 2 : (t.align === 'right' ? (t.w || 160) : 8);
+    const txt = el('text', {
+      class: 'ann-text', x: tx, y: (t.size || 16) + 6,
+      'font-family': t.font || 'Microsoft YaHei', 'font-size': t.size || 16,
+      fill: t.color || '#1e293b',
+      'font-weight': t.bold ? '700' : '400',
+      'font-style': t.italic ? 'italic' : 'normal',
+      'text-anchor': anchor
+    }, g);
+    lines.forEach((ln, i) => {
+      const ts = el('tspan', { x: tx, dy: i ? (t.size || 16) * 1.25 : 0 }, txt);
+      ts.textContent = ln;
+    });
+    this.textEls.set(t.id, g);
+  }
+
+  /* ---------- 显示开关 ---------- */
+  setShowLabels(v) {
+    this.showLabels = !!v;
+    this.update();
+  }
+  setSubnetView(show, names) {
+    this.showSubnets = !!show;
+    if (names) this.subnetNames = names;
+    this.update();
+  }
+  setDownLinks(set) {
+    this.downLinks = set || new Set();
+    this.update();
+  }
+
+  /* ---------- 子网分组 ---------- */
+  _buildGroups() {
+    this.groupLayer.innerHTML = '';
+    if (!this.showSubnets) return;
+    const groups = U.subnetGroups(this.nodes, this.links, this.subnetNames);
+    for (const g of groups) {
+      const grp = el('g', { class: 'subnet', transform: `translate(${g.x} ${g.y})`, 'data-key': g.key }, this.groupLayer);
+      el('rect', { class: 'subnet-box', x: 0, y: 0, width: g.w, height: g.h, rx: 16, fill: g.color }, grp).style.opacity = '0.08';
+      // 边框与标题按屏幕等效尺寸绘制（除以 zoom），缩放时保持可读
+      const z = 1 / this.zoom;
+      el('rect', { class: 'subnet-box', x: 0.5, y: 0.5, width: g.w - 1, height: g.h - 1, rx: 16, fill: 'none', stroke: g.color, 'stroke-width': 1.6 / this.zoom, 'stroke-dasharray': `${9 / this.zoom} ${5 / this.zoom}` }, grp);
+      const ttG = el('g', { transform: `translate(16 26) scale(${z})` }, grp);
+      const tt = el('text', { class: 'subnet-title', x: 0, y: 0, 'data-key': g.key }, ttG);
+      tt.textContent = g.name;
+      tt.style.fill = g.color;
+      el('title', {}, grp).textContent = g.cidr + ' · ' + g.nodeIds.length + ' 台设备';
+      tt.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (this.cb.onGroupRename) this.cb.onGroupRename(g.key, g.name);
+      });
+    }
   }
 
   /* ---------- 节点构建 ---------- */
@@ -212,9 +289,15 @@ class Renderer {
 
   /* ---------- 全量位置更新 ---------- */
   update() {
+    this._buildGroups();
     for (const n of this.nodes) {
       const g = this.nodeEls.get(n.id);
       if (g) g.setAttribute('transform', `translate(${n.x} ${n.y})`);
+    }
+    const tz = 1 / this.zoom;
+    for (const t of this.texts) {
+      const g = this.textEls.get(t.id);
+      if (g) g.setAttribute('transform', `translate(${t.x} ${t.y}) scale(${tz})`);
     }
     const geom = U.linkGeom(this.nodes, this.links);
     // 标注：三行合一，先收集位置与尺寸，防碰撞（标注互不重叠、不压节点）后渲染
@@ -224,7 +307,7 @@ class Renderer {
     for (const l of this.links) {
       const q = geom[l.id];
       if (!q) continue;
-      const lines = U.labelLines(l);
+      const lines = this.showLabels ? U.labelLines(l) : [];
       if (!lines.length) { labelBoxes.push(null); labelData.push(null); continue; }
       const mx = (q.x1 + q.x2) / 2, my = (q.y1 + q.y2) / 2;
       const dx = q.x2 - q.x1, dy = q.y2 - q.y1;
@@ -253,6 +336,8 @@ class Renderer {
       const q = geom[l.id];
       if (!q) continue;
       const ln = g.querySelector('.ln'), hit = g.querySelector('.hit');
+      g.classList.toggle('down', this.downLinks.has(l.id));
+      g.style.setProperty('--bw-c', U.bwColor(l.bw)); // 带宽颜色（图上不显示带宽文字）
       ln.setAttribute('x1', q.x1); ln.setAttribute('y1', q.y1);
       ln.setAttribute('x2', q.x2); ln.setAttribute('y2', q.y2);
       hit.setAttribute('x1', q.x1); hit.setAttribute('y1', q.y1);
@@ -261,7 +346,7 @@ class Renderer {
       const ld = labelData[bi];
       bi++;
       const lab = g.querySelector('.lab');
-      if (!box || !ld || !lab) { lab && lab.setAttribute('display', 'none'); continue; }
+      if (!this.showLabels || !box || !ld || !lab) { lab && lab.setAttribute('display', 'none'); continue; }
       lab.setAttribute('display', '');
       lab.setAttribute('transform', `translate(${box.x} ${box.y}) scale(${z})`);
       const texts = lab.querySelectorAll('text');
@@ -279,27 +364,88 @@ class Renderer {
 
   /* 更新 pdf/vsdx 风格三行标注不再需要 _setLabel，删除 */
   /* ---------- 选中 ---------- */
-  select(kind, id) {
-    if (this.sel.kind === kind && this.sel.id === id) return;
-    const prev = this.sel;
-    if (prev.kind === 'node') {
-      const g = this.nodeEls.get(prev.id);
-      if (g) g.classList.remove('selected');
-    } else if (prev.kind === 'link') {
-      const g = this.linkEls.get(prev.id);
-      if (g) g.classList.remove('selected');
+  _syncSelClass() {
+    for (const [nid, g] of this.nodeEls) g.classList.toggle('selected', this.selIds.has(nid));
+    for (const [lid, g] of this.linkEls) g.classList.toggle('selected', this.selLinkIds.has(lid));
+    for (const [tid, g] of this.textEls) g.classList.toggle('selected', this.sel.kind === 'text' && this.sel.id === tid);
+  }
+
+  select(kind, id, opts) {
+    opts = opts || {};
+    if (kind === 'text') {
+      this.selIds.clear();
+      this.selLinkIds.clear();
+      this.sel = { kind: 'text', id };
+      this._syncSelClass();
+      return this.sel;
     }
-    this.sel = { kind, id };
     if (kind === 'node') {
-      const g = this.nodeEls.get(id);
-      if (g) g.classList.add('selected');
-    } else if (kind === 'link') {
-      const g = this.linkEls.get(id);
-      if (g) g.classList.add('selected');
+      this.selLinkIds.clear();
+      if (opts.multi) { // Ctrl/Cmd 点选：切换
+        if (this.selIds.has(id)) this.selIds.delete(id);
+        else this.selIds.add(id);
+        this.sel = { kind: 'node', id: this.selIds.size ? id : null };
+      } else if (opts.extend) { // Shift 点选：追加
+        this.selIds.add(id);
+        this.sel = { kind: 'node', id };
+      } else {
+        // 普通点击：若该节点已在多选中，保留多选（便于整体拖动）；否则单选
+        if (!this.selIds.has(id)) this.selIds = new Set([id]);
+        this.sel = { kind: 'node', id };
+      }
+      this._syncSelClass();
+      return this.sel;
     }
+    if (kind === 'link') {
+      this.selIds.clear();
+      if (opts.multi) { // Ctrl 点选：切换
+        if (this.selLinkIds.has(id)) this.selLinkIds.delete(id);
+        else this.selLinkIds.add(id);
+        this.sel = { kind: 'link', id: this.selLinkIds.size ? id : null };
+      } else if (opts.extend) {
+        this.selLinkIds.add(id);
+        this.sel = { kind: 'link', id };
+      } else {
+        this.selLinkIds = new Set([id]);
+        this.sel = { kind: 'link', id };
+      }
+      this._syncSelClass();
+      return this.sel;
+    }
+    // 取消选择：清空全部
+    this.selIds.clear();
+    this.selLinkIds.clear();
+    this._syncSelClass();
+    if (this.sel.kind === 'node') {
+      const g = this.nodeEls.get(this.sel.id);
+      if (g) g.classList.remove('selected');
+    } else if (this.sel.kind === 'link') {
+      const g = this.linkEls.get(this.sel.id);
+      if (g) g.classList.remove('selected');
+    }
+    this.sel = { kind: null, id: null };
+    return this.sel;
   }
 
   clearSelect() { this.select(null, null); }
+
+  selectedNodes() { return [...this.selIds]; }
+
+  selectedLinks() { return [...this.selLinkIds]; }
+
+  /* ---------- 路径高亮 ---------- */
+  highlightPath(nodeIds, linkIds) {
+    this.clearPath();
+    this.pathHl = { nodeIds: nodeIds || [], linkIds: linkIds || [] };
+    for (const id of nodeIds || []) { const g = this.nodeEls.get(id); if (g) g.classList.add('path-hl'); }
+    for (const id of linkIds || []) { const g = this.linkEls.get(id); if (g) g.classList.add('path-hl'); }
+  }
+
+  clearPath() {
+    this.pathHl = null;
+    for (const g of this.nodeEls.values()) g.classList.remove('path-hl');
+    for (const g of this.linkEls.values()) g.classList.remove('path-hl');
+  }
 
   flash(kind, id) {
     const map = kind === 'node' ? this.nodeEls : this.linkEls;
@@ -327,13 +473,15 @@ class Renderer {
     svg.addEventListener('pointerdown', (e) => {
       if (this.cb.onBgDown) this.cb.onBgDown(); // 点击画布时先隐藏悬停提示
       if (e.button === 1) { e.preventDefault(); this._startPan(e); return; }
-      const target = e.target.closest ? e.target.closest('.node, .link') : null;
+      const target = e.target.closest ? e.target.closest('.node, .link, .ann') : null;
       if (target) {
-        const kind = target.classList.contains('node') ? 'node' : 'link';
+        const kind = target.classList.contains('node') ? 'node' : (target.classList.contains('ann') ? 'text' : 'link');
         const id = target.getAttribute('data-id');
         if (this.cb.onDown && this.cb.onDown(e, kind, id) === false) return;
         if (kind === 'node' && this.allowDrag) {
           this._startDrag(e, id);
+        } else if (kind === 'text' && this.allowDrag) {
+          this._startTextDrag(e, id);
         } else if (kind === 'link') {
           // 连线仅选中，不拖拽不平移
         } else {
@@ -341,21 +489,22 @@ class Renderer {
         }
       } else {
         if (this.cb.onDown && this.cb.onDown(e, 'bg', null) === false) return;
-        this._startPan(e);
+        if (e.shiftKey) { this._startBoxSelect(e); }
+        else this._startPan(e);
       }
     });
 
     svg.addEventListener('dblclick', (e) => {
-      const target = e.target.closest ? e.target.closest('.node, .link') : null;
+      const target = e.target.closest ? e.target.closest('.node, .link, .ann') : null;
       if (!target) return;
-      const kind = target.classList.contains('node') ? 'node' : 'link';
+      const kind = target.classList.contains('node') ? 'node' : (target.classList.contains('ann') ? 'text' : 'link');
       this.cb.onDbl && this.cb.onDbl(kind, target.getAttribute('data-id'));
     });
 
     svg.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      const target = e.target.closest ? e.target.closest('.node, .link') : null;
-      const kind = target ? (target.classList.contains('node') ? 'node' : 'link') : 'bg';
+      const target = e.target.closest ? e.target.closest('.node, .link, .ann') : null;
+      const kind = target ? (target.classList.contains('node') ? 'node' : (target.classList.contains('ann') ? 'text' : 'link')) : 'bg';
       const id = target ? target.getAttribute('data-id') : null;
       this.cb.onCtx && this.cb.onCtx(e, kind, id);
     });
@@ -382,20 +531,31 @@ class Renderer {
   }
 
   _startDrag(e, id) {
-    const n = this.nodes.find(x => x.id === id);
-    if (!n) return;
+    const ids = this.selIds.has(id) && this.selIds.size > 1 ? [...this.selIds] : [id];
+    const orig = {};
+    for (const i of ids) {
+      const nn = this.nodes.find(x => x.id === i);
+      if (nn) orig[i] = { x: nn.x, y: nn.y };
+    }
+    const first = this.nodes.find(x => x.id === id);
+    if (!first) return;
     const w = this.toWorld(e.clientX, e.clientY);
-    this._drag = { id, dx: w.x - n.x, dy: w.y - n.y, moved: false, ox: n.x, oy: n.y };
+    this._drag = { ids, dx: w.x - first.x, dy: w.y - first.y, moved: false, orig };
     try { this.svg.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件无活动指针时忽略 */ }
     const move = (ev) => {
-      if (!this._drag || this._drag.id !== id) return;
+      if (!this._drag) return;
       const w2 = this.toWorld(ev.clientX, ev.clientY);
-      const n2 = this.nodes.find(x => x.id === id);
-      n2.x = w2.x - this._drag.dx;
-      n2.y = w2.y - this._drag.dy;
-      if (Math.abs(n2.x - this._drag.ox) > 2 || Math.abs(n2.y - this._drag.oy) > 2) this._drag.moved = true;
+      for (const i of this._drag.ids) {
+        const nn = this.nodes.find(x => x.id === i);
+        if (!nn) continue;
+        const o = this._drag.orig[i];
+        nn.x = w2.x - this._drag.dx + (o.x - this._drag.orig[this._drag.ids[0]].x);
+        nn.y = w2.y - this._drag.dy + (o.y - this._drag.orig[this._drag.ids[0]].y);
+      }
+      const f0 = this.nodes.find(x => x.id === id);
+      if (f0 && (Math.abs(f0.x - this._drag.orig[id].x) > 2 || Math.abs(f0.y - this._drag.orig[id].y) > 2)) this._drag.moved = true;
       this.update();
-      this.cb.onDrag && this.cb.onDrag(id, n2.x, n2.y);
+      this.cb.onDrag && this.cb.onDrag(id, f0 && f0.x, f0 && f0.y);
     };
     const up = (ev) => {
       svgElRemove(this.svg, 'pointermove', move);
@@ -403,6 +563,67 @@ class Renderer {
       const d = this._drag;
       this._drag = null;
       if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+    };
+    svgElAdd(this.svg, 'pointermove', move);
+    svgElAdd(this.svg, 'pointerup', up);
+  }
+
+  _startTextDrag(e, id) {
+    const t = this.texts.find(x => x.id === id);
+    if (!t) return;
+    const orig = { x: t.x, y: t.y };
+    const w = this.toWorld(e.clientX, e.clientY);
+    this._drag = { ids: [id], dx: w.x - t.x, dy: w.y - t.y, moved: false, orig: { [id]: orig } };
+    try { this.svg.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件无活动指针时忽略 */ }
+    const move = (ev) => {
+      if (!this._drag) return;
+      const w2 = this.toWorld(ev.clientX, ev.clientY);
+      t.x = w2.x - this._drag.dx;
+      t.y = w2.y - this._drag.dy;
+      if (Math.abs(t.x - orig.x) > 2 || Math.abs(t.y - orig.y) > 2) this._drag.moved = true;
+      this.update();
+    };
+    const up = (ev) => {
+      svgElRemove(this.svg, 'pointermove', move);
+      svgElRemove(this.svg, 'pointerup', up);
+      const d = this._drag;
+      this._drag = null;
+      if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+    };
+    svgElAdd(this.svg, 'pointermove', move);
+    svgElAdd(this.svg, 'pointerup', up);
+  }
+
+  /* ---------- Shift 拖拽框选 ---------- */
+  _startBoxSelect(e) {
+    const w0 = this.toWorld(e.clientX, e.clientY);
+    if (!this._boxRect) {
+      this._boxRect = el('rect', { class: 'box-sel', x: 0, y: 0, width: 0, height: 0 }, this.world);
+    }
+    const move = (ev) => {
+      const w1 = this.toWorld(ev.clientX, ev.clientY);
+      const x = Math.min(w0.x, w1.x), y = Math.min(w0.y, w1.y);
+      this._boxRect.setAttribute('x', x);
+      this._boxRect.setAttribute('y', y);
+      this._boxRect.setAttribute('width', Math.abs(w1.x - w0.x));
+      this._boxRect.setAttribute('height', Math.abs(w1.y - w0.y));
+    };
+    const up = (ev) => {
+      svgElRemove(this.svg, 'pointermove', move);
+      svgElRemove(this.svg, 'pointerup', up);
+      if (this._boxRect) { this._boxRect.remove(); this._boxRect = null; }
+      const w1 = this.toWorld(ev.clientX, ev.clientY);
+      const x0 = Math.min(w0.x, w1.x), y0 = Math.min(w0.y, w1.y);
+      const x1 = Math.max(w0.x, w1.x), y1 = Math.max(w0.y, w1.y);
+      if (Math.hypot(w1.x - w0.x, w1.y - w0.y) < 4) { this.cb.onBgClick && this.cb.onBgClick(w1, ev); return; }
+      const ids = this.nodes
+        .filter(n => n.x < x1 && n.x + n.w > x0 && n.y < y1 && n.y + n.h > y0)
+        .map(n => n.id);
+      if (!ids.length) { this.select(null, null); this.cb.onBoxSelect && this.cb.onBoxSelect([]); return; }
+      this.selIds = new Set(ids);
+      this.sel = { kind: 'node', id: ids[ids.length - 1] };
+      this._syncSelClass();
+      this.cb.onBoxSelect && this.cb.onBoxSelect(ids);
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);

@@ -18,11 +18,18 @@ const state = {
   theme: localStorage.getItem('nettopo.theme') || 'light',
   search: '',
   tab: 'nodes',
-  blank: false   // 用户主动新建空白画布（无表格也能直接画）
+  blank: false,   // 用户主动新建空白画布（无表格也能直接画）
+  showLabels: localStorage.getItem('nettopo.showLabels') !== '0',   // 链路标注显示开关
+  showSubnets: localStorage.getItem('nettopo.showSubnets') === '1', // 子网分组显示开关
+  subnetNames: {},  // 子网 -> 自定义名称（子网分组命名）
+  downLinks: new Set(),  // 故障链路 id 集合（模拟断链，路径分析绕行）
+  autoBackup: { on: localStorage.getItem('nettopo.autoBackup') === '1', minutes: Number(localStorage.getItem('nettopo.autoBackupMin') || 10) },
+  texts: []  // 画布文本框（自定义字体样式）
 };
 let layoutCancel = false;
 
 U.loadCustomTypes(); // 恢复自定义设备类型
+U.loadCustomCfgTemplates(); // 恢复自定义配置模板
 
 const renderer = new TopoRender($('#svg'), {
   onDown(e, kind, id) {
@@ -32,10 +39,16 @@ const renderer = new TopoRender($('#svg'), {
       handleModeClick(e, kind, id);
       return false;
     }
-    if (kind !== 'bg') select(kind, id, { center: false });
+    if (kind !== 'bg') select(kind, id, { center: false, multi: e.ctrlKey || e.metaKey, extend: e.shiftKey });
     // 记录拖拽前的状态，拖动结束时用于撤销（避免撤销栈记录“当前态”）
     state._dragPre = kind === 'node' ? snapshot() : null;
     return true;
+  },
+  onBoxSelect(ids) {
+    if (!ids.length) { select(null, null); return; }
+    state.sel = { kind: 'node', id: ids[ids.length - 1] };
+    renderSelCard();
+    refreshPanel();
   },
   onDbl(kind, id) { kind === 'node' ? editNode(id) : editLink(id); },
   onCtx(e, kind, id) { openCtx(e, kind, id); },
@@ -48,6 +61,14 @@ const renderer = new TopoRender($('#svg'), {
   onBgClick() { if (state.mode === 'normal') select(null, null); },
   onHover(e, kind, id) { showTooltip(e, kind, id); },
   onHoverOut() { hideTooltip(); },
+  onGroupRename(key, cur) {
+    const name = prompt('子网分组名称（留空恢复为网段名）', state.subnetNames[key] || '');
+    if (name === null) return;
+    if (!name.trim()) delete state.subnetNames[key];
+    else state.subnetNames[key] = name.trim();
+    renderer.setSubnetView(state.showSubnets, state.subnetNames);
+    saveGraph();
+  },
   onView(z) {
     $('#zVal').textContent = Math.round(z * 100) + '%';
     // 视图平移/缩放也持久化（节流）
@@ -55,12 +76,17 @@ const renderer = new TopoRender($('#svg'), {
     saveGraph._t = setTimeout(saveGraph, 500);
   }
 });
+// 显示开关初始状态
+renderer.showLabels = state.showLabels;
+renderer.showSubnets = state.showSubnets;
+renderer.subnetNames = state.subnetNames;
+setupAutoBackup(); // 自动备份（若有配置）
 
 /* ================= 选中 ================= */
 function select(kind, id, opts) {
   opts = opts || {};
   state.sel = { kind, id };
-  renderer.select(kind, id);
+  renderer.select(kind, id, opts);
   renderSelCard();
   if (opts.center && id) {
     centerOn(kind, id);
@@ -87,11 +113,11 @@ function centerOn(kind, id) {
 }
 
 /* ================= 撤销 / 重做 ================= */
-function snapshot() { return { nodes: U.clone(state.nodes), links: U.clone(state.links) }; }
+function snapshot() { return { nodes: U.clone(state.nodes), links: U.clone(state.links), texts: U.clone(state.texts) }; }
 function restore(s) {
-  state.nodes = s.nodes; state.links = s.links;
+  state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
   state.sel = { kind: null, id: null };
-  renderer.setData(state.nodes, state.links);
+  renderer.setData(state.nodes, state.links, state.texts);
   refreshAll();
   renderSelCard(); // 隐藏可能残留的选中卡
 }
@@ -146,16 +172,20 @@ function loadGraph(graph, msg) {
   setMode('normal');
   state.nodes = graph.nodes;
   state.links = graph.links;
+  state.texts = [];
   state.sel = { kind: null, id: null };
   state.undoStack = []; // 初始状态无需撤销
   state.redoStack = [];
   state.blank = false; // 已导入/载入内容，回到常规模式
   updateUndoBtns();
-  renderer.setData(state.nodes, state.links);
+  renderer.setData(state.nodes, state.links, state.texts);
   refreshAll();
   if (msg) toast(msg);
   saveGraph();
-  autoLayout();
+  // 带坐标的表格/工程直接还原布局，不带坐标才自动布局
+  const hasPos = graph.nodes.some(n => n.x || n.y);
+  if (hasPos) renderer.fit();
+  else autoLayout();
 }
 
 /* ================= 自动布局 ================= */
@@ -181,6 +211,709 @@ function autoLayout() {
   });
 }
 
+
+/* ================= 布局预设 ================= */
+function viewCenter() {
+  const r = $('#svg').getBoundingClientRect();
+  return renderer.toWorld(r.left + r.width / 2, r.top + r.height / 2);
+}
+
+function applyLayoutPreset(kind) {
+  if (!state.nodes.length) { toast('画布为空，请先添加设备'); return; }
+  pushUndo();
+  const c = viewCenter();
+  if (kind === 'ring') Layout.ringLayout(state.nodes, { cx: c.x, cy: c.y });
+  else if (kind === 'grid') Layout.gridLayout(state.nodes, { cx: c.x, cy: c.y });
+  else if (kind === 'layer') Layout.layerLayout(state.nodes, { cx: c.x, cy: c.y });
+  else if (kind === 'tier') Layout.tierLayout(state.nodes, { cx: c.x, cy: c.y });
+  renderer.setData(state.nodes, state.links, state.texts);
+  refreshAll();
+  renderer.fit();
+  saveGraph();
+  toast(kind === 'ring' ? '已应用环形布局' : kind === 'grid' ? '已应用网格布局' : kind === 'tier' ? '已应用三层架构布局（核心-汇聚-接入）' : '已应用分层布局（按类型）');
+}
+
+/* ================= 路径分析 ================= */
+function openPathAnalysis() {
+  if (state.nodes.length < 2) { toast('至少需要两台设备才能分析路径'); return; }
+  openModal({
+    title: '路径分析',
+    sub: '选择起点与终点，高亮显示最短路径（BFS）',
+    fields: [
+      { name: 'from', label: '起点设备', type: 'select', options: state.nodes.map(n => [n.id, n.name]) },
+      { name: 'to', label: '终点设备', type: 'select', options: state.nodes.map(n => [n.id, n.name]) }
+    ],
+    sub: state.downLinks.size ? `选择起点与终点（已排除 ${state.downLinks.size} 条故障链路）` : '选择起点与终点，高亮显示最短路径（BFS）',
+    submit: '分析',
+    onSubmit: (v) => {
+      if (!v.from || !v.to) { toast('请选择起点与终点'); return; }
+      const path = U.bestPath(state.nodes, state.links, v.from, v.to, { exclude: state.downLinks.size ? state.downLinks : null });
+      if (!path) { toast(state.downLinks.size ? '两台设备之间不可达（可能因故障链路导致）' : '两台设备之间不可达'); return; }
+      renderer.highlightPath(path.nodeIds, path.linkIds);
+      const names = path.nodeIds.map(id => { const n = state.nodes.find(x => x.id === id); return n ? n.name : id; });
+      const ifText = path.linkIds.map((lid, i) => {
+        const l = state.links.find(x => x.id === lid);
+        if (!l) return '';
+        const dir = (l.a === path.nodeIds[i] && l.b === path.nodeIds[i + 1]) || (l.a === path.nodeIds[i + 1] && l.b === path.nodeIds[i]);
+        return dir ? `（${l.aIf || '—'} / ${l.bIf || '—'}）` : '';
+      });
+      const steps = names.map((nm, i) => (i ? ifText[i - 1] + nm : nm)).join(' → ');
+      const bottleneck = Number.isFinite(path.bottleneck) ? U.formatBw(path.bottleneck) : '';
+      showPathResult(names.length - 1, steps, bottleneck);
+    }
+  });
+}
+
+function showPathResult(hops, steps, bottleneck) {
+  const faultNote = state.downLinks.size ? `<div class="m-sub">已排除 ${state.downLinks.size} 条故障链路（红色虚线）</div>` : '';
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:520px">
+      <h3>路径分析结果</h3>
+      <div class="m-sub">共 ${hops} 跳${bottleneck ? `，瓶颈带宽 <b>${bottleneck}</b>（按带宽优选）` : '（未设置带宽，按跳数优先）'}；路径已在画布中高亮为金色</div>
+      ${faultNote}
+      <div class="path-steps">${U.escHtml(steps)}</div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="clear">清除高亮</button>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => { ov.remove(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) { renderer.clearPath(); close(); } });
+  ov.querySelector('[data-act=clear]').onclick = () => { renderer.clearPath(); close(); };
+  ov.querySelector('[data-act=close]').onclick = () => close();
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); renderer.clearPath(); close(); } });
+}
+
+/* ================= 设备模板库 ================= */
+const DEVICE_TEMPLATES = [
+  { label: '路由器（华为 AR）', type: 'router', name: 'AR-核心路由器', mgmt: '10.255.0.1' },
+  { label: '路由器（思科 ISR）', type: 'router', name: 'ISR-边界路由器', mgmt: '10.255.0.1' },
+  { label: '核心交换机', type: 'switch', name: '核心交换机', mgmt: '10.255.0.2' },
+  { label: '接入交换机', type: 'switch', name: '接入交换机', mgmt: '10.255.0.3' },
+  { label: '防火墙', type: 'firewall', name: '防火墙', mgmt: '10.255.0.254' },
+  { label: '服务器', type: 'server', name: '服务器', mgmt: '' },
+  { label: '终端 PC', type: 'pc', name: '办公PC', mgmt: '' },
+  { label: '云 / 外网', type: 'cloud', name: '互联网出口', mgmt: '' }
+];
+
+function openTemplatePicker() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:560px">
+      <h3>从模板添加设备</h3>
+      <div class="m-sub">点击模板即在画布中心添加（重名自动加序号），可随后双击编辑</div>
+      <div class="tpl-grid">
+        ${DEVICE_TEMPLATES.map((t, i) => `
+          <button type="button" class="tb tpl" data-i="${i}">
+            <i class="ic" data-ic="node"></i>
+            <span><b>${U.escHtml(t.label)}</b><small>${U.escHtml(t.mgmt ? '管理 ' + t.mgmt : t.type)}</small></span>
+          </button>`).join('')}
+      </div>
+      <div class="m-actions"><button type="button" class="tb" data-act="close">关闭</button></div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelectorAll('.tpl').forEach(btn => {
+    btn.onclick = () => { const t = DEVICE_TEMPLATES[+btn.dataset.i]; close(); addTemplateDevice(t); };
+  });
+}
+
+function addTemplateDevice(t) {
+  const c = viewCenter();
+  let name = t.name;
+  let k = 2;
+  while (state.nodes.some(n => n.name === name)) name = `${t.name}-${k++}`;
+  pushUndo();
+  const node = {
+    id: U.uid('n'), name, type: t.type, note: '',
+    x: c.x - U.nodeWidthForName(name) / 2, y: c.y - U.NODE_H / 2,
+    w: U.nodeWidthForName(name), h: U.NODE_H, mgmt: t.mgmt
+  };
+  node.h = U.nodeHeightFor(node);
+  node.y = c.y - node.h / 2;
+  state.nodes.push(node);
+  renderer.setData(state.nodes, state.links, state.texts);
+  refreshAll();
+  saveGraph();
+  select('node', node.id, { center: true });
+  toast(`已添加「${name}」，双击可编辑`);
+}
+
+/* ================= 设备配置生成（自定义厂家风格） ================= */
+function cfgVendorOptions() {
+  const tpls = U.cfgTemplates();
+  const builtin = [], custom = [];
+  for (const k in tpls) {
+    const t = tpls[k];
+    (t.builtin ? builtin : custom).push(`<option value="${k}">${U.escHtml(t.label)}${t.builtin ? '' : '（自定义）'}</option>`);
+  }
+  return builtin.join('') + (custom.length ? '<optgroup label="自定义厂家">' + custom.join('') + '</optgroup>' : '');
+}
+function openConfigGen() {
+  if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  const root = $('#modalRoot');
+  const hasSel = renderer.selIds.size > 0;
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:700px">
+      <h3>生成设备配置</h3>
+      <div class="m-sub">按拓扑接口/IP 生成配置片段；可选 <b>静态路由</b>（自动推导）与 <b>VLAN</b>（交换机接入端口）</div>
+      <div class="m-row">
+        <label>厂家风格</label>
+        <select id="cfgVendor">${cfgVendorOptions()}</select>
+        <label style="margin-left:16px">范围</label>
+        <select id="cfgScope">
+          <option value="all">全部设备</option>
+          ${hasSel ? '<option value="sel">仅选中设备（' + renderer.selIds.size + ' 台）</option>' : ''}
+        </select>
+        <label style="margin-left:16px;display:flex;align-items:center;gap:5px"><input id="cfgRoutes" type="checkbox" checked/> 静态路由</label>
+        <label style="display:flex;align-items:center;gap:5px"><input id="cfgVlan" type="checkbox" checked/> VLAN</label>
+        <button type="button" class="tb" id="cfgTplMgr" style="margin-left:auto">管理模板…</button>
+      </div>
+      <textarea id="cfgOut" class="cfg-box" readonly spellcheck="false"></textarea>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="copy">复制配置</button>
+        <button type="button" class="tb" data-act="dl">下载 .txt</button>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  const gen = () => {
+    const vendor = ov.querySelector('#cfgVendor').value;
+    const scope = ov.querySelector('#cfgScope').value;
+    const selIds = renderer.selIds;
+    const nodes = scope === 'sel' && selIds.size ? state.nodes.filter(n => selIds.has(n.id)) : state.nodes;
+    ov.querySelector('#cfgOut').value = U.generateConfigs(nodes, state.links, vendor, {
+      routes: ov.querySelector('#cfgRoutes').checked,
+      vlan: ov.querySelector('#cfgVlan').checked
+    });
+  };
+  ov.querySelector('#cfgVendor').addEventListener('change', gen);
+  ov.querySelector('#cfgScope').addEventListener('change', gen);
+  ov.querySelector('#cfgRoutes').addEventListener('change', gen);
+  ov.querySelector('#cfgVlan').addEventListener('change', gen);
+  ov.querySelector('#cfgTplMgr').onclick = () => openConfigTemplateManager(() => {
+    ov.querySelector('#cfgVendor').innerHTML = cfgVendorOptions();
+    gen();
+  });
+  gen();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.querySelector('[data-act=copy]').onclick = () => {
+    const txt = ov.querySelector('#cfgOut').value;
+    const done = () => toast('配置已复制到剪贴板');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(done).catch(() => fallbackCopy(txt, done));
+    } else fallbackCopy(txt, done);
+  };
+  ov.querySelector('[data-act=dl]').onclick = () => {
+    U.download(`设备配置_${U.fmtDate()}.txt`, new Blob([ov.querySelector('#cfgOut').value], { type: 'text/plain;charset=utf-8' }));
+    toast('已下载设备配置文本');
+  };
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
+/* 配置模板管理：内置模板只读，自定义模板可增删改（占位符 {name}{mgmt}{type}{iface}{ip}{peer}{peerIf}{vlan}{subnet}{nextHop}） */
+function openConfigTemplateManager(done) {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:720px">
+      <h3>配置模板管理</h3>
+      <div class="m-sub" style="line-height:1.7">占位符（模板里直接写，生成时替换）：
+        设备级 <b>{name}</b> 设备名 · <b>{mgmt}</b> 管理地址 · <b>{type}</b> 类型 · <b>{comment}</b> 注释符
+        接口级 <b>{iface}</b> 本端接口 · <b>{ip}</b> 接口 IP · <b>{mask}</b> 掩码 · <b>{peer}</b> 对端设备 · <b>{peerIf}</b> 对端接口 · <b>{bw}</b> 带宽 · <b>{vlan}</b> VLAN 号
+        路由级 <b>{subnet}</b> 远端网段 · <b>{nextHop}</b> 下一跳</div>
+      <div id="tplList" style="max-height:46vh;overflow:auto"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="add">新增模板</button>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => { ov.remove(); done && done(); };
+  const render = () => {
+    const list = ov.querySelector('#tplList');
+    const tpls = U.cfgTemplates();
+    list.innerHTML = Object.keys(tpls).map(k => {
+      const t = tpls[k];
+      return `<div class="tpl-item" data-k="${k}">
+        <div class="tpl-head"><b>${U.escHtml(t.label)}</b>${t.builtin ? '<span class="tpl-badge">内置</span>' : '<span class="tpl-badge custom">自定义</span>'}</div>
+        <div class="tpl-actions">
+          <button type="button" class="tb" data-act="edit">编辑</button>
+          ${t.builtin ? '' : '<button type="button" class="tb danger" data-act="del">删除</button>'}
+        </div>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.tpl-item').forEach(item => {
+      const k = item.dataset.k;
+      item.querySelector('[data-act=edit]').onclick = () => editCfgTemplate(k);
+      const del = item.querySelector('[data-act=del]');
+      if (del) del.onclick = () => {
+        if (!confirm('删除自定义模板「' + (U.cfgTemplates()[k] || {}).label + '」？')) return;
+        delete (U.customCfgTemplates || {})[k];
+        U.saveCustomCfgTemplates();
+        render();
+      };
+    });
+  };
+  const editCfgTemplate = (k) => {
+    const t = U.cfgTemplates()[k];
+    if (!t) return;
+    const edit = document.createElement('div');
+    edit.className = 'overlay';
+    edit.innerHTML = `
+      <div class="modal" role="dialog" style="width:680px">
+        <h3>${t.builtin ? '查看模板' : '编辑模板'}：${U.escHtml(t.label)}</h3>
+        <div class="m-row"><label>名称</label><input id="tplLabel" type="text" value="${U.escHtml(t.label)}" ${t.builtin ? 'disabled' : ''}/></div>
+        <div class="m-row"><label>注释符</label><input id="tplComment" type="text" value="${U.escHtml(t.comment || '')}" style="width:70px" ${t.builtin ? 'disabled' : ''}/></div>
+        <div class="m-sub" style="line-height:1.6">可用占位符：<b>{name}</b>设备名 <b>{mgmt}</b>管理 <b>{type}</b>类型 <b>{comment}</b>注释符 <b>{iface}</b>接口 <b>{ip}</b>IP <b>{mask}</b>掩码 <b>{peer}</b>对端设备 <b>{peerIf}</b>对端接口 <b>{bw}</b>带宽 <b>{vlan}</b>VLAN <b>{subnet}</b>网段 <b>{nextHop}</b>下一跳</div>
+        <div class="m-row" style="align-items:flex-start"><label>设备头</label><textarea id="tplHeader" style="height:54px">${U.escHtml(t.deviceHeader || '')}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>接口块<br/><small>每行一条</small></label><textarea id="tplIface" style="height:110px">${U.escHtml((t.interface || []).join('\n'))}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>接入端口<br/><small>VLAN</small></label><textarea id="tplAccess" style="height:54px">${U.escHtml((t.switchAccess || []).join('\n'))}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>路由行<br/><small>可选</small></label><input id="tplRoute" type="text" value="${U.escHtml(t.route || '')}" style="flex:1"/></div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="cancel">取消</button>
+          <button type="button" class="tb primary" data-act="save">${t.builtin ? '关闭' : '保存'}</button>
+        </div>
+      </div>`;
+    root.appendChild(edit);
+    edit.tabIndex = -1; edit.focus();
+    const c2 = () => edit.remove();
+    edit.addEventListener('pointerdown', (e) => { if (e.target === edit) c2(); });
+    edit.querySelector('[data-act=cancel]').onclick = c2;
+    edit.querySelector('[data-act=save]').onclick = () => {
+      if (t.builtin) { c2(); return; }
+      const label = edit.querySelector('#tplLabel').value.trim();
+      if (!label) { toast('模板名称不能为空'); return; }
+      U.customCfgTemplates = U.customCfgTemplates || {};
+      U.customCfgTemplates[k] = {
+        key: k, label,
+        comment: edit.querySelector('#tplComment').value.trim() || '#',
+        deviceHeader: edit.querySelector('#tplHeader').value,
+        noIface: U.cfgTemplates().huawei.noIface,
+        interface: edit.querySelector('#tplIface').value.split('\n').map(s => s.trim()).filter(Boolean),
+        switchAccess: edit.querySelector('#tplAccess').value.split('\n').map(s => s.trim()).filter(Boolean),
+        vlanLine: U.cfgTemplates().huawei.vlanLine,
+        route: edit.querySelector('#tplRoute').value.trim() || null
+      };
+      U.saveCustomCfgTemplates();
+      c2(); render();
+    };
+    edit.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); c2(); } });
+  };
+  ov.querySelector('[data-act=add]').onclick = () => {
+    let k = 'custom' + (Date.now() % 100000);
+    while ((U.cfgTemplates())[k]) k = 'custom' + (Date.now() % 100000);
+    U.customCfgTemplates = U.customCfgTemplates || {};
+    U.customCfgTemplates[k] = {
+      key: k, label: '自定义厂家',
+      comment: '#',
+      deviceHeader: '{comment} {name}  管理: {mgmt}  [{type}]',
+      noIface: '{comment} （无接口配置）',
+      interface: ['interface {iface}', ' ip address {ip} 255.255.255.0', ' description -> {peer}{peerIf}'],
+      switchAccess: [],
+      vlanLine: '',
+      route: null
+    };
+    U.saveCustomCfgTemplates();
+    render();
+    editCfgTemplate(k);
+  };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  render();
+}
+
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败，请手动选择复制'); }
+  ta.remove();
+}
+
+/* ================= IP 规划清单 ================= */
+function openIpPlan() {
+  if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  const { rows, subnets } = U.ipPlan(state.nodes, state.links);
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:560px">
+      <h3>IP 规划清单</h3>
+      <div class="m-sub">已按设备分组（${rows.length} 行，子网 ${subnets.length} 个）；Excel 中「设备名」列按设备合并单元格</div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="copy">复制清单</button>
+        <button type="button" class="tb" data-act="csv">导出 CSV</button>
+        <button type="button" class="tb" data-act="xlsx">导出 Excel</button>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  const text = () => {
+    const head = Object.keys(rows[0] || {});
+    const lines = [head.join('\t')].concat(rows.map(r => head.map(k => r[k] == null ? '' : String(r[k])).join('\t')));
+    lines.push('');
+    lines.push('== 子网统计 ==');
+    lines.push('网段\t设备数\t设备');
+    for (const s of subnets) lines.push(s.cidr + '\t' + s.devices.length + '\t' + s.devices.join(', '));
+    return lines.join('\n');
+  };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.querySelector('[data-act=copy]').onclick = () => {
+    const done = () => toast('IP 规划清单已复制');
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text()).then(done).catch(() => fallbackCopy(text(), done));
+    else fallbackCopy(text(), done);
+  };
+  ov.querySelector('[data-act=csv]').onclick = () => {
+    const head = Object.keys(rows[0] || {});
+    const arr = [head].concat(rows.map(r => head.map(k => r[k] == null ? '' : String(r[k]))));
+    arr.push([]); arr.push(['== 子网统计 ==']);
+    arr.push(['网段', '设备数', '设备']);
+    for (const s of subnets) arr.push([s.cidr, s.devices.length, s.devices.join(', ')]);
+    U.download(`IP规划_${U.fmtDate()}.csv`, new Blob([U.buildCSV(arr)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出 IP 规划 CSV');
+  };
+  ov.querySelector('[data-act=xlsx]').onclick = () => {
+    if (!window.XLSX) { toast('未加载 Excel 解析库（需联网），请改用 CSV 导出'); return; }
+    const wb = window.XLSX.utils.book_new();
+    const ws = window.XLSX.utils.json_to_sheet(rows);
+    // 设备名列合并：同一台设备的连续行合并成一个单元格（第 0 行表头，数据从第 1 行起，设备名列=0）
+    const merges = U.deviceMergeRanges(rows);
+    if (merges.length) ws['!merges'] = merges;
+    // 列宽自适应
+    const keys = Object.keys(rows[0] || {});
+    ws['!cols'] = keys.map(k => ({ wch: Math.min(30, Math.max(8, ...rows.map(r => String(r[k] == null ? '' : r[k]).length)) + 2) }));
+    window.XLSX.utils.book_append_sheet(wb, ws, 'IP规划');
+    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(subnets.map(s => ({ 网段: s.cidr, 设备数: s.devices.length, 设备: s.devices.join(', ') }))), '子网统计');
+    const buf = window.XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    U.download(`IP规划_${U.fmtDate()}.xlsx`, new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    toast('已导出 IP 规划 Excel（设备名已按设备合并单元格）');
+  };
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
+/* ================= IP 批量改段 ================= */
+function openIpRenumber() {
+  if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  // 收集拓扑中的网段（接口 IP + 管理 IP）
+  const subSet = new Map(); // cidr -> 数量
+  const count = (ip) => { const s = U.subnetOf(ip); if (s) subSet.set(s, (subSet.get(s) || 0) + 1); };
+  for (const l of state.links) { if (l.aIp) count(l.aIp); if (l.bIp) count(l.bIp); }
+  for (const n of state.nodes) { if (n.mgmt) count(n.mgmt); }
+  const options = [...subSet.keys()].sort();
+  if (!options.length) { toast('拓扑中未发现 IP，无法改段'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:520px">
+      <h3>IP 批量改段</h3>
+      <div class="m-sub">把某个网段整体改到新网段，自动保留主机位（如 192.168.1.5 → 172.20.1.5）</div>
+      <div class="m-row">
+        <label>原网段</label>
+        <select id="rnOld">${options.map(s => `<option value="${s}">${s}（${subSet.get(s)} 个 IP）</option>`).join('')}</select>
+      </div>
+      <div class="m-row">
+        <label>新网段</label>
+        <input id="rnNew" type="text" placeholder="例如 172.20.1.0/24" style="width:200px"/>
+      </div>
+      <div class="m-row"><label style="display:flex;align-items:center;gap:6px"><input id="rnMgmt" type="checkbox" checked/> 同步更新网段内的管理地址</label></div>
+      <div class="m-sub" id="rnPreview"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="apply">应用改段</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  const preview = () => {
+    const oldC = ov.querySelector('#rnOld').value;
+    const newC = ov.querySelector('#rnNew').value.trim();
+    const info = U.cidrInfo(newC);
+    let ifCnt = 0, mgmtCnt = 0, devs = new Set();
+    for (const l of state.links) {
+      if (l.aIp && U.renumberIp(l.aIp, oldC, newC) !== l.aIp) { ifCnt++; devs.add(l.a); }
+      if (l.bIp && U.renumberIp(l.bIp, oldC, newC) !== l.bIp) { ifCnt++; devs.add(l.b); }
+    }
+    if (ov.querySelector('#rnMgmt').checked) {
+      for (const n of state.nodes) { if (n.mgmt && U.renumberIp(n.mgmt, oldC, newC) !== n.mgmt) { mgmtCnt++; devs.add(n.id); } }
+    }
+    const ok = info ? (info.prefix >= U.cidrInfo(oldC).prefix ? '' : '（注意：新网段主机位更少，超出部分会被截断）') : '（新网段格式无效）';
+    ov.querySelector('#rnPreview').textContent = `将更新 ${ifCnt} 个接口 IP、${mgmtCnt} 个管理地址，涉及 ${devs.size} 台设备${ok}`;
+  };
+  ov.querySelector('#rnOld').addEventListener('change', preview);
+  ov.querySelector('#rnNew').addEventListener('input', preview);
+  ov.querySelector('#rnMgmt').addEventListener('change', preview);
+  preview();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=apply]').onclick = () => {
+    const oldC = ov.querySelector('#rnOld').value;
+    const newC = ov.querySelector('#rnNew').value.trim();
+    if (!U.cidrInfo(newC)) { toast('新网段格式无效，应为 CIDR 如 172.20.1.0/24'); return; }
+    const incMgmt = ov.querySelector('#rnMgmt').checked;
+    let changed = 0;
+    pushUndo();
+    for (const l of state.links) {
+      if (l.aIp && U.renumberIp(l.aIp, oldC, newC) !== l.aIp) { l.aIp = U.renumberIp(l.aIp, oldC, newC); changed++; }
+      if (l.bIp && U.renumberIp(l.bIp, oldC, newC) !== l.bIp) { l.bIp = U.renumberIp(l.bIp, oldC, newC); changed++; }
+    }
+    if (incMgmt) {
+      for (const n of state.nodes) {
+        if (n.mgmt && U.renumberIp(n.mgmt, oldC, newC) !== n.mgmt) { n.mgmt = U.renumberIp(n.mgmt, oldC, newC); changed++; }
+      }
+    }
+    close();
+    renderer.setData(state.nodes, state.links, state.texts);
+    refreshAll();
+    saveGraph();
+    toast(changed ? `已改段：${oldC} → ${newC}，共更新 ${changed} 个 IP` : '没有 IP 位于该网段，未做修改');
+  };
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
+/* ================= 拓扑设计报告导出 ================= */
+function exportReport() {
+  if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  const html = U.buildReportHtml(state.nodes, state.links, { includeConfig: true });
+  U.download(`拓扑设计报告_${U.fmtDate()}.html`, new Blob([html], { type: 'text/html;charset=utf-8' }));
+  toast('已导出拓扑设计报告（HTML，含设备/IP/子网/链路/配置）');
+}
+
+/* ================= 多选对齐 / 分布 ================= */
+function openAlign() {
+  const ids = renderer.selectedNodes();
+  if (ids.length < 2) { toast('请先多选至少两台设备（Ctrl 点选 / Shift 框选）'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const acts = [
+    ['left', '左对齐'], ['hcenter', '水平居中'], ['right', '右对齐'],
+    ['top', '顶部对齐'], ['vcenter', '垂直居中'], ['bottom', '底部对齐'],
+    ['hdist', '水平等距'], ['vdist', '垂直等距']
+  ];
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:520px">
+      <h3>对齐 / 分布（已选 ${ids.length} 台设备）</h3>
+      <div class="m-sub">按当前相对位置对齐或等距分布，Ctrl+Z 可撤销</div>
+      <div class="align-grid">
+        ${acts.map(([k, lb]) => `<button type="button" class="tb" data-k="${k}">${lb}</button>`).join('')}
+      </div>
+      <div class="m-actions"><button type="button" class="tb" data-act="close">关闭</button></div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.querySelectorAll('.align-grid .tb').forEach(btn => {
+    btn.onclick = () => {
+      const nodes = state.nodes.filter(n => ids.has(n.id));
+      pushUndo();
+      U.alignNodes(nodes, btn.dataset.k);
+      renderer.setData(state.nodes, state.links, state.texts);
+      refreshAll(); saveGraph();
+      toast('已执行「' + btn.textContent + '」');
+      close();
+    };
+  });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
+/* ================= 工程对比（diff） ================= */
+function openProjectDiff() {
+  if (!state.nodes.length) { toast('请先打开或导入一个拓扑作为对比基准'); return; }
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.nettopo,.json';
+  inp.onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const { buffer } = await U.readFile(f);
+      const data = JSON.parse(U.decodeBytes(buffer));
+      if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) { toast('对比文件不是有效的 .nettopo 工程'); return; }
+      const d = U.diffProjects({ nodes: state.nodes, links: state.links }, { nodes: data.nodes, links: data.links || [] });
+      const row = (items) => items.length ? items.map(x => `<div class="tt-r">· ${U.escHtml(x)}</div>`).join('') : '<div class="tt-r" style="color:var(--muted)">无</div>';
+      const chg = d.changedNodes.length ? d.changedNodes.map(c => `<div class="tt-r">· ${U.escHtml(c.name)}：${U.escHtml(c.from.mgmt || '-')} → ${U.escHtml(c.to.mgmt || '-')}</div>`).join('') : '<div class="tt-r" style="color:var(--muted)">无</div>';
+      const root = $('#modalRoot');
+      const ov = document.createElement('div');
+      ov.className = 'overlay';
+      ov.innerHTML = `
+        <div class="modal" role="dialog" style="width:560px">
+          <h3>工程对比结果</h3>
+          <div class="m-sub">当前工程 vs ${U.escHtml(f.name)}（${data.nodes.length} 设备 / ${(data.links||[]).length} 链路）</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;max-height:48vh;overflow:auto">
+            <div><b style="color:var(--danger)">新增设备 ${d.addedNodes.length}</b>${row(d.addedNodes)}</div>
+            <div><b style="color:var(--danger)">删除设备 ${d.removedNodes.length}</b>${row(d.removedNodes)}</div>
+            <div><b>变更设备 ${d.changedNodes.length}</b>${chg}</div>
+            <div><b style="color:var(--accent)">新增链路 ${d.addedLinks.length}</b>${row(d.addedLinks)}</div>
+            <div><b style="color:var(--accent)">删除链路 ${d.removedLinks.length}</b>${row(d.removedLinks)}</div>
+          </div>
+          <div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div>
+        </div>`;
+      root.appendChild(ov);
+      ov.tabIndex = -1; ov.focus();
+      const close = () => ov.remove();
+      ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+      ov.querySelector('[data-act=close]').onclick = close;
+      ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    } catch (err) { toast('对比文件解析失败：' + err.message); }
+    e.target.value = '';
+  };
+  inp.click();
+}
+
+/* ================= 批量重命名 ================= */
+function openRename() {
+  const ids = renderer.selectedNodes();
+  const nodes = ids.size ? state.nodes.filter(n => ids.has(n.id)) : state.nodes;
+  if (!nodes.length) { toast('画布为空，请先添加设备'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:520px">
+      <h3>批量重命名（${nodes.length} 台设备）</h3>
+      <div class="m-sub">${ids.size ? '对选中的设备' : '对全部设备'}统一加前缀/后缀，或按序号重命名；Ctrl+Z 可撤销</div>
+      <div class="m-row"><label>方式</label>
+        <select id="rnMode">
+          <option value="keep">保留原名 + 前缀/后缀</option>
+          <option value="number">按序号重命名</option>
+        </select>
+      </div>
+      <div class="m-row"><label>前缀</label><input id="rnPrefix" type="text" placeholder="例如 接入-"/></div>
+      <div class="m-row"><label>后缀</label><input id="rnSuffix" type="text" placeholder="例如 -主"/></div>
+      <div class="m-row" id="rnNumRow" style="display:none">
+        <label>起始序号</label><input id="rnStart" type="number" value="1" style="width:90px"/>
+        <label>位数</label><input id="rnPad" type="number" value="2" style="width:70px"/>
+      </div>
+      <div class="m-sub" id="rnPrev"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="apply">应用</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  const prev = () => {
+    const mode = ov.querySelector('#rnMode').value;
+    const p = ov.querySelector('#rnPrefix').value, s = ov.querySelector('#rnSuffix').value;
+    const start = Number(ov.querySelector('#rnStart').value || 1), pad = Number(ov.querySelector('#rnPad').value || 0);
+    ov.querySelector('#rnNumRow').style.display = mode === 'number' ? '' : 'none';
+    const sample = [...nodes].sort((a, b) => a.name.localeCompare(b.name, 'zh')).slice(0, 4);
+    const names = [];
+    sample.forEach((n, i) => {
+      if (mode === 'number') names.push(p + String(start + i).padStart(pad, '0') + s);
+      else names.push(p + n.name + s);
+    });
+    ov.querySelector('#rnPrev').textContent = '示例：' + names.join('、') + (nodes.length > 4 ? ' …' : '');
+  };
+  ['rnMode','rnPrefix','rnSuffix','rnStart','rnPad'].forEach(id2 => ov.querySelector('#'+id2).addEventListener('input', prev));
+  ov.querySelector('#rnMode').addEventListener('change', prev);
+  prev();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=apply]').onclick = () => {
+    const mode = ov.querySelector('#rnMode').value;
+    const prefix = ov.querySelector('#rnPrefix').value.trim();
+    const suffix = ov.querySelector('#rnSuffix').value.trim();
+    const start = Number(ov.querySelector('#rnStart').value || 1);
+    const pad = Number(ov.querySelector('#rnPad').value || 0);
+    pushUndo();
+    U.renameNodes(nodes, { mode, prefix, suffix, start, pad });
+    // 名称变化 → 宽度自适应（保持中心不变）
+    for (const n of nodes) {
+      const nw = U.nodeWidthForName(n.name);
+      const dw = nw - n.w;
+      if (dw) { n.w = nw; n.x -= dw / 2; }
+    }
+    close();
+    renderer.setData(state.nodes, state.links, state.texts);
+    refreshAll(); saveGraph();
+    toast('已重命名 ' + nodes.length + ' 台设备');
+  };
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
+/* ================= 自动备份工程 ================= */
+function openAutoBackup() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:460px">
+      <h3>自动备份工程</h3>
+      <div class="m-sub">按固定间隔自动下载 .nettopo 备份（内容有变化时才备份，避免空文件）</div>
+      <div class="m-row"><label style="display:flex;align-items:center;gap:6px"><input id="abOn" type="checkbox" ${state.autoBackup.on ? 'checked' : ''}/> 启用自动备份</label></div>
+      <div class="m-row"><label>间隔（分钟）</label><input id="abMin" type="number" min="1" max="120" value="${state.autoBackup.minutes}" style="width:90px"/></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=save]').onclick = () => {
+    state.autoBackup.on = ov.querySelector('#abOn').checked;
+    state.autoBackup.minutes = Math.max(1, Number(ov.querySelector('#abMin').value || 10));
+    localStorage.setItem('nettopo.autoBackup', state.autoBackup.on ? '1' : '0');
+    localStorage.setItem('nettopo.autoBackupMin', String(state.autoBackup.minutes));
+    close();
+    setupAutoBackup();
+    toast(state.autoBackup.on ? '已启用自动备份（每 ' + state.autoBackup.minutes + ' 分钟）' : '已关闭自动备份');
+  };
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+function setupAutoBackup() {
+  if (setupAutoBackup._timer) { clearInterval(setupAutoBackup._timer); setupAutoBackup._timer = null; }
+  if (!state.autoBackup.on) return;
+  setupAutoBackup._last = '';
+  setupAutoBackup._timer = setInterval(() => {
+    if (!state.nodes.length) return;
+    const data = {
+      app: 'NetTopo', version: 1, savedAt: new Date().toISOString(),
+      nodes: state.nodes, links: state.links,
+      pan: renderer.pan, zoom: renderer.zoom,
+      showLabels: state.showLabels, showSubnets: state.showSubnets,
+      subnetNames: state.subnetNames, downLinks: [...state.downLinks],
+      customTypes: U.customTypes, typeOverrides: U.typeOverrides
+    };
+    const hash = JSON.stringify([state.nodes, state.links, state.downLinks ? [...state.downLinks] : []]);
+    if (hash === setupAutoBackup._last) return;
+    setupAutoBackup._last = hash;
+    U.download(`自动备份_${U.fmtDate()}.nettopo`, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));
+    toast('已自动备份工程（' + U.fmtDate() + '）');
+  }, state.autoBackup.minutes * 60000);
+}
+
 /* ================= 导出 ================= */
 function exportCSV() {
   const rows = M.graphToTableRows(state.nodes, state.links);
@@ -203,7 +936,7 @@ function exportXlsx() {
 
 function exportVisio() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links }, {});
+  const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
   U.download(`网络拓扑图_${U.fmtDate()}.vsdx`,
     new Blob([buf], { type: 'application/vnd.ms-visio' }));
   toast('已导出 Visio 文件（.vsdx，Visio 2013+ 可直接打开编辑）');
@@ -211,7 +944,7 @@ function exportVisio() {
 
 function exportPdf() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links }, {});
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -239,6 +972,192 @@ function exportPdf() {
   img.src = url;
 }
 
+/* ================= 导出图片（PNG / SVG / 剪贴板） ================= */
+function renderTopologyPng(cb) {
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
+  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url);
+    canvas.toBlob(cb, 'image/png');
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); cb(null); };
+  img.src = url;
+}
+
+function exportImage(kind) {
+  if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  if (kind === 'svg') {
+    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
+    U.download(`网络拓扑图_${U.fmtDate()}.svg`, new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+    toast('已导出 SVG 矢量图');
+    return;
+  }
+  renderTopologyPng((b) => {
+    if (!b) { toast('PNG 导出失败'); return; }
+    U.download(`网络拓扑图_${U.fmtDate()}.png`, b);
+    toast('已导出 PNG 高清图片（2 倍像素）');
+  });
+}
+
+function copyImageToClipboard() {
+  if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  if (!navigator.clipboard || !window.ClipboardItem || !navigator.clipboard.write) {
+    toast('当前环境不支持剪贴板图片，请用「导出图片」');
+    return;
+  }
+  renderTopologyPng((blob) => {
+    if (!blob) { toast('生成图片失败'); return; }
+    navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      .then(() => toast('已复制拓扑图片到剪贴板，可直接粘贴'))
+      .catch(() => toast('复制失败：浏览器未授予剪贴板权限，请用「导出图片」'));
+  });
+}
+
+function openImageExport() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:420px">
+      <h3>导出图片</h3>
+      <div class="m-sub">图例、设备样式与画布一致；PNG 为 2 倍像素高清图，SVG 可无限缩放</div>
+      <div class="img-export-actions">
+        <button type="button" class="tb big" data-act="png"><i class="ic" data-ic="image"></i><span>PNG 高清图片</span></button>
+        <button type="button" class="tb big" data-act="svg"><i class="ic" data-ic="image"></i><span>SVG 矢量图</span></button>
+      </div>
+      <div class="m-actions"><button type="button" class="tb" data-act="cancel">取消</button></div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=cancel]').addEventListener('click', close);
+  ov.querySelector('[data-act=png]').addEventListener('click', () => { close(); exportImage('png'); });
+  ov.querySelector('[data-act=svg]').addEventListener('click', () => { close(); exportImage('svg'); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
+/* ================= 工程文件（.nettopo 保存/打开） ================= */
+function saveProject() {
+  const data = {
+    app: 'NetTopo',
+    version: 1,
+    savedAt: new Date().toISOString(),
+    nodes: state.nodes,
+    links: state.links,
+    texts: state.texts,
+    pan: renderer.pan,
+    zoom: renderer.zoom,
+    customTypes: U.customTypes,
+    typeOverrides: U.typeOverrides,
+    showLabels: state.showLabels,
+    showSubnets: state.showSubnets,
+    subnetNames: state.subnetNames,
+    downLinks: [...state.downLinks]
+  };
+  U.download(`网络拓扑工程_${U.fmtDate()}.nettopo`,
+    new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));
+  toast('已保存工程文件（.nettopo，含位置与自定义类型）');
+}
+
+async function loadProject(file) {
+  const { buffer } = await U.readFile(file);
+  let data;
+  try {
+    data = JSON.parse(U.decodeBytes(buffer));
+  } catch (e) {
+    toast('工程文件解析失败：不是有效的 .nettopo 文件'); return;
+  }
+  if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) {
+    toast('工程文件格式不正确'); return;
+  }
+  if (state.nodes.length && !confirm('打开工程将替换当前拓扑，是否继续？')) return;
+  if (Array.isArray(data.customTypes)) { U.customTypes = data.customTypes; U.saveCustomTypes(); }
+  if (data.typeOverrides && typeof data.typeOverrides === 'object') { U.typeOverrides = data.typeOverrides; U.saveTypeOverrides(); }
+  state.nodes = data.nodes;
+  state.links = Array.isArray(data.links) ? data.links : [];
+  state.texts = Array.isArray(data.texts) ? data.texts : [];
+  state.sel = { kind: null, id: null };
+  state.undoStack = [];
+  state.redoStack = [];
+  if (typeof data.showLabels === 'boolean') state.showLabels = data.showLabels;
+  if (typeof data.showSubnets === 'boolean') state.showSubnets = data.showSubnets;
+  if (data.subnetNames && typeof data.subnetNames === 'object') state.subnetNames = data.subnetNames;
+  state.downLinks = new Set(Array.isArray(data.downLinks) ? data.downLinks : []);
+  renderer.showLabels = state.showLabels;
+  renderer.showSubnets = state.showSubnets;
+  renderer.subnetNames = state.subnetNames;
+  renderer.setDownLinks(state.downLinks);
+  U.seedCounters(state.nodes, state.links);
+  updateUndoBtns();
+  renderer.setData(state.nodes, state.links, state.texts);
+  if (data.pan && data.zoom) renderer.setView(data.pan, data.zoom);
+  else renderer.fit();
+  refreshAll();
+  saveGraph();
+  toast(`已打开工程：${state.nodes.length} 台设备、${state.links.length} 条链路`);
+}
+
+/* ================= 拓扑校验报告 ================= */
+function runValidation() {
+  if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  const issues = M.validateTopology(state.nodes, state.links);
+  const errs = issues.filter(i => i.level === 'error').length;
+  const warns = issues.filter(i => i.level === 'warning').length;
+  const infos = issues.filter(i => i.level === 'info').length;
+  const cls = { error: 'err', warning: 'warn', info: 'info' };
+  const icon = { error: '✕', warning: '!', info: 'i' };
+  const rows = issues.length ? issues.map((it, idx) => `
+    <div class="vrow ${cls[it.level]}" data-idx="${idx}">
+      <span class="v-ic">${icon[it.level]}</span>
+      <span class="v-msg">${U.escHtml(it.msg)}</span>
+      <button type="button" class="tb icon" data-act="locate" title="定位到画布">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/></svg>
+      </button>
+    </div>`).join('') : '<div class="vrow ok"><span class="v-ic">✓</span><span class="v-msg">未发现问题，拓扑健康。</span></div>';
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:600px">
+      <h3>拓扑校验报告</h3>
+      <div class="m-sub">${errs} 个错误 · ${warns} 个警告 · ${infos} 条提示</div>
+      <div class="v-list">${rows}</div>
+      <div class="m-actions"><button type="button" class="tb" data-act="close">关闭</button></div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=close]').addEventListener('click', close);
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelectorAll('[data-act=locate]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const it = issues[+btn.closest('.vrow').dataset.idx];
+      close();
+      locateIssue(it);
+    });
+  });
+}
+
+function locateIssue(issue) {
+  const nid = (issue.nodeIds || []).find(id => state.nodes.some(n => n.id === id));
+  const lid = (issue.linkIds || []).find(id => state.links.some(l => l.id === id));
+  if (nid) select('node', nid, { center: true });
+  else if (lid) select('link', lid, { center: true });
+  else toast(issue.msg);
+}
+
 /* ================= 新建 ================= */
 function newGraph() {
   if (state.nodes.length && !confirm('新建将清空当前拓扑，是否继续？')) return;
@@ -251,7 +1170,7 @@ function newGraph() {
   state.redoStack = [];
   state.blank = true; // 空白画布：无表格也可直接添加设备/连线
   updateUndoBtns();
-  renderer.setData(state.nodes, state.links);
+  renderer.setData(state.nodes, state.links, state.texts);
   refreshAll();
   saveGraph();
   toast('已新建空白画布：点击「添加设备」或右键画布添加设备');
@@ -280,11 +1199,95 @@ function addNodeAt(wx, wy) {
       node.h = U.nodeHeightFor(node);
       node.y = wy - node.h / 2;
       state.nodes.push(node);
-      renderer.setData(state.nodes, state.links);
+      renderer.setData(state.nodes, state.links, state.texts);
       refreshAll();
       select('node', node.id, { center: true });
     }
   });
+}
+
+const TEXT_FONTS = ['Microsoft YaHei', 'SimSun', 'SimHei', 'DengXian', 'KaiTi', 'Arial', 'Consolas', 'Georgia', 'Times New Roman'];
+
+/* ================= 文本框（自定义字体样式） ================= */
+function addTextAt(wx, wy) {
+  const t = {
+    id: U.uid('t'),
+    x: wx, y: wy,
+    w: 220, h: 56,
+    text: '双击编辑文字',
+    font: 'Microsoft YaHei', size: 16, color: '#1e293b',
+    bold: false, italic: false, align: 'left', bg: ''
+  };
+  pushUndo();
+  state.texts.push(t);
+  renderer.setData(state.nodes, state.links, state.texts);
+  refreshAll(); saveGraph();
+  select('text', t.id);
+  editText(t.id);
+}
+function editText(id) {
+  const t = state.texts.find(x => x.id === id);
+  if (!t) return;
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:540px">
+      <h3>编辑文本框</h3>
+      <div class="m-sub">支持多行文字与字体样式；保存后自动按内容调整框大小，Ctrl+Z 可撤销</div>
+      <div class="m-row" style="align-items:flex-start"><label>内容</label><textarea id="txText" style="height:90px">${U.escHtml(t.text || '')}</textarea></div>
+      <div class="m-row"><label>字体</label><select id="txFont">${TEXT_FONTS.map(f => `<option value="${f}" ${t.font === f ? 'selected' : ''}>${f}</option>`).join('')}</select>
+        <label style="margin-left:16px">字号</label><input id="txSize" type="number" min="10" max="72" value="${t.size || 16}" style="width:70px"/></div>
+      <div class="m-row"><label>颜色</label><input id="txColor" type="color" value="${t.color || '#1e293b'}"/>
+        <label style="margin-left:16px;display:flex;align-items:center;gap:5px"><input id="txBold" type="checkbox" ${t.bold ? 'checked' : ''}/> 粗体</label>
+        <label style="display:flex;align-items:center;gap:5px"><input id="txItalic" type="checkbox" ${t.italic ? 'checked' : ''}/> 斜体</label></div>
+      <div class="m-row"><label>对齐</label>
+        <select id="txAlign"><option value="left" ${t.align === 'left' ? 'selected' : ''}>左对齐</option><option value="center" ${t.align === 'center' ? 'selected' : ''}>居中</option><option value="right" ${t.align === 'right' ? 'selected' : ''}>右对齐</option></select>
+        <label style="margin-left:16px;display:flex;align-items:center;gap:5px"><input id="txBgOn" type="checkbox" ${t.bg ? 'checked' : ''}/> 背景色</label>
+        <input id="txBg" type="color" value="${t.bg || '#ffffff'}" ${t.bg ? '' : 'disabled'}/></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.querySelector('#txBgOn').addEventListener('change', (e) => { ov.querySelector('#txBg').disabled = !e.target.checked; });
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=save]').onclick = () => {
+    const text = ov.querySelector('#txText').value;
+    if (!text.trim()) { toast('内容不能为空'); return; }
+    pushUndo();
+    t.text = text;
+    t.font = ov.querySelector('#txFont').value;
+    t.size = Math.max(10, Number(ov.querySelector('#txSize').value || 16));
+    t.color = ov.querySelector('#txColor').value;
+    t.bold = ov.querySelector('#txBold').checked;
+    t.italic = ov.querySelector('#txItalic').checked;
+    t.align = ov.querySelector('#txAlign').value;
+    t.bg = ov.querySelector('#txBgOn').checked ? ov.querySelector('#txBg').value : '';
+    const lines = text.split('\n');
+    const maxLine = lines.reduce((a, b) => a.length > b.length ? a : b, '');
+    t.w = Math.max(120, U.measureText(maxLine, t.size) + 24);
+    t.h = Math.max(40, lines.length * t.size * 1.25 + 16);
+    close();
+    renderer.setData(state.nodes, state.links, state.texts);
+    refreshAll(); saveGraph();
+    select('text', t.id);
+  };
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+function deleteText(id) {
+  const t = state.texts.find(x => x.id === id);
+  if (!t) return;
+  pushUndo();
+  state.texts = state.texts.filter(x => x.id !== id);
+  renderer.setData(state.nodes, state.links, state.texts);
+  refreshAll(); saveGraph();
+  select(null, null);
+  toast('已删除文本框');
 }
 
 function editNode(id) {
@@ -312,7 +1315,7 @@ function editNode(id) {
       if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
       n.type = v.type;
       n.note = v.note.trim();
-      renderer.setData(state.nodes, state.links);
+      renderer.setData(state.nodes, state.links, state.texts);
       refreshAll();
       select('node', n.id);
     }
@@ -326,7 +1329,7 @@ function deleteNode(id) {
   const removed = state.links.filter(l => l.a === id || l.b === id);
   state.links = state.links.filter(l => l.a !== id && l.b !== id);
   state.nodes = state.nodes.filter(x => x.id !== id);
-  renderer.setData(state.nodes, state.links);
+  renderer.setData(state.nodes, state.links, state.texts);
   refreshAll();
   select(null, null);
   toast(`已删除 ${n.name} 及其 ${removed.length} 条连线`);
@@ -344,7 +1347,7 @@ function addLinkBetween(aId, bId) {
       { name: 'aIp', label: `${a.name} IP`, ph: '例如 10.0.0.1' },
       { name: 'bIf', label: `${b.name} 接口`, ph: '例如 GE1/0/1' },
       { name: 'bIp', label: `${b.name} IP`, ph: '例如 10.0.0.2' },
-      { name: 'bw', label: '带宽', ph: '例如 千兆 / 10Gbps' },
+      { name: 'bw', label: '带宽 (Mbps)', ph: '例如 1000（百兆=100 / 千兆=1000 / 万兆=10000）' },
       { name: 'note', label: '备注', type: 'textarea' }
     ],
     submit: '创建',
@@ -354,9 +1357,9 @@ function addLinkBetween(aId, bId) {
         id: U.uid('l'), a: aId, b: bId,
         aIf: v.aIf.trim(), aIp: v.aIp.trim(),
         bIf: v.bIf.trim(), bIp: v.bIp.trim(),
-        bw: v.bw.trim(), note: v.note.trim()
+        bw: U.normalizeBw(v.bw), note: v.note.trim()
       });
-      renderer.setData(state.nodes, state.links);
+      renderer.setData(state.nodes, state.links, state.texts);
       refreshAll();
       select('link', state.links[state.links.length - 1].id);
     }
@@ -377,7 +1380,7 @@ function editLink(id) {
       { name: 'aIp', label: `${a.name} IP`, value: l.aIp },
       { name: 'bIf', label: `${b.name} 接口`, value: l.bIf },
       { name: 'bIp', label: `${b.name} IP`, value: l.bIp },
-      { name: 'bw', label: '带宽', value: l.bw },
+      { name: 'bw', label: '带宽 (Mbps)', value: U.normalizeBw(l.bw), ph: '例如 1000（百兆=100 / 千兆=1000 / 万兆=10000）' },
       { name: 'note', label: '备注', type: 'textarea', value: l.note }
     ],
     submit: '保存',
@@ -385,8 +1388,8 @@ function editLink(id) {
       pushUndo(); // 变更前快照
       l.aIf = v.aIf.trim(); l.aIp = v.aIp.trim();
       l.bIf = v.bIf.trim(); l.bIp = v.bIp.trim();
-      l.bw = v.bw.trim(); l.note = v.note.trim();
-      renderer.setData(state.nodes, state.links);
+      l.bw = U.normalizeBw(v.bw); l.note = v.note.trim();
+      renderer.setData(state.nodes, state.links, state.texts);
       refreshAll();
       select('link', l.id);
     }
@@ -398,16 +1401,117 @@ function deleteLink(id) {
   if (!l) return;
   pushUndo(); // 变更前快照
   state.links = state.links.filter(x => x.id !== id);
-  renderer.setData(state.nodes, state.links);
+  renderer.setData(state.nodes, state.links, state.texts);
   refreshAll();
   select(null, null);
 }
 
 function deleteSelection() {
   const { kind, id } = state.sel;
+  if (kind === 'node' && renderer.selIds.size > 1) {
+    deleteNodes(renderer.selectedNodes());
+    return;
+  }
+  if (kind === 'link' && renderer.selLinkIds.size > 1) {
+    deleteLinks(renderer.selectedLinks());
+    return;
+  }
   if (!id) return;
   if (kind === 'node') deleteNode(id);
   else if (kind === 'link') deleteLink(id);
+  else if (kind === 'text') deleteText(id);
+}
+
+function deleteNodes(ids) {
+  const set = new Set(ids);
+  const names = state.nodes.filter(n => set.has(n.id)).map(n => n.name);
+  const removedLinks = state.links.filter(l => set.has(l.a) || set.has(l.b)).length;
+  pushUndo();
+  state.links = state.links.filter(l => !set.has(l.a) && !set.has(l.b));
+  state.nodes = state.nodes.filter(n => !set.has(n.id));
+  renderer.setData(state.nodes, state.links, state.texts);
+  refreshAll();
+  select(null, null);
+  toast(`已删除 ${names.length} 台设备及 ${removedLinks} 条连线`);
+}
+
+function batchEditNodes() {
+  const ids = renderer.selectedNodes();
+  if (!ids.length) return;
+  openModal({
+    title: `批量编辑（${ids.length} 台设备）`,
+    sub: '留空的字段保持原值不变',
+    fields: [
+      { name: 'type', label: '设备类型', type: 'select', options: [['', '（保持不变）']].concat(U.typeList().map(t => [t.key, t.label])) },
+      { name: 'mgmt', label: '管理地址', ph: '留空不修改' },
+      { name: 'note', label: '备注', type: 'textarea', ph: '留空不修改' }
+    ],
+    submit: '应用',
+    onSubmit: (v) => {
+      pushUndo();
+      for (const id of ids) {
+        const n = state.nodes.find(x => x.id === id);
+        if (!n) continue;
+        if (v.type) n.type = v.type;
+        if (String(v.mgmt).trim()) n.mgmt = String(v.mgmt).trim();
+        if (String(v.note).trim()) n.note = String(v.note).trim();
+        const nh = U.nodeHeightFor(n);
+        if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
+      }
+      renderer.setData(state.nodes, state.links, state.texts);
+      refreshAll();
+      // 保留多选，便于继续操作
+      renderer.selIds = new Set(ids);
+      renderer.sel = { kind: 'node', id: ids[ids.length - 1] };
+      renderer._syncSelClass();
+      state.sel = { kind: 'node', id: ids[ids.length - 1] };
+      renderSelCard();
+      toast(`已批量更新 ${ids.length} 台设备`);
+    }
+  });
+}
+
+function deleteLinks(ids) {
+  const set = new Set(ids);
+  const removed = state.links.filter(l => set.has(l.id));
+  pushUndo();
+  state.links = state.links.filter(l => !set.has(l.id));
+  renderer.setData(state.nodes, state.links, state.texts);
+  refreshAll();
+  select(null, null);
+  toast(`已删除 ${removed.length} 条连线`);
+}
+
+function batchEditLinks() {
+  const ids = renderer.selectedLinks();
+  if (!ids.length) return;
+  openModal({
+    title: `批量编辑连线（${ids.length} 条）`,
+    sub: '留空的字段保持原值不变',
+    fields: [
+      { name: 'bw', label: '带宽 (Mbps)', ph: '留空不修改，例如 1000 / 10000' },
+      { name: 'note', label: '备注', type: 'textarea', ph: '留空不修改' }
+    ],
+    submit: '应用',
+    onSubmit: (v) => {
+      pushUndo();
+      for (const id of ids) {
+        const l = state.links.find(x => x.id === id);
+        if (!l) continue;
+        if (String(v.bw).trim()) l.bw = U.normalizeBw(v.bw);
+        if (String(v.note).trim()) l.note = String(v.note).trim();
+      }
+      renderer.setData(state.nodes, state.links, state.texts);
+      refreshAll();
+      // 保留多选
+      renderer.selLinkIds = new Set(ids);
+      renderer.sel = { kind: 'link', id: ids[ids.length - 1] };
+      renderer._syncSelClass();
+      state.sel = { kind: 'link', id: ids[ids.length - 1] };
+      renderSelCard();
+      toast(`已批量更新 ${ids.length} 条连线`);
+    }
+  });
 }
 
 /* ================= 模式（添加连线 / 添加设备） ================= */
@@ -423,8 +1527,8 @@ function setMode(mode, silent) {
   }
   renderer.allowDrag = mode === 'normal';
   // 工具栏按钮高亮显示模式状态
-  $('#btnAddLink').classList.toggle('mode-on', mode === 'link');
-  $('#btnAddNode').classList.toggle('mode-on', mode === 'place');
+  const dEdit = $('#btnDropEdit');
+  if (dEdit) dEdit.classList.toggle('mode-on', mode === 'link' || mode === 'place');
   if (mode === 'link') {
     setHint('连线模式：依次点击两台设备；Esc 或右键取消');
   } else if (mode === 'place') {
@@ -483,8 +1587,83 @@ function handleModeClick(e, kind, id) {
   }
 }
 
+/* ================= 显示开关 ================= */
+function toggleLabels() {
+  state.showLabels = !state.showLabels;
+  renderer.setShowLabels(state.showLabels);
+  localStorage.setItem('nettopo.showLabels', state.showLabels ? '1' : '0');
+  saveGraph();
+  toast(state.showLabels ? '已显示链路标注' : '已隐藏链路标注');
+}
+function toggleSubnets() {
+  state.showSubnets = !state.showSubnets;
+  renderer.setSubnetView(state.showSubnets, state.subnetNames);
+  localStorage.setItem('nettopo.showSubnets', state.showSubnets ? '1' : '0');
+  saveGraph();
+  updateLegend();
+  toast(state.showSubnets ? '已显示子网分组' : '已隐藏子网分组');
+}
+
+/* ================= 链路故障模拟 ================= */
+function toggleLinkDown(id) {
+  if (state.downLinks.has(id)) state.downLinks.delete(id); else state.downLinks.add(id);
+  renderer.setDownLinks(state.downLinks);
+  saveGraph();
+  updateLegend();
+  const down = state.downLinks.has(id);
+  toast(down ? '已标记链路故障（红色虚线，路径分析将绕行）' : '已恢复链路');
+}
+function clearDownLinks() {
+  if (!state.downLinks.size) { toast('当前没有故障标记'); return; }
+  state.downLinks.clear();
+  renderer.setDownLinks(state.downLinks);
+  saveGraph();
+  updateLegend();
+  toast('已清除全部故障标记');
+}
+function clearPathHl() {
+  if (!renderer.pathHl) { toast('当前没有路径高亮'); return; }
+  renderer.clearPath();
+  toast('已清除路径高亮');
+}
+
 /* ================= 弹窗 ================= */
+
+/* ================= 工具栏下拉菜单 ================= */
+function openDrop(anchor, items) {
+  const drop = $('#drop');
+  drop._anchor = anchor;
+  drop.innerHTML = items.map(it => {
+    if (it.sep) return '<div class="d-sep"></div>';
+    const active = it.active ? ' mode-on' : '';
+    return `<button class="ci${it.danger ? ' danger' : ''}${active}" data-k="${it.key || ''}"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(it.label)}</button>`;
+  }).join('');
+  U.fillIcons();
+  drop.classList.remove('hidden');
+  const r = anchor.getBoundingClientRect();
+  const mw = drop.offsetWidth, mh = drop.offsetHeight;
+  drop.style.left = Math.max(4, Math.min(r.left, innerWidth - mw - 4)) + 'px';
+  drop.style.top = (r.bottom + 4) + 'px';
+  if (r.bottom + 4 + mh > innerHeight - 4) drop.style.top = Math.max(4, r.top - mh - 4) + 'px';
+  let bi = 0;
+  for (const it of items) {
+    if (it.sep || it.head) continue;
+    const b = drop.querySelectorAll('.ci')[bi++];
+    b.onclick = () => { closeDrop(); it.act && it.act(); };
+  }
+  anchor.classList.add('mode-on');
+}
+function closeDrop() {
+  const drop = $('#drop');
+  if (!drop.classList.contains('hidden')) {
+    drop.classList.add('hidden');
+    if (drop._anchor) drop._anchor.classList.remove('mode-on');
+    drop._anchor = null;
+  }
+}
+
 function openModal(opts) {
+  closeDrop();
   const root = $('#modalRoot');
   const ov = document.createElement('div');
   ov.className = 'overlay';
@@ -562,6 +1741,7 @@ function toast(msg) {
 
 /* ================= 右键菜单 ================= */
 function openCtx(e, kind, id) {
+  closeDrop();
   const menu = $('#ctx');
   let items = [];
   if (kind === 'node') {
@@ -577,15 +1757,26 @@ function openCtx(e, kind, id) {
     const l = state.links.find(x => x.id === id);
     const na = l ? state.nodes.find(n => n.id === l.a) : null;
     const nb = l ? state.nodes.find(n => n.id === l.b) : null;
+    const isDown = state.downLinks.has(id);
     items = [
       { ic: 'edit', label: '编辑连线…', act: () => editLink(id) },
+      { ic: isDown ? 'undo' : 'shield', label: isDown ? '恢复链路（解除故障）' : '标记链路故障（模拟断链）', act: () => toggleLinkDown(id) },
       { sep: true },
       { ic: 'trash', label: '删除连线', danger: true, act: () => deleteLink(id) }
     ];
-    if (na && nb) items.unshift({ head: `${na.name} ⇄ ${nb.name}` });
+    if (na && nb) items.unshift({ head: `${na.name} ⇄ ${nb.name}${isDown ? '（故障）' : ''}` });
+  } else if (kind === 'text') {
+    const t = state.texts.find(x => x.id === id);
+    items = [
+      { ic: 'edit', label: '编辑文本框…', act: () => editText(id) },
+      { sep: true },
+      { ic: 'trash', label: '删除文本框', danger: true, act: () => deleteText(id) }
+    ];
+    if (t) items.unshift({ head: (t.text || '').split('\n')[0].slice(0, 20) || '文本框' });
   } else {
     items = [
       { ic: 'node', label: '在此添加设备', act: () => { const w = renderer.toWorld(e.clientX, e.clientY); setMode('normal'); addNodeAt(w.x, w.y); } },
+      { ic: 'edit', label: '在此添加文本框', act: () => { const w = renderer.toWorld(e.clientX, e.clientY); setMode('normal'); addTextAt(w.x, w.y); } },
       { ic: 'link', label: '添加连线…', act: () => setMode('link') },
       { sep: true },
       { ic: 'layout', label: '自动布局', act: () => autoLayout() },
@@ -636,8 +1827,9 @@ function showTooltip(e, kind, id) {
     const row = (ifn, ip) => `<div class="tt-r">${U.escHtml(ifn || '—')} ${U.escHtml(ip || '')}</div>`;
     const html = `<div class="tt-t">${U.escHtml(na ? na.name : '?')} ⇄ ${U.escHtml(nb ? nb.name : '?')}</div>
       ${row(l.aIf, l.aIp)}${row(l.bIf, l.bIp)}
-      ${l.bw ? `<div class="tt-r">带宽：${U.escHtml(l.bw)}</div>` : ''}
-      ${l.note ? `<div class="tt-r">备注：${U.escHtml(l.note)}</div>` : ''}`;
+      ${l.bw ? `<div class="tt-r">带宽：${U.escHtml(U.formatBw(l.bw))}</div>` : ''}
+      ${l.note ? `<div class="tt-r">备注：${U.escHtml(l.note)}</div>` : ''}
+      ${state.downLinks.has(l.id) ? '<div class="tt-r" style="color:var(--danger)">故障：已标记断链（路径分析将绕行）</div>' : ''}`;
     posTooltip(e, html);
   }
 }
@@ -661,6 +1853,66 @@ function hideTooltip() {
 function renderSelCard() {
   const card = $('#selCard');
   const { kind, id } = state.sel;
+  if (kind === 'node' && renderer.selIds.size > 1) {
+    const ids = renderer.selectedNodes();
+    card.classList.remove('hidden');
+    card.innerHTML = `
+      <div class="sc-head"><span class="sc-type">多选</span><span class="sc-title">已选 ${ids.length} 台设备</span></div>
+      <div class="sc-row">拖动任意一台可整体移动；Delete 删除选中</div>
+      <div class="sc-actions">
+        <button class="tb" data-act="batch">批量编辑</button>
+        <button class="tb danger" data-act="del">删除</button>
+        <button class="tb" data-act="clear">取消选择</button>
+      </div>`;
+    card.querySelector('[data-act=batch]').onclick = () => batchEditNodes();
+    card.querySelector('[data-act=del]').onclick = () => deleteSelection();
+    card.querySelector('[data-act=clear]').onclick = () => select(null, null);
+    return;
+  }
+  if (kind === 'link' && renderer.selLinkIds.size > 1) {
+    const ids = renderer.selectedLinks();
+    card.classList.remove('hidden');
+    card.innerHTML = `
+      <div class="sc-head"><span class="sc-type">多选</span><span class="sc-title">已选 ${ids.length} 条连线</span></div>
+      <div class="sc-row">Ctrl+点选切换；Delete 删除选中</div>
+      <div class="sc-actions">
+        <button class="tb" data-act="batch">批量编辑</button>
+        <button class="tb" data-act="fault">${ids.every(id2 => state.downLinks.has(id2)) ? '批量恢复' : '批量标记故障'}</button>
+        <button class="tb danger" data-act="del">删除</button>
+        <button class="tb" data-act="clear">取消选择</button>
+      </div>`;
+    card.querySelector('[data-act=batch]').onclick = () => batchEditLinks();
+    card.querySelector('[data-act=fault]').onclick = () => {
+      const down = !ids.every(id2 => state.downLinks.has(id2));
+      for (const id2 of ids) { if (down) state.downLinks.add(id2); else state.downLinks.delete(id2); }
+      renderer.setDownLinks(state.downLinks);
+      saveGraph();
+      updateLegend();
+      toast(down ? '已批量标记 ' + ids.length + ' 条链路故障（红色虚线，路径分析绕行）' : '已批量恢复 ' + ids.length + ' 条链路');
+      renderSelCard();
+    };
+    card.querySelector('[data-act=del]').onclick = () => deleteSelection();
+    card.querySelector('[data-act=clear]').onclick = () => select(null, null);
+    return;
+  }
+  if (kind === 'text') {
+    const t = state.texts.find(x => x.id === id);
+    if (!t) { card.classList.add('hidden'); return; }
+    card.classList.remove('hidden');
+    const first = (t.text || '').split('\n')[0] || '';
+    card.innerHTML = `
+      <div class="sc-head"><span class="sc-type" style="background:var(--accent)">文本框</span><span class="sc-title">${U.escHtml(first.slice(0, 18))}</span></div>
+      <div class="sc-row">${U.escHtml(t.font)} · ${t.size}px${t.bold ? ' · 粗体' : ''}${t.italic ? ' · 斜体' : ''}${t.bg ? ' · 有背景' : ''}</div>
+      <div class="sc-actions">
+        <button class="tb" data-act="edit">编辑</button>
+        <button class="tb danger" data-act="del">删除</button>
+        <button class="tb" data-act="clear">取消选择</button>
+      </div>`;
+    card.querySelector('[data-act=edit]').onclick = () => editText(id);
+    card.querySelector('[data-act=del]').onclick = () => deleteText(id);
+    card.querySelector('[data-act=clear]').onclick = () => select(null, null);
+    return;
+  }
   if (!id) { card.classList.add('hidden'); return; }
   let html = '';
   if (kind === 'node') {
@@ -687,7 +1939,7 @@ function renderSelCard() {
       <span class="sc-title">${U.escHtml(na ? na.name : '?')} ⇄ ${U.escHtml(nb ? nb.name : '?')}</span></div>
       ${row(na ? na.name : '', l.aIf, l.aIp)}
       ${row(nb ? nb.name : '', l.bIf, l.bIp)}
-      ${l.bw ? `<div class="sc-row">带宽：<b>${U.escHtml(l.bw)}</b></div>` : ''}
+      ${l.bw ? `<div class="sc-row">带宽：<b>${U.escHtml(U.formatBw(l.bw))}</b></div>` : ''}
       ${l.note ? `<div class="sc-row">备注：<b>${U.escHtml(l.note)}</b></div>` : ''}
       <div class="sc-actions">
         <button class="tb" data-act="edit">编辑</button>
@@ -757,7 +2009,7 @@ function refreshPanel() {
         <span class="nm">${U.escHtml(a ? a.name : '?')} ⇄ ${U.escHtml(b ? b.name : '?')}
           <span class="sub">${U.escHtml(l.aIf || '')} ${U.escHtml(l.aIp || '')} ⇄ ${U.escHtml(l.bIf || '')} ${U.escHtml(l.bIp || '')}</span>
         </span>
-        ${l.bw ? `<span class="ifc">${U.escHtml(l.bw)}</span>` : ''}
+        ${l.bw ? `<span class="ifc">${U.escHtml(U.formatBw(l.bw))}</span>` : ''}
       </div>`).join('');
   }
   $$('.pitem', wrap).forEach(it => {
@@ -765,14 +2017,46 @@ function refreshPanel() {
       const kind = it.getAttribute('data-kind'), id = it.getAttribute('data-id');
       select(kind, id, { center: true });
     });
+    // 右键：在面板项上直接打开与画布一致的编辑菜单（设备/连线）
+    it.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const kind = it.getAttribute('data-kind'), id = it.getAttribute('data-id');
+      select(kind, id);
+      openCtx(e, kind, id);
+    });
+    // 双击：直接编辑设备 / 连线
+    it.addEventListener('dblclick', () => {
+      const kind = it.getAttribute('data-kind'), id = it.getAttribute('data-id');
+      if (kind === 'node') editNode(id);
+      else if (kind === 'link') editLink(id);
+    });
   });
 }
 
 function updateLegend() {
-  $('#legend').innerHTML = U.typeList().map(t => {
+  const typeHtml = U.typeList().map(t => {
     const c = U.getType(t.key);
     return `<span class="lg" title="${U.escHtml(t.label)}"><i style="background:${c.c1}"></i>${U.escHtml(t.label)}</span>`;
   }).join('');
+  // 带宽图例：颜色标识带宽大小（图上不显示带宽文字）
+  const bwSet = new Map();
+  for (const l of state.links) { const n = U.normalizeBw(l.bw); if (n && !bwSet.has(n)) bwSet.set(n, U.bwColor(n)); }
+  const bwHtml = bwSet.size ? [...bwSet.entries()].sort((a, b) => b[0] - a[0])
+    .map(([n, c]) => `<span class="lg bw" title="带宽 ${U.formatBw(n)}"><i style="background:${c}"></i>${U.formatBw(n)}</span>`).join('') : '';
+  // 故障图例
+  const faultHtml = state.downLinks.size
+    ? `<span class="lg fault" title="已标记故障的链路（模拟断链）"><i></i>故障 ${state.downLinks.size}</span>` : '';
+  // 子网分组图例（显示子网分组时展示配色）
+  let subnetHtml = '';
+  if (state.showSubnets) {
+    const groups = U.subnetGroups(state.nodes, state.links, state.subnetNames);
+    subnetHtml = groups.map(g =>
+      `<span class="lg subnet" title="${U.escHtml(g.cidr)}"><i style="border-color:${g.color};color:${g.color}"></i>${U.escHtml(g.name)}</span>`
+    ).join('');
+  }
+  const parts = [typeHtml, bwHtml, faultHtml, subnetHtml].filter(Boolean);
+  $('#legend').innerHTML = parts.map((p, i) => i ? '<span class="lg-sep"></span>' + p : p).join('');
 }
 
 /* ================= 持久化（刷新自动恢复） ================= */
@@ -783,8 +2067,13 @@ function saveGraph() {
     localStorage.setItem(GRAPH_KEY, JSON.stringify({
       nodes: state.nodes,
       links: state.links,
+      texts: state.texts,
       pan: renderer.pan,
       zoom: renderer.zoom,
+      showLabels: state.showLabels,
+      showSubnets: state.showSubnets,
+      subnetNames: state.subnetNames,
+      downLinks: [...state.downLinks],
       ts: Date.now()
     }));
   } catch (e) { /* 存储超限时忽略 */ }
@@ -798,11 +2087,20 @@ function restoreGraph() {
     if (!d.nodes || !d.nodes.length) return false;
     state.nodes = d.nodes;
     state.links = d.links;
+    state.texts = Array.isArray(d.texts) ? d.texts : [];
     U.seedCounters(state.nodes, state.links); // 避免新 ID 与恢复节点冲突
     state.sel = { kind: null, id: null };
     state.undoStack = []; // 初始状态无需撤销
     state.redoStack = [];
-    renderer.setData(state.nodes, state.links);
+    if (typeof d.showLabels === 'boolean') state.showLabels = d.showLabels;
+    if (typeof d.showSubnets === 'boolean') state.showSubnets = d.showSubnets;
+    if (d.subnetNames && typeof d.subnetNames === 'object') state.subnetNames = d.subnetNames;
+    state.downLinks = new Set(Array.isArray(d.downLinks) ? d.downLinks : []);
+    renderer.showLabels = state.showLabels;
+    renderer.showSubnets = state.showSubnets;
+    renderer.subnetNames = state.subnetNames;
+    renderer.setDownLinks(state.downLinks);
+    renderer.setData(state.nodes, state.links, state.texts);
     if (d.pan && d.zoom) renderer.setView(d.pan, d.zoom);
     else renderer.fit();
     updateUndoBtns();
@@ -869,7 +2167,7 @@ function openTypeManager() {
   let rowFileKey = null;
 
   const afterChange = () => {
-    renderer.setData(state.nodes, state.links);
+    renderer.setData(state.nodes, state.links, state.texts);
     refreshAll();
     render();
   };
@@ -1002,38 +2300,89 @@ function openHelp() {
 function wire() {
   U.fillIcons();
 
-  $('#btnNew').onclick = newGraph;
-  $('#btnImport').onclick = () => $('#fileInput').click();
+  // ---- 工具栏下拉菜单（文件 / 编辑 / 布局 / 导出） ----
+  const loadSample = () => {
+    if (state.nodes.length && !confirm('导入将替换当前拓扑，是否继续？')) return;
+    loadGraph(M.textToGraph(M.SAMPLE_CSV), '已载入示例拓扑：9 台设备、10 条链路');
+  };
+  const togglePlace = () => setMode(state.mode === 'place' ? 'normal' : 'place');
+  const toggleLink = () => setMode(state.mode === 'link' ? 'normal' : 'link');
+
+  $('#btnDropFile').onclick = (e) => openDrop(e.currentTarget, [
+    { ic: 'fileplus', label: '新建空白画布', act: newGraph },
+    { ic: 'upload', label: '导入表格…', act: () => $('#fileInput').click() },
+    { ic: 'wand', label: '载入示例拓扑', act: loadSample },
+    { sep: true },
+    { ic: 'save', label: '保存工程…', act: saveProject },
+    { ic: 'folder', label: '打开工程…', act: () => $('#projInput').click() },
+    { ic: 'git', label: '对比工程…', act: openProjectDiff },
+    { ic: 'clock', label: '自动备份工程…', act: openAutoBackup }
+  ]);
+  $('#btnDropEdit').onclick = (e) => openDrop(e.currentTarget, [
+    { ic: 'node', label: '添加设备', active: state.mode === 'place', act: togglePlace },
+    { ic: 'link', label: '添加连线', active: state.mode === 'link', act: toggleLink },
+    { ic: 'edit', label: '添加文本框', act: () => { const c = viewCenter(); addTextAt(c.x, c.y); } },
+    { ic: 'fileplus', label: '从模板添加设备…', act: openTemplatePicker },
+    { sep: true },
+    { ic: 'edit', label: '对齐 / 分布选中…', act: openAlign },
+    { ic: 'edit', label: '批量重命名…', act: openRename },
+    { ic: 'edit', label: 'IP 批量改段…', act: openIpRenumber },
+    { sep: true },
+    { ic: 'tag', label: '类型管理…', act: openTypeManager },
+    { ic: 'trash', label: '删除选中', danger: true, act: () => deleteSelection() }
+  ]);
+  $('#btnDropLayout').onclick = (e) => openDrop(e.currentTarget, [
+    { ic: 'layout', label: '自动布局（力导向）(L)', act: () => autoLayout() },
+    { ic: 'layout', label: '环形布局', act: () => applyLayoutPreset('ring') },
+    { ic: 'layout', label: '分层布局（按类型）', act: () => applyLayoutPreset('layer') },
+    { ic: 'layout', label: '三层架构布局（核心-汇聚-接入）', act: () => applyLayoutPreset('tier') },
+    { ic: 'layout', label: '网格布局', act: () => applyLayoutPreset('grid') },
+    { sep: true },
+    { ic: 'fit', label: '适应视图 (F)', act: () => renderer.fit() },
+    { ic: 'locate', label: '路径分析…', act: openPathAnalysis },
+    { sep: true },
+    { ic: 'shield', label: '拓扑校验', act: runValidation }
+  ]);
+  $('#btnDropView').onclick = (e) => openDrop(e.currentTarget, [
+    { ic: 'eye', label: '链路标注', active: state.showLabels, act: toggleLabels },
+    { ic: 'layers', label: '子网分组', active: state.showSubnets, act: toggleSubnets },
+    { sep: true },
+    { ic: 'undo', label: state.downLinks.size ? '清除故障标记（' + state.downLinks.size + '）' : '清除故障标记', act: clearDownLinks },
+    { ic: 'close', label: '清除路径高亮', active: !!renderer.pathHl, act: clearPathHl }
+  ]);
+  $('#btnDropExport').onclick = (e) => openDrop(e.currentTarget, [
+    { ic: 'csv', label: '导出 CSV 表格', act: exportCSV },
+    { ic: 'xlsx', label: '导出 Excel 表格', act: exportXlsx },
+    { ic: 'pdf', label: '导出 PDF', act: exportPdf },
+    { ic: 'image', label: '导出图片（PNG / SVG）', act: openImageExport },
+    { ic: 'copy', label: '复制图片到剪贴板', act: copyImageToClipboard },
+    { ic: 'visio', label: '导出 Visio', act: exportVisio },
+    { sep: true },
+    { ic: 'list', label: '导出设计报告（HTML）', act: exportReport },
+    { ic: 'code', label: '生成设备配置…', act: openConfigGen },
+    { ic: 'list', label: '导出 IP 规划清单…', act: openIpPlan }
+  ]);
+
   $('#btnEmptyImport').onclick = () => $('#fileInput').click();
   $('#fileInput').addEventListener('change', (e) => {
     const f = e.target.files[0];
     if (f) handleImport(f).catch(err => toast('读取文件失败：' + err.message));
     e.target.value = '';
   });
-
-  $('#btnSample').onclick = () => {
-    if (state.nodes.length && !confirm('导入将替换当前拓扑，是否继续？')) return;
-    loadGraph(M.textToGraph(M.SAMPLE_CSV), '已载入示例拓扑：9 台设备、10 条链路');
-  };
-  $('#btnEmptySample').onclick = () => $('#btnSample').click();
+  $('#btnEmptySample').onclick = loadSample;
+  $('#projInput').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    if (f) loadProject(f).catch(err => toast('打开工程失败：' + err.message));
+    e.target.value = '';
+  });
   $('#btnEmptyNew').onclick = () => {
     newGraph();
     setMode('place'); // 直接进入放置模式，点击画布即可添加第一台设备
     setHint('放置模式：点击画布空白处放置设备；Esc 或右键取消');
   };
 
-  $('#btnAddNode').onclick = () => setMode(state.mode === 'place' ? 'normal' : 'place');
-  $('#btnAddLink').onclick = () => setMode(state.mode === 'link' ? 'normal' : 'link');
-  $('#btnTypes').onclick = openTypeManager;
-  $('#btnDelete').onclick = () => deleteSelection();
-  $('#btnLayout').onclick = () => autoLayout();
-  $('#btnFit').onclick = () => renderer.fit();
   $('#btnUndo').onclick = undo;
   $('#btnRedo').onclick = redo;
-  $('#btnCsv').onclick = exportCSV;
-  $('#btnXlsx').onclick = exportXlsx;
-  $('#btnPdf').onclick = exportPdf;
-  $('#btnVisio').onclick = exportVisio;
   $('#btnTheme').onclick = toggleTheme;
   $('#btnHelp').onclick = openHelp;
 
@@ -1056,7 +2405,14 @@ function wire() {
 
   document.addEventListener('pointerdown', (e) => {
     if (!$('#ctx').classList.contains('hidden') && !e.target.closest('#ctx')) closeCtx();
-  });
+    const drop = $('#drop');
+    if (!drop.classList.contains('hidden')) {
+      const anchor = drop._anchor;
+      const inDrop = e.target.closest && e.target.closest('#drop');
+      const inAnchor = anchor && e.target.closest && e.target.closest('#' + anchor.id);
+      if (!inDrop && !inAnchor) closeDrop();
+    }
+  }, true);
 
   // hintBar：点击任意位置关闭（pointerdown + mousedown + click 三重兼容）
   const closeHint = (e) => { e.stopPropagation(); e.preventDefault(); setMode('normal'); };
@@ -1084,6 +2440,7 @@ function wire() {
       return;
     }
     if (e.key === 'Escape') {
+      closeDrop();
       closeCtx();
       select(null, null);
       return;
@@ -1096,6 +2453,10 @@ function wire() {
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelection(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveProject(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#searchInput').focus(); $('#searchInput').select(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') { e.preventDefault(); $('#btnDropExport').click(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); toggleLabels(); return; }
     if (e.key.toLowerCase() === 'l') { autoLayout(); return; }
     if (e.key.toLowerCase() === 'f') { renderer.fit(); return; }
     if (e.key === '+' || e.key === '=') { renderer.zoomBy(1.25); return; }

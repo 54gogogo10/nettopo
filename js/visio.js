@@ -203,7 +203,7 @@ ${cF('Angle', Math.PI, 'ATAN2(EndY-BeginY,EndX-BeginX)', '')}
     </XForm>
     <Line>
       <LineWeight>0.01</LineWeight>
-      <LineColor>#8fa0b8</LineColor>
+      <LineColor>${U.bwColor(l.bw)}</LineColor>
       <LineColorTrans>0</LineColorTrans>
       <LinePattern>1</LinePattern>
       <Rounding>0</Rounding>
@@ -224,11 +224,7 @@ ${cF('X', len, 'Width*1', '')}${cF('Y', 0, 'Height*0', '')}      </LineTo>
   </Shape>`);
 
     /* ---- 独立的 2D 文本框（水平、透明、无边框） ---- */
-    const lines = [
-      [l.aIf, l.aIp].filter(Boolean).join('  '),
-      [l.bIf, l.bIp].filter(Boolean).join('  '),
-      l.bw ? '带宽: ' + l.bw : ''
-    ].filter(Boolean);
+    const lines = U.labelLines(l);
     const tw = 2.3, th = 0.55;
     const tpx = mx, tpy = my + 0.32; // 线中点上方（Visio Y 向上）
     let textRuns = '';

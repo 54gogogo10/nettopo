@@ -20,6 +20,10 @@ function buildSvgImage(graph, opts) {
     minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
     maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h);
   }
+  for (const t of (graph.texts || [])) {
+    minX = Math.min(minX, t.x); minY = Math.min(minY, t.y);
+    maxX = Math.max(maxX, t.x + (t.w || 160)); maxY = Math.max(maxY, t.y + (t.h || 40));
+  }
   if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 800; maxY = 600; }
   const W = Math.ceil(maxX - minX + M * 2), H = Math.ceil(maxY - minY + M * 2);
   const X = (px) => px - minX + M, Y = (py) => py - minY + M;
@@ -34,7 +38,7 @@ function buildSvgImage(graph, opts) {
   for (const l of links) {
     const g = geom[l.id];
     if (!g) continue;
-    parts.push(`<line x1="${X(g.x1).toFixed(1)}" y1="${Y(g.y1).toFixed(1)}" x2="${X(g.x2).toFixed(1)}" y2="${Y(g.y2).toFixed(1)}" stroke="#8fa0b8" stroke-width="2"/>`);
+    parts.push(`<line x1="${X(g.x1).toFixed(1)}" y1="${Y(g.y1).toFixed(1)}" x2="${X(g.x2).toFixed(1)}" y2="${Y(g.y2).toFixed(1)}" stroke="${U.bwColor(l.bw)}" stroke-width="2"/>`);
   }
 
   // 标注（三行，先算位置再防碰撞推开）
@@ -52,7 +56,7 @@ function buildSvgImage(graph, opts) {
   for (const l of links) {
     const g = geom[l.id];
     if (!g) continue;
-    const lines = U.labelLines(l);
+    const lines = opts.showLabels === false ? [] : U.labelLines(l);
     if (!lines.length) continue;
     const mx = X((g.x1 + g.x2) / 2), my = Y((g.y1 + g.y2) / 2);
     const dx = g.x2 - g.x1, dy = g.y2 - g.y1;
@@ -77,6 +81,18 @@ function buildSvgImage(graph, opts) {
     });
   }
 
+  // 文本框（自定义字体样式）
+  for (const t of (graph.texts || [])) {
+    const x = X(t.x), y = Y(t.y), w = t.w || 160, h = t.h || 40;
+    if (t.bg) parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="${t.bg}"/>`);
+    const anchor = t.align === 'center' ? 'middle' : (t.align === 'right' ? 'end' : 'start');
+    const tx = t.align === 'center' ? x + w / 2 : (t.align === 'right' ? x + w : x + 8);
+    const size = t.size || 16;
+    String(t.text || '').split('\n').forEach((ln, i) => {
+      parts.push(`<text x="${tx}" y="${y + size + 6 + i * size * 1.25}" font-family="${esc(t.font || 'Microsoft YaHei')}" font-size="${size}" fill="${t.color || '#1e293b'}" font-weight="${t.bold ? '700' : '400'}" font-style="${t.italic ? 'italic' : 'normal'}" text-anchor="${anchor}">${esc(ln)}</text>`);
+    });
+  }
+
   // 节点
   for (const n of nodes) {
     const t = U.getType(n.type);
@@ -88,6 +104,22 @@ function buildSvgImage(graph, opts) {
     parts.push(`<text x="${cx}" y="${hasMgmt ? cy + 5 : cy + 15}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.8)" text-anchor="middle">${esc(t.label)}</text>`);
     if (hasMgmt) {
       parts.push(`<text x="${cx}" y="${cy + 19}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.7)" text-anchor="middle">管理: ${esc(n.mgmt)}</text>`);
+    }
+  }
+
+  // 带宽图例（颜色标识带宽大小）
+  const bwSet = new Map();
+  for (const l of links) { const n = U.normalizeBw(l.bw); if (n && !bwSet.has(n)) bwSet.set(n, U.bwColor(n)); }
+  if (bwSet.size) {
+    const entries = [...bwSet.entries()].sort((a, b) => b[0] - a[0]);
+    let lx = 14;
+    parts.push(`<text x="${lx}" y="${H - 22}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#64748b">带宽：</text>`);
+    lx += 34;
+    for (const [n, color] of entries) {
+      const lab = U.formatBw(n);
+      parts.push(`<line x1="${lx}" y1="${H - 18}" x2="${lx + 16}" y2="${H - 18}" stroke="${color}" stroke-width="3"/>`);
+      parts.push(`<text x="${lx + 22}" y="${H - 14}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#334155">${esc(lab)}</text>`);
+      lx += 22 + U.measureText(lab, 10) + 14;
     }
   }
 
