@@ -618,12 +618,19 @@ console.log('== Visio VSDX 导出（2012 格式） ==');
   // 自定义类型图片嵌入（media 部件 + ForeignData）
   {
     const PNG1x1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-    const had = U.typeOverrides['router'];
-    U.typeOverrides['router'] = Object.assign({}, had, { img: PNG1x1 });
+    const PNG1x1b = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+    const hadR = U.typeOverrides['router'];
+    const hadS = U.typeOverrides['switch'];
+    U.typeOverrides['router'] = Object.assign({}, hadR, { img: PNG1x1 });
+    U.typeOverrides['switch'] = Object.assign({}, hadS, { img: PNG1x1b });
     const bufI = V2.buildVSDX({ nodes: nodes2, links: links2 }, {});
     const sI = Buffer.from(bufI).toString('latin1');
-    ok(sI.includes('visio/media/image1.png') && sI.includes('<ForeignData'), 'VSDX 嵌入自定义类型图片');
-    if (had) U.typeOverrides['router'] = had; else delete U.typeOverrides['router'];
+    ok(sI.includes('visio/media/image1.png') && sI.includes('visio/media/image2.png') && sI.includes('<ForeignData'), 'VSDX 嵌入自定义类型图片（多张）');
+    const ctPng = (sI.match(/<Default Extension="png" ContentType="image\/png"\/>/g) || []).length;
+    ok(ctPng === 1, 'VSDX Content_Types 中 png Default 仅声明一次（多张同类型图片不重复）');
+    ok((sI.match(/Id="rIdImg1"/g) || []).length === 1 && (sI.match(/Id="rIdImg2"/g) || []).length === 1, 'VSDX 两张图片各自有独立关系 ID');
+    if (hadR) U.typeOverrides['router'] = hadR; else delete U.typeOverrides['router'];
+    if (hadS) U.typeOverrides['switch'] = hadS; else delete U.typeOverrides['switch'];
   }
 
   }

@@ -2522,7 +2522,7 @@ function wire() {
 })();
 
 /* ================= 启动 ================= */
-console.log('[NetTopo] 版本 v20260811c');
+console.log('[NetTopo] 版本 v20260812g');
 // 启动时强制隐藏悬浮层（避免上次会话残留的黑点/提示条）
 $('#tooltip').classList.add('hidden');
 $('#hintBar').classList.add('hidden');

@@ -549,7 +549,7 @@ function buildVSDX(graph, opts) {
   const contentTypes = `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
-${[...imageParts.values()].map(p => `<Default Extension="${p.ext}" ContentType="${p.ext === 'jpg' ? 'image/jpeg' : 'image/png'}"/>`).join('')}
+${[...new Set([...imageParts.values()].map(p => p.ext))].map(ext => `<Default Extension="${ext}" ContentType="${ext === 'jpg' ? 'image/jpeg' : 'image/png'}"/>`).join('')}
 <Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>
 <Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
 <Override PartName="/visio/pages/page1.xml" ContentType="application/vnd.ms-visio.page+xml"/>
