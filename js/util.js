@@ -18,10 +18,10 @@ U.uid = (prefix) => {
 };
 
 /* 从已有图中恢复 ID 计数器（页面刷新后避免新 ID 与恢复节点冲突） */
-U.seedCounters = (nodes, links) => {
-  const scan = (prefix) => {
+U.seedCounters = (nodes, links, texts) => {
+  const scan = (prefix, lists) => {
     let max = 0;
-    for (const list of [nodes, links]) {
+    for (const list of lists) {
       for (const o of (list || [])) {
         const id = o && o.id;
         if (typeof id === 'string' && id.startsWith(prefix)) {
@@ -32,7 +32,9 @@ U.seedCounters = (nodes, links) => {
     }
     counters[prefix] = max;
   };
-  scan('n'); scan('l');
+  scan('n', [nodes, links]);
+  scan('l', [nodes, links]);
+  scan('t', [texts]);
 };
 
 /* ---------- 字符串 ---------- */
@@ -259,6 +261,9 @@ U.loadCustomTypes = () => {
     if (raw) U.customTypes = JSON.parse(raw);
     const ov = localStorage.getItem(U.OVERRIDE_KEY);
     if (ov) U.typeOverrides = JSON.parse(ov);
+    const cleaned = U.sanitizeTypeData(U.typeOverrides, U.customTypes);
+    U.typeOverrides = cleaned.overrides;
+    U.customTypes = cleaned.customTypes;
   } catch (e) { U.customTypes = []; U.typeOverrides = {}; }
 };
 U.saveCustomTypes = () => {
@@ -266,6 +271,31 @@ U.saveCustomTypes = () => {
 };
 U.saveTypeOverrides = () => {
   try { localStorage.setItem(U.OVERRIDE_KEY, JSON.stringify(U.typeOverrides)); } catch (e) { /* 超限时忽略 */ }
+};
+
+/* ---------- 类型数据安全校验（防止恶意工程/本地存储注入 HTML/SVG） ---------- */
+U.isValidColor = (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
+U.isValidImg = (v) => typeof v === 'string' && (v === '' || /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/i.test(v));
+/* 清洗 typeOverrides / customTypes：剔除非法颜色与图片，避免拼入 innerHTML/SVG 时注入 */
+U.sanitizeTypeData = (overrides, customTypes) => {
+  const ov = {};
+  for (const [key, o] of Object.entries(overrides || {})) {
+    if (!o || typeof o !== 'object') continue;
+    const clean = {};
+    if (U.isValidColor(o.c1)) { clean.c1 = o.c1; clean.c2 = U.isValidColor(o.c2) ? o.c2 : o.c1; clean.stroke = U.isValidColor(o.stroke) ? o.stroke : o.c1; }
+    if (U.isValidImg(o.img)) clean.img = o.img;
+    if (Object.keys(clean).length) ov[key] = clean;
+  }
+  const ct = Array.isArray(customTypes) ? customTypes.map(t => {
+    if (!t || typeof t !== 'object' || typeof t.key !== 'string' || typeof t.label !== 'string') return null;
+    const clean = { key: t.key, label: t.label, c1: t.c1, c2: t.c2 || t.c1, stroke: t.stroke || t.c1, img: '' };
+    if (!U.isValidColor(clean.c1)) clean.c1 = U.PALETTE[0];
+    if (!U.isValidColor(clean.c2)) clean.c2 = clean.c1;
+    if (!U.isValidColor(clean.stroke)) clean.stroke = clean.c1;
+    if (U.isValidImg(t.img)) clean.img = t.img; else clean.img = '';
+    return clean;
+  }).filter(Boolean) : [];
+  return { overrides: ov, customTypes: ct };
 };
 
 /* 修改类型颜色（内置/自定义均可） */

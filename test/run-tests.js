@@ -129,6 +129,10 @@ console.log('== ID 计数器恢复（刷新后新增不冲突） ==');
   ok(!g.nodes.some(n => n.id === nid), 'seedCounters 后新设备 ID 不与恢复节点冲突');
   const lid = U.uid('l');
   ok(!g.links.some(l => l.id === lid), 'seedCounters 后新连线 ID 不冲突');
+  const gt = [{ id: 't1' }, { id: 't7' }];
+  U.seedCounters(g.nodes, g.links, gt);
+  const tid = U.uid('t');
+  ok(!gt.some(t => t.id === tid), 'seedCounters 后新文本框 ID 不与恢复文本框冲突（' + tid + '）');
 }
 
 console.log('== 无表头按位置推断 ==');
@@ -186,6 +190,19 @@ eq(U.nodeWidthForName('核心交换机SW1'), 172, '中等名称按实际宽度�
 const longW = U.nodeWidthForName('这是一个非常非常长的设备名称用于测试宽度自适应显示效果');
 ok(longW > 200 && longW <= 320, '长名称宽度自适应（' + longW + '）');
 ok(U.measureText('中文A', 13.5) > U.measureText('AA', 13.5), 'CJK 测量宽于 ASCII');
+
+console.log('== 类型数据安全清洗 ==');
+{
+  const bad = U.sanitizeTypeData(
+    { router: { c1: '" onload="x', img: '"><svg onload=alert(1)>' } },
+    [{ key: 'ct1', label: '坏类型', c1: 'red" onerror="x', img: 'javascript:alert(1)' }]
+  );
+  ok(Object.keys(bad.overrides).length === 0, '清洗非法类型颜色/图片（overrides 清空）');
+  ok(bad.customTypes.length === 1 && /^#[0-9a-f]{6}$/i.test(bad.customTypes[0].c1) && bad.customTypes[0].img === '', '清洗自定义类型非法字段（颜色回退、图片清空）');
+  const good = U.sanitizeTypeData({ router: { c1: '#ff0000', img: 'data:image/png;base64,AAA' } }, []);
+  ok(good.overrides.router && good.overrides.router.c1 === '#ff0000' && good.overrides.router.img === 'data:image/png;base64,AAA', '合法颜色/图片保留');
+  ok(U.isValidColor('#aBcDeF') && !U.isValidColor('red') && !U.isValidColor('#12345'), '颜色校验只接受 #rrggbb');
+}
 
 console.log('== 类型覆盖（颜色/图片） ==');
 {
@@ -852,6 +869,31 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const r2 = mgr.connect({ host: '127.0.0.1', protocol: 'ssh', port: 1 });
     ok(r2 && r2.ok === true && /^s\d+$/.test(r2.id), 'Shell 发起连接返回会话 ID');
     mgr.close(r2.id);
+  }
+
+  // Telnet：连接超时（服务器接受但无任何响应）
+  {
+    const idleSocks = new Set();
+    const idle = net.createServer((sock) => {
+      idleSocks.add(sock);
+      sock.on('close', () => idleSocks.delete(sock));
+      sock.on('error', () => {});
+    });
+    await new Promise((res) => idle.listen(0, '127.0.0.1', res));
+    const port = idle.address().port;
+    const mgr = new ShellManager();
+    const statuses = [];
+    mgr.on('status', (id, info) => statuses.push(info));
+    const r = mgr.connect({ protocol: 'telnet', host: '127.0.0.1', port, timeout: 300 });
+    const ended = new Promise((res) => mgr.on('end', (id, reason) => res(reason)));
+    const reason = await Promise.race([ended, new Promise((res) => setTimeout(() => res('__NOT_FIRED__'), 3000))]);
+    ok(String(reason).includes('连接超时'), 'Telnet 无响应触发连接超时（' + reason + '）');
+    ok(statuses.some(s => s.state === 'error' && s.text.includes('连接超时')), 'Telnet 超时上报 error 状态');
+    for (const s of idleSocks) s.destroy();
+    await Promise.race([
+      new Promise((res) => idle.close(res)),
+      new Promise((res) => setTimeout(res, 1000))
+    ]);
   }
 
   // Telnet：本地模拟服务器（RFC854 协商 + NAWS）

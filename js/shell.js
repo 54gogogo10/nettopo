@@ -30,7 +30,8 @@ class ShellManager extends EventEmitter {
       username: String(opts.username || '').trim() || 'admin',
       password: String(opts.password || ''),
       cols: Math.max(parseInt(opts.cols, 10) || 80, 10),
-      rows: Math.max(parseInt(opts.rows, 10) || 24, 5)
+      rows: Math.max(parseInt(opts.rows, 10) || 24, 5),
+      timeout: opts.timeout != null ? parseInt(opts.timeout, 10) : undefined
     };
     let session;
     if (protocol === 'ssh') session = this._ssh(base);
@@ -120,6 +121,8 @@ class ShellManager extends EventEmitter {
     const sock = net.createConnection({ host: o.host, port: o.port });
     let buf = Buffer.alloc(0);
     let closed = false;
+    // 连接超时（默认 12s，测试可传 opts.timeout 缩短）；连接建立后关闭空闲超时
+    sock.setTimeout(o.timeout || 12000);
     const send = (b) => { if (!sock.destroyed) sock.write(b); };
     const finish = (reason) => {
       if (closed) return;
@@ -138,7 +141,9 @@ class ShellManager extends EventEmitter {
       send(Buffer.from([IAC, DO, OPT_ECHO, IAC, WILL, OPT_SGA, IAC, DO, OPT_SGA, IAC, DO, OPT_NAWS]));
       sendNaws();
     });
+    let firstData = false;
     sock.on('data', (chunk) => {
+      if (!firstData) { firstData = true; sock.setTimeout(0); } // 收到首包后关闭空闲超时
       buf = Buffer.concat([buf, chunk]);
       const out = [];
       while (buf.length) {
@@ -171,6 +176,10 @@ class ShellManager extends EventEmitter {
         buf = buf.slice(2); // 其它命令（NOP 等）丢弃
       }
       if (out.length) em.emit('output', Buffer.concat(out).toString('utf8'));
+    });
+    sock.on('timeout', () => {
+      em.emit('status', { state: 'error', text: '连接超时' });
+      finish('连接超时：请检查主机地址和端口是否可达');
     });
     sock.on('error', (err) => {
       em.emit('status', { state: 'error', text: err.message });

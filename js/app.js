@@ -62,12 +62,18 @@ const renderer = new TopoRender($('#svg'), {
   onHover(e, kind, id) { showTooltip(e, kind, id); },
   onHoverOut() { hideTooltip(); },
   onGroupRename(key, cur) {
-    const name = prompt('子网分组名称（留空恢复为网段名）', state.subnetNames[key] || '');
-    if (name === null) return;
-    if (!name.trim()) delete state.subnetNames[key];
-    else state.subnetNames[key] = name.trim();
-    renderer.setSubnetView(state.showSubnets, state.subnetNames);
-    saveGraph();
+    openModal({
+      title: '子网分组命名',
+      sub: '留空则恢复为网段名',
+      fields: [{ name: 'name', label: '分组名称', value: state.subnetNames[key] || '', ph: '例如：核心区' }],
+      submit: '确定',
+      onSubmit: (v) => {
+        if (!String(v.name).trim()) delete state.subnetNames[key];
+        else state.subnetNames[key] = String(v.name).trim();
+        renderer.setSubnetView(state.showSubnets, state.subnetNames);
+        saveGraph();
+      }
+    });
   },
   onView(z) {
     $('#zVal').textContent = Math.round(z * 100) + '%';
@@ -1085,8 +1091,12 @@ async function loadProject(file) {
     toast('工程文件格式不正确'); return;
   }
   if (state.nodes.length && !(await confirmBox('打开工程将替换当前拓扑，是否继续？'))) return;
-  if (Array.isArray(data.customTypes)) { U.customTypes = data.customTypes; U.saveCustomTypes(); }
-  if (data.typeOverrides && typeof data.typeOverrides === 'object') { U.typeOverrides = data.typeOverrides; U.saveTypeOverrides(); }
+  if (Array.isArray(data.customTypes) || (data.typeOverrides && typeof data.typeOverrides === 'object')) {
+    // 清洗非法颜色/图片，防止恶意工程注入 HTML/SVG
+    const cleaned = U.sanitizeTypeData(data.typeOverrides, data.customTypes);
+    if (Array.isArray(data.customTypes)) { U.customTypes = cleaned.customTypes; U.saveCustomTypes(); }
+    if (data.typeOverrides && typeof data.typeOverrides === 'object') { U.typeOverrides = cleaned.overrides; U.saveTypeOverrides(); }
+  }
   state.nodes = data.nodes;
   state.links = Array.isArray(data.links) ? data.links : [];
   state.texts = Array.isArray(data.texts) ? data.texts : [];
@@ -1101,7 +1111,7 @@ async function loadProject(file) {
   renderer.showSubnets = state.showSubnets;
   renderer.subnetNames = state.subnetNames;
   renderer.setDownLinks(state.downLinks);
-  U.seedCounters(state.nodes, state.links);
+  U.seedCounters(state.nodes, state.links, state.texts);
   updateUndoBtns();
   renderer.setData(state.nodes, state.links, state.texts);
   if (data.pan && data.zoom) renderer.setView(data.pan, data.zoom);
@@ -2006,8 +2016,8 @@ function refreshPanel() {
   const q = state.search.trim().toLowerCase();
   if (state.tab === 'nodes') {
     const list = state.nodes
-      .filter(n => !q || n.name.toLowerCase().includes(q) || n.note.toLowerCase().includes(q))
-      .sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+      .filter(n => !q || String(n.name || '').toLowerCase().includes(q) || String(n.note || '').toLowerCase().includes(q))
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh'));
     if (!list.length) {
       wrap.innerHTML = `<div class="list-empty">${state.nodes.length ? '无匹配设备' : '暂无设备，可新建空白画布或添加设备'}</div>`;
       return;
@@ -2120,7 +2130,7 @@ function restoreGraph() {
     state.nodes = d.nodes;
     state.links = d.links;
     state.texts = Array.isArray(d.texts) ? d.texts : [];
-    U.seedCounters(state.nodes, state.links); // 避免新 ID 与恢复节点冲突
+    U.seedCounters(state.nodes, state.links, state.texts); // 避免新 ID 与恢复节点/文本框冲突
     state.sel = { kind: null, id: null };
     state.undoStack = []; // 初始状态无需撤销
     state.redoStack = [];
@@ -2608,7 +2618,7 @@ function openWebShell(id) {
 }
 
 /* ================= 启动 ================= */
-console.log('[NetTopo] 版本 v20260812k');
+console.log('[NetTopo] 版本 v20260812l');
 // 启动时强制隐藏悬浮层（避免上次会话残留的黑点/提示条）
 $('#tooltip').classList.add('hidden');
 $('#hintBar').classList.add('hidden');

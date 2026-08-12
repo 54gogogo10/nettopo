@@ -3,6 +3,8 @@
 (function () {
   if (!window.topoShell) return; // 非 Electron 环境直接退出
   const $ = (s, r) => (r || document).querySelector(s);
+  const escAttr = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const tabsEl = $('#shTabs'), termsEl = $('#shTerms'), emptyEl = $('#shEmpty');
   const sessions = new Map(); // sid -> { tabEl, wrapEl, term, fit, dotEl, ended, buf }
 
@@ -135,7 +137,7 @@
         </div>
         <div class="frow"><div class="frow-inline">
           <div class="frow"><label>端口</label><input id="wsPort" type="number" min="1" max="65535"/></div>
-          <div class="frow"><label>用户名</label><input id="wsUser" type="text" placeholder="admin" value="${saved.username || 'admin'}" autocomplete="off"/></div>
+          <div class="frow"><label>用户名</label><input id="wsUser" type="text" placeholder="admin" value="${escAttr(saved.username || 'admin')}" autocomplete="off"/></div>
         </div></div>
         <div class="frow">
           <label>密码</label>
