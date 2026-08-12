@@ -1780,6 +1780,7 @@ function openCtx(e, kind, id) {
     items = [
       { ic: 'edit', label: '编辑设备…', act: () => editNode(id) },
       { ic: 'locate', label: '定位到视图', act: () => { select('node', id); centerOn('node', id); } },
+      { ic: 'terminal', label: 'Web Shell（SSH/Telnet）…', act: () => openWebShell(id) },
       { sep: true },
       { ic: 'trash', label: '删除设备及连线', danger: true, act: () => deleteNode(id) }
     ];
@@ -2458,7 +2459,7 @@ function wire() {
     if (state.mode === 'normal') return;
     if (state.mode === 'place') return; // 放置模式点击空白 = 放置设备，不退出
     const t = e.target;
-    const keep = t && t.closest && t.closest('.node, .link, .modal, #toolbar, #panel, #hintBar, #ctx, #empty, #selCard, #zoomCtl');
+    const keep = t && t.closest && t.closest('.node, .link, .modal, .shell-ov, #toolbar, #panel, #hintBar, #ctx, #empty, #selCard, #zoomCtl');
     if (!keep) setMode('normal');
   };
   document.addEventListener('pointerdown', exitOnBlank, true);
@@ -2521,8 +2522,174 @@ function wire() {
   });
 })();
 
+/* ================= Web Shell（SSH / Telnet 连接设备管理口） ================= */
+const shellSessions = new Map(); // sid -> { ov, term, statusEl, closeBtn, buf, ended }
+let shellListenersBound = false;
+
+function bindShellListeners() {
+  if (shellListenersBound || !window.topoShell) return;
+  shellListenersBound = true;
+  window.topoShell.onOutput((sid, data) => {
+    const s = shellSessions.get(sid);
+    if (!s) return;
+    if (s.term) s.term.write(data); else s.buf.push(['out', data]);
+  });
+  window.topoShell.onStatus((sid, info) => {
+    const s = shellSessions.get(sid);
+    if (!s) return;
+    if (s.term) applyShellStatus(s, info); else s.buf.push(['status', info]);
+  });
+  window.topoShell.onEnd((sid, reason) => {
+    const s = shellSessions.get(sid);
+    if (!s) return;
+    if (s.term) applyShellEnd(s, reason); else s.buf.push(['end', reason]);
+  });
+}
+
+function applyShellStatus(s, info) {
+  if (!s.statusEl) return;
+  const state = info && info.state;
+  s.statusEl.className = 'shell-status' + (state === 'error' ? ' err' : state === 'connected' ? ' ok' : '');
+  s.statusEl.textContent = (info && info.text) || (state === 'connected' ? '已连接' : state === 'error' ? '连接失败' : '');
+}
+
+function applyShellEnd(s, reason) {
+  s.ended = true;
+  if (s.statusEl) {
+    s.statusEl.className = 'shell-status err';
+    s.statusEl.textContent = reason || '连接已关闭';
+  }
+  if (s.term) s.term.write('\r\n\x1b[33m[会话已结束] ' + (reason || '连接已关闭') + '\x1b[0m\r\n');
+}
+
+function openWebShell(id) {
+  const n = state.nodes.find(x => x.id === id);
+  if (!n) return;
+  if (!window.topoShell) { toast('Web Shell 需要桌面版 NetTopo（Electron）环境'); return; }
+  bindShellListeners();
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('topoShellCfg') || 'null'); } catch (e) { saved = null; }
+  saved = saved || {};
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:430px">
+      <h3>Web Shell — ${U.escHtml(n.name)}</h3>
+      <div class="m-sub">通过 SSH 或 Telnet 连接设备的管理口地址（${n.mgmt ? U.escHtml(n.mgmt) : '该设备未设置管理地址，请手动填写主机'}）。</div>
+      <div class="m-row"><label>协议</label>
+        <select id="wsProto">
+          <option value="ssh"${(saved.protocol || 'ssh') === 'ssh' ? ' selected' : ''}>SSH（默认端口 22）</option>
+          <option value="telnet"${saved.protocol === 'telnet' ? ' selected' : ''}>Telnet（默认端口 23）</option>
+        </select>
+      </div>
+      <div class="m-row"><label>主机</label><input id="wsHost" type="text" placeholder="例如 10.255.0.1" value="${U.escHtml(n.mgmt || '')}"/></div>
+      <div class="m-row"><label>端口</label><input id="wsPort" type="number" min="1" max="65535" placeholder="留空自动（22/23）" value="${U.escHtml(saved.port || '')}"/></div>
+      <div class="m-row"><label>用户名</label><input id="wsUser" type="text" placeholder="admin" value="${U.escHtml(saved.username || 'admin')}" autocomplete="off"/></div>
+      <div class="m-row"><label>密码</label><input id="wsPass" type="password" placeholder="SSH 密码；Telnet 通常可留空" autocomplete="off"/></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="connect">连接</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const protoEl = ov.querySelector('#wsProto');
+  const portEl = ov.querySelector('#wsPort');
+  protoEl.addEventListener('change', () => {
+    portEl.placeholder = protoEl.value === 'telnet' ? '留空自动（23）' : '留空自动（22）';
+  });
+  const doConnect = async () => {
+    const cfg = {
+      protocol: protoEl.value,
+      host: ov.querySelector('#wsHost').value.trim(),
+      port: ov.querySelector('#wsPort').value.trim(),
+      username: ov.querySelector('#wsUser').value.trim(),
+      password: ov.querySelector('#wsPass').value
+    };
+    if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
+    try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username })); } catch (e) {}
+    const btn = ov.querySelector('[data-act=connect]');
+    btn.disabled = true; btn.textContent = '连接中…';
+    let res;
+    try { res = await window.topoShell.connect(cfg); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
+    if (!res || !res.ok) {
+      btn.disabled = false; btn.textContent = '连接';
+      toast((res && res.error) || '无法发起连接');
+      return;
+    }
+    close();
+    openTerminal(res.id, n, cfg);
+  };
+  ov.querySelector('[data-act=connect]').onclick = doConnect;
+  for (const sel of ['#wsHost', '#wsPass']) {
+    ov.querySelector(sel).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doConnect(); } });
+  }
+}
+
+function openTerminal(sid, node, cfg) {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay shell-ov';
+  ov.innerHTML = `
+    <div class="shell">
+      <div class="shell-head">
+        <span class="shell-title"><i class="ic" data-ic="terminal"></i> ${U.escHtml(node.name)} · ${U.escHtml(cfg.protocol.toUpperCase())} ${U.escHtml(cfg.host)}:${cfg.port || (cfg.protocol === 'telnet' ? 23 : 22)}</span>
+        <span class="shell-status">连接中…</span>
+        <button type="button" class="tb icon" id="shellClose" title="关闭会话（Ctrl+D / exit 退出后关闭）"><i class="ic" data-ic="close"></i></button>
+      </div>
+      <div class="shell-term"></div>
+      <div class="shell-foot">在终端内输入设备命令；Ctrl+C 中断 · 关闭按钮结束会话 · SSH 密码仅在内存中，不保存。</div>
+    </div>`;
+  root.appendChild(ov);
+  U.fillIcons();
+  const rec = { ov, term: null, statusEl: ov.querySelector('.shell-status'), closeBtn: ov.querySelector('#shellClose'), buf: [], ended: false };
+  shellSessions.set(sid, rec);
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: 'Consolas, "Cascadia Mono", "Microsoft YaHei", monospace',
+    theme: { background: '#0b1220', foreground: '#e2e8f0' },
+    scrollback: 3000
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  rec.term = term;
+  term.open(ov.querySelector('.shell-term'));
+  term.write('\x1b[33m正在连接 ' + cfg.host + (cfg.port ? ':' + cfg.port : '') + ' …\r\n\x1b[0m');
+  // 冲刷连接过程中缓冲的事件
+  for (const item of rec.buf.splice(0)) {
+    if (item[0] === 'out') term.write(item[1]);
+    else if (item[0] === 'status') applyShellStatus(rec, item[1]);
+    else if (item[0] === 'end') applyShellEnd(rec, item[1]);
+  }
+  term.onData((d) => { if (!rec.ended) window.topoShell.sendData(sid, d); });
+  const doResize = () => {
+    try { fit.fit(); } catch (e) { return; }
+    window.topoShell.resize(sid, term.cols, term.rows);
+  };
+  doResize();
+  const onWinResize = () => { if (shellSessions.has(sid)) doResize(); };
+  window.addEventListener('resize', onWinResize);
+  const closeIt = () => {
+    window.removeEventListener('resize', onWinResize);
+    if (!rec.ended) window.topoShell.close(sid);
+    shellSessions.delete(sid);
+    try { term.dispose(); } catch (e) {}
+    ov.remove();
+  };
+  rec.closeBtn.onclick = closeIt;
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) closeIt(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); closeIt(); } });
+  term.focus();
+}
+
 /* ================= 启动 ================= */
-console.log('[NetTopo] 版本 v20260812g');
+console.log('[NetTopo] 版本 v20260812h');
 // 启动时强制隐藏悬浮层（避免上次会话残留的黑点/提示条）
 $('#tooltip').classList.add('hidden');
 $('#hintBar').classList.add('hidden');

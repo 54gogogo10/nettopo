@@ -821,6 +821,115 @@ console.log('== 性能：复杂拓扑（核心-汇聚-接入-终端 分层网络
   console.log('性能耗时明细：' + report.join(' | '));
 }
 
-console.log('');
-console.log(`结果：${pass} 通过，${fail} 失败`);
-process.exit(fail ? 1 : 0);
+console.log('== Web Shell（SSH/Telnet 会话） ==');
+(async () => {
+  const net = require('net');
+  const fs = require('fs');
+  const { ShellManager } = require(path.join(root, 'js', 'shell.js'));
+  const waitFor = (cond, ms) => new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (cond()) { clearInterval(iv); resolve(); }
+      else if (Date.now() - t0 > ms) { clearInterval(iv); reject(new Error('waitFor 超时')); }
+    }, 10);
+  });
+
+  // 参数校验
+  {
+    const mgr = new ShellManager();
+    const r0 = mgr.connect({});
+    ok(r0 && r0.ok === false, 'Shell 空主机拒绝连接');
+    const r1 = mgr.connect({ host: '1.2.3.4', protocol: 'ftp' });
+    ok(r1 && r1.ok === false, 'Shell 不支持的协议拒绝连接');
+    const r2 = mgr.connect({ host: '127.0.0.1', protocol: 'ssh', port: 1 });
+    ok(r2 && r2.ok === true && /^s\d+$/.test(r2.id), 'Shell 发起连接返回会话 ID');
+    mgr.close(r2.id);
+  }
+
+  // Telnet：本地模拟服务器（RFC854 协商 + NAWS）
+  {
+    const serverData = [];
+    const server = net.createServer((sock) => {
+      sock.on('data', (d) => serverData.push(d));
+      sock.write(Buffer.from([255, 251, 1, 255, 251, 3])); // WILL ECHO / WILL SGA
+      sock.write('\r\nWelcome to mock telnet\r\n> ');
+    });
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const port = server.address().port;
+    const mgr = new ShellManager();
+    const outs = [];
+    mgr.on('output', (id, d) => outs.push(d));
+    const r = mgr.connect({ protocol: 'telnet', host: '127.0.0.1', port, cols: 80, rows: 24 });
+    ok(r.ok, 'Telnet 发起连接成功');
+    await waitFor(() => outs.join('').includes('Welcome to mock telnet'), 3000);
+    const allOut = outs.join('');
+    ok(allOut.includes('Welcome to mock telnet'), 'Telnet 输出剔除 IAC 协商字节');
+    ok(!/[\uFFFD]/.test(allOut), 'Telnet 输出无乱码替换符');
+    await waitFor(() => serverData.some(b => b.includes(Buffer.from([255, 253, 1]))), 3000);
+    ok(serverData.some(b => b.includes(Buffer.from([255, 253, 1]))), 'Telnet 客户端请求服务器回显（DO ECHO）');
+    ok(serverData.some(b => b.includes(Buffer.from([255, 251, 3]))), 'Telnet 客户端启用 SGA（WILL SGA）');
+    mgr.write(r.id, 'show version\r\n');
+    await waitFor(() => serverData.some(b => b.toString('latin1').includes('show version')), 3000);
+    ok(serverData.some(b => b.toString('latin1').includes('show version')), 'Telnet 输入转发到服务器');
+    mgr.resize(r.id, 100, 30);
+    await waitFor(() => serverData.some(b => b.includes(Buffer.from([255, 250, 31, 0, 100, 0, 30, 255, 240]))), 3000);
+    ok(serverData.some(b => b.includes(Buffer.from([255, 250, 31, 0, 100, 0, 30, 255, 240]))), 'Telnet 发送窗口尺寸 NAWS');
+    const endedT = new Promise((res) => mgr.on('end', (id) => res(id)));
+    mgr.close(r.id);
+    await endedT;
+    ok(true, 'Telnet 关闭会话触发 end');
+    await new Promise((res) => server.close(res));
+  }
+
+  // SSH：本地模拟服务器（ssh2 自带测试主机密钥）
+  {
+    const { Server } = require('ssh2');
+    const hostKey = fs.readFileSync(path.join(root, 'node_modules', 'ssh2', 'test', 'fixtures', 'ssh_host_rsa_key'));
+    const got = [];
+    const server = new Server({ hostKeys: [hostKey] }, (client) => {
+      client.on('authentication', (ctx) => {
+        if (ctx.method === 'password' && ctx.username === 'admin' && ctx.password === 'secret') ctx.accept();
+        else ctx.reject();
+      }).on('ready', () => {
+        client.on('session', (accept) => {
+          const session = accept();
+          session.on('pty', (a, r, info) => a());
+          session.on('window-change', (a, r, info) => { if (info) got.push(['resize', info.cols, info.rows]); a && a(); });
+          session.on('shell', (accept2) => {
+            const stream = accept2();
+            stream.write('SSH-READY\r\n');
+            stream.on('data', (d) => got.push(['data', d.toString()]));
+            stream.on('close', () => stream.end());
+          });
+        });
+      });
+    });
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const port = server.address().port;
+    const mgr = new ShellManager();
+    const outs = [];
+    mgr.on('output', (id, d) => outs.push(d));
+    const r = mgr.connect({ protocol: 'ssh', host: '127.0.0.1', port, username: 'admin', password: 'secret', cols: 80, rows: 24 });
+    ok(r.ok, 'SSH 发起连接成功');
+    await waitFor(() => outs.join('').includes('SSH-READY'), 5000);
+    ok(outs.join('').includes('SSH-READY'), 'SSH 打开远程 Shell 并收到欢迎信息');
+    mgr.write(r.id, 'ping\r\n');
+    await waitFor(() => got.some(g => g[0] === 'data' && g[1].includes('ping')), 3000);
+    ok(got.some(g => g[0] === 'data' && g[1].includes('ping')), 'SSH 输入转发到服务器');
+    mgr.resize(r.id, 120, 40);
+    await waitFor(() => got.some(g => g[0] === 'resize' && g[1] === 120 && g[2] === 40), 3000);
+    ok(got.some(g => g[0] === 'resize' && g[1] === 120 && g[2] === 40), 'SSH 窗口尺寸同步（resize）');
+    const endedS = new Promise((res) => mgr.on('end', (id) => res(id)));
+    mgr.close(r.id);
+    await endedS;
+    ok(true, 'SSH 关闭会话触发 end');
+    await new Promise((res) => server.close(res));
+  }
+})().then(() => {
+  console.log('');
+  console.log(`结果：${pass} 通过，${fail} 失败`);
+  process.exit(fail ? 1 : 0);
+}).catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
