@@ -418,6 +418,8 @@ console.log('== 设备配置生成 / IP 规划 ==');
   ok(cisco.includes('!') && cisco.includes('no shutdown') && !hw.includes('no shutdown'), '思科配置含 ! 与 no shutdown，华为不含');
   const plan = U.ipPlan(gC.nodes, gC.links);
   ok(plan.rows.length >= 2 && plan.rows.some(r => r.IP === '10.0.0.1' && r.网段 === '10.0.0.0/24'), 'IP 规划含接口行与网段');
+  ok(plan.rows.some(r => r.IP === '10.0.0.1' && r.对端IP === '10.0.0.2'), 'IP 规划含对端接口 IP');
+  ok(plan.rows.every(r => '对端IP' in r), 'IP 规划每行都有对端IP 字段（管理行为空）');
   ok(plan.subnets.length >= 1 && plan.subnets[0].cidr === '10.0.0.0/24', 'IP 规划子网统计');
   // 按设备分组：同一设备的行必须连续（Excel 合并设备名列的前提）
   {
@@ -726,6 +728,30 @@ try {
   ok(out.includes('PASS'), 'VDX 通过官方 visio2003.xsd 校验');
 } catch (e) {
   ok(false, 'VDX 通过官方 visio2003.xsd 校验：' + String(e.stderr || e.message).slice(0, 120));
+}
+
+console.log('== 力导向布局（原样） / 拓扑分层布局（最少交叉） ==');
+{
+  const gX = M.textToGraph(M.SAMPLE_CSV);
+  for (const n of gX.nodes) { n.w = U.nodeWidthForName(n.name); n.h = U.nodeHeightFor(n); n.x = 0; n.y = 0; }
+  Layout.layoutNow(gX.nodes, gX.links, 320); // 纯力导向（不自动套分层）
+  ok(gX.nodes.every(n => Number.isFinite(n.x) && Number.isFinite(n.y)), '力导向布局坐标有效');
+  const cForce = U.countCrossings(gX.nodes, gX.links);
+  ok(typeof cForce === 'number' && cForce >= 0, '连线交叉计数可用（力导向 ' + cForce + '）');
+  // 手动拓扑分层布局：交叉数应不高于力导向，且接近 0
+  Layout.layerTopoLayout(gX.nodes, gX.links, {});
+  ok(gX.nodes.every(n => Number.isFinite(n.x) && Number.isFinite(n.y)), '拓扑分层布局坐标有效');
+  const cLayered = U.countCrossings(gX.nodes, gX.links);
+  ok(cLayered <= cForce && cLayered <= 2, '拓扑分层布局交叉数 ≤ 力导向（' + cForce + ' → ' + cLayered + '）');
+  // 大型拓扑
+  const gBig = M.textToGraph('源设备,源接口,源IP,目标设备,目标接口,目标IP\n' +
+    Array.from({ length: 30 }, (_, i) => `R${i % 5},G0,10.0.0.${i + 1},S${i % 10},G1,10.0.1.${i + 1}`).join('\n'));
+  for (const n of gBig.nodes) { n.w = U.nodeWidthForName(n.name); n.h = U.nodeHeightFor(n); n.x = 0; n.y = 0; }
+  Layout.layoutNow(gBig.nodes, gBig.links, 200);
+  const cfBig = U.countCrossings(gBig.nodes, gBig.links);
+  Layout.layerTopoLayout(gBig.nodes, gBig.links, {});
+  const clBig = U.countCrossings(gBig.nodes, gBig.links);
+  ok(clBig <= cfBig && clBig <= 40, '大拓扑分层布局交叉数不增（' + cfBig + ' → ' + clBig + '，边数 ' + gBig.links.length + '）');
 }
 
 console.log('== 性能：复杂拓扑（核心-汇聚-接入-终端 分层网络） ==');

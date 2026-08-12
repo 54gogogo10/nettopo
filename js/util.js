@@ -813,7 +813,7 @@ U.ipPlan = (nodes, links) => {
   const sorted = [...nodes].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
   for (const n of sorted) {
     if (n.mgmt) {
-      rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: '管理', IP: n.mgmt, 对端设备: '', 对端接口: '', 带宽: '', 网段: U.subnetOf(n.mgmt) || '', 备注: n.note || '' });
+      rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: '管理', IP: n.mgmt, 对端设备: '', 对端接口: '', 对端IP: '', 带宽: '', 网段: U.subnetOf(n.mgmt) || '', 备注: n.note || '' });
       addSubnet(n.mgmt, n.name);
     }
     for (const l of links) {
@@ -822,8 +822,9 @@ U.ipPlan = (nodes, links) => {
       const myIf = l.a === n.id ? l.aIf : l.bIf;
       const myIp = l.a === n.id ? l.aIp : l.bIp;
       const otIf = l.a === n.id ? l.bIf : l.aIf;
+      const otIp = l.a === n.id ? l.bIp : l.aIp; // 对端接口 IP
       if (myIp) {
-        rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: myIf || '', IP: myIp, 对端设备: other.name, 对端接口: otIf || '', 带宽: U.formatBw(l.bw), 网段: U.subnetOf(myIp) || '', 备注: l.note || '' });
+        rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: myIf || '', IP: myIp, 对端设备: other.name, 对端接口: otIf || '', 对端IP: otIp || '', 带宽: U.formatBw(l.bw), 网段: U.subnetOf(myIp) || '', 备注: l.note || '' });
         addSubnet(myIp, n.name);
       }
     }
@@ -923,7 +924,7 @@ U.buildReportHtml = (nodes, links, opts) => {
       const r = rows[k];
       ipRows.push(`<tr>${k === i ? `<td rowspan="${span}"><b>${esc(name)}</b></td>` : ''}
         <td>${esc(r.类型)}</td><td>${esc(r.接口)}</td><td>${esc(r.IP)}</td>
-        <td>${esc(r.对端设备)}</td><td>${esc(r.对端接口)}</td><td>${esc(r.带宽)}</td><td>${esc(r.网段)}</td><td>${esc(r.备注)}</td></tr>`);
+        <td>${esc(r.对端设备)}</td><td>${esc(r.对端接口)}</td><td>${esc(r.对端IP)}</td><td>${esc(r.带宽)}</td><td>${esc(r.网段)}</td><td>${esc(r.备注)}</td></tr>`);
     }
     i = j;
   }
@@ -964,7 +965,7 @@ pre{background:#0f172a;color:#e2e8f0;padding:12px 14px;border-radius:10px;font:1
 <h2>设备清单</h2>
 <table><tr><th>设备名</th><th>类型</th><th>管理地址</th><th>接口数</th><th>备注</th></tr>${devRows}</table>
 <h2>IP 规划</h2>
-<table><tr><th>设备名</th><th>类型</th><th>接口</th><th>IP</th><th>对端设备</th><th>对端接口</th><th>带宽</th><th>网段</th><th>备注</th></tr>${ipRows}</table>
+<table><tr><th>设备名</th><th>类型</th><th>接口</th><th>IP</th><th>对端设备</th><th>对端接口</th><th>对端IP</th><th>带宽</th><th>网段</th><th>备注</th></tr>${ipRows}</table>
 <h2>子网统计</h2>
 <table><tr><th>网段</th><th>设备数</th><th>设备</th></tr>${subRows}</table>
 <h2>链路明细</h2>
@@ -1058,6 +1059,30 @@ U.bestPath = (nodes, links, fromId, toId, opts) => {
   }
   nodeIds.unshift(fromId);
   return { nodeIds, linkIds, bottleneck: best.get(toId) };
+};
+
+/* ---------- 连线交叉计数（直线边，用于评估布局质量） ---------- */
+U.countCrossings = (nodes, links) => {
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const segs = [];
+  for (const l of links) {
+    const a = byId.get(l.a), b = byId.get(l.b);
+    if (!a || !b) continue;
+    segs.push({ x1: a.x + a.w / 2, y1: a.y + a.h / 2, x2: b.x + b.w / 2, y2: b.y + b.h / 2 });
+  }
+  const cross = (s, x, y, x2, y2) => (x - s.x1) * (y2 - s.y2) - (y - s.y1) * (x2 - s.x2);
+  let c = 0;
+  for (let i = 0; i < segs.length; i++) {
+    for (let j = i + 1; j < segs.length; j++) {
+      const p = segs[i], q = segs[j];
+      const d1 = cross(q, p.x1, p.y1, p.x2, p.y2);
+      const d2 = cross(q, p.x2, p.y2, p.x1, p.y1);
+      const d3 = cross(p, q.x1, q.y1, q.x2, q.y2);
+      const d4 = cross(p, q.x2, q.y2, q.x1, q.y1);
+      if (d1 * d2 < 0 && d3 * d4 < 0) c++;
+    }
+  }
+  return c;
 };
 
 /* ---------- 节点默认尺寸 ---------- */

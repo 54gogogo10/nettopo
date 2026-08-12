@@ -226,11 +226,12 @@ function applyLayoutPreset(kind) {
   else if (kind === 'grid') Layout.gridLayout(state.nodes, { cx: c.x, cy: c.y });
   else if (kind === 'layer') Layout.layerLayout(state.nodes, { cx: c.x, cy: c.y });
   else if (kind === 'tier') Layout.tierLayout(state.nodes, { cx: c.x, cy: c.y });
+  else if (kind === 'topo') Layout.layerTopoLayout(state.nodes, state.links, { cx: c.x, cy: c.y });
   renderer.setData(state.nodes, state.links, state.texts);
   refreshAll();
   renderer.fit();
   saveGraph();
-  toast(kind === 'ring' ? '已应用环形布局' : kind === 'grid' ? '已应用网格布局' : kind === 'tier' ? '已应用三层架构布局（核心-汇聚-接入）' : '已应用分层布局（按类型）');
+  toast(kind === 'ring' ? '已应用环形布局' : kind === 'grid' ? '已应用网格布局' : kind === 'tier' ? '已应用三层架构布局（核心-汇聚-接入）' : kind === 'topo' ? '已应用拓扑分层布局（最少交叉）' : '已应用分层布局（按类型）');
 }
 
 /* ================= 路径分析 ================= */
@@ -2336,6 +2337,7 @@ function wire() {
     { ic: 'layout', label: '环形布局', act: () => applyLayoutPreset('ring') },
     { ic: 'layout', label: '分层布局（按类型）', act: () => applyLayoutPreset('layer') },
     { ic: 'layout', label: '三层架构布局（核心-汇聚-接入）', act: () => applyLayoutPreset('tier') },
+    { ic: 'layout', label: '拓扑分层布局（最少交叉）', act: () => applyLayoutPreset('topo') },
     { ic: 'layout', label: '网格布局', act: () => applyLayoutPreset('grid') },
     { sep: true },
     { ic: 'fit', label: '适应视图 (F)', act: () => renderer.fit() },

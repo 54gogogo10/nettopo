@@ -247,5 +247,97 @@ function tierLayout(nodes, opts) {
   }
 }
 
-global.TopoLayout = { simulate, runLayout, layoutNow, ringLayout, gridLayout, layerLayout, tierLayout };
+/* 拓扑分层布局（Sugiyama 简化版）：BFS 分层 + 重心排序，显著减少连线交叉。
+ * 保持各连通分量原有中心，只调整分量内部结构；完成后自动做碰撞分离。 */
+function layerTopoLayout(nodes, links, opts) {
+  opts = opts || {};
+  const n = nodes.length;
+  if (!n) return;
+  const gapX = opts.gapX != null ? opts.gapX : 300;
+  const gapY = opts.gapY != null ? opts.gapY : 170;
+  const byId = new Map(nodes.map(nd => [nd.id, nd]));
+  const adj = new Map();
+  for (const nd of nodes) adj.set(nd.id, []);
+  for (const l of links) {
+    if (adj.has(l.a)) adj.get(l.a).push(l.b);
+    if (adj.has(l.b)) adj.get(l.b).push(l.a);
+  }
+  for (const [k, v] of adj) adj.set(k, [...new Set(v)]);
+
+  // 连通分量
+  const comps = [];
+  const seen = new Set();
+  for (const nd of nodes) {
+    if (seen.has(nd.id)) continue;
+    const comp = [];
+    const q = [nd.id]; seen.add(nd.id);
+    while (q.length) {
+      const id = q.shift(); comp.push(id);
+      for (const v of adj.get(id) || []) if (!seen.has(v)) { seen.add(v); q.push(v); }
+    }
+    comps.push(comp);
+  }
+
+  const centerOf = (ids) => {
+    let sx = 0, sy = 0;
+    for (const id of ids) { const nd = byId.get(id); if (nd) { sx += nd.x + nd.w / 2; sy += nd.y + nd.h / 2; } }
+    const k = ids.length || 1;
+    return { x: sx / k, y: sy / k };
+  };
+
+  for (const comp of comps) {
+    if (comp.length === 1) continue;
+    const cc = centerOf(comp);
+    // 根 = 度最大的节点
+    let root = comp[0];
+    for (const id of comp) if ((adj.get(id) || []).length > (adj.get(root) || []).length) root = id;
+    // BFS 分层
+    const layer = new Map([[root, 0]]);
+    const q = [root];
+    while (q.length) {
+      const id = q.shift();
+      for (const v of adj.get(id) || []) if (!layer.has(v)) { layer.set(v, layer.get(id) + 1); q.push(v); }
+    }
+    const layers = [];
+    for (const id of comp) {
+      const L = layer.get(id) || 0;
+      if (!layers[L]) layers[L] = [];
+      layers[L].push(id);
+    }
+    // 重心排序：按相邻层邻居序号均值排序，迭代收敛减少交叉
+    const order = layers.map(arr => [...arr]);
+    const idx = new Map();
+    order.forEach((arr, L) => arr.forEach((id, i) => idx.set(id, { L, i })));
+    const bary = (id, L) => {
+      const ns = (adj.get(id) || []).filter(v => layer.has(v) && layer.get(v) !== L);
+      if (!ns.length) return 0;
+      let s = 0;
+      for (const v of ns) { const r = idx.get(v); if (r) s += r.i; }
+      return s / ns.length;
+    };
+    for (let iter = 0; iter < 6; iter++) {
+      for (let L = 0; L < order.length; L++) {
+        order[L].sort((a, b) => bary(a, L) - bary(b, L));
+        order[L].forEach((id, i) => { idx.get(id).i = i; });
+      }
+    }
+    // 摆放：层 = 列（x），层内按顺序上下排布（y），以连通分量原中心为基准
+    order.forEach((arr, L) => {
+      const x = cc.x + (L - (order.length - 1) / 2) * gapX;
+      arr.forEach((id, i) => {
+        const nd = byId.get(id);
+        if (!nd) return;
+        nd.x = x - nd.w / 2;
+        nd.y = cc.y + (i - (arr.length - 1) / 2) * gapY - nd.h / 2;
+      });
+    });
+  }
+
+  // 碰撞分离（防止层内/层间节点重叠）
+  const pos = nodes.map(nd => ({ x: nd.x + nd.w / 2, y: nd.y + nd.h / 2 }));
+  separateRects(pos, nodes);
+  nodes.forEach((nd, i) => { nd.x = pos[i].x - nd.w / 2; nd.y = pos[i].y - nd.h / 2; });
+}
+
+global.TopoLayout = { simulate, runLayout, layoutNow, ringLayout, gridLayout, layerLayout, tierLayout, layerTopoLayout };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
