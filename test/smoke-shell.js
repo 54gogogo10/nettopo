@@ -47,6 +47,9 @@ const httpsServer = https.createServer({
   cert: fs.readFileSync(path.join(root, 'test', 'fixtures', 'selfsigned.crt'))
 }, (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  if (req.url && req.url.startsWith('/ua')) { res.end('<script>document.title=navigator.userAgent</script>'); return; }
+  if (req.url && req.url.startsWith('/dlg')) { res.end('<script>document.title="BEFORE_DLG"; setTimeout(function(){ alert("hi"); confirm("ok"); document.title="AFTER_DLG"; }, 300);</script>'); return; }
+  if (req.url && req.url.startsWith('/pop')) { res.end('<script>window.open("/ua","_blank"); document.title="POP_OPENED";</script>'); return; }
   res.end('<!DOCTYPE html><html><head><title>NetTopo Secured Test</title></head><body>secured page</body></html>');
 });
 function listen(server, port) { return new Promise((res, rej) => { server.once('error', rej); server.listen(port, '127.0.0.1', res); }); }
@@ -298,6 +301,29 @@ async function connectCDP(target) {
     await webv.eval(`document.getElementById('wvAddr').value = 'https://127.0.0.1:2325/'; document.getElementById('wvAddrForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))`);
     await sleep(2500);
     ok(!(await webv.eval(`!!document.getElementById('certModal')`)), '记住站点后再次打开不再询问');
+
+    // 显示兼容性：UA、弹窗抑制、window.open 转标签、页面缩放
+    const navTo = (u) => webv.eval(`document.getElementById('wvAddr').value = '${u}'; document.getElementById('wvAddrForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))`);
+    await navTo('https://127.0.0.1:2325/ua');
+    ok(await waitText(webv, `document.querySelector('.wv-tab.active .tt')`, 'Chrome', 8000), '管理页 UA 为 Chrome');
+    ok(!(await webv.eval(`(document.querySelector('.wv-tab.active .tt') || {}).textContent || ''`)).includes('Electron'), 'UA 不含 Electron 标识');
+    await navTo('https://127.0.0.1:2325/dlg');
+    ok(await waitText(webv, `document.querySelector('.wv-tab.active .tt')`, 'AFTER_DLG', 8000), 'alert/confirm 弹窗被抑制，页面继续执行');
+    const tabsBefore = await webv.eval(`document.querySelectorAll('.wv-tab').length`);
+    await navTo('https://127.0.0.1:2325/pop');
+    const tPop = Date.now();
+    let popTitles = '';
+    while (Date.now() - tPop < 8000) {
+      popTitles = await webv.eval(`[...document.querySelectorAll('.wv-tab .tt')].map(x => x.textContent).join('|')`);
+      if (popTitles.includes('POP_OPENED')) break;
+      await sleep(150);
+    }
+    ok(popTitles.includes('POP_OPENED'), 'window.open 页面继续执行');
+    ok(await webv.eval(`document.querySelectorAll('.wv-tab').length`) === tabsBefore + 1, 'window.open 弹窗转为新标签');
+    await webv.eval(`document.getElementById('wvZoomIn').click()`);
+    ok(await webv.eval(`document.getElementById('wvZoomVal').textContent === '110%' && localStorage.getItem('webviewZoom') === '1.1'`), '页面缩放增大并记忆');
+    await webv.eval(`document.getElementById('wvZoomOut').click()`);
+    ok(await webv.eval(`document.getElementById('wvZoomVal').textContent === '100%'`), '页面缩放恢复 100%');
 
     // 帮助页与关于弹窗
     await main.eval(`document.getElementById('btnHelp').click()`);

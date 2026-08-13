@@ -135,6 +135,15 @@ function createWebWindow() {
     webReady = true;
     while (certQueue.length) webWin.webContents.send('web:cert-error', certQueue.shift());
   });
+  // 设备页面 window.open 弹窗 → 转为本窗口新标签（必须在加载前安装）
+  webWin.webContents.on('did-attach-webview', (e, guest) => {
+    try {
+      guest.setWindowOpenHandler(({ url }) => {
+        if (webWin && !webWin.isDestroyed()) webWin.webContents.send('web:newtab', { url });
+        return { action: 'deny' };
+      });
+    } catch (err) { /* ignore */ }
+  });
   return webWin;
 }
 
@@ -201,6 +210,9 @@ app.whenReady().then(() => {
       defaultPath: path.join(app.getPath('downloads'), item.getFilename())
     });
   });
+  // 设备管理 Web 页兼容性：使用干净的 Chrome UA（去掉 Electron 标识，避免设备页面误判）
+  // 弹窗抑制与 window.open 转标签由 webview 元素的 preload/allowpopups 处理
+  session.fromPartition('persist:nettopo-web').setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
   createWindow();
   // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
   app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {

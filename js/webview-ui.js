@@ -16,6 +16,23 @@
     if (!/^https?:\/\//i.test(u)) u = 'http://' + u;
     return u;
   };
+  /* ---- 页面显示缩放（0.6~2.0，本机记忆） ---- */
+  const ZOOM_KEY = 'webviewZoom';
+  let pageZoom = (() => {
+    try { const v = parseFloat(localStorage.getItem(ZOOM_KEY)); return Number.isFinite(v) ? Math.max(0.6, Math.min(2, v)) : 1; }
+    catch (e) { return 1; }
+  })();
+  const zoomValEl = $('#wvZoomVal');
+  const applyZoom = (wv) => {
+    try { const wc = wv.getWebContents(); if (wc && wc.setZoomFactor) wc.setZoomFactor(pageZoom); } catch (e) { /* 未就绪时忽略 */ }
+  };
+  const setPageZoom = (delta) => {
+    pageZoom = Math.max(0.6, Math.min(2, Math.round((pageZoom + delta) * 100) / 100));
+    try { localStorage.setItem(ZOOM_KEY, String(pageZoom)); } catch (e) { /* ignore */ }
+    if (zoomValEl) zoomValEl.textContent = Math.round(pageZoom * 100) + '%';
+    const id = active();
+    if (id) applyZoom(tabs.get(id).wv);
+  };
   const active = () => { for (const [id, t] of tabs) if (t.tabEl.classList.contains('active')) return id; return null; };
 
   function showErr(rec, msg) {
@@ -41,6 +58,7 @@
     const wv = document.createElement('webview');
     wv.setAttribute('src', url);
     wv.setAttribute('partition', 'persist:nettopo-web');
+    wv.setAttribute('allowpopups', ''); // 允许弹窗（由 new-window 事件转为本窗口标签）
     pageEl.appendChild(wv);
     pagesEl.appendChild(pageEl);
     tabsEl.appendChild(tabEl);
@@ -48,6 +66,33 @@
     tabs.set(id, rec);
 
     wv.addEventListener('page-title-updated', (e) => { rec.titleEl.textContent = e.title || rec.titleEl.textContent; });
+    wv.addEventListener('dom-ready', () => {
+      // 兼容性：覆盖 alert/confirm/prompt，避免设备管理页弹窗等待导致页面卡死（用元素方法，随时可用）
+      try {
+        wv.executeJavaScript(`(() => {
+          try {
+            const log = (t, m) => { try { console.log('[webview:' + t + '] ' + String(m == null ? '' : m).slice(0, 300)); } catch (e) {} };
+            window.alert = (m) => log('alert', m);
+            window.confirm = (m) => { log('confirm', m); return true; };
+            window.prompt = (m, d) => { log('prompt', m); return d == null ? '' : String(d); };
+          } catch (e) {}
+        })()`).catch(() => {});
+      } catch (e) { /* ignore */ }
+      applyZoom(wv);
+      // window.open 兜底：guest webContents 可能稍后才可获取，做几次重试
+      let tries = 0;
+      const install = () => {
+        try {
+          const wc = wv.getWebContents();
+          if (wc && wc.setWindowOpenHandler) {
+            wc.setWindowOpenHandler(({ url }) => { addTab({ url }); return { action: 'deny' }; });
+            return;
+          }
+        } catch (e) { /* ignore */ }
+        if (++tries < 10) setTimeout(install, 100);
+      };
+      install();
+    });
     wv.addEventListener('did-start-loading', () => { rec.loading = true; rec.spinEl.style.display = ''; clearErr(rec); });
     wv.addEventListener('did-stop-loading', () => { rec.loading = false; rec.spinEl.style.display = 'none'; });
     wv.addEventListener('did-fail-load', (e) => { if (e.errorCode !== -3) showErr(rec, e.errorDescription); });
@@ -194,6 +239,14 @@
       const t = tabs.get(id);
       try { t.wv.loadURL(normUrl(addrEl.value)); } catch (err) { toast('地址无效'); }
       t.wv.focus();
+    });
+    if (zoomValEl) zoomValEl.textContent = Math.round(pageZoom * 100) + '%';
+    if ($('#wvZoomIn')) $('#wvZoomIn').onclick = () => setPageZoom(0.1);
+    if ($('#wvZoomOut')) $('#wvZoomOut').onclick = () => setPageZoom(-0.1);
+    document.addEventListener('keydown', (e) => {
+      if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#modalRoot')) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_')) { e.preventDefault(); setPageZoom(-0.1); }
+      if ((e.ctrlKey || e.metaKey) && (e.key === '+' || e.key === '=')) { e.preventDefault(); setPageZoom(0.1); }
     });
     backEl.onclick = () => { const id = active(); if (id) { try { tabs.get(id).wv.goBack(); } catch (e) {} } };
     fwdEl.onclick = () => { const id = active(); if (id) { try { tabs.get(id).wv.goForward(); } catch (e) {} } };

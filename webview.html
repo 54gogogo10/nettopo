@@ -5,8 +5,8 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob: http: https:; font-src 'self' data:; worker-src 'self' blob:; frame-src http: https:;"/>
 <title>NetTopo 设备管理页</title>
-<link rel="stylesheet" href="css/style.css?v=20260812v"/>
-<link rel="stylesheet" href="css/webview.css?v=20260812v"/>
+<link rel="stylesheet" href="css/style.css?v=20260812w"/>
+<link rel="stylesheet" href="css/webview.css?v=20260812w"/>
 </head>
 <body class="wv-body">
 
@@ -21,6 +21,11 @@
   <button id="wvFwd" class="wv-nav-btn" title="前进">→</button>
   <button id="wvReload" class="wv-nav-btn" title="刷新">⟳</button>
   <form id="wvAddrForm" class="wv-addr"><input id="wvAddr" type="text" placeholder="输入 http:// 或 https:// 地址后回车打开"/></form>
+  <div class="wv-zoom" title="页面显示缩放">
+    <button id="wvZoomOut" class="wv-nav-btn" title="缩小页面 (Ctrl+-)">A−</button>
+    <span id="wvZoomVal" class="wv-zoom-val">100%</span>
+    <button id="wvZoomIn" class="wv-nav-btn" title="放大页面 (Ctrl+=)">A+</button>
+  </div>
 </div>
 
 <main id="wvPages" class="wv-pages"></main>
@@ -34,6 +39,6 @@
 
 <div id="modalRoot"></div>
 
-<script src="js/webview-ui.js?v=20260812v"></script>
+<script src="js/webview-ui.js?v=20260812w"></script>
 </body>
 </html>

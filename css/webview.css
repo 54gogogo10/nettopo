@@ -68,3 +68,9 @@
 .wv-empty p { font-size: 14px; color: var(--text); }
 .wv-empty small { max-width: 360px; text-align: center; line-height: 1.7; }
 .wv-empty .tb { height: 34px; padding: 0 16px; }
+
+.wv-zoom { display: flex; align-items: center; gap: 3px; flex: none; margin-left: 2px; }
+.wv-zoom-val {
+  min-width: 40px; text-align: center; font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
