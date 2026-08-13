@@ -19,12 +19,13 @@
 - **Web Shell（桌面版）**：选中设备右键「Web Shell（SSH/Telnet）」连接管理口；在**独立窗口**以**多标签**方式管理多台设备，主界面不锁定可继续操作拓扑。每台设备可配置**多个管理口地址**（默认一个，编辑设备时点击「＋ 增加管理口」），Web Shell 连接时可下拉选择；Web Shell 底部带**快捷按钮条**（SecureCRT Button Bar 风格）：右键或点「＋」新建按钮，点击把预置命令发送到当前会话，支持 \n 回车、\t 制表、\p 暂停 1 秒，编辑/删除/排序，配置本机记忆
 - **设备管理 Web 页（桌面版）**：设备可配置「管理Web页URL」，右键设备「打开设备管理页面」在**独立窗口**以**多标签**方式打开多个设备的管理网页，主界面不锁定；HTTPS 自签名/无效证书会弹出**安全告警**，手动确认“继续访问”后加载，并可记住该站点（本次运行）；显示兼容性：使用标准 Chrome UA（去掉 Electron 标识）、抑制 alert/confirm/prompt 弹窗、window.open 弹窗自动转为新标签、页面缩放 A−/A+（Ctrl+-/Ctrl+=，记忆）
 - **网络故障模拟**：右键连线「标记链路故障（模拟断链）」，路径分析自动绕行
+- **备份管理（桌面版）**：自动备份与「立即备份」集中保存到本机备份库（用户数据目录），「备份管理」面板可浏览时间/大小、一键恢复、删除与清空，并按「保留最近 N 份」自动滚动清理（可在自动备份设置中调整）
 
 ## 使用
 
 **推荐使用桌面版**（`dist/` 下的 `NetTopo-...-portable.exe`，免安装、零后端）：
 
-- 支持全部功能，包括 **Web Shell（SSH/Telnet）独立多标签窗口**、工程自动备份
+- 支持全部功能，包括 **Web Shell（SSH/Telnet）独立多标签窗口**、**工程自动备份与备份管理**
 - 启动后左上角状态栏显示版本号（如 `v20260812m`）
 
 也可直接用浏览器打开 `index.html`（Chrome / Edge）或部署到任意静态服务器——画布编辑、导入导出等核心功能均可用，**Web Shell 为桌面版专属**（浏览器无本地网络能力）。
@@ -70,6 +71,7 @@
 | 模板添加           | 「编辑 ▾ 从模板添加设备…」          |
 | 拓扑校验           | 「布局 ▾ 拓扑校验」，报告内可点击定位 |
 | Web Shell           | 右键设备「Web Shell（SSH/Telnet）…」，独立窗口多标签（桌面版） |
+| 备份管理            | 「文件 ▾ 备份管理…」：浏览/恢复/删除/清空本机备份库（桌面版） |
 | 自动布局 / 适应视图 | L / F                             |
 
 ## 项目结构
@@ -92,6 +94,7 @@ nettopo/
 │   ├── vsdx.js        # VSDX 导出（2012 原生格式 + 内置 ZIP 写入器）
 │   ├── pdf.js         # PDF 导出（SVG 渲染 + 手写 PDF 生成器）
 │   ├── shell.js       # SSH/Telnet 会话管理（主进程，纯 Node）
+│   ├── backup-store.js # 工程备份库（本机备份目录、滚动保留、文件名校验，主进程）
 │   ├── shell-ui.js    # Web Shell 窗口标签/终端逻辑
 │   ├── webview-ui.js  # 设备管理页窗口标签/内嵌浏览器逻辑
 │   └── app.js         # 主逻辑（UI、撤销、面板、类型管理、导入导出）
@@ -102,9 +105,10 @@ nettopo/
 ## 开发测试
 
 ```bash
-node test/run-tests.js        # 309 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、多管理口、数据清洗、布局、路径、性能）
+node test/run-tests.js        # 357 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、多管理口、数据清洗、布局、路径、备份库、性能）
 cd test && npm i && node e2e.js   # 无头 Chrome 端到端（需本机 Chrome）
 node test/smoke-shell.js          # Electron 端到端冒烟（Web Shell 独立窗口/多标签，需本机桌面环境）
+node test/smoke-backup.js         # Electron 冒烟（备份管理：IPC 备份库 + 弹窗浏览/删除，需本机桌面环境）
 python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备用格式）
 ```
 

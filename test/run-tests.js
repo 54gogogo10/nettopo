@@ -908,6 +908,80 @@ console.log('== 打包配置 ==');
   ok(yml.includes('- js/**/*'), 'electron-builder 打包清单包含 js/**/*');
 }
 
+console.log('== 备份管理（本地备份库） ==');
+{
+  const os = require('os');
+  const { BackupStore } = require(path.join(root, 'js', 'backup-store.js'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-bk-'));
+  const B = new BackupStore(tmp);
+  const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+
+  ok(BackupStore.validName('自动备份_20260813_151020.nettopo'), '文件名白名单：合法中文名');
+  ok(BackupStore.validName('备份_20260813_151020_1.nettopo'), '文件名白名单：同秒序号后缀');
+  ok(BackupStore.validName('a-b_c.d.nettopo'), '文件名白名单：英文点横线');
+  ok(!BackupStore.validName('../evil.nettopo'), '文件名白名单：拒绝 ../ 路径穿越');
+  ok(!BackupStore.validName('..\\evil.nettopo'), '文件名白名单：拒绝 ..\\ 路径穿越');
+  ok(!BackupStore.validName('a/b.nettopo'), '文件名白名单：拒绝正斜杠');
+  ok(!BackupStore.validName('a\\b.nettopo'), '文件名白名单：拒绝反斜杠');
+  ok(!BackupStore.validName('a..b.nettopo'), '文件名白名单：拒绝连续点');
+  ok(!BackupStore.validName('x.txt'), '文件名白名单：拒绝非 .nettopo');
+  ok(!BackupStore.validName(''), '文件名白名单：拒绝空名');
+
+  ok(!B.save('', 'manual', 30).ok, '空内容拒绝保存');
+  ok(!B.save('   ', 'manual', 30).ok, '空白内容拒绝保存');
+  const small = new BackupStore(tmp + '-small', { maxBytes: 64 });
+  ok(!small.save('x'.repeat(100), 'manual', 30).ok, '超限内容拒绝保存');
+
+  const r1 = B.save('{"a":1}', 'auto', 30);
+  ok(r1.ok && /^自动备份_\d{8}_\d{6}\.nettopo$/.test(r1.name), '自动备份文件名格式（label=auto）');
+  ok(r1.count === 1, '保存后返回当前份数');
+  const r2 = B.save('{"a":2}', 'manual', 30);
+  ok(r2.ok && /^备份_\d{8}_\d{6}\.nettopo$/.test(r2.name), '手动备份文件名格式（label=manual）');
+  const r2b = B.save('{"a":2b}', 'manual', 30);
+  ok(r2b.ok && r2b.name !== r2.name, '同秒多次备份自动追加序号不覆盖');
+
+  const list = B.list();
+  ok(list.ok && list.items.length === 3, '列表返回全部 3 份');
+  ok(list.items[0].time >= list.items[list.items.length - 1].time, '列表按时间倒序');
+  ok(list.items.every(it => typeof it.size === 'number' && it.size > 0), '列表包含文件大小');
+  ok(B.read(r1.name).content === '{"a":1}', '读取备份内容一致');
+  ok(!B.read('../x.nettopo').ok, '读取拒绝路径穿越');
+  ok(!B.read('missing.nettopo').ok, '读取不存在的备份报错');
+
+  // 轮转保留：写入 5 份，keep=3 仅保留最新 3 份
+  for (let i = 0; i < 5; i++) B.save('{"i":' + i + '}', 'manual', 3);
+  const l5 = B.list();
+  ok(l5.items.length === 3, '保留份数裁剪到 3');
+  ok(l5.items.every(it => /^备份_/.test(it.name)), '裁剪后保留最新 3 份');
+  ok(!B.read('备份_19700101_000000.nettopo').ok, '最旧备份已被裁剪删除');
+
+  // 无效 keep 回退默认 30
+  const rk = B.save('{"k":1}', 'manual', 0);
+  ok(rk.ok, 'keep=0 时按默认 30 保存');
+
+  // 删除
+  ok(B.remove(l5.items[0].name).ok, '删除单份备份');
+  ok(!B.remove(l5.items[0].name).ok, '重复删除报错');
+  ok(!B.remove('../x.nettopo').ok, '删除拒绝路径穿越');
+  const cntBeforeClear = B.list().items.length;
+  ok(cntBeforeClear === 3, '清空前应有 3 份（裁剪 3 + 手动 1 - 删除 1）');
+  const ra = B.removeAll();
+  ok(ra.ok && ra.removed === cntBeforeClear, '清空全部备份（' + cntBeforeClear + ' 份）');
+  ok(B.list().items.length === 0, '清空后列表为空');
+
+  // 目录中存在无关文件时不受影响
+  fs.writeFileSync(path.join(tmp, 'random.txt'), 'x');
+  fs.mkdirSync(path.join(tmp, 'subdir'));
+  B.save('{"x":1}', 'manual', 30);
+  ok(B.list().items.length === 1, '列表忽略无关文件与子目录');
+  const ra2 = B.removeAll();
+  ok(ra2.ok && ra2.removed === 1, '清空仅删除 .nettopo 备份');
+  ok(fs.existsSync(path.join(tmp, 'random.txt')), '清空不误删无关文件');
+
+  cleanup();
+  try { fs.rmSync(tmp + '-small', { recursive: true, force: true }); } catch (e) { /* ignore */ }
+}
+
 console.log('== Web Shell（SSH/Telnet 会话） ==');
 
 (async () => {

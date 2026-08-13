@@ -22,3 +22,12 @@ contextBridge.exposeInMainWorld('topoWeb', {
   onCertError: (cb) => ipcRenderer.on('web:cert-error', (_e, info) => cb(info)),
   allowCert: (payload) => ipcRenderer.invoke('web:cert-allow', payload)
 });
+
+contextBridge.exposeInMainWorld('topoBackup', {
+  save: (payload) => ipcRenderer.invoke('backup:save', payload),
+  list: () => ipcRenderer.invoke('backup:list'),
+  read: (name) => ipcRenderer.invoke('backup:read', { name }),
+  remove: (name) => ipcRenderer.invoke('backup:delete', { name }),
+  removeAll: () => ipcRenderer.invoke('backup:delete', { all: true }),
+  openFolder: () => ipcRenderer.invoke('backup:open-folder')
+});

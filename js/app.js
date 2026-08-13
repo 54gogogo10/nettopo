@@ -23,7 +23,7 @@ const state = {
   showSubnets: localStorage.getItem('nettopo.showSubnets') === '1', // 子网分组显示开关
   subnetNames: {},  // 子网 -> 自定义名称（子网分组命名）
   downLinks: new Set(),  // 故障链路 id 集合（模拟断链，路径分析绕行）
-  autoBackup: { on: localStorage.getItem('nettopo.autoBackup') === '1', minutes: Number(localStorage.getItem('nettopo.autoBackupMin') || 10) },
+  autoBackup: { on: localStorage.getItem('nettopo.autoBackup') === '1', minutes: Number(localStorage.getItem('nettopo.autoBackupMin') || 10), keep: Math.min(200, Math.max(1, Number(localStorage.getItem('nettopo.autoBackupKeep') || 30) || 30)) },
   texts: []  // 画布文本框（自定义字体样式）
 };
 let layoutCancel = false;
@@ -888,9 +888,10 @@ function openAutoBackup() {
   ov.innerHTML = `
     <div class="modal" role="dialog" style="width:460px">
       <h3>自动备份工程</h3>
-      <div class="m-sub">按固定间隔自动下载 .nettopo 备份（内容有变化时才备份，避免空文件）</div>
+      <div class="m-sub">按固定间隔自动备份工程（内容有变化时才备份，避免重复）${window.topoBackup ? '，备份保存在本机备份库，可在「备份管理」中浏览/恢复' : ''}</div>
       <div class="m-row"><label style="display:flex;align-items:center;gap:6px"><input id="abOn" type="checkbox" ${state.autoBackup.on ? 'checked' : ''}/> 启用自动备份</label></div>
       <div class="m-row"><label>间隔（分钟）</label><input id="abMin" type="number" min="1" max="120" value="${state.autoBackup.minutes}" style="width:90px"/></div>
+      <div class="m-row"><label>保留最近份数</label><input id="abKeep" type="number" min="1" max="200" value="${Math.min(200, Math.max(1, state.autoBackup.keep))}" style="width:90px"/></div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="cancel">取消</button>
         <button type="button" class="tb primary" data-act="save">保存</button>
@@ -904,11 +905,13 @@ function openAutoBackup() {
   ov.querySelector('[data-act=save]').onclick = () => {
     state.autoBackup.on = ov.querySelector('#abOn').checked;
     state.autoBackup.minutes = Math.min(120, Math.max(1, Number(ov.querySelector('#abMin').value || 10)));
+    state.autoBackup.keep = Math.min(200, Math.max(1, Number(ov.querySelector('#abKeep').value || 30) || 30));
     localStorage.setItem('nettopo.autoBackup', state.autoBackup.on ? '1' : '0');
     localStorage.setItem('nettopo.autoBackupMin', String(state.autoBackup.minutes));
+    localStorage.setItem('nettopo.autoBackupKeep', String(state.autoBackup.keep));
     close();
     setupAutoBackup();
-    toast(state.autoBackup.on ? '已启用自动备份（每 ' + state.autoBackup.minutes + ' 分钟）' : '已关闭自动备份');
+    toast(state.autoBackup.on ? '已启用自动备份（每 ' + state.autoBackup.minutes + ' 分钟，保留最近 ' + state.autoBackup.keep + ' 份）' : '已关闭自动备份');
   };
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
 }
@@ -918,19 +921,21 @@ function setupAutoBackup() {
   setupAutoBackup._last = '';
   setupAutoBackup._timer = setInterval(() => {
     if (!state.nodes.length) return;
-    const data = {
-      app: 'NetTopo', version: 1, savedAt: new Date().toISOString(),
-      nodes: state.nodes, links: state.links, texts: state.texts,
-      pan: renderer.pan, zoom: renderer.zoom,
-      showLabels: state.showLabels, showSubnets: state.showSubnets,
-      subnetNames: state.subnetNames, downLinks: [...state.downLinks],
-      customTypes: U.customTypes, typeOverrides: U.typeOverrides
-    };
+    const data = buildProjectData();
     const hash = JSON.stringify([state.nodes, state.links, state.texts, state.downLinks ? [...state.downLinks] : []]);
     if (hash === setupAutoBackup._last) return;
     setupAutoBackup._last = hash;
-    U.download(`自动备份_${U.fmtDate()}.nettopo`, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));
-    toast('已自动备份工程（' + U.fmtDate() + '）');
+    if (window.topoBackup) {
+      // 桌面版：写入本机备份库（备份管理可浏览/恢复）
+      window.topoBackup.save({ content: JSON.stringify(data, null, 2), label: 'auto', keep: state.autoBackup.keep }).then((res) => {
+        if (res && res.ok) toast('已自动备份工程（' + res.name + '，共 ' + res.count + ' 份）');
+        else toast('自动备份失败：' + ((res && res.error) || '未知错误'));
+      }).catch(() => {});
+    } else {
+      // 浏览器版：无本地文件能力，回退为下载
+      U.download(`自动备份_${U.fmtDate()}.nettopo`, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));
+      toast('已自动备份工程（' + U.fmtDate() + '）');
+    }
   }, state.autoBackup.minutes * 60000);
 }
 
@@ -1068,8 +1073,9 @@ function openImageExport() {
 }
 
 /* ================= 工程文件（.nettopo 保存/打开） ================= */
-function saveProject() {
-  const data = {
+/** 构建工程数据对象（保存工程 / 自动备份 / 立即备份共用） */
+function buildProjectData() {
+  return {
     app: 'NetTopo',
     version: 1,
     savedAt: new Date().toISOString(),
@@ -1085,23 +1091,20 @@ function saveProject() {
     subnetNames: state.subnetNames,
     downLinks: [...state.downLinks]
   };
+}
+
+function saveProject() {
+  const data = buildProjectData();
   U.download(`网络拓扑工程_${U.fmtDate()}.nettopo`,
     new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));
   toast('已保存工程文件（.nettopo，含位置与自定义类型）');
 }
 
-async function loadProject(file) {
-  const { buffer } = await U.readFile(file);
-  let data;
-  try {
-    data = JSON.parse(U.decodeBytes(buffer));
-  } catch (e) {
-    toast('工程文件解析失败：不是有效的 .nettopo 文件'); return;
-  }
+/** 解析并应用工程数据（打开工程 / 恢复备份共用） */
+function applyProjectData(data) {
   if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) {
-    toast('工程文件格式不正确'); return;
+    toast('工程文件格式不正确'); return false;
   }
-  if (state.nodes.length && !(await confirmBox('打开工程将替换当前拓扑，是否继续？'))) return;
   if (Array.isArray(data.customTypes) || (data.typeOverrides && typeof data.typeOverrides === 'object')) {
     // 清洗非法颜色/图片，防止恶意工程注入 HTML/SVG
     const cleaned = U.sanitizeTypeData(data.typeOverrides, data.customTypes);
@@ -1130,7 +1133,170 @@ async function loadProject(file) {
   else renderer.fit();
   refreshAll();
   saveGraph();
-  toast(`已打开工程：${state.nodes.length} 台设备、${state.links.length} 条链路`);
+  return true;
+}
+
+async function loadProject(file) {
+  const { buffer } = await U.readFile(file);
+  let data;
+  try {
+    data = JSON.parse(U.decodeBytes(buffer));
+  } catch (e) {
+    toast('工程文件解析失败：不是有效的 .nettopo 文件'); return;
+  }
+  if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) {
+    toast('工程文件格式不正确'); return;
+  }
+  if (state.nodes.length && !(await confirmBox('打开工程将替换当前拓扑，是否继续？'))) return;
+  if (applyProjectData(data)) toast(`已打开工程：${state.nodes.length} 台设备、${state.links.length} 条链路`);
+}
+
+/* ================= 备份管理（桌面版本地备份库） ================= */
+const BACKUP_ICON_HTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="8.5" width="17" height="10" rx="1.8"/><path d="M3.5 8.5v-3h17v3M9 12h6"/></svg>';
+
+function fmtBackupTime(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function fmtBackupSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+/** 立即备份当前工程（桌面版写入备份库，浏览器版回退为下载） */
+function backupNow() {
+  if (!state.nodes.length) { toast('画布为空，无需备份'); return; }
+  const data = buildProjectData();
+  if (window.topoBackup) {
+    window.topoBackup.save({ content: JSON.stringify(data, null, 2), label: 'manual', keep: state.autoBackup.keep }).then((res) => {
+      if (res && res.ok) toast('已备份工程（' + res.name + '，共 ' + res.count + ' 份）');
+      else toast('备份失败：' + ((res && res.error) || '未知错误'));
+    }).catch(() => toast('备份失败'));
+  } else {
+    U.download(`网络拓扑备份_${U.fmtDate()}.nettopo`, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));
+    toast('浏览器版不支持备份库，已下载备份文件');
+  }
+}
+
+/** 备份管理弹窗：浏览 / 恢复 / 删除 / 立即备份 / 清空 */
+function openBackupManager() {
+  if (!window.topoBackup) {
+    openModal({
+      title: '备份管理',
+      sub: '备份管理为桌面版专属功能：自动/手动备份集中保存在本机备份库，可浏览、恢复与清理。浏览器版仍可通过下载保存备份文件。',
+      submit: '知道了',
+      onSubmit: () => {}
+    });
+    return;
+  }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:620px">
+      <h3>备份管理</h3>
+      <div class="m-sub" id="bkSub">正在读取备份列表…</div>
+      <div class="v-list" id="bkList" style="max-height:52vh"></div>
+      <div class="m-actions">
+        <button type="button" class="tb danger" data-act="clear">清空全部</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="folder"><i class="ic" data-ic="folder"></i>打开备份文件夹</button>
+        <button type="button" class="tb" data-act="now"><i class="ic" data-ic="save"></i>立即备份</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+
+  const listEl = ov.querySelector('#bkList');
+  const subEl = ov.querySelector('#bkSub');
+  const busy = new Set(); // 防止重复点击
+
+  async function refreshList() {
+    let res;
+    try { res = await window.topoBackup.list(); } catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+    if (!ov.isConnected) return;
+    if (!res || !res.ok) { subEl.textContent = (res && res.error) || '读取备份列表失败'; listEl.innerHTML = ''; return; }
+    const items = res.items || [];
+    subEl.textContent = `共 ${items.length} 份备份 · 保留最近 ${Math.min(200, Math.max(1, state.autoBackup.keep || 30))} 份 · 内容有变化的自动备份按间隔写入`;
+    if (!items.length) {
+      listEl.innerHTML = '<div class="vrow ok"><span class="v-ic">✓</span><span class="v-msg">暂无备份，点击「立即备份」创建第一份。</span></div>';
+      return;
+    }
+    listEl.innerHTML = items.map((it) => `
+      <div class="vrow" data-name="${U.escHtml(it.name)}">
+        <span class="v-ic" style="background:var(--accent)">${BACKUP_ICON_HTML}</span>
+        <span class="v-msg">
+          <b style="color:var(--text)">${U.escHtml(it.name)}</b><br>
+          <span style="color:var(--muted)">${fmtBackupTime(it.time)} · ${fmtBackupSize(it.size)}</span>
+        </span>
+        <button type="button" class="tb" data-act="restore" title="恢复该备份（替换当前拓扑）">恢复</button>
+        <button type="button" class="tb icon danger" data-act="del" title="删除该备份">
+          <i class="ic" data-ic="trash"></i>
+        </button>
+      </div>`).join('');
+    U.fillIcons();
+  }
+
+  listEl.addEventListener('click', async (e) => {
+    const row = e.target.closest('.vrow');
+    const btn = e.target.closest('button[data-act]');
+    if (!row || !btn) return;
+    const name = row.dataset.name;
+    const act = btn.dataset.act;
+    if (busy.has(name + act)) return;
+    if (act === 'del') {
+      if (!(await confirmBox(`删除备份「${name}」？此操作不可撤销。`))) return;
+      busy.add(name + act);
+      let res;
+      try { res = await window.topoBackup.remove(name); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
+      busy.delete(name + act);
+      if (res && res.ok) toast('已删除备份');
+      else toast('删除失败：' + ((res && res.error) || '未知错误'));
+      refreshList();
+    } else if (act === 'restore') {
+      if (state.nodes.length && !(await confirmBox(`恢复备份「${name}」将替换当前拓扑，是否继续？`))) return;
+      busy.add(name + act);
+      let res;
+      try { res = await window.topoBackup.read(name); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
+      busy.delete(name + act);
+      if (!res || !res.ok) { toast('恢复失败：' + ((res && res.error) || '未知错误')); return; }
+      let data;
+      try { data = JSON.parse(res.content); } catch (e) { toast('备份内容解析失败'); return; }
+      if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) { toast('备份文件格式不正确'); return; }
+      close();
+      if (applyProjectData(data)) toast(`已恢复备份：${state.nodes.length} 台设备、${state.links.length} 条链路`);
+    }
+  });
+
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.querySelector('[data-act=folder]').onclick = () => {
+    window.topoBackup.openFolder().then((res) => { if (res && !res.ok) toast('打开文件夹失败：' + (res.error || '')); }).catch(() => {});
+  };
+  ov.querySelector('[data-act=now]').onclick = async () => {
+    if (!state.nodes.length) { toast('画布为空，无需备份'); return; }
+    const data = buildProjectData();
+    let res;
+    try { res = await window.topoBackup.save({ content: JSON.stringify(data, null, 2), label: 'manual', keep: state.autoBackup.keep }); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
+    if (res && res.ok) toast('已备份工程（' + res.name + '）');
+    else toast('备份失败：' + ((res && res.error) || '未知错误'));
+    refreshList();
+  };
+  ov.querySelector('[data-act=clear]').onclick = async () => {
+    if (!(await confirmBox('清空全部备份？此操作不可撤销。'))) return;
+    let res;
+    try { res = await window.topoBackup.removeAll(); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
+    if (res && res.ok) toast('已清空 ' + (res.removed || 0) + ' 份备份');
+    else toast('清空失败：' + ((res && res.error) || '未知错误'));
+    refreshList();
+  };
+
+  refreshList();
 }
 
 /* ================= 拓扑校验报告 ================= */
@@ -2381,7 +2547,7 @@ function openHelp() {
     <h4>③ 画布操作</h4>
     <p>滚轮缩放（以光标为中心）、拖拽空白或中键平移；<b>Ctrl 点选</b>多选、<b>Shift 拖拽框选</b>；<kbd>Delete</kbd> 删除选中；多选后可整体拖动、批量编辑、对齐/分布。</p>
     <h4>④ 工具栏菜单</h4>
-    <p><b>文件</b>：新建 / 导入表格 / 示例 / 保存工程(.nettopo) / 打开工程 / 对比工程 / 自动备份。</p>
+    <p><b>文件</b>：新建 / 导入表格 / 示例 / 保存工程(.nettopo) / 打开工程 / 对比工程 / 自动备份 / 备份管理。</p>
     <p><b>编辑</b>：添加设备 / 连线 / 文本框、从模板添加设备、对齐分布、批量重命名、IP 批量改段、类型管理、删除选中。</p>
     <p><b>布局</b>：力导向 / 环形 / 分层（按类型）/ 三层架构 / 拓扑分层（最少交叉）/ 网格布局、适应视图、路径分析、拓扑校验。</p>
     <p><b>显示</b>：链路标注、子网分组、清除故障标记、清除路径高亮。</p>
@@ -2411,7 +2577,7 @@ function openHelp() {
       <tr><td>Ctrl+Shift+L</td><td>切换链路标注</td></tr>
     </table>
     <h4>说明</h4>
-    <p>浏览器版可编辑与导出；<b>Web Shell 与设备管理 Web 页为桌面版专属</b>（需 Electron 环境）。数据保存在本机，建议用「保存工程」备份。更多信息见右上角「关于」。</p>
+    <p>浏览器版可编辑与导出；<b>Web Shell、设备管理 Web 页与备份管理为桌面版专属</b>（需 Electron 环境）。数据保存在本机，建议用「保存工程」备份。更多信息见右上角「关于」。</p>
   </div>`;
 }
 
@@ -2477,7 +2643,8 @@ function wire() {
     { ic: 'save', label: '保存工程…', act: saveProject },
     { ic: 'folder', label: '打开工程…', act: () => $('#projInput').click() },
     { ic: 'git', label: '对比工程…', act: openProjectDiff },
-    { ic: 'clock', label: '自动备份工程…', act: openAutoBackup }
+    { ic: 'clock', label: '自动备份工程…', act: openAutoBackup },
+    { ic: 'archive', label: '备份管理…', act: openBackupManager }
   ]);
   $('#btnDropEdit').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'node', label: '添加设备', active: state.mode === 'place', act: togglePlace },

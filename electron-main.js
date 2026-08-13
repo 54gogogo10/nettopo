@@ -3,6 +3,10 @@
 const { app, BrowserWindow, session, ipcMain } = require('electron');
 const path = require('path');
 const { ShellManager } = require('./js/shell.js');
+const { BackupStore } = require('./js/backup-store.js');
+
+// 测试隔离：冒烟测试通过 NETTOPO_USERDATA 覆盖用户数据目录（临时目录），避免污染真实备份数据
+if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_USERDATA);
 
 let mainWin = null;
 let shellWin = null;
@@ -17,6 +21,13 @@ let shellReady = false;            // Shell 窗口渲染层是否已就绪（did
 const pendingTabs = [];            // 等待新窗口加载完成的 newtab 消息
 const shellQueue = [];             // 窗口就绪前到达的会话事件（避免首屏输出丢失）
 const shell = new ShellManager();
+
+/* ---- 工程备份库（用户数据目录 backups/） ---- */
+let backupStore = null;
+function getBackupStore() {
+  if (!backupStore) backupStore = new BackupStore(path.join(app.getPath('userData'), 'backups'));
+  return backupStore;
+}
 
 /* ---- Web Shell 独立窗口（多标签） ---- */
 function createShellWindow() {
@@ -208,6 +219,21 @@ ipcMain.handle('shell:open-external', (e, url) => {
   return { ok: true };
 });
 ipcMain.handle('shell:clipboard-read', () => require('electron').clipboard.readText());
+
+/* ---- 工程备份管理 IPC ---- */
+ipcMain.handle('backup:save', (e, p) => getBackupStore().save(
+  String((p && p.content) || ''),
+  (p && p.label) === 'auto' ? 'auto' : 'manual',
+  parseInt((p && p.keep), 10)
+));
+ipcMain.handle('backup:list', () => getBackupStore().list());
+ipcMain.handle('backup:read', (e, p) => getBackupStore().read(String((p && p.name) || '')));
+ipcMain.handle('backup:delete', (e, p) => {
+  if (p && p.all) return getBackupStore().removeAll();
+  return getBackupStore().remove(String((p && p.name) || ''));
+});
+ipcMain.handle('backup:open-folder', () => require('electron').shell.openPath(getBackupStore().dir)
+  .then(() => ({ ok: true }), (err) => ({ ok: false, error: String(err && err.message || err) })));
 
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框
