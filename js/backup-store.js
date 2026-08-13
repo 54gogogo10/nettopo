@@ -22,11 +22,13 @@ class BackupStore {
     this.maxBytes = opts.maxBytes || MAX_CONTENT_BYTES; // 单份内容上限（测试可调小）
   }
 
-  /** 文件名白名单校验：格式合法且不含路径成分 */
+  /** 文件名白名单校验：格式合法、不含路径成分、非 Windows 保留设备名 */
   static validName(name) {
     name = String(name || '');
     if (!SAFE_NAME.test(name)) return false;
     if (name.includes('..')) return false;
+    const base = name.replace(/\.nettopo$/i, '');
+    if (/^(CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])$/i.test(base)) return false; // Windows 设备名
     return path.basename(name) === name;
   }
 
@@ -77,8 +79,8 @@ class BackupStore {
         if (!BackupStore.validName(name)) continue;
         const full = path.join(this.dir, name);
         let st;
-        try { st = fs.statSync(full); } catch (e) { continue; }
-        if (!st.isFile()) continue;
+        try { st = fs.lstatSync(full); } catch (e) { continue; }
+        if (!st.isFile() || st.isSymbolicLink()) continue; // 忽略目录与符号链接（防链接指向任意文件）
         items.push({ name, time: st.mtimeMs, size: st.size });
       }
       items.sort((a, b) => (b.time - a.time) || (a.name < b.name ? 1 : -1));
@@ -93,7 +95,8 @@ class BackupStore {
     if (!BackupStore.validName(name)) return { ok: false, error: '非法的备份文件名' };
     const full = path.join(this.dir, name);
     try {
-      const st = fs.statSync(full);
+      const st = fs.lstatSync(full);
+      if (!st.isFile() || st.isSymbolicLink()) return { ok: false, error: '备份不存在或读取失败' };
       if (st.size > this.maxBytes) return { ok: false, error: '备份文件过大' };
       const content = fs.readFileSync(full, 'utf8');
       return { ok: true, content };

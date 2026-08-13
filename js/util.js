@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260813a';
+U.APP_VERSION = 'v20260813b';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -47,7 +47,7 @@ U.escHtml = (s) => String(s == null ? '' : s)
 
 U.escXml = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/\n/g, '&#10;').replace(/\r/g, '');
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/\n/g, '&#10;').replace(/\r/g, '');
 
 U.truncate = (s, n) => {
   s = String(s == null ? '' : s).trim();
@@ -134,12 +134,18 @@ U.parseCSV = (text) => {
   return rows;
 };
 
-/* ---------- CSV 构建（Excel 兼容：带 BOM + 引号转义） ---------- */
+/* ---------- 单元格公式注入防护（Excel/CSV 打开时以 = + - @ 开头会被当公式执行） ---------- */
+U.sanitizeCell = (v) => {
+  v = v == null ? '' : String(v);
+  return /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
+};
+
+/* ---------- CSV 构建（Excel 兼容：带 BOM + 引号转义 + 公式注入防护） ---------- */
 U.buildCSV = (rows, opts) => {
   opts = opts || {};
   const delim = opts.delim || ',';
   const esc = (v) => {
-    v = v == null ? '' : String(v);
+    v = U.sanitizeCell(v);
     return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   };
   return '\uFEFF' + rows.map(r => r.map(esc).join(delim)).join('\r\n');
@@ -278,7 +284,7 @@ U.saveTypeOverrides = () => {
 
 /* ---------- 类型数据安全校验（防止恶意工程/本地存储注入 HTML/SVG） ---------- */
 U.isValidColor = (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
-U.isValidImg = (v) => typeof v === 'string' && (v === '' || /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/i.test(v));
+U.isValidImg = (v) => typeof v === 'string' && (v === '' || /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(v));
 /* 清洗 typeOverrides / customTypes：剔除非法颜色与图片，避免拼入 innerHTML/SVG 时注入 */
 U.sanitizeTypeData = (overrides, customTypes) => {
   const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
@@ -312,9 +318,13 @@ U.sanitizeTypeData = (overrides, customTypes) => {
   return { overrides: ov, customTypes: ct };
 };
 
+/* 文本框可用字体白名单（防止工程文件注入任意字体名/样式串） */
+U.TEXT_FONTS = ['Microsoft YaHei', 'SimSun', 'SimHei', 'DengXian', 'KaiTi', 'Arial', 'Consolas', 'Georgia', 'Times New Roman'];
+
 /* 清洗工程图数据：保证节点/连线/文本框字段类型正确（防缺失字段、NaN 坐标、畸形数据） */
 U.sanitizeGraph = (nodes, links, texts) => {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  const coord = (v, d) => Math.max(-1e6, Math.min(1e6, num(v, d))); // 坐标钳制，防超大坐标几何 DoS
   const str = (v) => typeof v === 'string' ? v : String(v == null ? '' : v);
   const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
   const usedN = new Set(), usedL = new Set(), usedT = new Set();
@@ -331,10 +341,10 @@ U.sanitizeGraph = (nodes, links, texts) => {
     return {
       id, name: str(n.name).slice(0, 200),
       type: SAFE_ID.test(rawType) ? rawType : 'other',
-      x: num(n.x, 0), y: num(n.y, 0),
+      x: coord(n.x, 0), y: coord(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
-      mgmt: str(n.mgmt), note: str(n.note), web: str(n.web).slice(0, 500),
-      mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20)
+      mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',
+      mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20).map(s => s.slice(0, 200))
     };
   }).filter(Boolean);
   const nodeIds = new Set(cleanNodes.map(n => n.id));
@@ -354,9 +364,9 @@ U.sanitizeGraph = (nodes, links, texts) => {
     const id = SAFE_ID.test(oldId) && !usedT.has(oldId) ? oldId : fresh('t', usedT);
     usedT.add(id);
     return {
-      id, x: num(t.x, 0), y: num(t.y, 0),
+      id, x: coord(t.x, 0), y: coord(t.y, 0),
       w: Math.max(num(t.w, 220), 40), h: Math.max(num(t.h, 56), 24),
-      text: str(t.text), font: str(t.font) || 'Microsoft YaHei',
+      text: str(t.text), font: U.TEXT_FONTS.includes(str(t.font)) ? str(t.font) : 'Microsoft YaHei',
       size: Math.max(num(t.size, 16), 8),
       color: U.isValidColor(t.color) ? t.color : '#1e293b',
       bold: !!t.bold, italic: !!t.italic,

@@ -47,6 +47,7 @@ function createShellWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       spellcheck: false,
       preload: path.join(__dirname, 'preload.js')
     }
@@ -102,6 +103,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       spellcheck: false,
       preload: path.join(__dirname, 'preload.js')
     }
@@ -129,6 +131,7 @@ function createWebWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       spellcheck: false,
       webviewTag: true, // 标签页内嵌浏览器视图
       preload: path.join(__dirname, 'preload.js')
@@ -179,8 +182,14 @@ function openWebTab(info) {
   else win.webContents.send('web:newtab', info);
 }
 
+/* ---- IPC 安全辅助 ---- */
+function isHttpUrl(u) {
+  try { const p = new URL(u).protocol; return p === 'http:' || p === 'https:'; } catch (e) { return false; }
+}
+
 /* ---- Web Shell IPC ---- */
 ipcMain.handle('web:cert-allow', (e, payload) => {
+  if (!webWin || webWin.isDestroyed() || e.sender !== webWin.webContents) return { ok: false, error: 'forbidden' };
   const rec = pendingCert.get(payload && payload.id);
   if (!rec) return { ok: false, error: '请求已过期' };
   pendingCert.delete(payload.id);
@@ -191,7 +200,7 @@ ipcMain.handle('web:cert-allow', (e, payload) => {
 ipcMain.handle('web:open', (e, opts) => {
   opts = opts || {};
   const url = String(opts.url || '').trim();
-  if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'URL 必须以 http:// 或 https:// 开头' };
+  if (!isHttpUrl(url)) return { ok: false, error: 'URL 必须以 http:// 或 https:// 开头' };
   if (url.length > 2048) return { ok: false, error: 'URL 过长' };
   openWebTab({ url, title: String(opts.title || url).slice(0, 80) });
   return { ok: true };
@@ -206,8 +215,13 @@ ipcMain.handle('shell:connect', (e, opts) => {
   }
   return r;
 });
+ipcMain.handle('shell:trust', (e, p) => {
+  if (!shellWin || shellWin.isDestroyed() || e.sender !== shellWin.webContents) return { ok: false, error: 'forbidden' };
+  return { ok: shell.trustFingerprint(String((p && p.host) || ''), !!(p && p.trust)) };
+});
 ipcMain.on('shell:data', (e, id, data) => {
-  if (typeof data === 'string' && data.length > 1024 * 1024) return; // 防超大粘贴/异常数据
+  if (typeof data !== 'string') return; // 仅接受字符串：防非字符串绕过限长并致流写入崩溃
+  if (data.length > 1024 * 1024) return; // 防超大粘贴/异常数据
   shell.write(id, data);
 });
 ipcMain.on('shell:resize', (e, id, cols, rows) => shell.resize(id, cols, rows));
@@ -215,25 +229,31 @@ ipcMain.on('shell:close', (e, id) => shell.close(id));
 ipcMain.handle('shell:clipboard-write', (e, text) => { const { clipboard } = require('electron'); clipboard.writeText(String(text == null ? '' : text)); });
 ipcMain.handle('shell:open-external', (e, url) => {
   const u = String(url || '');
-  if (/^https?:\/\//i.test(u) && u.length < 2048) require('electron').shell.openExternal(u);
+  if (u.length < 2048 && isHttpUrl(u)) require('electron').shell.openExternal(u);
   return { ok: true };
 });
 ipcMain.handle('shell:clipboard-read', () => require('electron').clipboard.readText());
 
-/* ---- 工程备份管理 IPC ---- */
-ipcMain.handle('backup:save', (e, p) => getBackupStore().save(
-  String((p && p.content) || ''),
-  (p && p.label) === 'auto' ? 'auto' : 'manual',
-  parseInt((p && p.keep), 10)
-));
-ipcMain.handle('backup:list', () => getBackupStore().list());
-ipcMain.handle('backup:read', (e, p) => getBackupStore().read(String((p && p.name) || '')));
+/* ---- 工程备份管理 IPC（仅主窗口可调用，防其它窗口/被注入脚本越权读写备份） ---- */
+function backupGuard(e) {
+  return !!(mainWin && !mainWin.isDestroyed() && e && e.sender === mainWin.webContents);
+}
+ipcMain.handle('backup:save', (e, p) => {
+  if (!backupGuard(e)) return { ok: false, error: 'forbidden' };
+  const content = String((p && p.content) || '');
+  if (content.length > 70 * 1024 * 1024) return { ok: false, error: '备份内容过大' }; // IPC 侧快速拦截，避免序列化超大 payload
+  return getBackupStore().save(content, (p && p.label) === 'auto' ? 'auto' : 'manual', parseInt((p && p.keep), 10));
+});
+ipcMain.handle('backup:list', (e) => backupGuard(e) ? getBackupStore().list() : { ok: false, error: 'forbidden' });
+ipcMain.handle('backup:read', (e, p) => backupGuard(e) ? getBackupStore().read(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
 ipcMain.handle('backup:delete', (e, p) => {
+  if (!backupGuard(e)) return { ok: false, error: 'forbidden' };
   if (p && p.all) return getBackupStore().removeAll();
   return getBackupStore().remove(String((p && p.name) || ''));
 });
-ipcMain.handle('backup:open-folder', () => require('electron').shell.openPath(getBackupStore().dir)
-  .then(() => ({ ok: true }), (err) => ({ ok: false, error: String(err && err.message || err) })));
+ipcMain.handle('backup:open-folder', (e) => backupGuard(e)
+  ? require('electron').shell.openPath(getBackupStore().dir).then(() => ({ ok: true }), (err) => ({ ok: false, error: String(err && err.message || err) }))
+  : { ok: false, error: 'forbidden' });
 
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框

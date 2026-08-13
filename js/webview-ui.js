@@ -165,7 +165,7 @@
         <div class="frow"><label>站点</label><span style="font:12px/1.6 Consolas,monospace;color:var(--text);word-break:break-all">${escAttr(info.host || '')}</span></div>
         <div class="frow"><label>网址</label><span style="font:12px/1.6 Consolas,monospace;color:var(--text);word-break:break-all">${escAttr(info.url || '')}</span></div>
         <div class="frow"><label>错误</label><span style="color:var(--danger);font-size:12px">${escAttr(info.error || '')}</span></div>
-        <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="certRemember" type="checkbox" checked/> 本次运行内记住该站点，不再询问</label></div>
+        <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="certRemember" type="checkbox"/> 本次运行内记住该站点，不再询问</label></div>
         <div class="m-actions">
           <button type="button" class="tb" data-act="cancel">取消</button>
           <button type="button" class="tb primary" data-act="continue">继续访问</button>
@@ -175,7 +175,7 @@
     ov.tabIndex = -1; ov.focus();
     const next = () => { ov.remove(); if (certQueueAlerts.length) showCertAlert(certQueueAlerts.shift()); };
     const decide = (allow) => {
-      let remember = true;
+      let remember = false;
       try { remember = ov.querySelector('#certRemember').checked; } catch (e) { /* ignore */ }
       window.topoWeb.allowCert({ id: info.id, allow, remember });
       next();

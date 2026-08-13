@@ -42,9 +42,37 @@
       s._fpShown = true;
       s.term.write('\r\n\x1b[90m' + info.text + '\x1b[0m\r\n');
     }
-    // 记忆主机密钥指纹（用于下次连接校验，防中间人）
-    if (state === 'info' && info.host && info.text && info.text.indexOf('主机密钥 SHA256 指纹: ') === 0) {
-      try { localStorage.setItem('topoShellFp:' + info.host, info.text.slice('主机密钥 SHA256 指纹: '.length)); } catch (e) { /* ignore */ }
+    // 首次连接：弹出指纹确认（TOFU），用户确认后由主进程放行握手
+    if (state === 'fingerprint' && info.host) showFingerprintConfirm(info);
+  }
+  function showFingerprintConfirm(info) {
+    if ($('#fpModal')) return; // 已有确认框
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.id = 'fpModal';
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal sh-dialog" role="dialog">
+        <h3>首次连接 · 确认主机指纹</h3>
+        <div class="m-sub">首次连接 ${escAttr(info.host || '')}，请核对 SSH 主机密钥指纹（可用 <b>ssh-keygen -l -E sha256</b> 比对）：</div>
+        <div class="frow"><code style="font:12px/1.7 Consolas,monospace;color:var(--text);background:var(--panel2);padding:6px 10px;border-radius:8px;word-break:break-all">${escAttr(info.fp || '')}</code></div>
+        <div class="m-sub" style="color:var(--muted)">确认无误后信任并连接；若与已知指纹不一致，可能遭遇中间人攻击，请取消。</div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="cancel">取消</button>
+          <button type="button" class="tb primary" data-act="trust">信任并连接</button>
+        </div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) { decide(false); } });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); decide(false); } });
+    ov.querySelector('[data-act=cancel]').onclick = () => decide(false);
+    ov.querySelector('[data-act=trust]').onclick = () => decide(true);
+    function decide(trust) {
+      if (trust) { try { localStorage.setItem('topoShellFp:' + info.host, info.fp); } catch (e) { /* ignore */ } }
+      window.topoShell.trustFingerprint(info.host, trust);
+      close();
     }
   }
   function applyEnd(s, reason) {
@@ -373,7 +401,7 @@
         password: ov.querySelector('#wsPass').value,
         title: ov.querySelector('#wsHost').value.trim() || '连接'
       };
-      try { cfg.expectFp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; } catch (e) { cfg.expectFp = ''; }
+      try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
       try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username })); } catch (e) {}
       const btn = ov.querySelector('[data-act=connect]');

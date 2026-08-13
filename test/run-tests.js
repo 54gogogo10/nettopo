@@ -46,6 +46,12 @@ ok(U.parseCSV('x\tb\n1\t2')[0][1] === 'b', '制表符分隔检测');
 const rt = U.buildCSV([['a', 'b,c'], ['d', 'e"f']]);
 ok(rt.includes('"b,c"') && rt.includes('"e""f"'), 'CSV 构建转义');
 ok(rt.charCodeAt(0) === 0xFEFF, 'CSV 带 BOM');
+ok(U.escXml("a'b<c&d\"e") === 'a&#39;b&lt;c&amp;d&quot;e', 'XML 转义含单引号');
+// 公式注入防护：以 = + - @ 开头的单元格加 ' 前缀
+const fi = U.buildCSV([['=1+1', '+x', '-y', '@z', 'normal', 123]]);
+ok(fi.includes("'=1+1") && fi.includes("'+x") && fi.includes("'-y") && fi.includes("'@z"), 'CSV 公式注入加前缀');
+ok(fi.includes(',normal,') && fi.includes(',123'), 'CSV 普通单元格不受影响');
+ok(U.sanitizeCell('=SUM(1)') === "'=SUM(1)" && U.sanitizeCell('hello') === 'hello', 'sanitizeCell 公式注入防护');
 
 console.log('== 表头映射 ==');
 eq(M.mapHeader('源设备'), 'sa', '中文-源设备');
@@ -926,6 +932,9 @@ console.log('== 备份管理（本地备份库） ==');
   ok(!BackupStore.validName('a..b.nettopo'), '文件名白名单：拒绝连续点');
   ok(!BackupStore.validName('x.txt'), '文件名白名单：拒绝非 .nettopo');
   ok(!BackupStore.validName(''), '文件名白名单：拒绝空名');
+  ok(!BackupStore.validName('NUL.nettopo'), '文件名白名单：拒绝 Windows 设备名 NUL');
+  ok(!BackupStore.validName('CON.nettopo'), '文件名白名单：拒绝 Windows 设备名 CON');
+  ok(!BackupStore.validName('COM1.nettopo'), '文件名白名单：拒绝 Windows 设备名 COM1');
 
   ok(!B.save('', 'manual', 30).ok, '空内容拒绝保存');
   ok(!B.save('   ', 'manual', 30).ok, '空白内容拒绝保存');
@@ -1129,9 +1138,29 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     mgr.on('status', (id, info) => statuses.push(info));
     const r = mgr.connect({ protocol: 'ssh', host: '127.0.0.1', port, username: 'admin', password: 'secret', cols: 80, rows: 24 });
     ok(r.ok, 'SSH 发起连接成功');
+    // 首次连接：先上报指纹确认（TOFU），未确认前不建立会话
+    await waitFor(() => statuses.some(s => s.state === 'fingerprint'), 5000);
+    const fpStatus = statuses.find(s => s.state === 'fingerprint');
+    ok(!!fpStatus, 'SSH 首次连接上报指纹确认');
+    ok(fpStatus && /^SHA256:[A-Za-z0-9+/]+={0,2}$/.test(fpStatus.fp), 'SSH 指纹为标准 SHA256:base64 格式（' + (fpStatus && fpStatus.fp) + '）');
+    ok(!outs.join('').includes('SSH-READY'), '确认前不建立会话');
+    ok(mgr.trustFingerprint('127.0.0.1', true), '信任指纹放行握手');
     await waitFor(() => outs.join('').includes('SSH-READY'), 5000);
     ok(outs.join('').includes('SSH-READY'), 'SSH 打开远程 Shell 并收到欢迎信息');
-    ok(statuses.some(s => s.state === 'info' && s.text.includes('指纹')), 'SSH 展示主机密钥 SHA256 指纹');
+    // 已信任主机再次连接：直接通过并展示指纹（不再弹确认）
+    {
+      const mgr2 = new ShellManager();
+      const outs2 = [];
+      const statuses2 = [];
+      mgr2.on('output', (id, d) => outs2.push(d));
+      mgr2.on('status', (id, info) => statuses2.push(info));
+      const r2 = mgr2.connect({ protocol: 'ssh', host: '127.0.0.1', port, username: 'admin', password: 'secret', cols: 80, rows: 24, expectFp: fpStatus.fp });
+      await waitFor(() => outs2.join('').includes('SSH-READY'), 5000);
+      ok(outs2.join('').includes('SSH-READY'), '已信任指纹直接建立会话');
+      ok(!statuses2.some(s => s.state === 'fingerprint'), '已信任主机不再弹指纹确认');
+      ok(statuses2.some(s => s.state === 'info' && s.text.includes('指纹')), '已信任主机展示主机密钥指纹');
+      mgr2.close(r2.id);
+    }
     mgr.write(r.id, 'ping\r\n');
     await waitFor(() => got.some(g => g[0] === 'data' && g[1].includes('ping')), 3000);
     ok(got.some(g => g[0] === 'data' && g[1].includes('ping')), 'SSH 输入转发到服务器');

@@ -15,6 +15,7 @@ class ShellManager extends EventEmitter {
     super();
     this.sessions = new Map();
     this._seq = 0;
+    this._pendingVerify = new Map(); // host -> verify 回调（SSH 首次连接待用户确认指纹）
   }
 
   /** 建立会话。opts: {protocol:'ssh'|'telnet', host, port, username, password, cols, rows}
@@ -67,6 +68,15 @@ class ShellManager extends EventEmitter {
     for (const id of [...this.sessions.keys()]) this.close(id);
   }
 
+  /** SSH 首次连接指纹确认：用户信任后放行握手（TOFU） */
+  trustFingerprint(host, trust) {
+    const verify = this._pendingVerify.get(host);
+    if (!verify) return false;
+    this._pendingVerify.delete(host);
+    try { verify(!!trust); } catch (e) { /* ignore */ }
+    return true;
+  }
+
   /* ---------- SSH（ssh2） ---------- */
   _ssh(o) {
     const em = new EventEmitter();
@@ -76,6 +86,7 @@ class ShellManager extends EventEmitter {
     const finish = (reason) => {
       if (closed) return;
       closed = true;
+      this._pendingVerify.delete(o.host); // 会话结束即清理未确认的指纹等待
       try { if (stream && !stream.destroyed) stream.end(); } catch (e) { /* ignore */ }
       try { client.end(); } catch (e) { /* ignore */ }
       em.emit('end', reason || '连接已关闭');
@@ -106,19 +117,27 @@ class ShellManager extends EventEmitter {
       username: o.username,
       readyTimeout: 12000,
       hostHash: 'sha256',
-      // 设备通常使用自签/未知主机密钥：默认信任（适合实验室/内网设备），
-      // 同时把主机密钥 SHA256 指纹作为 info 状态展示，便于人工核对
-      hostVerifier: (key) => {
+      // 主机密钥校验：首次连接弹出指纹确认（TOFU）；已信任主机校验指纹变化（防中间人）
+      hostVerifier: (key, verify) => {
         try {
           const hex = String(key).toLowerCase();
-          const fp = hex.replace(/(.{2})(?=.)/g, '$1:');
-          em.emit('status', { state: 'info', host: o.host, text: '主机密钥 SHA256 指纹: ' + fp });
-          if (o.expectFp && o.expectFp !== fp) {
-            em.emit('status', { state: 'error', text: '主机密钥指纹不匹配：' + fp + '（期望 ' + o.expectFp + '），可能存在中间人攻击' });
-            return false;
+          // ssh2 传入的是 SHA256 的 hex 摘要，转成 OpenSSH 标准 SHA256:<base64> 格式，便于与 ssh-keygen 输出核对
+          const fp = 'SHA256:' + Buffer.from(hex, 'hex').toString('base64').replace(/=+$/, '');
+          if (o.expectFp) {
+            if (o.expectFp !== fp) {
+              em.emit('status', { state: 'error', text: '主机密钥指纹不匹配：' + fp + '（期望 ' + o.expectFp + '），可能存在中间人攻击' });
+              return false;
+            }
+            em.emit('status', { state: 'info', host: o.host, fp, text: '主机密钥指纹: ' + fp });
+            return true;
           }
-        } catch (e) { /* ignore */ }
-        return true;
+          // 首次连接：暂停握手，等用户确认信任该指纹
+          this._pendingVerify.set(o.host, verify);
+          em.emit('status', { state: 'fingerprint', host: o.host, fp, text: '首次连接，请核对主机指纹: ' + fp });
+          return undefined; // 异步确认，不立即 verify
+        } catch (e) {
+          return false;
+        }
       }
     };
     if (o.password) { cfg.password = o.password; cfg.tryKeyboard = true; }

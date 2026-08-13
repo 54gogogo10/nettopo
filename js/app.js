@@ -615,10 +615,11 @@ function openIpPlan() {
   };
   ov.querySelector('[data-act=xlsx]').onclick = () => {
     if (!window.XLSX) { toast('未加载 Excel 解析库（需联网），请改用 CSV 导出'); return; }
+    const safeRows = rows.map(r => { const o = {}; for (const k in r) o[k] = U.sanitizeCell(r[k]); return o; });
     const wb = window.XLSX.utils.book_new();
-    const ws = window.XLSX.utils.json_to_sheet(rows);
+    const ws = window.XLSX.utils.json_to_sheet(safeRows);
     // 设备名列合并：同一台设备的连续行合并成一个单元格（第 0 行表头，数据从第 1 行起，设备名列=0）
-    const merges = U.deviceMergeRanges(rows);
+    const merges = U.deviceMergeRanges(safeRows);
     if (merges.length) ws['!merges'] = merges;
     // 列宽自适应
     const keys = Object.keys(rows[0] || {});
@@ -949,7 +950,7 @@ function exportCSV() {
 
 function exportXlsx() {
   if (!window.XLSX) { toast('未加载 Excel 解析库（需联网），请改用 CSV 导出'); return; }
-  const rows = M.graphToTableRows(state.nodes, state.links);
+  const rows = M.graphToTableRows(state.nodes, state.links).map(r => r.map(U.sanitizeCell));
   const ws = window.XLSX.utils.aoa_to_sheet(rows);
   const wb = window.XLSX.utils.book_new();
   window.XLSX.utils.book_append_sheet(wb, ws, '连线关系');
@@ -1400,7 +1401,7 @@ function addNodeAt(wx, wy) {
   });
 }
 
-const TEXT_FONTS = ['Microsoft YaHei', 'SimSun', 'SimHei', 'DengXian', 'KaiTi', 'Arial', 'Consolas', 'Georgia', 'Times New Roman'];
+const TEXT_FONTS = U.TEXT_FONTS;
 
 /* ================= 文本框（自定义字体样式） ================= */
 function addTextAt(wx, wy) {
@@ -2897,7 +2898,7 @@ function openWebShell(id) {
       password: ov.querySelector('#wsPass').value,
       title: n.name
     };
-    try { cfg.expectFp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; } catch (e) { cfg.expectFp = ''; }
+    try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
     if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
     try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username })); } catch (e) {}
     const btn = ov.querySelector('[data-act=connect]');
