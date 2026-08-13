@@ -532,3 +532,7 @@ body:not(.panel-off) #panelOpen { display: none; }
   background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
 }
 .about-note { font-size: 11px; color: var(--muted); }
+
+.about-url { color: var(--accent); font: 12px/1.6 Consolas, monospace; }
+.about-actions { display: flex; gap: 8px; width: 100%; justify-content: center; }
+.about-actions .tb { height: 30px; padding: 0 16px; }

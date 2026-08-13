@@ -307,7 +307,8 @@ async function connectCDP(target) {
     await sleep(200);
     await main.eval(`document.getElementById('btnAbout').click()`);
     await sleep(300);
-    ok(await main.eval(`(() => { const m = [...document.querySelectorAll('#modalRoot .modal')].pop(); return m && m.textContent.includes('版权') && m.textContent.includes('MIT License') && m.textContent.includes('v20260812'); })()`), '关于弹窗含版权与版本信息');
+    ok(await main.eval(`(() => { const m = [...document.querySelectorAll('#modalRoot .modal')].pop(); return m && m.textContent.includes('版权') && m.textContent.includes('MIT License') && m.textContent.includes('v20260812') && m.textContent.includes('github.com/54gogogo10/nettopo'); })()`), '关于弹窗含版权、版本与项目 GitHub 地址');
+    ok(await main.eval(`!!document.getElementById('aboutCopy') && !!document.getElementById('aboutOpen')`), '关于弹窗含复制/打开按钮');
     await main.eval(`(() => { const b = [...document.querySelectorAll('#modalRoot .m-actions .tb')].pop(); if (b) b.click(); return true; })()`);
 
     webv.ws.close();

@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('topoShell', {
   resize: (id, cols, rows) => ipcRenderer.send('shell:resize', id, cols, rows),
   close: (id) => ipcRenderer.send('shell:close', id),
   copyText: (text) => ipcRenderer.invoke('shell:clipboard-write', text),
+  openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   pasteText: () => ipcRenderer.invoke('shell:clipboard-read'),
   onOutput: (cb) => ipcRenderer.on('shell:output', (_e, id, data) => cb(id, data)),
   onStatus: (cb) => ipcRenderer.on('shell:status', (_e, id, info) => cb(id, info)),

@@ -2428,9 +2428,25 @@ function openAbout() {
     <div class="about-row"><b>运行环境</b><span>Windows 桌面版（Electron）/ 现代浏览器</span></div>
     <div class="about-row"><b>版权</b><span>© 2026 NetTopo 项目，保留所有权利</span></div>
     <div class="about-row"><b>许可</b><span>MIT License</span></div>
+    <div class="about-row"><b>项目主页</b><span class="about-url">https://github.com/54gogogo10/nettopo</span></div>
+    <div class="about-actions">
+      <button type="button" class="tb" id="aboutCopy">复制链接</button>
+      <button type="button" class="tb primary" id="aboutOpen">在浏览器打开</button>
+    </div>
     <div class="about-license">本软件基于 MIT 许可证发布：允许自由使用、复制、修改、合并、出版发行、再许可和/或销售副本，但需保留上述版权声明与许可声明。本软件按“现状”提供，不作任何明示或暗示的担保。</div>
     <div class="about-note">数据仅保存在本机；Web Shell 与设备管理 Web 页为桌面版功能。</div>
   </div>`;
+  const ABOUT_URL = 'https://github.com/54gogogo10/nettopo';
+  const aboutCopy = ov.querySelector('#aboutCopy');
+  if (aboutCopy) aboutCopy.onclick = () => {
+    if (window.topoShell && window.topoShell.copyText) window.topoShell.copyText(ABOUT_URL);
+    toast('已复制项目地址：' + ABOUT_URL);
+  };
+  const aboutOpen = ov.querySelector('#aboutOpen');
+  if (aboutOpen) aboutOpen.onclick = () => {
+    if (window.topoShell && window.topoShell.openExternal) window.topoShell.openExternal(ABOUT_URL);
+    else window.open(ABOUT_URL, '_blank');
+  };
 }
 
 

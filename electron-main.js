@@ -186,6 +186,11 @@ ipcMain.on('shell:data', (e, id, data) => shell.write(id, data));
 ipcMain.on('shell:resize', (e, id, cols, rows) => shell.resize(id, cols, rows));
 ipcMain.on('shell:close', (e, id) => shell.close(id));
 ipcMain.handle('shell:clipboard-write', (e, text) => { const { clipboard } = require('electron'); clipboard.writeText(String(text == null ? '' : text)); });
+ipcMain.handle('shell:open-external', (e, url) => {
+  const u = String(url || '');
+  if (/^https?:\/\//i.test(u) && u.length < 2048) require('electron').shell.openExternal(u);
+  return { ok: true };
+});
 ipcMain.handle('shell:clipboard-read', () => require('electron').clipboard.readText());
 
 app.whenReady().then(() => {
