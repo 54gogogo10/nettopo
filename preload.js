@@ -17,5 +17,7 @@ contextBridge.exposeInMainWorld('topoShell', {
 
 contextBridge.exposeInMainWorld('topoWeb', {
   open: (url, title) => ipcRenderer.invoke('web:open', { url, title }),
-  onNewTab: (cb) => ipcRenderer.on('web:newtab', (_e, info) => cb(info))
+  onNewTab: (cb) => ipcRenderer.on('web:newtab', (_e, info) => cb(info)),
+  onCertError: (cb) => ipcRenderer.on('web:cert-error', (_e, info) => cb(info)),
+  allowCert: (payload) => ipcRenderer.invoke('web:cert-allow', payload)
 });

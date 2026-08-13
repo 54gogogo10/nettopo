@@ -4,6 +4,8 @@
   if (!window.topoWeb) return; // 非 Electron 环境直接退出
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
+  const escAttr = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const tabsEl = $('#wvTabs'), pagesEl = $('#wvPages'), emptyEl = $('#wvEmpty');
   const navEl = $('#wvNav'), addrEl = $('#wvAddr'), backEl = $('#wvBack'), fwdEl = $('#wvFwd'), reloadEl = $('#wvReload');
   const tabs = new Map(); // id -> { tabEl, pageEl, wv, spinEl, titleEl }
@@ -46,7 +48,7 @@
     tabs.set(id, rec);
 
     wv.addEventListener('page-title-updated', (e) => { rec.titleEl.textContent = e.title || rec.titleEl.textContent; });
-    wv.addEventListener('did-start-loading', () => { rec.loading = true; rec.spinEl.style.display = ''; });
+    wv.addEventListener('did-start-loading', () => { rec.loading = true; rec.spinEl.style.display = ''; clearErr(rec); });
     wv.addEventListener('did-stop-loading', () => { rec.loading = false; rec.spinEl.style.display = 'none'; });
     wv.addEventListener('did-fail-load', (e) => { if (e.errorCode !== -3) showErr(rec, e.errorDescription); });
     wv.addEventListener('did-navigate', (e) => {
@@ -99,6 +101,42 @@
     }
   }
 
+  /* ---- 证书安全告警（自签名/无效证书，手动允许） ---- */
+  const certQueueAlerts = [];
+  function showCertAlert(info) {
+    if ($('#certModal')) { certQueueAlerts.push(info); return; }
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.id = 'certModal';
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal" role="dialog" style="width:480px">
+        <h3>安全告警 · 证书不受信任</h3>
+        <div class="m-sub">该页面使用的 HTTPS 证书未被系统信任（自签名或已过期/无效）。请确认站点身份后再继续。</div>
+        <div class="frow"><label>站点</label><span style="font:12px/1.6 Consolas,monospace;color:var(--text);word-break:break-all">${escAttr(info.host || '')}</span></div>
+        <div class="frow"><label>网址</label><span style="font:12px/1.6 Consolas,monospace;color:var(--text);word-break:break-all">${escAttr(info.url || '')}</span></div>
+        <div class="frow"><label>错误</label><span style="color:var(--danger);font-size:12px">${escAttr(info.error || '')}</span></div>
+        <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="certRemember" type="checkbox" checked/> 本次运行内记住该站点，不再询问</label></div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="cancel">取消</button>
+          <button type="button" class="tb primary" data-act="continue">继续访问</button>
+        </div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const next = () => { ov.remove(); if (certQueueAlerts.length) showCertAlert(certQueueAlerts.shift()); };
+    const decide = (allow) => {
+      let remember = true;
+      try { remember = ov.querySelector('#certRemember').checked; } catch (e) { /* ignore */ }
+      window.topoWeb.allowCert({ id: info.id, allow, remember });
+      next();
+    };
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) decide(false); });
+    ov.querySelector('[data-act=cancel]').onclick = () => decide(false);
+    ov.querySelector('[data-act=continue]').onclick = () => decide(true);
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); decide(false); } });
+  }
+
   function openUrlDialog() {
     const root = $('#modalRoot');
     const ov = document.createElement('div');
@@ -146,6 +184,7 @@
 
   function init() {
     window.topoWeb.onNewTab((info) => addTab(info));
+    window.topoWeb.onCertError((info) => showCertAlert(info));
     $('#wvNew').onclick = openUrlDialog;
     $('#wvEmptyNew').onclick = openUrlDialog;
     $('#wvAddrForm').addEventListener('submit', (e) => {

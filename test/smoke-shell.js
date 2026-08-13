@@ -9,6 +9,8 @@
 const { spawn } = require('child_process');
 const net = require('net');
 const http = require('http');
+const https = require('https');
+const fs = require('fs');
 const path = require('path');
 const root = path.join(__dirname, '..');
 
@@ -37,6 +39,15 @@ mockServer.on('error', () => {});
 const webServer = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end('<!DOCTYPE html><html><head><title>NetTopo Web Test</title></head><body>Hello from device web</body></html>');
+});
+
+/* ---- 本地模拟设备 HTTPS 管理页（自签名证书） ---- */
+const httpsServer = https.createServer({
+  key: fs.readFileSync(path.join(root, 'test', 'fixtures', 'selfsigned.key')),
+  cert: fs.readFileSync(path.join(root, 'test', 'fixtures', 'selfsigned.crt'))
+}, (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end('<!DOCTYPE html><html><head><title>NetTopo Secured Test</title></head><body>secured page</body></html>');
 });
 function listen(server, port) { return new Promise((res, rej) => { server.once('error', rej); server.listen(port, '127.0.0.1', res); }); }
 
@@ -82,7 +93,8 @@ async function connectCDP(target) {
 (async () => {
   await listen(mockServer, 2323);
   await listen(webServer, 2324);
-  console.log('mock telnet 127.0.0.1:2323 / web 127.0.0.1:2324 就绪');
+  await listen(httpsServer, 2325);
+  console.log('mock telnet 127.0.0.1:2323 / web 127.0.0.1:2324 / https 127.0.0.1:2325 就绪');
 
   const appExe = process.env.SMOKE_APP || path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe');
   const appArgs = appExe.includes('portable') ? [] : ['.'];
@@ -272,6 +284,21 @@ async function connectCDP(target) {
     await sleep(2500);
     ok(await webv.eval(`document.querySelectorAll('.wv-tab').length === 2`), '第二台设备在同一窗口新增第 2 个标签');
 
+    // HTTPS 自签名证书：安全告警 → 手动允许 → 加载成功；记住站点后不再询问
+    await main.eval(`(() => { const n = __topo.state.nodes.find(x => document.querySelector('.node[data-id]').getAttribute('data-id') === x.id); n.web = 'https://127.0.0.1:2325/'; return true; })()`);
+    await main.eval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);
+    await sleep(300);
+    await main.eval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('打开设备管理页面')); b && b.click(); return !!b; })()`);
+    const tCert = Date.now();
+    while (Date.now() - tCert < 8000 && !(await webv.eval(`!!document.getElementById('certModal')`))) await sleep(150);
+    ok(await webv.eval(`!!document.getElementById('certModal')`), '自签名 HTTPS 弹出安全告警');
+    ok((await webv.eval(`(document.getElementById('certModal') || {}).textContent || ''`)).includes('127.0.0.1'), '告警显示站点地址');
+    await webv.eval(`document.querySelector('#certModal [data-act=continue]').click()`);
+    ok(await waitText(webv, `document.querySelector('.wv-tab.active .tt')`, 'NetTopo Secured Test', 8000), '允许证书后页面加载成功');
+    await webv.eval(`document.getElementById('wvAddr').value = 'https://127.0.0.1:2325/'; document.getElementById('wvAddrForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))`);
+    await sleep(2500);
+    ok(!(await webv.eval(`!!document.getElementById('certModal')`)), '记住站点后再次打开不再询问');
+
     webv.ws.close();
     shell.ws.close();
     main.ws.close();
@@ -283,6 +310,7 @@ async function connectCDP(target) {
     for (const s of mockSocks) s.destroy();
     mockServer.close();
     webServer.close();
+    httpsServer.close();
     await sleep(500);
     console.log('');
     console.log(failed ? ('冒烟结果：失败 ' + failed) : '冒烟结果：全部通过');

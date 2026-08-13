@@ -9,6 +9,10 @@ let shellWin = null;
 let webWin = null;
 let webReady = false;              // Web 管理页窗口渲染层是否就绪
 const pendingWebTabs = [];         // 等待 Web 窗口加载完成的 newtab 消息
+let certSeq = 0;
+const pendingCert = new Map();     // id -> { callback, host, url, error }
+const allowedCerts = new Set();    // 本次运行已手动允许的主机（host）
+const certQueue = [];              // 窗口未就绪时到达的证书告警
 let shellReady = false;            // Shell 窗口渲染层是否已就绪（did-finish-load）
 const pendingTabs = [];            // 等待新窗口加载完成的 newtab 消息
 const shellQueue = [];             // 窗口就绪前到达的会话事件（避免首屏输出丢失）
@@ -129,8 +133,20 @@ function createWebWindow() {
   webWin.webContents.once('did-finish-load', () => {
     while (pendingWebTabs.length) webWin.webContents.send('web:newtab', pendingWebTabs.shift());
     webReady = true;
+    while (certQueue.length) webWin.webContents.send('web:cert-error', certQueue.shift());
   });
   return webWin;
+}
+
+/** 证书告警统一出口：窗口未就绪先入队；无窗口则直接拒绝该请求 */
+function emitCertError(info) {
+  if (!webWin || webWin.isDestroyed()) {
+    const rec = pendingCert.get(info.id);
+    if (rec) { pendingCert.delete(info.id); rec.callback(false); }
+    return;
+  }
+  if (!webReady) { certQueue.push(info); return; }
+  webWin.webContents.send('web:cert-error', info);
 }
 
 function openWebTab(info) {
@@ -140,6 +156,14 @@ function openWebTab(info) {
 }
 
 /* ---- Web Shell IPC ---- */
+ipcMain.handle('web:cert-allow', (e, payload) => {
+  const rec = pendingCert.get(payload && payload.id);
+  if (!rec) return { ok: false, error: '请求已过期' };
+  pendingCert.delete(payload.id);
+  if (payload.allow && payload.remember) allowedCerts.add(rec.host);
+  rec.callback(!!payload.allow);
+  return { ok: true };
+});
 ipcMain.handle('web:open', (e, opts) => {
   opts = opts || {};
   const url = String(opts.url || '').trim();
@@ -173,6 +197,17 @@ app.whenReady().then(() => {
     });
   });
   createWindow();
+  // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
+  app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
+    if (webContents.getType() !== 'webview') return; // 仅处理设备管理页内嵌浏览器
+    let host = '';
+    try { host = new URL(url).host; } catch (e) { host = url; }
+    if (allowedCerts.has(host)) { callback(true); return; }
+    event.preventDefault();
+    const id = 'cert' + (++certSeq);
+    pendingCert.set(id, { callback, host, url, error });
+    emitCertError({ id, host, url, error });
+  });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
