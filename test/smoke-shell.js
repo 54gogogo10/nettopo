@@ -18,12 +18,14 @@ const ok = (cond, name) => { console.log((cond ? '  ✓ ' : '  ✗ ') + name); i
 
 /* ---- mock telnet 服务器 ---- */
 const mockSocks = new Set();
+const mockRecv = []; // { t, txt } 记录收到数据的时间戳（验证 \p 暂停）
 const mockServer = net.createServer((sock) => {
   mockSocks.add(sock);
   sock.on('close', () => mockSocks.delete(sock));
   sock.on('error', () => {});
   sock.on('data', (d) => {
     const txt = d.toString('utf8');
+    mockRecv.push({ t: Date.now(), txt });
     if (txt.includes('show version')) sock.write('v9.9.9 MOCK\r\n> ');
     else if (txt.trim()) sock.write(txt.replace(/\r?\n$/, '') + '\r\n> '); // 回显，便于验证粘贴
   });
@@ -184,6 +186,21 @@ async function connectCDP(target) {
     await shell.eval(`(() => { const b = [...document.querySelectorAll('#shCtx .ci')].find(x => x.textContent.includes('删除按钮')); b && b.click(); return !!b; })()`);
     await sleep(300);
     ok(await shell.eval(`document.querySelectorAll('.sh-bbtn').length === 0`), '删除按钮后条内无按钮');
+
+    // \p 暂停：按钮内容 show version\pshow running，两条命令间隔约 1 秒
+    await shell.eval(`(() => { const bar = document.getElementById('shBbar'); bar.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 300, clientY: 300 })); return true; })()`);
+    await sleep(300);
+    await shell.eval(`(() => { const b = [...document.querySelectorAll('#shCtx .ci')].find(x => x.textContent.includes('新建按钮')); b && b.click(); return !!b; })()`);
+    await sleep(300);
+    await shell.eval(`(() => { document.getElementById('bbLabel').value = '暂停测试'; document.getElementById('bbText').value = 'show version\\\\pshow running'; document.querySelector('[data-act=save]').click(); return true; })()`);
+    await sleep(300);
+    mockRecv.length = 0;
+    await shell.eval(`document.querySelector('.sh-bbtn').click()`);
+    const tPause = Date.now();
+    while (Date.now() - tPause < 6000 && !(mockRecv.some(x => x.txt.includes('show version')) && mockRecv.some(x => x.txt.includes('show running')))) await sleep(100);
+    const idxOf = (needle) => { for (let i = mockRecv.length - 1; i >= 0; i--) if (mockRecv[i].txt.includes(needle)) return i; return -1; };
+    const iv = idxOf('show version'), ir = idxOf('show running');
+    ok(iv >= 0 && ir >= 0 && mockRecv[ir].t - mockRecv[iv].t >= 900, '\p 暂停约 1 秒（间隔 ' + (iv >= 0 && ir >= 0 ? mockRecv[ir].t - mockRecv[iv].t : -1) + 'ms）');
 
     // 字号调节
     ok(await shell.eval(`document.getElementById('shFontVal').textContent === '13'`), '终端字号默认 13');

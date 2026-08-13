@@ -199,13 +199,36 @@
   try { buttons = JSON.parse(localStorage.getItem(BTN_KEY) || '[]') || []; } catch (e) { buttons = []; }
   const btnWrapEl = $('#shBBtnWrap'), bbarEl = $('#shBbar'), btnAddEl = $('#shBAdd');
   const saveButtons = () => { try { localStorage.setItem(BTN_KEY, JSON.stringify(buttons)); } catch (e) { /* ignore */ } };
-  /* 展开 \n / \r / \t 转义（\n 按终端回车 \r 处理） */
-  const expandEsc = (t) => String(t).replace(/\\r/g, '\r').replace(/\\n/g, '\r').replace(/\\t/g, '\t');
-  const sendBtn = (b) => {
+  /* 解析发送内容：\n / \r → 回车(\r)，\t → 制表，\p → 暂停 1 秒，\\ → 字面反斜杠 */
+  const parseSendText = (t) => {
+    const out = [];
+    let cur = '';
+    const flush = () => { if (cur) { out.push({ type: 'text', data: cur }); cur = ''; } };
+    const s = String(t);
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === '\\' && i + 1 < s.length) {
+        const c = s[i + 1];
+        if (c === 'p' || c === 'P') { flush(); out.push({ type: 'pause', ms: 1000 }); i++; continue; }
+        if (c === 'r' || c === 'n') { cur += '\r'; i++; continue; }
+        if (c === 't') { cur += '\t'; i++; continue; }
+        if (c === '\\') { cur += '\\'; i++; continue; }
+      }
+      cur += s[i];
+    }
+    flush();
+    return out;
+  };
+  const sendBtn = async (b) => {
     const a = activeSession();
     if (!a) { toast('当前没有活动会话'); return; }
     if (a.s.ended) { toast('会话已结束'); return; }
-    window.topoShell.sendData(a.id, expandEsc(b.text) + (b.enter ? '\r' : ''));
+    const parts = parseSendText(b.text);
+    if (b.enter) parts.push({ type: 'text', data: '\r' });
+    for (const p of parts) {
+      if (a.s.ended) return;
+      if (p.type === 'pause') await new Promise((r) => setTimeout(r, p.ms));
+      else window.topoShell.sendData(a.id, p.data);
+    }
   };
   function renderBar() {
     if (!btnWrapEl) return;
@@ -235,7 +258,7 @@
     ov.innerHTML = `
       <div class="modal sh-dialog" role="dialog">
         <h3>${editing ? '编辑快捷按钮' : '新建快捷按钮'}</h3>
-        <div class="m-sub">点击按钮把内容发送到当前会话；内容支持 \\n（回车）、\\t（制表）。</div>
+        <div class="m-sub">点击按钮把内容发送到当前会话；内容支持 \\n 回车、\\t 制表、\\p 暂停 1 秒。</div>
         <div class="frow"><label>按钮名称</label><input id="bbLabel" type="text" value="${escAttr(b.label)}" placeholder="例如：查看版本"/></div>
         <div class="frow"><label>发送内容</label><textarea id="bbText" style="height:80px" placeholder="例如：show version\\n">${escAttr(b.text)}</textarea></div>
         <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="bbEnter" type="checkbox" ${b.enter ? 'checked' : ''}/> 发送后追加回车（Enter）</label></div>
