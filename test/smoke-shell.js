@@ -35,6 +35,28 @@ const mockServer = net.createServer((sock) => {
 });
 mockServer.on('error', () => {});
 
+/* ---- 本地模拟 SSH 服务器（指纹确认 TOFU 测试，ssh2 自带测试主机密钥） ---- */
+const sshServer = new (require('ssh2').Server)({
+  hostKeys: [fs.readFileSync(path.join(root, 'node_modules', 'ssh2', 'test', 'fixtures', 'ssh_host_rsa_key'))]
+}, (client) => {
+  client.on('error', () => {});
+  client.on('authentication', (ctx) => {
+    if (ctx.method === 'password' && ctx.username === 'admin' && ctx.password === 'secret') ctx.accept();
+    else ctx.reject();
+  }).on('ready', () => {
+    client.on('session', (accept) => {
+      const session = accept();
+      session.on('pty', (a) => a());
+      session.on('shell', (accept2) => {
+        const stream = accept2();
+        stream.write('SSH-READY\r\n> ');
+        stream.on('data', (d) => { if (d.toString().includes('show version')) stream.write('v9.9.9 SSH-MOCK\r\n> '); });
+        stream.on('close', () => stream.end());
+      });
+    });
+  });
+});
+
 /* ---- 本地模拟设备管理 Web 页 ---- */
 const webServer = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -97,7 +119,8 @@ async function connectCDP(target) {
   await listen(mockServer, 2323);
   await listen(webServer, 2324);
   await listen(httpsServer, 2325);
-  console.log('mock telnet 127.0.0.1:2323 / web 127.0.0.1:2324 / https 127.0.0.1:2325 就绪');
+  await listen(sshServer, 2326);
+  console.log('mock telnet 127.0.0.1:2323 / web 127.0.0.1:2324 / https 127.0.0.1:2325 / ssh 127.0.0.1:2326 就绪');
 
   const appExe = process.env.SMOKE_APP || path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe');
   const appArgs = appExe.includes('portable') ? [] : ['.'];
@@ -266,6 +289,61 @@ async function connectCDP(target) {
     ok(await shell.eval(`document.querySelectorAll('.sh-tab').length === 1`), '关闭标签后剩余 1 个');
     ok(await shell.eval(`document.querySelectorAll('.sh-term-wrap.active').length === 1`), '关闭后自动激活剩余标签');
 
+    // SSH 首次连接指纹确认（TOFU）：主窗口发起 SSH → 指纹弹窗 → 信任 → 连接成功
+    const openSshDialog = async (win) => {
+      await win.eval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);
+      await sleep(300);
+      await win.eval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('Web Shell')); b && b.click(); return !!b; })()`);
+      await sleep(300);
+      await win.eval(`(() => {
+        const setVal = (el, v) => { const s = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('change', { bubbles: true })); };
+        setVal(document.getElementById('wsProto'), 'ssh');
+        document.getElementById('wsHost').value = '127.0.0.1';
+        document.getElementById('wsPort').value = '2326';
+        document.getElementById('wsUser').value = 'admin';
+        document.getElementById('wsPass').value = 'secret';
+        document.querySelector('[data-act=connect]').click();
+        return true;
+      })()`);
+      await sleep(2500);
+    };
+    await openSshDialog(main);
+    const tFp = Date.now();
+    let fpInfo = null;
+    while (Date.now() - tFp < 8000) {
+      fpInfo = await shell.eval(`(() => { const m = document.getElementById('fpModal'); return m ? { txt: m.textContent } : null; })()`);
+      if (fpInfo) break;
+      await sleep(200);
+    }
+    ok(fpInfo && fpInfo.txt.includes('SHA256:') && fpInfo.txt.includes('127.0.0.1'), 'SSH 首次连接弹出指纹确认（SHA256 格式 + 主机地址）');
+    await shell.eval(`document.querySelector('#fpModal [data-act=trust]').click()`);
+    ok(await waitText(shell, `document.querySelector('.sh-term-wrap.active .xterm-rows')`, 'SSH-READY', 8000), '信任指纹后 SSH 连接建立（收到欢迎信息）');
+    ok(await shell.eval(`(localStorage.getItem('topoShellFp:127.0.0.1') || '').startsWith('SHA256:')`), '指纹已记忆（SHA256: 前缀）');
+    // 关闭 SSH 标签
+    await shell.eval(`document.querySelectorAll('.sh-tab')[1].querySelector('.x').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))`);
+    await sleep(400);
+    ok(await shell.eval(`document.querySelectorAll('.sh-tab').length === 1`), '关闭 SSH 标签后剩余 1 个');
+
+    // 已信任主机再次连接：不再弹指纹确认，直接建立会话
+    await shell.eval(`document.getElementById('shNew').click()`);
+    await sleep(300);
+    await shell.eval(`(() => {
+      const setVal = (el, v) => { const s = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('change', { bubbles: true })); };
+      setVal(document.getElementById('wsProto'), 'ssh');
+      document.getElementById('wsHost').value = '127.0.0.1';
+      document.getElementById('wsPort').value = '2326';
+      document.getElementById('wsUser').value = 'admin';
+      document.getElementById('wsPass').value = 'secret';
+      document.querySelector('[data-act=connect]').click();
+      return true;
+    })()`);
+    await sleep(2500);
+    ok(!(await shell.eval(`!!document.getElementById('fpModal')`)), '已信任主机再次连接不再弹指纹确认');
+    ok(await waitText(shell, `document.querySelector('.sh-term-wrap.active .xterm-rows')`, 'SSH-READY', 8000), '已信任主机直接建立 SSH 会话');
+    await shell.eval(`document.querySelectorAll('.sh-tab')[1].querySelector('.x').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))`);
+    await sleep(400);
+    ok(await shell.eval(`document.querySelectorAll('.sh-tab').length === 1`), '关闭第二个 SSH 标签后剩余 1 个');
+
     // 设备管理 Web 页：独立窗口 + 多标签 + 不锁定主界面
     await main.eval(`(() => { const n = __topo.state.nodes.find(x => document.querySelector('.node[data-id]').getAttribute('data-id') === x.id); n.web = 'http://127.0.0.1:2324/'; return true; })()`);
     await main.eval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);
@@ -349,6 +427,7 @@ async function connectCDP(target) {
     mockServer.close();
     webServer.close();
     httpsServer.close();
+    sshServer.close();
     await sleep(500);
     console.log('');
     console.log(failed ? ('冒烟结果：失败 ' + failed) : '冒烟结果：全部通过');

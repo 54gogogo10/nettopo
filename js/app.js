@@ -803,8 +803,8 @@ function exportReport() {
 
 /* ================= 多选对齐 / 分布 ================= */
 function openAlign() {
-  const ids = renderer.selectedNodes();
-  if (ids.length < 2) { toast('请先多选至少两台设备（Ctrl 点选 / Shift 框选）'); return; }
+  const ids = new Set(renderer.selectedNodes()); // selectedNodes() 返回数组，这里转 Set 供 has() 判断
+  if (ids.size < 2) { toast('请先多选至少两台设备（Ctrl 点选 / Shift 框选）'); return; }
   const root = $('#modalRoot');
   const ov = document.createElement('div');
   ov.className = 'overlay';
@@ -815,7 +815,7 @@ function openAlign() {
   ];
   ov.innerHTML = `
     <div class="modal" role="dialog" style="width:520px">
-      <h3>对齐 / 分布（已选 ${ids.length} 台设备）</h3>
+      <h3>对齐 / 分布（已选 ${ids.size} 台设备）</h3>
       <div class="m-sub">按当前相对位置对齐或等距分布，Ctrl+Z 可撤销</div>
       <div class="align-grid">
         ${acts.map(([k, lb]) => `<button type="button" class="tb" data-k="${k}">${lb}</button>`).join('')}
@@ -886,7 +886,7 @@ function openProjectDiff() {
 
 /* ================= 批量重命名 ================= */
 function openRename() {
-  const ids = renderer.selectedNodes();
+  const ids = new Set(renderer.selectedNodes()); // selectedNodes() 返回数组，这里转 Set 供 size/has 判断
   const nodes = ids.size ? state.nodes.filter(n => ids.has(n.id)) : state.nodes;
   if (!nodes.length) { toast('画布为空，请先添加设备'); return; }
   const root = $('#modalRoot');

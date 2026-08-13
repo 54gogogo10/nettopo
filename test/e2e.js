@@ -238,6 +238,311 @@ const puppeteer = require('puppeteer-core');
   await new Promise(r => setTimeout(r, 200));
   console.log('含自定义类型导出 VDX 无异常:', vdxCheck);
 
+  // ================= 集成场景补充 =================
+  // 关闭当前最上层弹窗（兼容表单弹窗：cancel/close/提交按钮）
+  const closeTopModal = () => page.evaluate(() => {
+    const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+    if (!ov) return;
+    const btn = ov.querySelector('[data-act=close]') || ov.querySelector('[data-act=cancel]') || ov.querySelector('form button[type=submit]');
+    if (btn) btn.click();
+    else ov.remove();
+  });
+
+  // ---- 面板搜索过滤 ----
+  await page.evaluate(() => {
+    const input = document.querySelector('#searchInput');
+    input.value = '交换机';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await new Promise(r => setTimeout(r, 200));
+  const searchRes = await page.evaluate(() => ({
+    items: [...document.querySelectorAll('#listWrap .pitem')].map(x => x.textContent.trim().split('\n')[0]),
+    tab: document.querySelector('.tab.active').textContent.trim()
+  }));
+  const searchOk = searchRes.items.length >= 2 && searchRes.items.every(t => t.includes('交换机'));
+  console.log('搜索「交换机」过滤:', searchOk ? 'OK' : 'FAIL', JSON.stringify(searchRes));
+  if (!searchOk) errors.push('[search] 搜索过滤结果异常');
+  await page.evaluate(() => {
+    const input = document.querySelector('#searchInput');
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await new Promise(r => setTimeout(r, 150));
+
+  // ---- 拓扑校验（示例含重复 IP 192.168.1.10 → 应报错） ----
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('拓扑校验'));
+    document.getElementById('btnDropLayout').click();
+  });
+  await new Promise(r => setTimeout(r, 200));
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('拓扑校验'));
+    if (b) b.click();
+  });
+  await new Promise(r => setTimeout(r, 300));
+  const validation = await page.evaluate(() => {
+    const m = [...document.querySelectorAll('#modalRoot .modal')].pop();
+    return m ? { title: m.querySelector('h3').textContent, rows: m.querySelectorAll('.vrow').length, errs: m.querySelectorAll('.vrow.err').length, sub: m.querySelector('.m-sub').textContent } : null;
+  });
+  const validationOk = validation && validation.title === '拓扑校验报告' && validation.rows > 0 && validation.errs > 0;
+  console.log('拓扑校验报告:', validationOk ? 'OK' : 'FAIL', JSON.stringify(validation));
+  if (!validationOk) errors.push('[validation] 拓扑校验报告异常');
+  await closeTopModal();
+  await new Promise(r => setTimeout(r, 150));
+
+  // ---- 路径分析（正常）：路由器 → 办公PC1（多跳） ----
+  const runPath = async () => {
+    await page.evaluate(() => document.getElementById('btnDropLayout').click());
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('路径分析'));
+      if (b) b.click();
+    });
+    await new Promise(r => setTimeout(r, 250));
+    await page.evaluate(() => {
+      const f = document.querySelector('#modalRoot .modal form');
+      const fromOpt = [...f.elements.from.options].find(o => window.__topo.state.nodes.find(n => n.id === o.value && n.type === 'router'));
+      const toOpt = [...f.elements.to.options].find(o => o.textContent === '办公PC1');
+      if (!fromOpt || !toOpt) return 'no-opt';
+      f.elements.from.value = fromOpt.value;
+      f.elements.to.value = toOpt.value;
+      f.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      return 'ok';
+    });
+    await new Promise(r => setTimeout(r, 300));
+    return page.evaluate(() => {
+      const m = [...document.querySelectorAll('#modalRoot .modal')].pop();
+      return m ? { title: m.querySelector('h3').textContent, text: m.textContent } : null;
+    });
+  };
+  const pathRes = await runPath();
+  const pathOk = pathRes && pathRes.title === '路径分析结果' && pathRes.text.includes('跳') && pathRes.text.includes('→');
+  console.log('路径分析 路由器→办公PC1:', pathOk ? 'OK' : 'FAIL', pathRes && pathRes.text.slice(0, 120));
+  if (!pathOk) errors.push('[path] 路径分析异常');
+  await closeTopModal();
+  await new Promise(r => setTimeout(r, 150));
+
+  // ---- 故障标记 → 路径分析绕行 → 恢复 ----
+  const faultLinkId = await page.evaluate(() => {
+    const l = window.__topo.state.links.find(x => x.aIf === 'GE0/0/1' && x.aIp === '10.0.0.1');
+    return l ? l.id : null;
+  });
+  if (faultLinkId) {
+    await page.evaluate((id) => {
+      const el = document.querySelector('.link[data-id="' + id + '"]');
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 300, clientY: 300 }));
+    }, faultLinkId);
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('标记链路故障'));
+      if (b) b.click();
+    });
+    await new Promise(r => setTimeout(r, 250));
+    const downed = await page.evaluate((id) => !!document.querySelector('.link[data-id="' + id + '"].down'), faultLinkId);
+    console.log('标记链路故障（R1-SW1）:', downed ? 'OK' : 'FAIL');
+    if (!downed) errors.push('[fault] 故障标记未生效');
+    const reroute = await runPath();
+    const rerouteOk = reroute && reroute.text.includes('已排除 1 条故障链路') && reroute.text.includes('防火墙FW1');
+    console.log('故障后路径绕行:', rerouteOk ? 'OK' : 'FAIL', reroute && reroute.text.slice(0, 150));
+    if (!rerouteOk) errors.push('[fault] 故障后未绕行');
+    await closeTopModal();
+    await new Promise(r => setTimeout(r, 150));
+    // 恢复链路
+    await page.evaluate((id) => {
+      const el = document.querySelector('.link[data-id="' + id + '"]');
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 300, clientY: 300 }));
+    }, faultLinkId);
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('恢复链路'));
+      if (b) b.click();
+    });
+    await new Promise(r => setTimeout(r, 250));
+    const recovered = await page.evaluate((id) => !document.querySelector('.link[data-id="' + id + '"].down'), faultLinkId);
+    console.log('恢复链路:', recovered ? 'OK' : 'FAIL');
+    if (!recovered) errors.push('[fault] 链路恢复未生效');
+  } else {
+    errors.push('[fault] 未找到 R1-SW1 链路');
+  }
+
+  // ---- 多选 + 对齐/分布 ----
+  // 先点击画布空白清空选择/关闭右键菜单，再 Ctrl+点选 3 台设备
+  await page.evaluate(() => {
+    document.querySelector('#svg').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 10, clientY: 10 }));
+  });
+  await new Promise(r => setTimeout(r, 150));
+  await page.evaluate(() => {
+    const els = [...document.querySelectorAll('.node')].slice(0, 3);
+    const fire = (el, ctrl) => el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, ctrlKey: ctrl, button: 0, clientX: 5, clientY: 5 }));
+    fire(els[0], false);
+    fire(els[1], true);
+    fire(els[2], true);
+  });
+  await new Promise(r => setTimeout(r, 250));
+  const selCount = await page.evaluate(() => window.__topo.renderer.selectedNodes().length);
+  console.log('多选设备数:', selCount);
+  if (selCount === 3) {
+    await menuClick('对齐 / 分布选中…');
+    await new Promise(r => setTimeout(r, 200));
+    const selBefore = await page.evaluate(() => window.__topo.renderer.selectedNodes());
+    const alignBtn = await page.evaluate(() => {
+      const b = document.querySelector('.align-grid .tb[data-k=left]');
+      if (b) b.click();
+      return !!b;
+    });
+    await new Promise(r => setTimeout(r, 250));
+    const xs = await page.evaluate((ids) => ids.map(id => window.__topo.state.nodes.find(n => n.id === id).x), selBefore);
+    const alignOk = alignBtn && xs.length === 3 && Math.max(...xs) - Math.min(...xs) < 0.5;
+    console.log('多选 3 台左对齐:', alignOk ? 'OK' : 'FAIL', JSON.stringify(xs));
+    if (!alignOk) errors.push('[align] 对齐未生效');
+    await page.evaluate(() => document.querySelector('#btnUndo').click()); // 撤销对齐
+    await new Promise(r => setTimeout(r, 150));
+    // 批量重命名（验证 openRename 修复：只作用于选中的设备）
+    await page.evaluate(() => {
+      const els = [...document.querySelectorAll('.node')].slice(0, 3);
+      const fire = (el, ctrl) => el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, ctrlKey: ctrl, button: 0, clientX: 5, clientY: 5 }));
+      fire(els[0], false); fire(els[1], true); fire(els[2], true);
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await menuClick('批量重命名…');
+    await new Promise(r => setTimeout(r, 200));
+    const rnApplied = await page.evaluate(() => {
+      const m = [...document.querySelectorAll('#modalRoot .modal')].pop();
+      const title = m.querySelector('h3').textContent;
+      const prefix = m.querySelector('#rnPrefix');
+      if (!prefix) return 'no-modal';
+      prefix.value = 'TEST-';
+      document.querySelector('[data-act=apply]').click();
+      return title;
+    });
+    await new Promise(r => setTimeout(r, 300));
+    const rnNames = await page.evaluate((ids) => ids.map(id => window.__topo.state.nodes.find(n => n.id === id).name), selBefore);
+    const rnOk = rnApplied && rnApplied.includes('3 台设备') && rnNames.length === 3 && rnNames.every(n => n.startsWith('TEST-'));
+    console.log('批量重命名 3 台加前缀:', rnOk ? 'OK' : 'FAIL', JSON.stringify(rnNames));
+    if (!rnOk) errors.push('[rename] 批量重命名未生效');
+    await page.evaluate(() => document.querySelector('#btnUndo').click()); // 撤销重命名
+    await new Promise(r => setTimeout(r, 150));
+  } else {
+    console.log('多选 3 台左对齐: FAIL（选中数=' + selCount + '）');
+    errors.push('[align] 多选未生效');
+  }
+
+  // ---- 配置生成 + 设备选择器 ----
+  await page.evaluate(() => document.getElementById('btnDropExport').click());
+  await new Promise(r => setTimeout(r, 200));
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('生成设备配置'));
+    if (b) b.click();
+  });
+  await new Promise(r => setTimeout(r, 300));
+  const cfgInit = await page.evaluate(() => {
+    const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+    const out = ov.querySelector('#cfgOut').value;
+    const devs = window.__topo.state.nodes.map(n => n.name);
+    const secs = devs.filter(n => out.split('\n').some(l => l.startsWith('# ' + n + '  ')));
+    return { pickBtn: !!ov.querySelector('#cfgPick'), cnt: ov.querySelector('#cfgPickCnt').textContent, secs: secs.length, total: devs.length };
+  });
+  await page.evaluate(() => document.querySelector('#cfgPick').click());
+  await new Promise(r => setTimeout(r, 250));
+  const pickerInfo = await page.evaluate(() => {
+    const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+    if (!ov.querySelector('#dpList')) return null;
+    return { items: ov.querySelectorAll('#dpList .dp-item').length, count: ov.querySelector('#dpCount').textContent, search: !!ov.querySelector('#dpSearch') };
+  });
+  await page.evaluate(() => {
+    const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+    const boxes = [...ov.querySelectorAll('#dpList input[type=checkbox]')];
+    [boxes[1], boxes[3]].forEach(b => b.click());
+    ov.querySelector('[data-act=confirm]').click();
+  });
+  await new Promise(r => setTimeout(r, 300));
+  const cfgAfter = await page.evaluate(() => {
+    const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+    const out = ov.querySelector('#cfgOut').value;
+    const devs = window.__topo.state.nodes.map(n => n.name);
+    const secs = devs.filter(n => out.split('\n').some(l => l.startsWith('# ' + n + '  ')));
+    return { cnt: ov.querySelector('#cfgPickCnt').textContent, secs: secs.length };
+  });
+  const cfgOkFinal = cfgInit && cfgInit.pickBtn && cfgInit.cnt.includes('全部')
+    && pickerInfo && pickerInfo.items === cfgInit.total && pickerInfo.search
+    && cfgAfter && cfgAfter.cnt.includes('/ ' + cfgInit.total + ' 台') && cfgAfter.cnt.includes((cfgInit.total - 2) + ' /')
+    && cfgAfter.secs === cfgInit.total - 2;
+  console.log('配置生成设备选择器:', cfgOkFinal ? 'OK' : 'FAIL', JSON.stringify({ cnt: cfgInit && cfgInit.cnt, secs: cfgAfter && cfgAfter.secs, total: cfgInit && cfgInit.total }));
+  if (!cfgOkFinal) errors.push('[configgen] 设备选择器流程异常');
+  await page.evaluate(() => { [...document.querySelectorAll('#modalRoot .overlay')].pop().querySelector('[data-act=close]').click(); });
+  await new Promise(r => setTimeout(r, 150));
+
+  // ---- 备份管理（浏览器回退提示） ----
+  await page.evaluate(() => document.getElementById('btnDropFile').click());
+  await new Promise(r => setTimeout(r, 200));
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('备份管理'));
+    if (b) b.click();
+  });
+  await new Promise(r => setTimeout(r, 300));
+  const bkModal = await page.evaluate(() => {
+    const m = [...document.querySelectorAll('#modalRoot .modal')].pop();
+    return m ? { title: m.querySelector('h3').textContent, sub: (m.querySelector('.m-sub') || {}).textContent || '' } : null;
+  });
+  const bkOk = bkModal && bkModal.title === '备份管理' && bkModal.sub.includes('桌面版专属');
+  console.log('备份管理（浏览器回退）:', bkOk ? 'OK' : 'FAIL');
+  if (!bkOk) errors.push('[backup] 备份管理回退弹窗异常');
+  await page.evaluate(() => { [...document.querySelectorAll('#modalRoot .overlay')].pop().querySelector('form button[type=submit]').click(); });
+  await new Promise(r => setTimeout(r, 150));
+
+  // ---- 模板添加设备 ----
+  await menuClick('从模板添加设备…');
+  await new Promise(r => setTimeout(r, 250));
+  const tplAdded = await page.evaluate(() => {
+    const b = [...document.querySelectorAll('.tpl')].find(x => x.textContent.includes('核心交换机'));
+    if (b) b.click();
+    return !!b;
+  });
+  await new Promise(r => setTimeout(r, 300));
+  const hasTplNode = await page.evaluate(() => window.__topo.state.nodes.some(n => n.name === '核心交换机'));
+  console.log('模板添加核心交换机:', tplAdded && hasTplNode ? 'OK' : 'FAIL');
+  if (!(tplAdded && hasTplNode)) errors.push('[template] 模板添加设备失败');
+
+  // ---- 打开工程（uploadFile 往返） ----
+  const tmpProj = path.join(__dirname, '_tmp_open.nettopo');
+  require('fs').writeFileSync(tmpProj, JSON.stringify({
+    app: 'NetTopo', version: 1,
+    nodes: [{ id: 'n1', name: '导入设备A', type: 'router', x: 0, y: 0, w: 160, h: 56 }, { id: 'n2', name: '导入设备B', type: 'switch', x: 300, y: 0, w: 160, h: 56 }],
+    links: [{ id: 'l1', a: 'n1', b: 'n2', aIf: 'GE0/0/1', aIp: '10.1.1.1', bIf: 'GE1/0/1', bIp: '10.1.1.2' }],
+    texts: []
+  }));
+  await page.$eval('input#projInput', (el) => { el.value = ''; });
+  const projInput = await page.$('input#projInput');
+  await projInput.uploadFile(tmpProj);
+  await new Promise(r => setTimeout(r, 400));
+  await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+  await new Promise(r => setTimeout(r, 400));
+  const opened = await page.evaluate(() => ({ nodes: window.__topo.state.nodes.length, links: window.__topo.state.links.length, rendered: document.querySelectorAll('.node').length }));
+  const openOk = opened.nodes === 2 && opened.links === 1 && opened.rendered === 2;
+  console.log('打开工程往返:', openOk ? 'OK' : 'FAIL', JSON.stringify(opened));
+  if (!openOk) errors.push('[open] 打开工程未生效');
+  require('fs').unlinkSync(tmpProj);
+
+  // ---- 新建空白画布 ----
+  await page.evaluate(() => document.getElementById('btnDropFile').click());
+  await new Promise(r => setTimeout(r, 200));
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('新建空白画布'));
+    if (b) b.click();
+  });
+  await new Promise(r => setTimeout(r, 250));
+  await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+  await new Promise(r => setTimeout(r, 300));
+  const blank = await page.evaluate(() => ({
+    nodes: window.__topo.state.nodes.length,
+    emptyHidden: document.querySelector('#empty').classList.contains('hidden'),
+    zoomHidden: document.querySelector('#zoomCtl').classList.contains('hidden')
+  }));
+  // 设计意图：空白画布模式不显示空状态卡片（无表格也可直接画），画布与缩放控件为空
+  const blankOk = blank.nodes === 0 && blank.emptyHidden && blank.zoomHidden;
+  console.log('新建空白画布:', blankOk ? 'OK' : 'FAIL', JSON.stringify(blank));
+  if (!blankOk) errors.push('[new] 新建空白画布未生效');
+
   console.log(errors.length ? '发现错误:\n' + errors.join('\n') : '无控制台错误 ✓');
   await browser.close();
   process.exit(errors.length ? 1 : 0);
