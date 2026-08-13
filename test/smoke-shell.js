@@ -30,7 +30,13 @@ const mockServer = net.createServer((sock) => {
   sock.write('\r\nWelcome to MOCK-TELNET-READY\r\n> ');
 });
 mockServer.on('error', () => {});
-function listen(server) { return new Promise((res, rej) => { server.once('error', rej); server.listen(2323, '127.0.0.1', res); }); }
+
+/* ---- 本地模拟设备管理 Web 页 ---- */
+const webServer = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end('<!DOCTYPE html><html><head><title>NetTopo Web Test</title></head><body>Hello from device web</body></html>');
+});
+function listen(server, port) { return new Promise((res, rej) => { server.once('error', rej); server.listen(port, '127.0.0.1', res); }); }
 
 class CDP {
   constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map();
@@ -72,8 +78,9 @@ async function connectCDP(target) {
 }
 
 (async () => {
-  await listen(mockServer);
-  console.log('mock telnet 127.0.0.1:2323 就绪');
+  await listen(mockServer, 2323);
+  await listen(webServer, 2324);
+  console.log('mock telnet 127.0.0.1:2323 / web 127.0.0.1:2324 就绪');
 
   const appExe = process.env.SMOKE_APP || path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe');
   const appArgs = appExe.includes('portable') ? [] : ['.'];
@@ -208,6 +215,28 @@ async function connectCDP(target) {
     ok(await shell.eval(`document.querySelectorAll('.sh-tab').length === 1`), '关闭标签后剩余 1 个');
     ok(await shell.eval(`document.querySelectorAll('.sh-term-wrap.active').length === 1`), '关闭后自动激活剩余标签');
 
+    // 设备管理 Web 页：独立窗口 + 多标签 + 不锁定主界面
+    await main.eval(`(() => { const n = __topo.state.nodes.find(x => document.querySelector('.node[data-id]').getAttribute('data-id') === x.id); n.web = 'http://127.0.0.1:2324/'; return true; })()`);
+    await main.eval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);
+    await sleep(300);
+    ok(await main.eval(`(() => { const m = document.getElementById('ctx'); return m && !m.classList.contains('hidden') && m.textContent.includes('打开设备管理页面'); })()`), '右键菜单含「打开设备管理页面」');
+    await main.eval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('打开设备管理页面')); b && b.click(); return !!b; })()`);
+    await sleep(2500);
+    ok(await main.eval(`!document.querySelector('.overlay')`), '打开管理页后主界面无遮罩（不锁定）');
+    const webTarget = await waitTarget('webview.html');
+    const webv = await connectCDP(webTarget);
+    ok(await webv.eval(`document.querySelectorAll('.wv-tab').length === 1`), '设备管理页窗口出现 1 个标签');
+    ok(await webv.eval(`!!document.querySelector('webview')`), '标签内嵌 webview 已创建');
+    ok(await waitText(webv, `document.querySelector('.wv-tab .tt')`, 'NetTopo Web Test', 8000), '标签标题更新为页面标题');
+    // 第二台设备 → 同窗口第 2 个标签
+    await main.eval(`(() => { const n = __topo.state.nodes.find(x => document.querySelectorAll('.node[data-id]')[1].getAttribute('data-id') === x.id); n.web = 'http://127.0.0.1:2324/'; return true; })()`);
+    await main.eval(`(() => { const el = document.querySelectorAll('.node[data-id]')[1]; el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);
+    await sleep(300);
+    await main.eval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('打开设备管理页面')); b && b.click(); return !!b; })()`);
+    await sleep(2500);
+    ok(await webv.eval(`document.querySelectorAll('.wv-tab').length === 2`), '第二台设备在同一窗口新增第 2 个标签');
+
+    webv.ws.close();
     shell.ws.close();
     main.ws.close();
   } catch (e) {
@@ -217,6 +246,7 @@ async function connectCDP(target) {
     try { require('child_process').execSync('taskkill /PID ' + proc.pid + ' /T /F', { stdio: 'ignore' }); } catch (e) { try { proc.kill(); } catch (e2) {} }
     for (const s of mockSocks) s.destroy();
     mockServer.close();
+    webServer.close();
     await sleep(500);
     console.log('');
     console.log(failed ? ('冒烟结果：失败 ' + failed) : '冒烟结果：全部通过');

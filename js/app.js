@@ -1202,6 +1202,7 @@ function addNodeAt(wx, wy) {
       { name: 'name', label: '设备名称', required: true, ph: '例如：核心交换机SW1' },
       { name: 'type', label: '设备类型', type: 'select', options: U.typeList().map(t => [t.key, t.label]) },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: [] },
+      { name: 'web', label: '管理Web页URL', ph: '例如 http://10.255.0.1（可选）' },
       { name: 'note', label: '备注', type: 'textarea' }
     ],
     submit: '创建',
@@ -1213,7 +1214,7 @@ function addNodeAt(wx, wy) {
         type: v.type || U.typeOf(v.name),
         x: wx - U.nodeWidthForName(v.name) / 2, y: wy - U.NODE_H / 2,
         w: U.nodeWidthForName(v.name), h: U.NODE_H,
-        note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1)
+        note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1), web: v.web.trim()
       };
       node.h = U.nodeHeightFor(node);
       node.y = wy - node.h / 2;
@@ -1318,6 +1319,7 @@ function editNode(id) {
       { name: 'name', label: '设备名称', required: true, value: n.name },
       { name: 'type', label: '设备类型', type: 'select', options: U.typeList().map(t => [t.key, t.label]), value: n.type },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: U.nodeMgmts(n) },
+      { name: 'web', label: '管理Web页URL', value: n.web || '', ph: '例如 http://10.255.0.1（可选）' },
       { name: 'note', label: '备注', type: 'textarea', value: n.note }
     ],
     submit: '保存',
@@ -1333,6 +1335,7 @@ function editNode(id) {
       const nh = U.nodeHeightFor(n);
       if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
       n.type = v.type;
+      n.web = v.web.trim();
       n.note = v.note.trim();
       renderer.setData(state.nodes, state.links, state.texts);
       refreshAll();
@@ -1463,6 +1466,7 @@ function batchEditNodes() {
     fields: [
       { name: 'type', label: '设备类型', type: 'select', options: [['', '（保持不变）']].concat(U.typeList().map(t => [t.key, t.label])) },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: [] },
+      { name: 'web', label: '管理Web页URL', ph: '留空不修改' },
       { name: 'note', label: '备注', type: 'textarea', ph: '留空不修改' }
     ],
     submit: '应用',
@@ -1474,6 +1478,7 @@ function batchEditNodes() {
         if (!n) continue;
         if (v.type) n.type = v.type;
         if (ms.length) U.setNodeMgmts(n, ms);
+        if (String(v.web).trim()) n.web = String(v.web).trim();
         if (String(v.note).trim()) n.note = String(v.note).trim();
         const nh = U.nodeHeightFor(n);
         if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
@@ -1823,6 +1828,7 @@ function openCtx(e, kind, id) {
       { ic: 'edit', label: '编辑设备…', act: () => editNode(id) },
       { ic: 'locate', label: '定位到视图', act: () => { select('node', id); centerOn('node', id); } },
       { ic: 'terminal', label: 'Web Shell（SSH/Telnet）…', act: () => openWebShell(id) },
+      { ic: 'web', label: '打开设备管理页面', act: () => openDeviceWeb(id) },
       { sep: true },
       { ic: 'trash', label: '删除设备及连线', danger: true, act: () => deleteNode(id) }
     ];
@@ -1892,6 +1898,7 @@ function showTooltip(e, kind, id) {
     const html = `<div class="tt-t">${U.escHtml(n.name)}</div>
       <div class="tt-r">类型：${U.escHtml(t.label)} · 连线 ${links.length} 条</div>
       ${U.nodeMgmts(n).length ? `<div class="tt-r">管理地址：${U.escHtml(U.nodeMgmts(n).join('、'))}</div>` : ''}
+      ${n.web ? `<div class="tt-r">管理Web页：${U.escHtml(n.web)}</div>` : ''}
       ${n.note ? `<div class="tt-r">备注：${U.escHtml(n.note)}</div>` : ''}`;
     posTooltip(e, html);
   } else if (kind === 'link') {
@@ -1998,6 +2005,7 @@ function renderSelCard() {
       <span class="sc-title">${U.escHtml(n.name)}</span></div>
       <div class="sc-row">接口数量：<b>${cnt}</b> 条连线</div>
       ${U.nodeMgmts(n).length ? `<div class="sc-row">管理地址：<b>${U.escHtml(U.nodeMgmts(n).join('、'))}</b></div>` : ''}
+      ${n.web ? `<div class="sc-row">管理Web页：<b>${U.escHtml(n.web)}</b></div>` : ''}
       ${n.note ? `<div class="sc-row">备注：<b>${U.escHtml(n.note)}</b></div>` : ''}
       <div class="sc-actions">
         <button class="tb" data-act="edit">编辑</button>
@@ -2564,6 +2572,20 @@ function wire() {
     if (e.key === 'F2') { div.style.display = div.style.display === 'none' ? 'block' : 'none'; }
   });
 })();
+
+/* ================= 设备管理 Web 页（独立窗口多标签，不锁定主界面） ================= */
+function openDeviceWeb(id) {
+  const n = state.nodes.find(x => x.id === id);
+  if (!n) return;
+  if (!window.topoWeb) { toast('打开设备管理页面需要桌面版 NetTopo（Electron）环境'); return; }
+  const url = String(n.web || '').trim();
+  if (!url) { toast(`设备「${n.name}」未设置管理 Web 页 URL，请在编辑设备中添加`); return; }
+  if (!/^https?:\/\//i.test(url)) { toast('管理 Web 页 URL 必须以 http:// 或 https:// 开头'); return; }
+  window.topoWeb.open(url, n.name).then((res) => {
+    if (res && res.ok) toast(`已在「设备管理页」窗口打开 ${n.name} 的管理页面（多标签，不锁定主界面）`);
+    else toast((res && res.error) || '无法打开管理页面');
+  }).catch(() => toast('无法打开管理页面'));
+}
 
 /* ================= Web Shell（SSH / Telnet 连接设备管理口，独立窗口多标签） ================= */
 function openWebShell(id) {

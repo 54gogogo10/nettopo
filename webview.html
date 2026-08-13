@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob: http: https:; font-src 'self' data:; worker-src 'self' blob:; frame-src http: https:;"/>
+<title>NetTopo 设备管理页</title>
+<link rel="stylesheet" href="css/style.css?v=20260812q"/>
+<link rel="stylesheet" href="css/webview.css?v=20260812q"/>
+</head>
+<body class="wv-body">
+
+<header class="wv-head">
+  <div class="wv-brand"><b>NetTopo</b><span>设备管理页</span></div>
+  <div id="wvTabs" class="wv-tabs" role="tablist"></div>
+  <button id="wvNew" class="wv-new" title="打开新页面（输入 URL）">＋ 新建</button>
+</header>
+
+<div id="wvNav" class="wv-nav hidden">
+  <button id="wvBack" class="wv-nav-btn" title="后退">←</button>
+  <button id="wvFwd" class="wv-nav-btn" title="前进">→</button>
+  <button id="wvReload" class="wv-nav-btn" title="刷新">⟳</button>
+  <form id="wvAddrForm" class="wv-addr"><input id="wvAddr" type="text" placeholder="输入 http:// 或 https:// 地址后回车打开"/></form>
+</div>
+
+<main id="wvPages" class="wv-pages"></main>
+
+<div id="wvEmpty" class="wv-empty hidden">
+  <svg viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.6 3.8 9S14.5 18.5 12 21c-2.5-2.5-3.8-5.6-3.8-9S9.5 5.5 12 3z"/></svg>
+  <p>暂无打开的页面</p>
+  <small>在拓扑中右键设备选择「打开设备管理页面」，或点击右上角「＋ 新建」。</small>
+  <button class="tb primary" id="wvEmptyNew">＋ 新建</button>
+</div>
+
+<div id="modalRoot"></div>
+
+<script src="js/webview-ui.js?v=20260812q"></script>
+</body>
+</html>

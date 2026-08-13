@@ -17,6 +17,7 @@
 - **路径分析**：选两台设备高亮最优路径（按带宽优选，显示瓶颈带宽）与经过的接口
 - **设备模板库**：预置路由器/交换机/防火墙等模板，一键添加到画布中心
 - **Web Shell（桌面版）**：选中设备右键「Web Shell（SSH/Telnet）」连接管理口；在**独立窗口**以**多标签**方式管理多台设备，主界面不锁定可继续操作拓扑。每台设备可配置**多个管理口地址**（默认一个，编辑设备时点击「＋ 增加管理口」），Web Shell 连接时可下拉选择
+- **设备管理 Web 页（桌面版）**：设备可配置「管理Web页URL」，右键设备「打开设备管理页面」在**独立窗口**以**多标签**方式打开多个设备的管理网页，主界面不锁定
 - **网络故障模拟**：右键连线「标记链路故障（模拟断链）」，路径分析自动绕行
 
 ## 使用
@@ -77,7 +78,8 @@
 nettopo/
 ├── index.html         # 主窗口入口（浏览器/Electron 通用）
 ├── shell.html         # Web Shell 独立窗口（多标签终端）
-├── electron-main.js   # Electron 主进程（窗口管理、Shell IPC、事件队列）
+├── webview.html       # 设备管理 Web 页窗口（多标签内嵌浏览器）
+├── electron-main.js   # Electron 主进程（窗口管理、Shell/Web IPC、事件队列）
 ├── preload.js         # 渲染层↔主进程安全桥（contextBridge）
 ├── css/style.css      # 主界面样式（明暗双主题）
 ├── css/shell.css      # Web Shell 窗口样式
@@ -91,6 +93,7 @@ nettopo/
 │   ├── pdf.js         # PDF 导出（SVG 渲染 + 手写 PDF 生成器）
 │   ├── shell.js       # SSH/Telnet 会话管理（主进程，纯 Node）
 │   ├── shell-ui.js    # Web Shell 窗口标签/终端逻辑
+│   ├── webview-ui.js  # 设备管理页窗口标签/内嵌浏览器逻辑
 │   └── app.js         # 主逻辑（UI、撤销、面板、类型管理、导入导出）
 ├── lib/               # xlsx（离线 Excel）、xterm（终端模拟器）
 └── test/              # 单元测试、schema 校验、无头浏览器 e2e、Electron 冒烟
@@ -99,7 +102,7 @@ nettopo/
 ## 开发测试
 
 ```bash
-node test/run-tests.js        # 292 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、数据清洗、布局、路径、性能）
+node test/run-tests.js        # 309 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、多管理口、数据清洗、布局、路径、性能）
 cd test && npm i && node e2e.js   # 无头 Chrome 端到端（需本机 Chrome）
 node test/smoke-shell.js          # Electron 端到端冒烟（Web Shell 独立窗口/多标签，需本机桌面环境）
 python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备用格式）

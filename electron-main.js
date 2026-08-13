@@ -6,6 +6,9 @@ const { ShellManager } = require('./js/shell.js');
 
 let mainWin = null;
 let shellWin = null;
+let webWin = null;
+let webReady = false;              // Web 管理页窗口渲染层是否就绪
+const pendingWebTabs = [];         // 等待 Web 窗口加载完成的 newtab 消息
 let shellReady = false;            // Shell 窗口渲染层是否已就绪（did-finish-load）
 const pendingTabs = [];            // 等待新窗口加载完成的 newtab 消息
 const shellQueue = [];             // 窗口就绪前到达的会话事件（避免首屏输出丢失）
@@ -93,7 +96,58 @@ function createWindow() {
   mainWin.on('closed', () => { mainWin = null; });
 }
 
+/* ---- 设备管理 Web 页独立窗口（多标签） ---- */
+function createWebWindow() {
+  if (webWin && !webWin.isDestroyed()) {
+    if (webWin.isMinimized()) webWin.restore();
+    webWin.focus();
+    return webWin;
+  }
+  webWin = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 720,
+    minHeight: 480,
+    autoHideMenuBar: true,
+    title: 'NetTopo 设备管理页',
+    icon: path.join(__dirname, 'icon.png'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: false,
+      webviewTag: true, // 标签页内嵌浏览器视图
+      preload: path.join(__dirname, 'preload.js')
+    }
+  });
+  webWin.loadFile('webview.html');
+  webWin.removeMenu();
+  webWin.on('closed', () => {
+    webWin = null;
+    webReady = false;
+    pendingWebTabs.length = 0;
+  });
+  webWin.webContents.once('did-finish-load', () => {
+    while (pendingWebTabs.length) webWin.webContents.send('web:newtab', pendingWebTabs.shift());
+    webReady = true;
+  });
+  return webWin;
+}
+
+function openWebTab(info) {
+  const win = createWebWindow();
+  if (win.webContents.isLoading()) pendingWebTabs.push(info);
+  else win.webContents.send('web:newtab', info);
+}
+
 /* ---- Web Shell IPC ---- */
+ipcMain.handle('web:open', (e, opts) => {
+  opts = opts || {};
+  const url = String(opts.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'URL 必须以 http:// 或 https:// 开头' };
+  if (url.length > 2048) return { ok: false, error: 'URL 过长' };
+  openWebTab({ url, title: String(opts.title || url).slice(0, 80) });
+  return { ok: true };
+});
 ipcMain.handle('shell:connect', (e, opts) => {
   opts = opts || {};
   const r = shell.connect(opts);

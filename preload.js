@@ -14,3 +14,8 @@ contextBridge.exposeInMainWorld('topoShell', {
   onEnd: (cb) => ipcRenderer.on('shell:end', (_e, id, reason) => cb(id, reason)),
   onNewTab: (cb) => ipcRenderer.on('shell:newtab', (_e, info) => cb(info))
 });
+
+contextBridge.exposeInMainWorld('topoWeb', {
+  open: (url, title) => ipcRenderer.invoke('web:open', { url, title }),
+  onNewTab: (cb) => ipcRenderer.on('web:newtab', (_e, info) => cb(info))
+});
