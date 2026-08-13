@@ -25,6 +25,7 @@ const mockServer = net.createServer((sock) => {
   sock.on('data', (d) => {
     const txt = d.toString('utf8');
     if (txt.includes('show version')) sock.write('v9.9.9 MOCK\r\n> ');
+    else if (txt.trim()) sock.write(txt.replace(/\r?\n$/, '') + '\r\n> '); // 回显，便于验证粘贴
   });
   sock.write('\r\nWelcome to MOCK-TELNET-READY\r\n> ');
 });
@@ -143,6 +144,22 @@ async function connectCDP(target) {
     await shell.eval(`(() => { const ta = document.querySelector('.xterm-helper-textarea') || document.querySelector('.xterm-rows textarea'); if (!ta) return false; ta.value = 'show version\\r'; ta.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'show version\\r', inputType: 'insertText' })); return true; })()`);
     await sleep(1200);
     ok((await shell.eval(`(document.querySelector('.xterm-rows') || {}).textContent || ''`)).includes('v9.9.9 MOCK'), '收到命令回显');
+
+    // 字号调节
+    ok(await shell.eval(`document.getElementById('shFontVal').textContent === '13'`), '终端字号默认 13');
+    await shell.eval(`document.getElementById('shFontInc').click()`);
+    ok(await shell.eval(`document.getElementById('shFontVal').textContent === '14' && localStorage.getItem('topoShellFontSize') === '14'`), '增大字号到 14 并记忆');
+    await shell.eval(`document.getElementById('shFontDec').click()`);
+    ok(await shell.eval(`document.getElementById('shFontVal').textContent === '13'`), '减小字号回 13');
+
+    // 剪贴板桥
+    const clipOk = await shell.eval(`(() => { window.topoShell.copyText('NETTOPO-CLIP-TEST'); return window.topoShell.pasteText(); })()`);
+    ok(clipOk === 'NETTOPO-CLIP-TEST', '复制/读取剪贴板桥可用');
+
+    // 终端内 Ctrl+Shift+V 粘贴 → 远程回显
+    await shell.eval(`window.topoShell.copyText('NETTOPO-PASTE-OK')`);
+    await shell.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', code: 'KeyV', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }))`);
+    ok(await waitText(shell, `document.querySelector('.xterm-rows')`, 'NETTOPO-PASTE-OK', 4000), '终端粘贴文本并收到回显');
 
     // 新建第二个连接（Shell 窗口内发起）
     await shell.eval(`document.getElementById('shNew').click()`);

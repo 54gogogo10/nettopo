@@ -6,7 +6,32 @@
   const escAttr = (s) => String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const tabsEl = $('#shTabs'), termsEl = $('#shTerms'), emptyEl = $('#shEmpty');
+  const ctxEl = $('#shCtx'), fontValEl = $('#shFontVal');
   const sessions = new Map(); // sid -> { tabEl, wrapEl, term, fit, dotEl, ended, buf }
+
+  /* ---- 终端字号（本地记忆，9~28px） ---- */
+  const FONT_KEY = 'topoShellFontSize';
+  let fontSize = (() => {
+    try { const v = parseInt(localStorage.getItem(FONT_KEY), 10); return Number.isFinite(v) ? Math.max(9, Math.min(28, v)) : 13; }
+    catch (e) { return 13; }
+  })();
+  const setFontSize = (delta) => {
+    fontSize = Math.max(9, Math.min(28, fontSize + delta));
+    try { localStorage.setItem(FONT_KEY, String(fontSize)); } catch (e) { /* ignore */ }
+    if (fontValEl) fontValEl.textContent = fontSize;
+    for (const s of sessions.values()) {
+      try { s.term.options.fontSize = fontSize; } catch (e) { /* ignore */ }
+    }
+    const a = activeSession();
+    if (a) {
+      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
+      window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows);
+    }
+  };
+  const activeSession = () => {
+    for (const [id, s] of sessions) if (s.wrapEl.classList.contains('active')) return { id, s };
+    return null;
+  };
 
   function applyStatus(s, info) {
     const state = info && info.state;
@@ -60,7 +85,7 @@
     termsEl.appendChild(wrapEl);
     tabsEl.appendChild(tabEl);
     const term = new Terminal({
-      cursorBlink: true, fontSize: 13,
+      cursorBlink: true, fontSize,
       fontFamily: 'Consolas, "Cascadia Mono", "Microsoft YaHei", monospace',
       theme: { background: '#0b1220', foreground: '#e2e8f0' },
       scrollback: 3000
@@ -77,6 +102,13 @@
       else if (item[0] === 'end') applyEnd(rec, item[1]);
     }
     term.onData((d) => { if (!rec.ended) window.topoShell.sendData(sid, d); });
+    // 选中即复制（PuTTY 风格）
+    term.onSelectionChange(() => {
+      try {
+        const sel = term.getSelection();
+        if (sel && window.topoShell.copyText) window.topoShell.copyText(sel);
+      } catch (e) { /* ignore */ }
+    });
     const fitResize = () => {
       try { fit.fit(); } catch (e) { /* 容器不可见时忽略 */ }
       window.topoShell.resize(sid, term.cols, term.rows);
@@ -118,6 +150,46 @@
     if (sessions.size === 0) emptyEl.classList.remove('hidden');
     else activate([...sessions.keys()][0]);
   }
+
+  /* ---- 复制 / 粘贴 ---- */
+  const copySelection = (s) => {
+    try { const sel = s.term.getSelection(); if (sel) window.topoShell.copyText(sel); } catch (e) { /* ignore */ }
+  };
+  const pasteTo = async (s) => {
+    try {
+      const txt = await window.topoShell.pasteText();
+      if (txt && !s.ended) s.term.paste(txt);
+    } catch (e) { /* ignore */ }
+  };
+
+  /* ---- 终端右键菜单 ---- */
+  function showCtx(x, y) {
+    const a = activeSession();
+    const s = a && a.s;
+    const sel = s && s.term.getSelection();
+    const items = [
+      { label: '复制选中', disabled: !sel, act: () => copySelection(s) },
+      { label: '粘贴', disabled: !s || s.ended, act: () => pasteTo(s) },
+      { label: '全选', disabled: !s, act: () => { try { s.term.selectAll(); } catch (e) { /* ignore */ } } },
+      { sep: true },
+      { label: '减小字号（Ctrl+-）', act: () => setFontSize(-1) },
+      { label: '增大字号（Ctrl+=）', act: () => setFontSize(1) }
+    ];
+    ctxEl.innerHTML = items.map(it => it.sep
+      ? '<div class="d-sep"></div>'
+      : `<button class="ci" ${it.disabled ? 'disabled' : ''}>${it.label}</button>`).join('');
+    ctxEl.classList.remove('hidden');
+    const r = ctxEl.getBoundingClientRect();
+    ctxEl.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 6)) + 'px';
+    ctxEl.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 6)) + 'px';
+    let bi = 0;
+    for (const it of items) {
+      if (it.sep) continue;
+      const b = ctxEl.querySelectorAll('.ci')[bi++];
+      b.onclick = () => { hideCtx(); it.act && it.act(); };
+    }
+  }
+  function hideCtx() { ctxEl.classList.add('hidden'); }
 
   /* ---- 新建连接对话框（窗口内直接发起连接） ---- */
   let saved = null;
@@ -217,6 +289,29 @@
     bindListeners();
     $('#shNew').onclick = openConnectDialog;
     $('#shEmptyNew').onclick = openConnectDialog;
+    if ($('#shFontDec')) $('#shFontDec').onclick = () => setFontSize(-1);
+    if ($('#shFontInc')) $('#shFontInc').onclick = () => setFontSize(1);
+    if (fontValEl) fontValEl.textContent = fontSize;
+
+    // 终端区域右键菜单（不拦截弹窗内输入）
+    termsEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (!sessions.size) return;
+      hideCtx();
+      showCtx(e.clientX, e.clientY);
+    });
+    document.addEventListener('pointerdown', (e) => { if (!e.target.closest('#shCtx')) hideCtx(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { hideCtx(); return; }
+      // 弹窗输入框内不拦截快捷键
+      if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#modalRoot')) return;
+      const k = (e.key || '').toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && k === 'c') { e.preventDefault(); const a = activeSession(); if (a) copySelection(a.s); return; }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && k === 'v') { e.preventDefault(); const a = activeSession(); if (a) pasteTo(a.s); return; }
+      if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_')) { e.preventDefault(); setFontSize(-1); return; }
+      if ((e.ctrlKey || e.metaKey) && (e.key === '+' || e.key === '=')) { e.preventDefault(); setFontSize(1); return; }
+    });
+
     window.addEventListener('resize', () => {
       for (const [id, s] of sessions) {
         if (!s.wrapEl.classList.contains('active')) continue;

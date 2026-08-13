@@ -107,6 +107,8 @@ ipcMain.handle('shell:connect', (e, opts) => {
 ipcMain.on('shell:data', (e, id, data) => shell.write(id, data));
 ipcMain.on('shell:resize', (e, id, cols, rows) => shell.resize(id, cols, rows));
 ipcMain.on('shell:close', (e, id) => shell.close(id));
+ipcMain.handle('shell:clipboard-write', (e, text) => { const { clipboard } = require('electron'); clipboard.writeText(String(text == null ? '' : text)); });
+ipcMain.handle('shell:clipboard-read', () => require('electron').clipboard.readText());
 
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框
