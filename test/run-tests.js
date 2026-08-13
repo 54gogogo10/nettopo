@@ -241,6 +241,31 @@ console.log('== 带宽单位解析 / 工程数据清洗 ==');
   ok(sg.texts.length === 1 && sg.texts[0].x === 0 && sg.texts[0].size === 8 && sg.texts[0].color === '#1e293b' && sg.texts[0].bg === '' && sg.texts[0].align === 'left' && sg.texts[0].text === '42', '清洗文本框字段（颜色/对齐/字号回退）');
 }
 
+console.log('== 多管理地址 ==');
+{
+  const n = { id: 'n1', name: 'R1', mgmt: '10.0.0.1', mgmts: ['10.0.0.2', '10.0.0.1', ''] };
+  ok(U.nodeMgmts(n).join(',') === '10.0.0.1,10.0.0.2', 'nodeMgmts 去重保序返回全部管理地址');
+  U.setNodeMgmts(n, ['10.1.1.1', '10.1.1.2', '10.1.1.2']);
+  ok(n.mgmt === '10.1.1.1' && n.mgmts.join(',') === '10.1.1.2', 'setNodeMgmts 主地址+附加地址去重');
+  ok(U.splitMgmts('10.0.0.1, 10.0.0.2；10.0.0.3\n10.0.0.4').length === 4, 'splitMgmts 支持逗号/分号/换行');
+  ok(U.nodeHeightFor({ mgmt: '1.1.1.1', mgmts: ['1.1.1.2'] }) === 88, '两个管理口节点高度 88');
+  ok(U.nodeHeightFor({ mgmt: '1.1.1.1', mgmts: ['1.1.1.2', '1.1.1.3', '1.1.1.4'] }) === 104, '三个及以上管理口高度封顶 104');
+  const sg = U.sanitizeGraph([{ id: 'n2', name: 'SW', mgmt: '2.2.2.1', mgmts: ['2.2.2.2', 5, ''] }], [], []);
+  ok(sg.nodes[0].mgmts.join(',') === '2.2.2.2,5', 'sanitizeGraph 清洗 mgmts 为字符串数组');
+  const ip = U.ipPlan([{ id: 'n3', name: 'FW', type: 'firewall', mgmt: '3.3.3.1', mgmts: ['3.3.3.2'] }], []);
+  ok(ip.rows.length === 2 && ip.rows[0].接口 === '管理' && ip.rows[1].接口 === '管理2' && ip.rows[1].IP === '3.3.3.2', 'IP 规划每个管理口一行');
+  const v = M.validateTopology([{ id: 'a', name: 'A', mgmt: '9.9.9.9' }, { id: 'b', name: 'B', mgmt: '', mgmts: ['9.9.9.9'] }], []);
+  ok(v.some(i => i.kind === 'dup-mgmt'), '附加管理地址参与重复校验');
+  const cfg = U.generateConfigs([{ id: 'a', name: 'A', type: 'router', mgmt: '8.8.8.1', mgmts: ['8.8.8.2'] }], [], 'huawei', {});
+  ok(cfg.includes('管理: 8.8.8.1, 8.8.8.2'), '配置生成含全部管理地址');
+  const gM = M.textToGraph(M.SAMPLE_CSV);
+  gM.nodes[0].mgmt = '5.5.5.1'; gM.nodes[0].mgmts = ['5.5.5.2'];
+  const csv = U.buildCSV(M.graphToTableRows(gM.nodes, gM.links));
+  const gM2 = M.textToGraph(csv);
+  const nm = gM2.nodes.find(x => x.name === gM.nodes[0].name);
+  ok(U.nodeMgmts(nm).join(',') === '5.5.5.1,5.5.5.2', '多管理口 CSV 导出→导入回环');
+}
+
 console.log('== 布局 ==');
 const posBefore = g1.nodes.map(n => [n.x, n.y]);
 Layout.layoutNow(g1.nodes, g1.links, 200);

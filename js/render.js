@@ -242,13 +242,20 @@ class Renderer {
       const sv = el('svg', { viewBox: '0 0 24 24', width: 26, height: 26 }, ic);
       sv.innerHTML = U.ICONS[t.key] || U.ICONS.other;
     }
-    // 名称 / 类型 / 管理地址（有管理地址时节点加高）
-    const hasMgmt = !!(n.mgmt || '').trim();
+    // 名称 / 类型 / 管理地址（有管理地址时节点加高，多个地址分行显示）
+    const mgmts = U.nodeMgmts(n);
+    const hasMgmt = mgmts.length > 0;
     if (hasMgmt) {
-      el('text', { class: 'nm', x: 60, y: n.h / 2 - 12, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w);
-      el('text', { class: 'tp', x: 60, y: n.h / 2 + 4, 'text-anchor': 'start' }, body).textContent = t.label;
-      const mg = el('text', { class: 'mgmt', x: 60, y: n.h / 2 + 19, 'text-anchor': 'start' }, body);
-      mg.textContent = '管理: ' + (n.mgmt || '');
+      const lines = Math.min(mgmts.length, 3);
+      const shown = mgmts.slice(0, lines);
+      if (mgmts.length > lines) shown[lines - 1] = '+' + (mgmts.length - lines + 1) + ' 个';
+      const y0 = n.h / 2 - 12 - (lines - 1) * 8;
+      el('text', { class: 'nm', x: 60, y: y0, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w);
+      el('text', { class: 'tp', x: 60, y: y0 + 16, 'text-anchor': 'start' }, body).textContent = t.label;
+      shown.forEach((ip, i) => {
+        const mg = el('text', { class: 'mgmt', x: 60, y: y0 + 32 + i * 14, 'text-anchor': 'start' }, body);
+        mg.textContent = '管理: ' + ip;
+      });
     } else {
       el('text', { class: 'nm', x: 60, y: n.h / 2 - 3, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w);
       el('text', { class: 'tp', x: 60, y: n.h / 2 + 15, 'text-anchor': 'start' }, body).textContent = t.label;

@@ -285,7 +285,7 @@ function buildVSDX(graph, opts) {
           ${cell('Style', 1)}
         </Row>
       </Section>
-      <Text><cp IX='0'/><pp IX='0'/>${XRAW(n.name)}${(n.mgmt || '').trim() ? '\r\n管理: ' + XRAW(n.mgmt) : ''}\r\n</Text>
+      <Text><cp IX='0'/><pp IX='0'/>${XRAW(n.name)}${U.nodeMgmts(n).length ? '\r\n管理: ' + XRAW(U.nodeMgmts(n).join(', ')) : ''}\r\n</Text>
     </Shape>`);
   }
 

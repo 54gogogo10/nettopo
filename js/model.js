@@ -139,8 +139,11 @@ function recordsToGraph(records) {
       bw: U.normalizeBw(r.bw), note: r.note
     };
     if (r.mgmt) {
-      if (!a.mgmt) { a.mgmt = r.mgmt; a.h = U.nodeHeightFor(a); }
-      else if (!b.mgmt) { b.mgmt = r.mgmt; b.h = U.nodeHeightFor(b); }
+      const ms = U.splitMgmts(r.mgmt);
+      if (ms.length) {
+        if (!U.nodeMgmts(a).length) { U.setNodeMgmts(a, ms); a.h = U.nodeHeightFor(a); }
+        else if (!U.nodeMgmts(b).length) { U.setNodeMgmts(b, ms); b.h = U.nodeHeightFor(b); }
+      }
     }
     links.push(link);
     if (r.note) {
@@ -165,8 +168,8 @@ function graphToRecords(nodes, links) {
   return links.map(l => {
     const a = byId[l.a], b = byId[l.b];
     let mgmt = '';
-    if (a && !emitted.has(a.id)) { mgmt = a.mgmt || ''; emitted.add(a.id); }
-    else if (b && !emitted.has(b.id)) { mgmt = b.mgmt || ''; emitted.add(b.id); }
+    if (a && !emitted.has(a.id)) { mgmt = U.nodeMgmts(a).join(','); emitted.add(a.id); }
+    else if (b && !emitted.has(b.id)) { mgmt = U.nodeMgmts(b).join(','); emitted.add(b.id); }
     return {
       sa: a ? a.name : '', si: l.aIf, sip: l.aIp,
       sb: b ? b.name : '', sii: l.bIf, sib: l.bIp,
@@ -242,10 +245,10 @@ function validateTopology(nodes, links) {
   // 2. 管理地址重复
   const mgmtMap = new Map();
   for (const n of nodes) {
-    const ip = (n.mgmt || '').trim();
-    if (!ip) continue;
-    if (!mgmtMap.has(ip)) mgmtMap.set(ip, []);
-    mgmtMap.get(ip).push(n);
+    for (const ip of U.nodeMgmts(n)) {
+      if (!mgmtMap.has(ip)) mgmtMap.set(ip, []);
+      mgmtMap.get(ip).push(n);
+    }
   }
   for (const [ip, list] of mgmtMap) {
     if (list.length > 1) issues.push({

@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260812n';
+U.APP_VERSION = 'v20260812o';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -313,7 +313,8 @@ U.sanitizeGraph = (nodes, links, texts) => {
       id, name: str(n.name).slice(0, 200), type: typeof n.type === 'string' && n.type ? n.type : 'other',
       x: num(n.x, 0), y: num(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
-      mgmt: str(n.mgmt), note: str(n.note)
+      mgmt: str(n.mgmt), note: str(n.note),
+      mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20)
     };
   }).filter(Boolean);
   const cleanLinks = (Array.isArray(links) ? links : []).map(l => {
@@ -649,7 +650,8 @@ U.subnetGroups = (nodes, links, names) => {
       if (c > bestC || (c === bestC && (best == null || s < best))) { best = s; bestC = c; }
     }
     if (best) return best;
-    return n.mgmt ? U.subnetOf(n.mgmt) : null;
+    const m0 = U.nodeMgmts(n)[0];
+    return m0 ? U.subnetOf(m0) : null;
   };
   const groups = new Map();
   for (const n of nodes) {
@@ -768,7 +770,7 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
   const out = [];
   for (const n of nodes) {
     const sec = [];
-    sec.push(fill(tpl.deviceHeader, { comment: tpl.comment, name: n.name || '', mgmt: n.mgmt || '—', type: U.getType(n.type).label }));
+    sec.push(fill(tpl.deviceHeader, { comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
     const intfs = [];
     for (const l of links) {
       let ifn, ip, peerId, peerIf, bw;
@@ -780,7 +782,7 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
       intfs.push({ ifn, ip, peer: peer ? peer.name : '?', peerIf, bw, peerIsAccess: peer ? ['pc', 'server', 'other'].includes(peer.type) : false, subnet: U.subnetOf(ip) });
     }
     if (!intfs.length) {
-      sec.push(fill(tpl.noIface, { comment: tpl.comment, name: n.name || '', mgmt: n.mgmt || '—', type: U.getType(n.type).label }));
+      sec.push(fill(tpl.noIface, { comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
     } else {
       for (const it of intfs) {
         sec.push('');
@@ -788,7 +790,7 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
           iface: it.ifn, ip: it.ip || '未配置', mask: maskOf(it.ip), peer: it.peer,
           peerIf: it.peerIf || '', peerSuffix: it.peerIf ? ':' + it.peerIf : '',
           bw: U.formatBw(it.bw) || '', vlan: vlanMap.get(it.subnet) || '',
-          comment: tpl.comment, name: n.name || '', mgmt: n.mgmt || '—', type: U.getType(n.type).label
+          comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label
         };
         for (const line of (tpl.interface || [])) sec.push(fill(line, map));
         // 交换机接入端口 VLAN
@@ -845,7 +847,7 @@ U.diffProjects = (a, b) => {
   for (const n of a.nodes) {
     const m = nameB.get(n.name);
     if (!m) removedNodes.push(n.name);
-    else if (n.mgmt !== m.mgmt || n.type !== m.type || (n.note || '') !== (m.note || '')) changedNodes.push({ name: n.name, from: { mgmt: n.mgmt, type: n.type, note: n.note }, to: { mgmt: m.mgmt, type: m.type, note: m.note } });
+    else if (U.nodeMgmts(n).join('|') !== U.nodeMgmts(m).join('|') || n.type !== m.type || (n.note || '') !== (m.note || '')) changedNodes.push({ name: n.name, from: { mgmt: U.nodeMgmts(n).join(', '), type: n.type, note: n.note }, to: { mgmt: U.nodeMgmts(m).join(', '), type: m.type, note: m.note } });
   }
   for (const n of b.nodes) if (!nameA.has(n.name)) addedNodes.push(n.name);
   const linkSetA = new Set(a.links.map(l => linkKey(l, byNameA)));
@@ -888,10 +890,11 @@ U.ipPlan = (nodes, links) => {
   // 按设备聚合：同一台设备的“管理地址 + 全部接口”连续排列，便于 Excel 合并设备名列
   const sorted = [...nodes].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
   for (const n of sorted) {
-    if (n.mgmt) {
-      rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: '管理', IP: n.mgmt, 对端设备: '', 对端接口: '', 对端IP: '', 带宽: '', 网段: U.subnetOf(n.mgmt) || '', 备注: n.note || '' });
-      addSubnet(n.mgmt, n.name);
-    }
+    const mgmts = U.nodeMgmts(n);
+    mgmts.forEach((ip, mi) => {
+      rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: mi === 0 ? '管理' : '管理' + (mi + 1), IP: ip, 对端设备: '', 对端接口: '', 对端IP: '', 带宽: '', 网段: U.subnetOf(ip) || '', 备注: n.note || '' });
+      addSubnet(ip, n.name);
+    });
     for (const l of links) {
       const other = l.a === n.id ? byId.get(l.b) : (l.b === n.id ? byId.get(l.a) : null);
       if (!other) continue;
@@ -1013,7 +1016,7 @@ U.buildReportHtml = (nodes, links, opts) => {
   const devRows = nodes.map(n => {
     const t = U.getType(n.type);
     const cnt = links.filter(l => l.a === n.id || l.b === n.id).length;
-    return `<tr><td><b>${esc(n.name)}</b></td><td>${esc(t.label)}</td><td>${esc(n.mgmt || '')}</td><td>${cnt}</td><td>${esc(n.note || '')}</td></tr>`;
+    return `<tr><td><b>${esc(n.name)}</b></td><td>${esc(t.label)}</td><td>${esc(U.nodeMgmts(n).join(', '))}</td><td>${cnt}</td><td>${esc(n.note || '')}</td></tr>`;
   }).join('');
   const subRows = subnets.map(s => `<tr><td><b>${esc(s.cidr)}</b></td><td>${s.devices.length}</td><td>${esc(s.devices.join('、'))}</td></tr>`).join('');
   const cfg = opts.includeConfig ? U.generateConfigs(nodes, links, 'huawei') : '';
@@ -1166,8 +1169,33 @@ U.NODE_W = 160;
 U.NODE_H = 56;
 U.NODE_H_MGMT = 72; // 含管理地址的节点高度
 
-/* 节点高度：有管理地址时加高一行 */
-U.nodeHeightFor = (n) => ((n.mgmt || '').trim()) ? U.NODE_H_MGMT : U.NODE_H;
+/* 节点全部管理地址（主地址 n.mgmt + 附加 n.mgmts，去重保序） */
+U.nodeMgmts = (n) => {
+  const arr = [];
+  const push = (v) => {
+    const s = String(v == null ? '' : v).trim();
+    if (s && !arr.includes(s)) arr.push(s);
+  };
+  if (n) { push(n.mgmt); for (const m of (Array.isArray(n.mgmts) ? n.mgmts : [])) push(m); }
+  return arr;
+};
+/* 把文本（逗号/分号/换行分隔）拆成管理地址列表 */
+U.splitMgmts = (v) => String(v == null ? '' : v).split(/[,，;；\n\r]+/).map(s => s.trim()).filter(Boolean);
+/* 设置设备管理地址列表：第一个为主地址 n.mgmt，其余放入 n.mgmts */
+U.setNodeMgmts = (n, arr) => {
+  const list = (Array.isArray(arr) ? arr : []).map(s => String(s == null ? '' : s).trim()).filter(Boolean);
+  const uniq = [];
+  for (const s of list) if (!uniq.includes(s)) uniq.push(s);
+  n.mgmt = uniq[0] || '';
+  n.mgmts = uniq.slice(1);
+  return uniq;
+};
+
+/* 节点高度：无管理地址 56；每多一个管理口加高 16px（最多 3 行显示） */
+U.nodeHeightFor = (n) => {
+  const c = U.nodeMgmts(n).length;
+  return c ? U.NODE_H + Math.min(c, 3) * 16 : U.NODE_H;
+};
 
 /* 文本宽度估算（CJK ≈ 字号，ASCII ≈ 0.56×字号） */
 U.measureText = (text, size) => {

@@ -631,7 +631,7 @@ function openIpRenumber() {
   const subSet = new Map(); // cidr -> 数量
   const count = (ip) => { const s = U.subnetOf(ip); if (s) subSet.set(s, (subSet.get(s) || 0) + 1); };
   for (const l of state.links) { if (l.aIp) count(l.aIp); if (l.bIp) count(l.bIp); }
-  for (const n of state.nodes) { if (n.mgmt) count(n.mgmt); }
+  for (const n of state.nodes) { for (const m of U.nodeMgmts(n)) count(m); }
   const options = [...subSet.keys()].sort();
   if (!options.length) { toast('拓扑中未发现 IP，无法改段'); return; }
   const root = $('#modalRoot');
@@ -669,7 +669,7 @@ function openIpRenumber() {
       if (l.bIp && U.renumberIp(l.bIp, oldC, newC) !== l.bIp) { ifCnt++; devs.add(l.b); }
     }
     if (ov.querySelector('#rnMgmt').checked) {
-      for (const n of state.nodes) { if (n.mgmt && U.renumberIp(n.mgmt, oldC, newC) !== n.mgmt) { mgmtCnt++; devs.add(n.id); } }
+      for (const n of state.nodes) { for (const m of U.nodeMgmts(n)) { if (U.renumberIp(m, oldC, newC) !== m) { mgmtCnt++; devs.add(n.id); } } }
     }
     const ok = info ? (info.prefix >= U.cidrInfo(oldC).prefix ? '' : '（注意：新网段主机位更少，超出部分会被截断）') : '（新网段格式无效）';
     ov.querySelector('#rnPreview').textContent = `将更新 ${ifCnt} 个接口 IP、${mgmtCnt} 个管理地址，涉及 ${devs.size} 台设备${ok}`;
@@ -693,7 +693,10 @@ function openIpRenumber() {
     }
     if (incMgmt) {
       for (const n of state.nodes) {
-        if (n.mgmt && U.renumberIp(n.mgmt, oldC, newC) !== n.mgmt) { n.mgmt = U.renumberIp(n.mgmt, oldC, newC); changed++; }
+        const list = U.nodeMgmts(n).map(m => U.renumberIp(m, oldC, newC));
+        const before = U.nodeMgmts(n).join('|');
+        U.setNodeMgmts(n, list);
+        if (U.nodeMgmts(n).join('|') !== before) changed++;
       }
     }
     close();
@@ -1198,18 +1201,19 @@ function addNodeAt(wx, wy) {
     fields: [
       { name: 'name', label: '设备名称', required: true, ph: '例如：核心交换机SW1' },
       { name: 'type', label: '设备类型', type: 'select', options: U.typeList().map(t => [t.key, t.label]) },
-      { name: 'mgmt', label: '管理地址', ph: '例如：10.255.0.1（可选）' },
+      { name: 'mgmts', label: '管理地址', type: 'mgmts', value: [] },
       { name: 'note', label: '备注', type: 'textarea' }
     ],
     submit: '创建',
     onSubmit: (v) => {
       pushUndo(); // 变更前快照
+      const ms = Array.isArray(v.mgmts) ? v.mgmts : [];
       const node = {
         id: U.uid('n'), name: v.name.trim(),
         type: v.type || U.typeOf(v.name),
         x: wx - U.nodeWidthForName(v.name) / 2, y: wy - U.NODE_H / 2,
         w: U.nodeWidthForName(v.name), h: U.NODE_H,
-        note: v.note.trim(), mgmt: v.mgmt.trim()
+        note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1)
       };
       node.h = U.nodeHeightFor(node);
       node.y = wy - node.h / 2;
@@ -1313,7 +1317,7 @@ function editNode(id) {
     fields: [
       { name: 'name', label: '设备名称', required: true, value: n.name },
       { name: 'type', label: '设备类型', type: 'select', options: U.typeList().map(t => [t.key, t.label]), value: n.type },
-      { name: 'mgmt', label: '管理地址', value: n.mgmt || '', ph: '例如：10.255.0.1（可选）' },
+      { name: 'mgmts', label: '管理地址', type: 'mgmts', value: U.nodeMgmts(n) },
       { name: 'note', label: '备注', type: 'textarea', value: n.note }
     ],
     submit: '保存',
@@ -1325,7 +1329,7 @@ function editNode(id) {
       const dw = nw - n.w;
       if (dw) { n.w = nw; n.x -= dw / 2; }
       // 管理地址变化 → 高度自适应（保持中心不变）
-      n.mgmt = v.mgmt.trim();
+      U.setNodeMgmts(n, v.mgmts);
       const nh = U.nodeHeightFor(n);
       if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
       n.type = v.type;
@@ -1458,17 +1462,18 @@ function batchEditNodes() {
     sub: '留空的字段保持原值不变',
     fields: [
       { name: 'type', label: '设备类型', type: 'select', options: [['', '（保持不变）']].concat(U.typeList().map(t => [t.key, t.label])) },
-      { name: 'mgmt', label: '管理地址', ph: '留空不修改' },
+      { name: 'mgmts', label: '管理地址', type: 'mgmts', value: [] },
       { name: 'note', label: '备注', type: 'textarea', ph: '留空不修改' }
     ],
     submit: '应用',
     onSubmit: (v) => {
       pushUndo();
+      const ms = Array.isArray(v.mgmts) ? v.mgmts : [];
       for (const id of ids) {
         const n = state.nodes.find(x => x.id === id);
         if (!n) continue;
         if (v.type) n.type = v.type;
-        if (String(v.mgmt).trim()) n.mgmt = String(v.mgmt).trim();
+        if (ms.length) U.setNodeMgmts(n, ms);
         if (String(v.note).trim()) n.note = String(v.note).trim();
         const nh = U.nodeHeightFor(n);
         if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
@@ -1689,6 +1694,11 @@ function openModal(opts) {
     if (f.type === 'select') {
       ctrl = `<select name="${f.name}">${f.options.map(([v, lb]) =>
         `<option value="${v}" ${String(f.value) === String(v) ? 'selected' : ''}>${U.escHtml(lb)}</option>`).join('')}</select>`;
+    } else if (f.type === 'mgmts') {
+      const vals = Array.isArray(f.value) ? f.value : [];
+      const rows = (vals.length ? vals : ['']).map(v =>
+        `<div class="mgmt-row"><input type="text" value="${U.escHtml(v)}" placeholder="例如 10.255.0.1（第一个为默认）"/><button type="button" class="tb icon mgmt-del" title="删除该管理口">✕</button></div>`).join('');
+      ctrl = `<div class="mgmt-list" data-field="${f.name}">${rows}<button type="button" class="tb mgmt-add" title="再增加一个管理口">＋ 增加管理口</button></div>`;
     } else if (f.type === 'textarea') {
       ctrl = `<textarea name="${f.name}" placeholder="${U.escHtml(f.ph || '')}">${U.escHtml(f.value || '')}</textarea>`;
     } else {
@@ -1713,15 +1723,36 @@ function openModal(opts) {
 
   const close = () => ov.remove();
   const form = ov.querySelector('form');
-  const grab = (v) => {
+  // 管理口列表：增加 / 删除行
+  U.$$('.mgmt-list', form).forEach(list => {
+    const addRow = () => {
+      const d = document.createElement('div');
+      d.className = 'mgmt-row';
+      d.innerHTML = '<input type="text" placeholder="例如 10.255.0.1（第一个为默认）"/><button type="button" class="tb icon mgmt-del" title="删除该管理口">✕</button>';
+      d.querySelector('.mgmt-del').onclick = () => d.remove();
+      list.insertBefore(d, list.querySelector('.mgmt-add'));
+      d.querySelector('input').focus();
+    };
+    list.querySelector('.mgmt-add').onclick = addRow;
+    list.querySelectorAll('.mgmt-del').forEach(b => { b.onclick = () => b.closest('.mgmt-row').remove(); });
+  });
+  const grab = () => {
     const o = {};
-    fields.forEach(f => { const el2 = form.elements[f.name]; if (el2) o[f.name] = el2.value; });
+    fields.forEach(f => {
+      if (f.type === 'mgmts') {
+        const list = form.querySelector('.mgmt-list[data-field="' + f.name + '"]');
+        o[f.name] = list ? [...list.querySelectorAll('.mgmt-row input')].map(i => i.value.trim()).filter(Boolean) : [];
+        return;
+      }
+      const el2 = form.elements[f.name];
+      if (el2) o[f.name] = el2.value;
+    });
     return o;
   };
   const submit = () => {
     const v = grab();
     for (const f of fields) {
-      if (f.required && !String(v[f.name]).trim()) {
+      if (f.required && f.type !== 'mgmts' && !String(v[f.name]).trim()) {
         const el2 = form.elements[f.name];
         el2.focus(); el2.style.borderColor = 'var(--danger)';
         return;
@@ -1860,7 +1891,7 @@ function showTooltip(e, kind, id) {
     const links = state.links.filter(l => l.a === id || l.b === id);
     const html = `<div class="tt-t">${U.escHtml(n.name)}</div>
       <div class="tt-r">类型：${U.escHtml(t.label)} · 连线 ${links.length} 条</div>
-      ${n.mgmt ? `<div class="tt-r">管理地址：${U.escHtml(n.mgmt)}</div>` : ''}
+      ${U.nodeMgmts(n).length ? `<div class="tt-r">管理地址：${U.escHtml(U.nodeMgmts(n).join('、'))}</div>` : ''}
       ${n.note ? `<div class="tt-r">备注：${U.escHtml(n.note)}</div>` : ''}`;
     posTooltip(e, html);
   } else if (kind === 'link') {
@@ -1966,7 +1997,7 @@ function renderSelCard() {
     html = `<div class="sc-head"><span class="sc-type" style="background:${t.c1}">${U.escHtml(t.label)}</span>
       <span class="sc-title">${U.escHtml(n.name)}</span></div>
       <div class="sc-row">接口数量：<b>${cnt}</b> 条连线</div>
-      ${n.mgmt ? `<div class="sc-row">管理地址：<b>${U.escHtml(n.mgmt)}</b></div>` : ''}
+      ${U.nodeMgmts(n).length ? `<div class="sc-row">管理地址：<b>${U.escHtml(U.nodeMgmts(n).join('、'))}</b></div>` : ''}
       ${n.note ? `<div class="sc-row">备注：<b>${U.escHtml(n.note)}</b></div>` : ''}
       <div class="sc-actions">
         <button class="tb" data-act="edit">编辑</button>
@@ -2548,7 +2579,7 @@ function openWebShell(id) {
   ov.innerHTML = `
     <div class="modal ws-dialog" role="dialog" style="width:440px">
       <h3>Web Shell — ${U.escHtml(n.name)}</h3>
-      <div class="m-sub">通过 SSH 或 Telnet 连接设备的管理口地址${n.mgmt ? ` <b class="ws-mgmt">${U.escHtml(n.mgmt)}</b>` : '（该设备未设置管理地址，请手动填写）'}。连接后将在独立的「Web Shell」窗口以标签页显示，主界面可继续操作。</div>
+      <div class="m-sub">通过 SSH 或 Telnet 连接设备的管理口地址${U.nodeMgmts(n).length ? ` <b class="ws-mgmt">${U.escHtml(U.nodeMgmts(n)[0])}</b>${U.nodeMgmts(n).length > 1 ? `（共 ${U.nodeMgmts(n).length} 个，可下拉选择）` : ''}` : '（该设备未设置管理地址，请手动填写）'}。连接后将在独立的「Web Shell」窗口以标签页显示，主界面可继续操作。</div>
       <div class="frow">
         <label>连接协议</label>
         <select id="wsProto">
@@ -2558,7 +2589,8 @@ function openWebShell(id) {
       </div>
       <div class="frow">
         <label>主机 / 管理口</label>
-        <input id="wsHost" type="text" placeholder="例如 10.255.0.1" value="${U.escHtml(n.mgmt || '')}" autocomplete="off"/>
+        <input id="wsHost" type="text" list="wsMgmtList" placeholder="例如 10.255.0.1" value="${U.escHtml(n.mgmt || '')}" autocomplete="off"/>
+        <datalist id="wsMgmtList">${U.nodeMgmts(n).map(m => `<option value="${U.escHtml(m)}"></option>`).join('')}</datalist>
       </div>
       <div class="frow"><div class="frow-inline">
         <div class="frow"><label>端口</label><input id="wsPort" type="number" min="1" max="65535" value="${U.escHtml(saved.port || '')}"/></div>

@@ -499,3 +499,23 @@ body:not(.panel-off) #panelOpen { display: none; }
   color: var(--accent); background: var(--accent-soft);
   border: 1px solid var(--accent-soft); border-radius: 6px; padding: 1px 7px; margin: 0 2px;
 }
+
+/* 多管理地址编辑列表 */
+.mgmt-list { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.mgmt-row { display: flex; align-items: center; gap: 6px; }
+.mgmt-row input {
+  flex: 1; min-width: 0; height: 32px; padding: 0 10px; font-size: 13px;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.mgmt-row input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.mgmt-row .mgmt-del {
+  flex: none; width: 26px; height: 26px; padding: 0; justify-content: center;
+  color: var(--muted); border-radius: 7px; font-size: 12px;
+}
+.mgmt-row .mgmt-del:hover { color: var(--danger); background: rgba(220, 38, 38, .12); border-color: var(--danger); }
+.mgmt-add {
+  align-self: flex-start; height: 28px; padding: 0 12px; font-size: 12px;
+  border-style: dashed; color: var(--accent);
+}
+.mgmt-add:hover { background: var(--accent-soft); border-color: var(--accent); }
