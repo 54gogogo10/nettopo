@@ -12,7 +12,8 @@ const os = require('os');
 const path = require('path');
 const root = path.join(__dirname, '..');
 
-const CDP_PORT = 9334;
+// 随机 CDP 端口，避免与残留实例/其它测试冲突
+const CDP_PORT = 9400 + Math.floor(Math.random() * 200);
 let failed = 0;
 const ok = (cond, name) => { console.log((cond ? '  ✓ ' : '  ✗ ') + name); if (!cond) failed++; };
 
@@ -133,7 +134,8 @@ async function connectCDP(target) {
 
     console.log('app stderr 异常: ' + (appLog.includes('Error') ? appLog.split('\n').filter(l => l.includes('Error')).slice(0, 3).join(' | ') : '无'));
   } finally {
-    try { proc.kill(); } catch (e) {}
+    // 必须杀整棵进程树：portable 包装器被杀后内部 exe 会变孤儿进程，占住 CDP 端口并残留临时目录
+    try { require('child_process').execSync('taskkill /PID ' + proc.pid + ' /T /F', { stdio: 'ignore' }); } catch (e) { try { proc.kill(); } catch (e2) {} }
     await sleep(800);
     try { fs.rmSync(tmpUserData, { recursive: true, force: true }); } catch (e) {}
     try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch (e) {}
