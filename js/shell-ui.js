@@ -42,6 +42,10 @@
       s._fpShown = true;
       s.term.write('\r\n\x1b[90m' + info.text + '\x1b[0m\r\n');
     }
+    // 记忆主机密钥指纹（用于下次连接校验，防中间人）
+    if (state === 'info' && info.host && info.text && info.text.indexOf('主机密钥 SHA256 指纹: ') === 0) {
+      try { localStorage.setItem('topoShellFp:' + info.host, info.text.slice('主机密钥 SHA256 指纹: '.length)); } catch (e) { /* ignore */ }
+    }
   }
   function applyEnd(s, reason) {
     s.ended = true;
@@ -369,6 +373,7 @@
         password: ov.querySelector('#wsPass').value,
         title: ov.querySelector('#wsHost').value.trim() || '连接'
       };
+      try { cfg.expectFp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; } catch (e) { cfg.expectFp = ''; }
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
       try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username })); } catch (e) {}
       const btn = ov.querySelector('[data-act=connect]');

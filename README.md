@@ -114,4 +114,4 @@ python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备�
 - 浏览器无法覆盖写入磁盘原文件，「保存回表格」以导出文件形式提供
 - 自定义类型与图片保存在浏览器 localStorage（本机）——清理浏览器数据会丢失，建议用「保存工程」备份
 - 桌面版 Web Shell 支持 SSH（密码/keyboard-interactive）与 Telnet（RFC854 协商 + 窗口尺寸 NAWS），SSH 主机密钥以 SHA256 指纹展示（内网实验环境默认信任）
-- 版本号统一由 `js/util.js` 的 `U.APP_VERSION` 维护，界面标题/状态栏/控制台同步显示
+- 版本号统一由 `js/util.js` 的 `U.APP_VERSION` 维护，界面标题/状态栏/控制台同步显示；package.json 的 1.0.0 仅为 Electron 打包语义版本，发布版本以 U.APP_VERSION 为准。安全策略：页面启用 CSP（script-src 保留 'unsafe-eval' 以兼容离线 SheetJS，其余来源严格限定本地/data/blob）；SSH 主机密钥首次连接展示 SHA256 指纹并记忆，指纹变化时拒绝连接

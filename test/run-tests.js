@@ -265,6 +265,22 @@ console.log('== 多管理地址 ==');
   const gM2 = M.textToGraph(csv);
   const nm = gM2.nodes.find(x => x.name === gM.nodes[0].name);
   ok(U.nodeMgmts(nm).join(',') === '5.5.5.1,5.5.5.2', '多管理口 CSV 导出→导入回环');
+  // M1：非法/重复 id 与 type 清洗
+  const bad = U.sanitizeGraph(
+    [{ id: 'n" onload="x', name: 'A', type: 'r" onload="x' }, { id: 'n1', name: 'B' }, { id: 'n1', name: 'C' }],
+    [{ id: 'l1', a: 'n" onload="x', b: 'n1' }],
+    [{ id: 't" onload="x', text: 'x' }]
+  );
+  ok(bad.nodes.length === 3 && new Set(bad.nodes.map(n => n.id)).size === 3, '非法/重复节点 id 被替换且无重复');
+  ok(bad.nodes.every(n => /^[A-Za-z0-9_-]{1,64}$/.test(n.id) && /^[A-Za-z0-9_-]{1,64}$/.test(n.type)), '节点 id/type 均为安全字符');
+  ok(bad.links.length === 1 && bad.nodes.some(n => n.name === 'A' && n.id === bad.links[0].a) && bad.nodes.some(n => n.name === 'B' && n.id === bad.links[0].b), '连线端点随 id 重映射');
+  ok(bad.texts.length === 1 && /^[A-Za-z0-9_-]{1,64}$/.test(bad.texts[0].id), '文本框非法 id 被替换');
+  const td = U.sanitizeTypeData(
+    { 'bad" key': { c1: '#ff0000' }, router: { c1: '#00ff00' } },
+    [{ key: 'x" onclick="x', label: '坏' }, { key: 'router', label: '冲突' }, { key: 'ct1', label: '好' }]
+  );
+  ok(!td.overrides['bad" key'] && td.overrides.router && td.overrides.router.c1 === '#00ff00', '非法 override key 丢弃，合法保留');
+  ok(td.customTypes.length === 3 && td.customTypes.every(t => /^[A-Za-z0-9_-]{1,64}$/.test(t.key)) && !td.customTypes.some(t => t.key === 'router') && td.customTypes.some(t => t.label === '好' && t.key === 'ct1'), '自定义类型 key 安全化且不与内置冲突');
 }
 
 console.log('== 布局 ==');
@@ -936,6 +952,34 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ]);
   }
 
+  // Telnet：跨包多字节 UTF-8 不产生乱码
+  {
+    const unicodeSocks = new Set();
+    const unicode = net.createServer((sock) => {
+      unicodeSocks.add(sock);
+      sock.on('close', () => unicodeSocks.delete(sock));
+      sock.on('error', () => {});
+      const b = Buffer.from('中文OK\r\n', 'utf8');
+      sock.write(b.slice(0, 1)); // 拆开第一个多字节字符
+      setTimeout(() => sock.write(b.slice(1)), 60);
+    });
+    await new Promise((res) => unicode.listen(0, '127.0.0.1', res));
+    const port = unicode.address().port;
+    const mgr = new ShellManager();
+    const outs = [];
+    mgr.on('output', (id, d) => outs.push(d));
+    const r = mgr.connect({ protocol: 'telnet', host: '127.0.0.1', port, timeout: 3000 });
+    await waitFor(() => outs.join('').includes('OK'), 3000);
+    ok(outs.join('').includes('中文OK'), 'Telnet 跨包多字节 UTF-8 正常（' + JSON.stringify(outs.join('')) + '）');
+    ok(!outs.join('').includes('\uFFFD'), 'Telnet 输出无替换符');
+    mgr.close(r.id);
+    for (const s of unicodeSocks) s.destroy();
+    await Promise.race([
+      new Promise((res) => unicode.close(res)),
+      new Promise((res) => setTimeout(res, 1000))
+    ]);
+  }
+
   // Telnet：本地模拟服务器（RFC854 协商 + NAWS）
   {
     const serverData = [];
@@ -977,6 +1021,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const hostKey = fs.readFileSync(path.join(root, 'node_modules', 'ssh2', 'test', 'fixtures', 'ssh_host_rsa_key'));
     const got = [];
     const server = new Server({ hostKeys: [hostKey] }, (client) => {
+      client.on('error', () => {}); // 客户端中途断连/握手失败时避免未处理 error
       client.on('authentication', (ctx) => {
         if (ctx.method === 'password' && ctx.username === 'admin' && ctx.password === 'secret') ctx.accept();
         else ctx.reject();
@@ -1012,6 +1057,16 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     mgr.resize(r.id, 120, 40);
     await waitFor(() => got.some(g => g[0] === 'resize' && g[1] === 120 && g[2] === 40), 3000);
     ok(got.some(g => g[0] === 'resize' && g[1] === 120 && g[2] === 40), 'SSH 窗口尺寸同步（resize）');
+    // 指纹校验：期望指纹不匹配时拒绝连接
+    {
+      const mgrBad = new ShellManager();
+      const badStatus = [];
+      mgrBad.on('status', (id, info) => badStatus.push(info));
+      const rb = mgrBad.connect({ protocol: 'ssh', host: '127.0.0.1', port, username: 'admin', password: 'secret', expectFp: '00:11:22:33' });
+      await waitFor(() => badStatus.some(s => s.state === 'error' && s.text.includes('不匹配')), 5000);
+      ok(badStatus.some(s => s.state === 'error' && s.text.includes('不匹配')), 'SSH 指纹不匹配时拒绝连接');
+      mgrBad.close(rb.id);
+    }
     const endedS = new Promise((res) => mgr.on('end', (id) => res(id)));
     mgr.close(r.id);
     await endedS;

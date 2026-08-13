@@ -129,6 +129,9 @@ function createWebWindow() {
     webWin = null;
     webReady = false;
     pendingWebTabs.length = 0;
+    certQueue.length = 0; // 丢弃未送达的证书告警
+    for (const rec of pendingCert.values()) { try { rec.callback(false); } catch (e) { /* ignore */ } }
+    pendingCert.clear();
   });
   webWin.webContents.once('did-finish-load', () => {
     while (pendingWebTabs.length) webWin.webContents.send('web:newtab', pendingWebTabs.shift());
@@ -139,7 +142,8 @@ function createWebWindow() {
   webWin.webContents.on('did-attach-webview', (e, guest) => {
     try {
       guest.setWindowOpenHandler(({ url }) => {
-        if (webWin && !webWin.isDestroyed()) webWin.webContents.send('web:newtab', { url });
+        // 仅放行 http/https，避免设备页面弹出 file:/javascript: 等危险地址
+        if (/^https?:\/\//i.test(url) && webWin && !webWin.isDestroyed()) webWin.webContents.send('web:newtab', { url });
         return { action: 'deny' };
       });
     } catch (err) { /* ignore */ }

@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260812w';
+U.APP_VERSION = 'v20260812x';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -281,23 +281,34 @@ U.isValidColor = (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
 U.isValidImg = (v) => typeof v === 'string' && (v === '' || /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/i.test(v));
 /* 清洗 typeOverrides / customTypes：剔除非法颜色与图片，避免拼入 innerHTML/SVG 时注入 */
 U.sanitizeTypeData = (overrides, customTypes) => {
+  const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
   const ov = {};
   for (const [key, o] of Object.entries(overrides || {})) {
+    if (!SAFE_KEY.test(key)) continue; // 非法 key 直接丢弃，避免拼入 HTML/SVG 属性
     if (!o || typeof o !== 'object') continue;
     const clean = {};
     if (U.isValidColor(o.c1)) { clean.c1 = o.c1; clean.c2 = U.isValidColor(o.c2) ? o.c2 : o.c1; clean.stroke = U.isValidColor(o.stroke) ? o.stroke : o.c1; }
     if (U.isValidImg(o.img)) clean.img = o.img;
     if (Object.keys(clean).length) ov[key] = clean;
   }
-  const ct = Array.isArray(customTypes) ? customTypes.map(t => {
-    if (!t || typeof t !== 'object' || typeof t.key !== 'string' || typeof t.label !== 'string') return null;
-    const clean = { key: t.key, label: t.label, c1: t.c1, c2: t.c2 || t.c1, stroke: t.stroke || t.c1, img: '' };
+  const arr = Array.isArray(customTypes) ? customTypes.filter(t => t && typeof t === 'object') : [];
+  const known = new Set(U.TYPE_ORDER);
+  for (const t of arr) {
+    const k = typeof t.key === 'string' ? t.key : '';
+    if (SAFE_KEY.test(k)) known.add(k);
+  }
+  let seq = 1;
+  const ct = arr.map(t => {
+    if (typeof t.label !== 'string') return null;
+    let key = (typeof t.key === 'string' && SAFE_KEY.test(t.key) && !U.TYPE_ORDER.includes(t.key)) ? t.key : null;
+    if (!key) { do { key = 'ct' + (seq++); } while (known.has(key)); known.add(key); }
+    const clean = { key, label: t.label.slice(0, 64), c1: t.c1, c2: t.c2 || t.c1, stroke: t.stroke || t.c1, img: '' };
     if (!U.isValidColor(clean.c1)) clean.c1 = U.PALETTE[0];
     if (!U.isValidColor(clean.c2)) clean.c2 = clean.c1;
     if (!U.isValidColor(clean.stroke)) clean.stroke = clean.c1;
     if (U.isValidImg(t.img)) clean.img = t.img; else clean.img = '';
     return clean;
-  }).filter(Boolean) : [];
+  }).filter(Boolean);
   return { overrides: ov, customTypes: ct };
 };
 
@@ -305,28 +316,43 @@ U.sanitizeTypeData = (overrides, customTypes) => {
 U.sanitizeGraph = (nodes, links, texts) => {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
   const str = (v) => typeof v === 'string' ? v : String(v == null ? '' : v);
+  const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+  const usedN = new Set(), usedL = new Set(), usedT = new Set();
+  const fresh = (prefix, used) => { let id; do { id = U.uid(prefix); } while (used.has(id)); used.add(id); return id; };
+  const idMap = new Map(); // 旧 id -> 新 id（仅在不合法/重复时记录）
   const cleanNodes = (Array.isArray(nodes) ? nodes : []).map(n => {
     if (!n || typeof n !== 'object') return null;
-    const id = str(n.id);
-    if (!id) return null;
+    const oldId = str(n.id);
+    const id = SAFE_ID.test(oldId) && !usedN.has(oldId) ? oldId : fresh('n', usedN);
+    usedN.add(id);
+    // 记录旧 id → 新 id；重复 id 以首个为准（后续重复的旧 id 不再覆盖）
+    if (!idMap.has(oldId)) idMap.set(oldId, id);
+    const rawType = typeof n.type === 'string' ? n.type : '';
     return {
-      id, name: str(n.name).slice(0, 200), type: typeof n.type === 'string' && n.type ? n.type : 'other',
+      id, name: str(n.name).slice(0, 200),
+      type: SAFE_ID.test(rawType) ? rawType : 'other',
       x: num(n.x, 0), y: num(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
       mgmt: str(n.mgmt), note: str(n.note), web: str(n.web).slice(0, 500),
       mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20)
     };
   }).filter(Boolean);
+  const nodeIds = new Set(cleanNodes.map(n => n.id));
   const cleanLinks = (Array.isArray(links) ? links : []).map(l => {
     if (!l || typeof l !== 'object') return null;
-    const id = str(l.id), a = str(l.a), b = str(l.b);
-    if (!id || !a || !b) return null;
+    const oldId = str(l.id);
+    const id = SAFE_ID.test(oldId) && !usedL.has(oldId) ? oldId : fresh('l', usedL);
+    usedL.add(id);
+    const a = idMap.get(str(l.a)) || str(l.a);
+    const b = idMap.get(str(l.b)) || str(l.b);
+    if (!nodeIds.has(a) || !nodeIds.has(b)) return null; // 引用不存在/非法的节点则丢弃
     return { id, a, b, aIf: str(l.aIf), aIp: str(l.aIp), bIf: str(l.bIf), bIp: str(l.bIp), bw: str(l.bw), note: str(l.note) };
   }).filter(Boolean);
   const cleanTexts = (Array.isArray(texts) ? texts : []).map(t => {
     if (!t || typeof t !== 'object') return null;
-    const id = str(t.id);
-    if (!id) return null;
+    const oldId = str(t.id);
+    const id = SAFE_ID.test(oldId) && !usedT.has(oldId) ? oldId : fresh('t', usedT);
+    usedT.add(id);
     return {
       id, x: num(t.x, 0), y: num(t.y, 0),
       w: Math.max(num(t.w, 220), 40), h: Math.max(num(t.h, 56), 24),

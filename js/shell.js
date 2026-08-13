@@ -4,6 +4,7 @@
 'use strict';
 const { EventEmitter } = require('events');
 const net = require('net');
+const { StringDecoder } = require('string_decoder');
 const { Client } = require('ssh2');
 
 const IAC = 255, DONT = 254, DO = 253, WONT = 252, WILL = 251, SB = 250, SE = 240;
@@ -31,7 +32,8 @@ class ShellManager extends EventEmitter {
       password: String(opts.password || ''),
       cols: Math.max(parseInt(opts.cols, 10) || 80, 10),
       rows: Math.max(parseInt(opts.rows, 10) || 24, 5),
-      timeout: opts.timeout != null ? parseInt(opts.timeout, 10) : undefined
+      timeout: opts.timeout != null ? parseInt(opts.timeout, 10) : undefined,
+      expectFp: String(opts.expectFp || '').trim()
     };
     let session;
     if (protocol === 'ssh') session = this._ssh(base);
@@ -110,7 +112,11 @@ class ShellManager extends EventEmitter {
         try {
           const hex = String(key).toLowerCase();
           const fp = hex.replace(/(.{2})(?=.)/g, '$1:');
-          em.emit('status', { state: 'info', text: '主机密钥 SHA256 指纹: ' + fp });
+          em.emit('status', { state: 'info', host: o.host, text: '主机密钥 SHA256 指纹: ' + fp });
+          if (o.expectFp && o.expectFp !== fp) {
+            em.emit('status', { state: 'error', text: '主机密钥指纹不匹配：' + fp + '（期望 ' + o.expectFp + '），可能存在中间人攻击' });
+            return false;
+          }
         } catch (e) { /* ignore */ }
         return true;
       }
@@ -128,6 +134,7 @@ class ShellManager extends EventEmitter {
   _telnet(o) {
     const em = new EventEmitter();
     const sock = net.createConnection({ host: o.host, port: o.port });
+    const decoder = new StringDecoder('utf8'); // 处理跨包的多字节 UTF-8
     let buf = Buffer.alloc(0);
     let closed = false;
     // 连接超时（默认 12s，测试可传 opts.timeout 缩短）；连接建立后关闭空闲超时
@@ -137,6 +144,7 @@ class ShellManager extends EventEmitter {
       if (closed) return;
       closed = true;
       try { sock.destroy(); } catch (e) { /* ignore */ }
+      try { decoder.end(); } catch (e) { /* ignore */ }
       em.emit('end', reason || '连接已关闭');
     };
     const sendNaws = () => {
@@ -184,7 +192,7 @@ class ShellManager extends EventEmitter {
         }
         buf = buf.slice(2); // 其它命令（NOP 等）丢弃
       }
-      if (out.length) em.emit('output', Buffer.concat(out).toString('utf8'));
+      if (out.length) em.emit('output', decoder.write(Buffer.concat(out)));
     });
     sock.on('timeout', () => {
       em.emit('status', { state: 'error', text: '连接超时' });

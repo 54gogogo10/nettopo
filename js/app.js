@@ -119,12 +119,21 @@ function centerOn(kind, id) {
 }
 
 /* ================= 撤销 / 重做 ================= */
-function snapshot() { return { nodes: U.clone(state.nodes), links: U.clone(state.links), texts: U.clone(state.texts) }; }
+function snapshot() {
+  return {
+    nodes: U.clone(state.nodes), links: U.clone(state.links), texts: U.clone(state.texts),
+    downLinks: [...state.downLinks], subnetNames: Object.assign({}, state.subnetNames)
+  };
+}
 function restore(s) {
   state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
   state.sel = { kind: null, id: null };
+  if (Array.isArray(s.downLinks)) { state.downLinks = new Set(s.downLinks); renderer.setDownLinks(state.downLinks); }
+  if (s.subnetNames && typeof s.subnetNames === 'object') { state.subnetNames = s.subnetNames; renderer.subnetNames = s.subnetNames; }
+  renderer.setSubnetView(state.showSubnets, state.subnetNames);
   renderer.setData(state.nodes, state.links, state.texts);
   refreshAll();
+  updateLegend();
   renderSelCard(); // 隐藏可能残留的选中卡
 }
 function pushUndo(pre) {
@@ -2722,6 +2731,7 @@ function openWebShell(id) {
       password: ov.querySelector('#wsPass').value,
       title: n.name
     };
+    try { cfg.expectFp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; } catch (e) { cfg.expectFp = ''; }
     if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
     try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username })); } catch (e) {}
     const btn = ov.querySelector('[data-act=connect]');

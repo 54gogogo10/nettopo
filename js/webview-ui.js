@@ -38,7 +38,7 @@
   function showErr(rec, msg) {
     let err = rec.pageEl.querySelector('.wv-err');
     if (!err) { err = document.createElement('div'); err.className = 'wv-err'; rec.pageEl.appendChild(err); }
-    err.innerHTML = '<b>页面加载失败</b><span>' + (msg || '未知错误') + '</span><span style="font-size:11px">点击「刷新」或检查设备管理页地址</span>';
+    err.innerHTML = '<b>页面加载失败</b><span>' + escAttr(msg || '未知错误') + '</span><span style="font-size:11px">点击「刷新」或检查设备管理页地址</span>';
   }
   function clearErr(rec) { const err = rec.pageEl.querySelector('.wv-err'); if (err) err.remove(); }
 
@@ -58,7 +58,7 @@
     const wv = document.createElement('webview');
     wv.setAttribute('src', url);
     wv.setAttribute('partition', 'persist:nettopo-web');
-    wv.setAttribute('allowpopups', ''); // 允许弹窗（由 new-window 事件转为本窗口标签）
+    wv.setAttribute('allowpopups', ''); // 允许弹窗（主进程 did-attach-webview / 渲染层 setWindowOpenHandler 转为本窗口标签）
     pageEl.appendChild(wv);
     pagesEl.appendChild(pageEl);
     tabsEl.appendChild(tabEl);
@@ -85,7 +85,11 @@
         try {
           const wc = wv.getWebContents();
           if (wc && wc.setWindowOpenHandler) {
-            wc.setWindowOpenHandler(({ url }) => { addTab({ url }); return { action: 'deny' }; });
+            wc.setWindowOpenHandler(({ url }) => {
+              // 仅放行 http/https，避免弹出 file:/javascript: 等危险地址
+              if (/^https?:\/\//i.test(url)) addTab({ url });
+              return { action: 'deny' };
+            });
             return;
           }
         } catch (e) { /* ignore */ }
