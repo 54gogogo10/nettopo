@@ -99,11 +99,25 @@ async function connectCDP(target) {
     ok(await main.eval('document.querySelectorAll(".node").length') > 0, '示例拓扑已载入');
 
     // 主窗口：右键设备 → Web Shell → 连接
-    await main.eval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);
-    await sleep(300);
-    ok(await main.eval(`(() => { const m = document.getElementById('ctx'); return m && !m.classList.contains('hidden') && m.textContent.includes('Web Shell'); })()`), '右键菜单含 Web Shell 项');
-    await main.eval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('Web Shell')); b && b.click(); return !!b; })()`);
-    await sleep(300);
+    const openShellDlg = async () => {
+      await main.eval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);
+      await sleep(300);
+      await main.eval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('Web Shell')); b && b.click(); return !!b; })()`);
+      await sleep(300);
+    };
+
+    // 多管理口：主机字段应为可选下拉，且包含全部地址
+    await main.eval(`(() => { const n = __topo.state.nodes.find(x => document.querySelector('.node[data-id]').getAttribute('data-id') === x.id); n.mgmts = ['10.255.0.99']; return true; })()`);
+    await openShellDlg();
+    const dlgInfo = await main.eval(`(() => {
+      const h = document.getElementById('wsHost');
+      return { tag: h.tagName, opts: [...h.options].map(o => o.value) };
+    })()`);
+    ok(dlgInfo.tag === 'SELECT' && dlgInfo.opts.length === 2 && dlgInfo.opts[1] === '10.255.0.99', '多管理口下拉包含全部地址（' + dlgInfo.opts.join('|') + '）');
+    await main.eval(`(() => { const b = document.querySelector('[data-act=cancel]'); if (b) b.click(); return true; })()`);
+    await main.eval(`(() => { const n = __topo.state.nodes.find(x => document.querySelector('.node[data-id]').getAttribute('data-id') === x.id); n.mgmts = []; return true; })()`);
+    await openShellDlg();
+    ok(await main.eval(`document.getElementById('wsHost').tagName === 'INPUT'`), '单管理口回退为主机输入框');
     ok(await main.eval(`!!document.getElementById('wsProto')`), '主窗口连接参数弹窗已打开');
     await main.eval(`(() => {
       const proto = document.getElementById('wsProto');
@@ -200,7 +214,7 @@ async function connectCDP(target) {
     console.error('冒烟测试异常：', e);
     failed++;
   } finally {
-    proc.kill();
+    try { require('child_process').execSync('taskkill /PID ' + proc.pid + ' /T /F', { stdio: 'ignore' }); } catch (e) { try { proc.kill(); } catch (e2) {} }
     for (const s of mockSocks) s.destroy();
     mockServer.close();
     await sleep(500);

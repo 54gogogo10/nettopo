@@ -2589,8 +2589,9 @@ function openWebShell(id) {
       </div>
       <div class="frow">
         <label>主机 / 管理口</label>
-        <input id="wsHost" type="text" list="wsMgmtList" placeholder="例如 10.255.0.1" value="${U.escHtml(n.mgmt || '')}" autocomplete="off"/>
-        <datalist id="wsMgmtList">${U.nodeMgmts(n).map(m => `<option value="${U.escHtml(m)}"></option>`).join('')}</datalist>
+        ${U.nodeMgmts(n).length > 1
+          ? `<select id="wsHost">${U.nodeMgmts(n).map(m => `<option value="${U.escHtml(m)}">${U.escHtml(m)}</option>`).join('')}</select>`
+          : `<input id="wsHost" type="text" placeholder="例如 10.255.0.1" value="${U.escHtml(n.mgmt || '')}" autocomplete="off"/>`}
       </div>
       <div class="frow"><div class="frow-inline">
         <div class="frow"><label>端口</label><input id="wsPort" type="number" min="1" max="65535" value="${U.escHtml(saved.port || '')}"/></div>
