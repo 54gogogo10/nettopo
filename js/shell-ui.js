@@ -162,19 +162,21 @@
     } catch (e) { /* ignore */ }
   };
 
-  /* ---- 终端右键菜单 ---- */
-  function showCtx(x, y) {
-    const a = activeSession();
-    const s = a && a.s;
-    const sel = s && s.term.getSelection();
-    const items = [
-      { label: '复制选中', disabled: !sel, act: () => copySelection(s) },
-      { label: '粘贴', disabled: !s || s.ended, act: () => pasteTo(s) },
-      { label: '全选', disabled: !s, act: () => { try { s.term.selectAll(); } catch (e) { /* ignore */ } } },
-      { sep: true },
-      { label: '减小字号（Ctrl+-）', act: () => setFontSize(-1) },
-      { label: '增大字号（Ctrl+=）', act: () => setFontSize(1) }
-    ];
+  /* ---- 通用右键菜单（items 缺省时显示终端菜单） ---- */
+  function showCtx(x, y, items) {
+    if (!items) {
+      const a = activeSession();
+      const s = a && a.s;
+      const sel = s && s.term.getSelection();
+      items = [
+        { label: '复制选中', disabled: !sel, act: () => copySelection(s) },
+        { label: '粘贴', disabled: !s || s.ended, act: () => pasteTo(s) },
+        { label: '全选', disabled: !s, act: () => { try { s.term.selectAll(); } catch (e) { /* ignore */ } } },
+        { sep: true },
+        { label: '减小字号（Ctrl+-）', act: () => setFontSize(-1) },
+        { label: '增大字号（Ctrl+=）', act: () => setFontSize(1) }
+      ];
+    }
     ctxEl.innerHTML = items.map(it => it.sep
       ? '<div class="d-sep"></div>'
       : `<button class="ci" ${it.disabled ? 'disabled' : ''}>${it.label}</button>`).join('');
@@ -190,6 +192,99 @@
     }
   }
   function hideCtx() { ctxEl.classList.add('hidden'); }
+
+  /* ---- 快捷按钮条（SecureCRT Button Bar 风格） ---- */
+  const BTN_KEY = 'topoShellButtons';
+  let buttons = [];
+  try { buttons = JSON.parse(localStorage.getItem(BTN_KEY) || '[]') || []; } catch (e) { buttons = []; }
+  const btnWrapEl = $('#shBBtnWrap'), bbarEl = $('#shBbar'), btnAddEl = $('#shBAdd');
+  const saveButtons = () => { try { localStorage.setItem(BTN_KEY, JSON.stringify(buttons)); } catch (e) { /* ignore */ } };
+  /* 展开 \n / \r / \t 转义（\n 按终端回车 \r 处理） */
+  const expandEsc = (t) => String(t).replace(/\\r/g, '\r').replace(/\\n/g, '\r').replace(/\\t/g, '\t');
+  const sendBtn = (b) => {
+    const a = activeSession();
+    if (!a) { toast('当前没有活动会话'); return; }
+    if (a.s.ended) { toast('会话已结束'); return; }
+    window.topoShell.sendData(a.id, expandEsc(b.text) + (b.enter ? '\r' : ''));
+  };
+  function renderBar() {
+    if (!btnWrapEl) return;
+    btnWrapEl.innerHTML = '';
+    if (!buttons.length) {
+      const h = document.createElement('span');
+      h.className = 'sh-bbar-empty';
+      h.textContent = '右键或点 ＋ 新建快捷按钮（发送到当前会话）';
+      btnWrapEl.appendChild(h);
+      return;
+    }
+    buttons.forEach((b, i) => {
+      const el = document.createElement('button');
+      el.className = 'sh-bbtn';
+      el.textContent = b.label || b.text || ('按钮 ' + (i + 1));
+      el.title = (b.label ? b.label + '：' : '') + b.text + (b.enter ? ' ⏎' : '');
+      el.onclick = () => sendBtn(b);
+      btnWrapEl.appendChild(el);
+    });
+  }
+  function openButtonDialog(idx) {
+    const editing = idx >= 0 && idx < buttons.length;
+    const b = editing ? buttons[idx] : { label: '', text: '', enter: true };
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal sh-dialog" role="dialog">
+        <h3>${editing ? '编辑快捷按钮' : '新建快捷按钮'}</h3>
+        <div class="m-sub">点击按钮把内容发送到当前会话；内容支持 \\n（回车）、\\t（制表）。</div>
+        <div class="frow"><label>按钮名称</label><input id="bbLabel" type="text" value="${escAttr(b.label)}" placeholder="例如：查看版本"/></div>
+        <div class="frow"><label>发送内容</label><textarea id="bbText" style="height:80px" placeholder="例如：show version\\n">${escAttr(b.text)}</textarea></div>
+        <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="bbEnter" type="checkbox" ${b.enter ? 'checked' : ''}/> 发送后追加回车（Enter）</label></div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="cancel">取消</button>
+          <button type="button" class="tb primary" data-act="save">保存</button>
+        </div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.querySelector('[data-act=cancel]').onclick = close;
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    ov.querySelector('[data-act=save]').onclick = () => {
+      const label = ov.querySelector('#bbLabel').value.trim();
+      const text = ov.querySelector('#bbText').value;
+      if (!text.trim()) { toast('请输入发送内容'); return; }
+      const item = { label: label || text.split(/\n|\r/)[0].trim().slice(0, 24), text, enter: ov.querySelector('#bbEnter').checked };
+      if (editing) buttons[idx] = item; else buttons.push(item);
+      saveButtons();
+      renderBar();
+      close();
+    };
+    setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#bbLabel').focus(); }, 250);
+  }
+  function openBarCtx(e, idx) {
+    e.preventDefault();
+    hideCtx();
+    const items = [
+      { label: '新建按钮…', act: () => openButtonDialog(-1) }
+    ];
+    if (idx >= 0) {
+      items.push(
+        { label: '编辑按钮…', act: () => openButtonDialog(idx) },
+        { label: '删除按钮', act: () => { buttons.splice(idx, 1); saveButtons(); renderBar(); } }
+      );
+      if (buttons.length > 1) {
+        items.push(
+          { sep: true },
+          { label: '左移', disabled: idx === 0, act: () => { const [it] = buttons.splice(idx, 1); buttons.splice(idx - 1, 0, it); saveButtons(); renderBar(); } },
+          { label: '右移', disabled: idx === buttons.length - 1, act: () => { const [it] = buttons.splice(idx, 1); buttons.splice(idx + 1, 0, it); saveButtons(); renderBar(); } }
+        );
+      }
+    } else {
+      items.push({ sep: true }, { label: '清空全部按钮', disabled: !buttons.length, act: () => { buttons = []; saveButtons(); renderBar(); } });
+    }
+    showCtx(e.clientX, e.clientY, items);
+  }
 
   /* ---- 新建连接对话框（窗口内直接发起连接） ---- */
   let saved = null;
@@ -292,6 +387,14 @@
     if ($('#shFontDec')) $('#shFontDec').onclick = () => setFontSize(-1);
     if ($('#shFontInc')) $('#shFontInc').onclick = () => setFontSize(1);
     if (fontValEl) fontValEl.textContent = fontSize;
+
+    // 快捷按钮条
+    renderBar();
+    if (btnAddEl) btnAddEl.onclick = () => openButtonDialog(-1);
+    if (bbarEl) bbarEl.addEventListener('contextmenu', (e) => {
+      const btn = e.target.closest('.sh-bbtn');
+      openBarCtx(e, btn ? [...btnWrapEl.querySelectorAll('.sh-bbtn')].indexOf(btn) : -1);
+    });
 
     // 终端区域右键菜单（不拦截弹窗内输入）
     termsEl.addEventListener('contextmenu', (e) => {

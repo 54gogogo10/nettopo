@@ -5,9 +5,9 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:;"/>
 <title>NetTopo Web Shell</title>
-<link rel="stylesheet" href="css/style.css?v=20260812q"/>
-<link rel="stylesheet" href="css/shell.css?v=20260812q"/>
-<link rel="stylesheet" href="lib/xterm.css?v=20260812q"/>
+<link rel="stylesheet" href="css/style.css?v=20260812r"/>
+<link rel="stylesheet" href="css/shell.css?v=20260812r"/>
+<link rel="stylesheet" href="lib/xterm.css?v=20260812r"/>
 </head>
 <body class="shell-body">
 
@@ -24,6 +24,11 @@
 
 <main id="shTerms" class="sh-terms"></main>
 
+<div id="shBbar" class="sh-bbar" title="右键管理快捷按钮">
+  <div id="shBBtnWrap" class="sh-bbar-btns"></div>
+  <button id="shBAdd" class="sh-bbar-add" title="新建快捷按钮（SecureCRT Button Bar 风格）">＋</button>
+</div>
+
 <div id="shEmpty" class="sh-empty hidden">
   <svg viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M6.5 9.5l3 2.5-3 2.5"/><path d="M12 14.5h5.5"/></svg>
   <p>暂无连接</p>
@@ -34,8 +39,8 @@
 <div id="modalRoot"></div>
 <div id="shCtx" class="sh-ctx hidden"></div>
 
-<script src="lib/xterm.js?v=20260812q"></script>
-<script src="lib/xterm-addon-fit.js?v=20260812q"></script>
-<script src="js/shell-ui.js?v=20260812q"></script>
+<script src="lib/xterm.js?v=20260812r"></script>
+<script src="lib/xterm-addon-fit.js?v=20260812r"></script>
+<script src="js/shell-ui.js?v=20260812r"></script>
 </body>
 </html>

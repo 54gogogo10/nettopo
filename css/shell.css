@@ -79,3 +79,29 @@
 .sh-ctx .ci[disabled]:hover { background: none; color: var(--text); }
 .sh-ctx .d-sep { height: 1px; background: var(--border); margin: 4px 6px; }
 .sh-ctx .ci .ic { width: 15px; height: 15px; flex: none; }
+
+/* 快捷按钮条（SecureCRT Button Bar 风格） */
+.sh-bbar {
+  display: flex; align-items: center; gap: 4px;
+  min-height: 34px; padding: 4px 8px; flex: 0 0 auto;
+  background: var(--panel); border-top: 1px solid var(--border);
+  user-select: none; overflow-x: auto; scrollbar-width: thin;
+}
+.sh-bbar-btns { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; flex-wrap: wrap; }
+.sh-bbar-empty { font-size: 11px; color: var(--muted); padding: 0 4px; white-space: nowrap; }
+.sh-bbtn {
+  flex: 0 0 auto; max-width: 220px; height: 26px; padding: 0 12px; border-radius: 7px;
+  background: var(--panel2); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: all .15s;
+}
+.sh-bbtn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.sh-bbtn:active { transform: translateY(1px); }
+.sh-bbtn:disabled { opacity: .45; cursor: default; }
+.sh-bbtn:disabled:hover { border-color: var(--border); color: var(--text); background: var(--panel2); }
+.sh-bbar-add {
+  flex: 0 0 auto; width: 28px; height: 26px; border-radius: 7px;
+  background: var(--panel2); border: 1px dashed var(--border);
+  font-size: 14px; color: var(--accent); transition: all .15s;
+}
+.sh-bbar-add:hover { border-color: var(--accent); background: var(--accent-soft); }

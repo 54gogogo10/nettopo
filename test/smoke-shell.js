@@ -166,6 +166,25 @@ async function connectCDP(target) {
     await sleep(1200);
     ok((await shell.eval(`(document.querySelector('.xterm-rows') || {}).textContent || ''`)).includes('v9.9.9 MOCK'), '收到命令回显');
 
+    // 快捷按钮条（SecureCRT Button Bar 风格）
+    await shell.eval(`(() => { const bar = document.getElementById('shBbar'); bar.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 300, clientY: 300 })); return true; })()`);
+    await sleep(300);
+    ok(await shell.eval(`(() => { const m = document.getElementById('shCtx'); return m && !m.classList.contains('hidden') && m.textContent.includes('新建按钮'); })()`), '按钮条右键菜单含「新建按钮」');
+    await shell.eval(`(() => { const b = [...document.querySelectorAll('#shCtx .ci')].find(x => x.textContent.includes('新建按钮')); b && b.click(); return !!b; })()`);
+    await sleep(300);
+    ok(await shell.eval(`!!document.getElementById('bbLabel')`), '新建按钮弹窗打开');
+    await shell.eval(`(() => { document.getElementById('bbLabel').value = '运行'; document.getElementById('bbText').value = 'show running'; document.querySelector('[data-act=save]').click(); return true; })()`);
+    await sleep(300);
+    ok(await shell.eval(`document.querySelectorAll('.sh-bbtn').length === 1 && document.querySelector('.sh-bbtn').textContent === '运行'`), '按钮已创建并显示名称');
+    await shell.eval(`document.querySelector('.sh-bbtn').click()`);
+    ok(await waitText(shell, `document.querySelector('.xterm-rows')`, 'show running', 4000), '点击按钮发送命令并收到回显');
+    ok(await shell.eval(`localStorage.getItem('topoShellButtons') && localStorage.getItem('topoShellButtons').includes('show running')`), '按钮配置已持久化');
+    await shell.eval(`(() => { const b = document.querySelector('.sh-bbtn'); b.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 300, clientY: 300 })); return true; })()`);
+    await sleep(300);
+    await shell.eval(`(() => { const b = [...document.querySelectorAll('#shCtx .ci')].find(x => x.textContent.includes('删除按钮')); b && b.click(); return !!b; })()`);
+    await sleep(300);
+    ok(await shell.eval(`document.querySelectorAll('.sh-bbtn').length === 0`), '删除按钮后条内无按钮');
+
     // 字号调节
     ok(await shell.eval(`document.getElementById('shFontVal').textContent === '13'`), '终端字号默认 13');
     await shell.eval(`document.getElementById('shFontInc').click()`);
