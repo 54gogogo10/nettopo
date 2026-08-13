@@ -70,7 +70,9 @@ function buildSvgImage(graph, opts) {
   }
   U.resolveLabelCollisions(labels, {
     pad: 6,
-    obstacles: nodes.map(n => ({ x: X(n.x), y: Y(n.y + n.h), w: n.w, h: n.h }))
+    // SVG 坐标系 Y 向下：节点矩形左上角为 (X(n.x), Y(n.y))。
+    // （旧写法用底边 Y(n.y + n.h)，障碍物整体下移一个节点高度，导致覆盖在节点上的标注不被推开）
+    obstacles: nodes.map(n => ({ x: X(n.x), y: Y(n.y), w: n.w, h: n.h }))
   });
   for (let i = 0; i < labels.length; i++) {
     const lb = labels[i], ld = labelData[i];

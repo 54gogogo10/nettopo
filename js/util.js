@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260813c';
+U.APP_VERSION = 'v20260814a';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -402,7 +402,11 @@ function shade(hex, f) {
 }
 
 U.addCustomType = (label, img) => {
-  const key = 'ct' + (U.customTypes.length + 1);
+  // 删除中间类型后 length+1 可能与已有 key 冲突，循环找不冲突的序号
+  const keys = new Set(U.customTypes.map(t => t.key));
+  let seq = U.customTypes.length + 1;
+  let key = 'ct' + seq;
+  while (keys.has(key)) { seq++; key = 'ct' + seq; }
   const c = U.PALETTE[U.customTypes.length % U.PALETTE.length];
   const t = { key, label: String(label || '').trim(), c1: c, c2: c, stroke: c, img: img || '' };
   U.customTypes.push(t);
@@ -613,13 +617,14 @@ U.normalizeBw = (v) => {
   if (v == null) return '';
   const s = String(v).trim().toLowerCase();
   if (!s) return '';
+  // 每个分支都必须 ^ 锚定：否则 "21gbps" 会被 "1gbps" 分支、 "x100gbps" 会被 "100gbps" 分支误命中
   const table = [
-    [/^100g|100gbps|100000m/, 100000],
-    [/^40g|40gbps|40000m/, 40000],
-    [/^10g|10gbps|10000m|万兆/, 10000],
-    [/^1g|1gbps|1000m|千兆/, 1000],
-    [/^100m|100mbps|百兆/, 100],
-    [/^10m|10mbps/, 10]
+    [/^(?:100g|100gbps|100000m)/, 100000],
+    [/^(?:40g|40gbps|40000m)/, 40000],
+    [/^(?:10g|10gbps|10000m|万兆)/, 10000],
+    [/^(?:1g|1gbps|1000m|千兆)/, 1000],
+    [/^(?:100m|100mbps|百兆)/, 100],
+    [/^(?:10m|10mbps)/, 10]
   ];
   for (const [re, val] of table) if (re.test(s)) return val;
   // 通用单位：2g / 2.5g / 200m / 800mbps 等（表内未列出的取值）
@@ -1259,7 +1264,11 @@ U.normalizeWebUrl = (v) => {
   const s = String(v == null ? '' : v).trim();
   if (!s) return null;
   if (/^https?:\/\//i.test(s)) return s;
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s)) return null; // 其它协议拒绝
+  // scheme:// 但非 http(s)（file://、ftp:// 等）拒绝
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) return null;
+  // 无 // 形式的危险协议（javascript:/data:/vbscript: 等）拒绝
+  if (/^(?:javascript|data|file|vbscript|about):/i.test(s)) return null;
+  // 其余视为 主机[:端口][/路径]（如 example.com:8080、10.0.0.1:8080），补 http://
   return 'http://' + s;
 };
 

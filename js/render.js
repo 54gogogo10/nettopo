@@ -72,7 +72,8 @@ class Renderer {
   }
 
   setView(pan, zoom) {
-    this.pan = pan; this.zoom = zoom;
+    this.pan = pan;
+    this.zoom = U.clamp(zoom, 0.12, 4); // 与 zoomBy 同一缩放范围（工程文件/本地存储可能含异常 zoom）
     this.applyView();
     this.update();
   }

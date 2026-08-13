@@ -15,7 +15,7 @@ class ShellManager extends EventEmitter {
     super();
     this.sessions = new Map();
     this._seq = 0;
-    this._pendingVerify = new Map(); // host -> verify 回调（SSH 首次连接待用户确认指纹）
+    this._pendingVerify = new Map(); // host -> [{verify, ...}]（SSH 首次连接待确认指纹；同一主机可有多个会话排队）
   }
 
   /** 建立会话。opts: {protocol:'ssh'|'telnet', host, port, username, password, cols, rows}
@@ -68,12 +68,12 @@ class ShellManager extends EventEmitter {
     for (const id of [...this.sessions.keys()]) this.close(id);
   }
 
-  /** SSH 首次连接指纹确认：用户信任后放行握手（TOFU） */
+  /** SSH 首次连接指纹确认：用户信任后放行该主机的全部待确认握手（TOFU） */
   trustFingerprint(host, trust) {
-    const verify = this._pendingVerify.get(host);
-    if (!verify) return false;
+    const arr = this._pendingVerify.get(host);
+    if (!arr || !arr.length) return false;
     this._pendingVerify.delete(host);
-    try { verify(!!trust); } catch (e) { /* ignore */ }
+    for (const rec of arr) { try { rec.verify(!!trust); } catch (e) { /* ignore */ } }
     return true;
   }
 
@@ -83,10 +83,16 @@ class ShellManager extends EventEmitter {
     const client = new Client();
     let stream = null;
     let closed = false;
+    const pendingRec = { verify: null }; // 本会话的指纹确认记录（结束时只移除自己的，不影响同主机其它会话）
     const finish = (reason) => {
       if (closed) return;
       closed = true;
-      this._pendingVerify.delete(o.host); // 会话结束即清理未确认的指纹等待
+      const arr = this._pendingVerify.get(o.host); // 会话结束即移除本会话的指纹等待
+      if (arr) {
+        const i = arr.indexOf(pendingRec);
+        if (i >= 0) arr.splice(i, 1);
+        if (!arr.length) this._pendingVerify.delete(o.host);
+      }
       try { if (stream && !stream.destroyed) stream.end(); } catch (e) { /* ignore */ }
       try { client.end(); } catch (e) { /* ignore */ }
       em.emit('end', reason || '连接已关闭');
@@ -131,8 +137,11 @@ class ShellManager extends EventEmitter {
             em.emit('status', { state: 'info', host: o.host, fp, text: '主机密钥指纹: ' + fp });
             return true;
           }
-          // 首次连接：暂停握手，等用户确认信任该指纹
-          this._pendingVerify.set(o.host, verify);
+          // 首次连接：暂停握手，等用户确认信任该指纹（同主机多会话各自排队）
+          pendingRec.verify = verify;
+          const arr = this._pendingVerify.get(o.host);
+          if (arr) arr.push(pendingRec);
+          else this._pendingVerify.set(o.host, [pendingRec]);
           em.emit('status', { state: 'fingerprint', host: o.host, fp, text: '首次连接，请核对主机指纹: ' + fp });
           return undefined; // 异步确认，不立即 verify
         } catch (e) {

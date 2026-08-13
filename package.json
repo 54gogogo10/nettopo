@@ -8,6 +8,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "build": "node bump-version.js && electron-builder --config build/electron-builder.yml",
     "pack": "electron-packager . NetTopo --platform=win32 --arch=x64 --out=dist --overwrite --icon=icon.ico --asar"
   },
   "devDependencies": {

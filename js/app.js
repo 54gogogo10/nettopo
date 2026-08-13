@@ -6,6 +6,10 @@
 const U = TopoUtil, M = TopoModel, Layout = TopoLayout;
 const $ = U.$, $$ = U.$$;
 
+/* localStorage 安全读取：浏览器禁用存储（隐私模式/沙箱）时 getItem 会抛异常，
+ * 顶层状态初始化不能因此中断整个应用 */
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } };
+
 /* ================= 状态 ================= */
 const state = {
   nodes: [],
@@ -15,15 +19,15 @@ const state = {
   linkPick: null,      // 连线模式下已选中的源节点
   undoStack: [],
   redoStack: [],
-  theme: localStorage.getItem('nettopo.theme') || 'light',
+  theme: lsGet('nettopo.theme', 'light'),
   search: '',
   tab: 'nodes',
   blank: false,   // 用户主动新建空白画布（无表格也能直接画）
-  showLabels: localStorage.getItem('nettopo.showLabels') !== '0',   // 链路标注显示开关
-  showSubnets: localStorage.getItem('nettopo.showSubnets') === '1', // 子网分组显示开关
+  showLabels: lsGet('nettopo.showLabels', '1') !== '0',   // 链路标注显示开关
+  showSubnets: lsGet('nettopo.showSubnets', '0') === '1', // 子网分组显示开关
   subnetNames: {},  // 子网 -> 自定义名称（子网分组命名）
   downLinks: new Set(),  // 故障链路 id 集合（模拟断链，路径分析绕行）
-  autoBackup: { on: localStorage.getItem('nettopo.autoBackup') === '1', minutes: Number(localStorage.getItem('nettopo.autoBackupMin') || 10), keep: Math.min(200, Math.max(1, Number(localStorage.getItem('nettopo.autoBackupKeep') || 30) || 30)) },
+  autoBackup: { on: lsGet('nettopo.autoBackup', '0') === '1', minutes: Number(lsGet('nettopo.autoBackupMin', '10') || 10), keep: Math.min(200, Math.max(1, Number(lsGet('nettopo.autoBackupKeep', '30') || 30) || 30)) },
   texts: []  // 画布文本框（自定义字体样式）
 };
 let layoutCancel = false;
@@ -1878,6 +1882,7 @@ function toggleSubnets() {
 
 /* ================= 链路故障模拟 ================= */
 function toggleLinkDown(id) {
+  pushUndo(); // 故障标记参与撤销（快照包含 downLinks）
   if (state.downLinks.has(id)) state.downLinks.delete(id); else state.downLinks.add(id);
   renderer.setDownLinks(state.downLinks);
   saveGraph();
@@ -1887,6 +1892,7 @@ function toggleLinkDown(id) {
 }
 function clearDownLinks() {
   if (!state.downLinks.size) { toast('当前没有故障标记'); return; }
+  pushUndo(); // 故障标记参与撤销
   state.downLinks.clear();
   renderer.setDownLinks(state.downLinks);
   saveGraph();
@@ -2212,6 +2218,7 @@ function renderSelCard() {
     card.querySelector('[data-act=batch]').onclick = () => batchEditLinks();
     card.querySelector('[data-act=fault]').onclick = () => {
       const down = !ids.every(id2 => state.downLinks.has(id2));
+      pushUndo(); // 批量故障标记参与撤销
       for (const id2 of ids) { if (down) state.downLinks.add(id2); else state.downLinks.delete(id2); }
       renderer.setDownLinks(state.downLinks);
       saveGraph();
@@ -2867,29 +2874,8 @@ function wire() {
   });
 }
 
-/* ================= 诊断（帮助定位交互问题） ================= */
-(function () {
-  const div = document.createElement('div');
-  div.id = 'diagBar';
-  div.style.cssText = 'position:fixed;right:8px;bottom:30px;z-index:999;font:11px/1.6 monospace;background:rgba(15,23,42,.85);color:#e2e8f0;padding:6px 10px;border-radius:8px;max-width:340px;pointer-events:none;display:none';
-  document.body.appendChild(div);
-  const D = { mode: 'normal', ev: '-', evTarget: '-', t: 0 };
-  for (const t of ['pointerdown', 'mousedown', 'click', 'keydown']) {
-    document.addEventListener(t, (e) => {
-      D.ev = t;
-      D.evTarget = (e.target && (e.target.id || e.target.className && e.target.className.baseVal !== undefined ? e.target.className.baseVal : e.target.className) || e.target.tagName) || '-';
-    }, true);
-  }
-  setInterval(() => {
-    D.mode = state.mode;
-    D.t = setHint._t ? 1 : 0;
-    div.textContent = `模式:${D.mode} | 事件:${D.ev}@${D.evTarget} | 计时器:${D.t} | 显示倒计时请按 F2`;
-  }, 400);
-  // F2 切换诊断条显隐
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'F2') { div.style.display = div.style.display === 'none' ? 'block' : 'none'; }
-  });
-})();
+/* 诊断条（F2 调试）已移除：常驻 setInterval 与全局捕获监听不再随生产包发布；
+ * 需要排查交互问题时可在控制台临时挂载等价监听 */
 
 /* ================= 设备管理 Web 页（独立窗口多标签，不锁定主界面） ================= */
 function openDeviceWeb(id) {

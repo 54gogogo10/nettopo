@@ -20,3 +20,8 @@ test/_*.js
 
 # 根目录生成的 Visio 样例/临时文件
 *.vsdx
+
+# 规划工作文件（planning-with-files 工作区记忆，不入库）
+task_plan.md
+findings.md
+progress.md

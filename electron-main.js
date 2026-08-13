@@ -3,7 +3,7 @@
 const { app, BrowserWindow, session, ipcMain } = require('electron');
 const path = require('path');
 const { ShellManager } = require('./js/shell.js');
-const { BackupStore } = require('./js/backup-store.js');
+const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 
 // 测试隔离：冒烟测试通过 NETTOPO_USERDATA 覆盖用户数据目录（临时目录），避免污染真实备份数据
 if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_USERDATA);
@@ -188,6 +188,13 @@ function isHttpUrl(u) {
 }
 
 /* ---- Web Shell IPC ---- */
+/** Shell 相关 IPC 仅允许主窗口与 Shell 窗口调用（两窗口都加载同一 preload） */
+function shellSender(e) {
+  return !!(e && e.sender && (
+    (mainWin && !mainWin.isDestroyed() && e.sender === mainWin.webContents) ||
+    (shellWin && !shellWin.isDestroyed() && e.sender === shellWin.webContents)
+  ));
+}
 ipcMain.handle('web:cert-allow', (e, payload) => {
   if (!webWin || webWin.isDestroyed() || e.sender !== webWin.webContents) return { ok: false, error: 'forbidden' };
   const rec = pendingCert.get(payload && payload.id);
@@ -206,6 +213,7 @@ ipcMain.handle('web:open', (e, opts) => {
   return { ok: true };
 });
 ipcMain.handle('shell:connect', (e, opts) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
   opts = opts || {};
   const r = shell.connect(opts);
   if (r.ok) {
@@ -220,19 +228,31 @@ ipcMain.handle('shell:trust', (e, p) => {
   return { ok: shell.trustFingerprint(String((p && p.host) || ''), !!(p && p.trust)) };
 });
 ipcMain.on('shell:data', (e, id, data) => {
+  if (!shellSender(e)) return;
   if (typeof data !== 'string') return; // 仅接受字符串：防非字符串绕过限长并致流写入崩溃
   if (data.length > 1024 * 1024) return; // 防超大粘贴/异常数据
   shell.write(id, data);
 });
-ipcMain.on('shell:resize', (e, id, cols, rows) => shell.resize(id, cols, rows));
-ipcMain.on('shell:close', (e, id) => shell.close(id));
-ipcMain.handle('shell:clipboard-write', (e, text) => { const { clipboard } = require('electron'); clipboard.writeText(String(text == null ? '' : text)); });
+ipcMain.on('shell:resize', (e, id, cols, rows) => { if (shellSender(e)) shell.resize(id, cols, rows); });
+ipcMain.on('shell:close', (e, id) => { if (shellSender(e)) shell.close(id); });
+ipcMain.handle('shell:clipboard-write', (e, text) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  text = String(text == null ? '' : text);
+  if (text.length > 1024 * 1024) return { ok: false, error: '内容过大' }; // 与 shell:data 一致限长
+  const { clipboard } = require('electron');
+  clipboard.writeText(text);
+  return { ok: true };
+});
 ipcMain.handle('shell:open-external', (e, url) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
   const u = String(url || '');
   if (u.length < 2048 && isHttpUrl(u)) require('electron').shell.openExternal(u);
   return { ok: true };
 });
-ipcMain.handle('shell:clipboard-read', () => require('electron').clipboard.readText());
+ipcMain.handle('shell:clipboard-read', (e) => {
+  if (!shellSender(e)) return '';
+  return require('electron').clipboard.readText();
+});
 
 /* ---- 工程备份管理 IPC（仅主窗口可调用，防其它窗口/被注入脚本越权读写备份） ---- */
 function backupGuard(e) {
@@ -241,7 +261,8 @@ function backupGuard(e) {
 ipcMain.handle('backup:save', (e, p) => {
   if (!backupGuard(e)) return { ok: false, error: 'forbidden' };
   const content = String((p && p.content) || '');
-  if (content.length > 70 * 1024 * 1024) return { ok: false, error: '备份内容过大' }; // IPC 侧快速拦截，避免序列化超大 payload
+  // 与 BackupStore 的字节上限（MAX_CONTENT_BYTES）保持一致；字符串 length 是 UTF-16 码元，中文场景偏小，按字节拦截
+  if (Buffer.byteLength(content, 'utf8') > MAX_CONTENT_BYTES) return { ok: false, error: '备份内容过大' };
   return getBackupStore().save(content, (p && p.label) === 'auto' ? 'auto' : 'manual', parseInt((p && p.keep), 10));
 });
 ipcMain.handle('backup:list', (e) => backupGuard(e) ? getBackupStore().list() : { ok: false, error: 'forbidden' });

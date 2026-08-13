@@ -9,7 +9,7 @@ const root = path.join(__dirname, '..');
 const sandbox = { console, Uint8Array, TextEncoder, TextDecoder, structuredClone, Map, Set, Promise, Math, requestAnimationFrame: (fn) => setTimeout(fn, 0), localStorage: { getItem: () => null, setItem: () => {} } };
 vm.createContext(sandbox);
 
-for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/visio.js']) {
+for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/visio.js', 'js/pdf.js']) {
   const code = fs.readFileSync(path.join(root, f), 'utf8');
   vm.runInContext(code, sandbox, { filename: f });
 }
@@ -998,6 +998,57 @@ console.log('== 备份管理（本地备份库） ==');
 
   cleanup();
   try { fs.rmSync(tmp + '-small', { recursive: true, force: true }); } catch (e) { /* ignore */ }
+}
+
+/* ================= 回归测试（代码审查修复项） ================= */
+console.log('== 回归：normalizeBw 锚定 ==');
+{
+  ok(U.normalizeBw('21gbps') === 21000, "normalizeBw('21gbps')=21000（未被 '1gbps' 分支误命中）");
+  ok(U.normalizeBw('x100gbps') === '', "normalizeBw('x100gbps')=''（未锚定分支不误匹配）");
+  ok(U.normalizeBw('100gbps') === 100000 && U.normalizeBw('1000m') === 1000 && U.normalizeBw('100m') === 100 && U.normalizeBw('10m') === 10, '锚定后常规取值不变');
+}
+
+console.log('== 回归：normalizeWebUrl host:port ==');
+{
+  ok(U.normalizeWebUrl('example.com:8080') === 'http://example.com:8080', '域名:端口 视为主机+端口');
+  ok(U.normalizeWebUrl('10.0.0.1:8080/path') === 'http://10.0.0.1:8080/path', 'IP:端口/路径 保留');
+  ok(U.normalizeWebUrl('javascript:alert(1)') === null && U.normalizeWebUrl('file:///C:/x') === null && U.normalizeWebUrl('ftp://x') === null, '危险/非 http(s) 协议仍拒绝');
+}
+
+console.log('== 回归：addCustomType 键唯一 ==');
+{
+  const prev = U.customTypes.slice();
+  try {
+    U.customTypes = [{ key: 'ct1', label: 'A' }, { key: 'ct2', label: 'B' }, { key: 'ct3', label: 'C' }];
+    U.removeCustomType('ct2'); // 删除中间类型后新增，旧实现会复用 ct3
+    const t = U.addCustomType('新类型', '');
+    ok(U.customTypes.filter(x => x.key === t.key).length === 1, '删除中间类型后新增 key 不冲突（' + t.key + '）');
+  } finally {
+    U.customTypes = prev;
+  }
+}
+
+console.log('== 回归：导出标注防碰撞（pdf.js 障碍物坐标） ==');
+{
+  // 节点 n3 位于链路 n1-n2 中点上方：标注初始位置会压到 n3 上半部分。
+  // 修复前障碍物取了节点底边（SVG 坐标下整体下移一个节点高度），标注不被推开；修复后必须推出 n3 范围。
+  const nodes = [
+    { id: 'n1', name: 'R1', type: 'router', x: 0, y: 100, w: 160, h: 56 },
+    { id: 'n2', name: 'SW1', type: 'switch', x: 300, y: 100, w: 160, h: 56 },
+    { id: 'n3', name: 'FW1', type: 'firewall', x: 70, y: 30, w: 160, h: 56 }
+  ];
+  const links = [
+    { id: 'l1', a: 'n1', b: 'n2', aIf: 'GE0/0/1', aIp: '10.0.0.1', bIf: 'GE1/0/1', bIp: '10.0.0.2', bw: '1000' }
+  ];
+  const svg = sandbox.TopoPdf.buildSvgImage({ nodes, links, texts: [] }, { showLabels: true });
+  // 节点 n3 在导出 SVG 中的 y 范围：Y(30)=60 ~ Y(30)+56=116（buildSvgImage 的 minY=30、M=60）
+  const re = /<text x="[\d.]+" y="([\d.]+)"[^>]*font-size="13"[^>]*>(GE0\/0\/1|GE1\/0\/1)[^<]*<\/text>/g;
+  const ys = [];
+  let m;
+  while ((m = re.exec(svg)) !== null) ys.push(parseFloat(m[1]));
+  ok(ys.length >= 1, '导出的 SVG 包含链路标注');
+  const inside = ys.filter(y => y > 56 && y < 120);
+  ok(inside.length === 0, '标注不落在节点 n3 范围内（标注 y=' + ys.join('/') + '，n3 范围 60~116）');
 }
 
 console.log('== Web Shell（SSH/Telnet 会话） ==');

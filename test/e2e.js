@@ -89,13 +89,21 @@ const puppeteer = require('puppeteer-core');
   console.log('点击连线后选中保持:', linkCard);
   await page.screenshot({ path: 'shot_link_selected.png' });
 
-  // 添加连线模式提示
-  await page.evaluate(() => document.querySelector('#btnAddLink').click());
+  // 添加连线模式提示（当前 UI：编辑下拉菜单）
+  const menuClick = async (label) => {
+    await page.evaluate((lb) => {
+      document.querySelector('#btnDropEdit').click();
+      const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes(lb));
+      if (!b) throw new Error('菜单项不存在: ' + lb);
+      b.click();
+    }, label);
+  };
+  await menuClick('添加连线');
   await new Promise(r => setTimeout(r, 150));
   const hint = await page.evaluate(() => document.querySelector('#hintBar').textContent);
   console.log('连线模式提示:', JSON.stringify(hint));
   await page.screenshot({ path: 'shot_linkmode.png' });
-  await page.evaluate(() => document.querySelector('#btnAddLink').click());
+  await menuClick('添加连线');
 
   // 主题切换（暗色）
   await page.evaluate(() => document.querySelector('#btnTheme').click());
@@ -178,8 +186,8 @@ const puppeteer = require('puppeteer-core');
   });
   await page.evaluate((d) => { window.TopoUtil.addCustomType('核心存储', d); }, imgDataURL);
 
-  // 类型管理弹窗显示缩略图
-  await page.evaluate(() => document.querySelector('#btnTypes').click());
+  // 类型管理弹窗显示缩略图（编辑下拉菜单）
+  await menuClick('类型管理');
   await new Promise(r => setTimeout(r, 200));
   const tmThumb = await page.evaluate(() => !!document.querySelector('#tmCustom .tm-thumb'));
   const tmRow = await page.evaluate(() => document.querySelector('#tmCustom .tm-row').textContent.trim());
@@ -192,8 +200,8 @@ const puppeteer = require('puppeteer-core');
   });
   await new Promise(r => setTimeout(r, 150));
 
-  // 添加自定义类型的设备（走 放置模式 → 弹窗）
-  await page.evaluate(() => document.querySelector('#btnAddNode').click());
+  // 添加自定义类型的设备（走 放置模式 → 弹窗，编辑下拉菜单）
+  await menuClick('添加设备');
   await new Promise(r => setTimeout(r, 120));
   const stageRect = await page.evaluate(() => {
     const r = document.querySelector('#stage').getBoundingClientRect();

@@ -314,15 +314,21 @@ function validateTopology(nodes, links) {
   for (const l of links) { adj.get(l.a).push(l.b); adj.get(l.b).push(l.a); }
   const visited = new Set();
   let hasCycle = false;
-  const dfs = (u, parent) => {
-    visited.add(u);
-    for (const v of adj.get(u) || []) {
-      if (v === parent) continue;
-      if (visited.has(v)) hasCycle = true;
-      else dfs(v, u);
+  // 迭代版 DFS（避免大图递归栈溢出）；语义与递归版一致：节点首次处理时检查邻接已访问节点
+  const dfs = (start) => {
+    const stack = [[start, null]];
+    while (stack.length) {
+      const [u, parent] = stack.pop();
+      if (visited.has(u)) continue;
+      visited.add(u);
+      for (const v of adj.get(u) || []) {
+        if (v === parent) continue;
+        if (visited.has(v)) hasCycle = true;
+        else stack.push([v, u]);
+      }
     }
   };
-  for (const n of nodes) if (!visited.has(n.id)) dfs(n.id, null);
+  for (const n of nodes) if (!visited.has(n.id)) dfs(n.id);
   if (hasCycle && nodes.length) issues.push({
     level: 'info', kind: 'cycle', nodeIds: [],
     msg: '检测到环路（可能存在冗余链路，允许但请注意）'
