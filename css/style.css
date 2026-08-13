@@ -519,3 +519,16 @@ body:not(.panel-off) #panelOpen { display: none; }
   border-style: dashed; color: var(--accent);
 }
 .mgmt-add:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+/* ============ 关于 ============ */
+.about-body { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 6px 0 2px; }
+.about-logo svg { display: block; filter: drop-shadow(0 4px 10px rgba(79, 70, 229, .35)); }
+.about-title { font-size: 16px; font-weight: 700; letter-spacing: .3px; }
+.about-row { display: flex; gap: 12px; width: 100%; font-size: 12.5px; color: var(--text); }
+.about-row b { flex: none; width: 76px; text-align: right; color: var(--muted); font-weight: 600; }
+.about-row span { flex: 1; min-width: 0; word-break: break-all; }
+.about-license {
+  font-size: 11.5px; line-height: 1.7; color: var(--muted);
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+}
+.about-note { font-size: 11px; color: var(--muted); }

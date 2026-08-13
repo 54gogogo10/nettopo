@@ -299,6 +299,17 @@ async function connectCDP(target) {
     await sleep(2500);
     ok(!(await webv.eval(`!!document.getElementById('certModal')`)), '记住站点后再次打开不再询问');
 
+    // 帮助页与关于弹窗
+    await main.eval(`document.getElementById('btnHelp').click()`);
+    await sleep(300);
+    ok(await main.eval(`(() => { const m = [...document.querySelectorAll('#modalRoot .modal')].pop(); return m && m.textContent.includes('使用帮助') && m.textContent.includes('Web Shell') && m.textContent.includes('快捷键') && m.textContent.includes('设备管理 Web 页'); })()`), '帮助页内容完整（覆盖全部功能）');
+    await main.eval(`(() => { const b = [...document.querySelectorAll('#modalRoot .m-actions .tb')].pop(); if (b) b.click(); return true; })()`);
+    await sleep(200);
+    await main.eval(`document.getElementById('btnAbout').click()`);
+    await sleep(300);
+    ok(await main.eval(`(() => { const m = [...document.querySelectorAll('#modalRoot .modal')].pop(); return m && m.textContent.includes('版权') && m.textContent.includes('MIT License') && m.textContent.includes('v20260812'); })()`), '关于弹窗含版权与版本信息');
+    await main.eval(`(() => { const b = [...document.querySelectorAll('#modalRoot .m-actions .tb')].pop(); if (b) b.click(); return true; })()`);
+
     webv.ws.close();
     shell.ws.close();
     main.ws.close();

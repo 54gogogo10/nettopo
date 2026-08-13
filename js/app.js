@@ -2353,11 +2353,12 @@ function openHelp() {
   });
   const ov = $('#modalRoot').lastElementChild;
   const modal = ov.querySelector('.modal');
-  modal.style.width = '560px';
+  modal.style.width = '700px';
   ov.querySelector('form').innerHTML = `
   <div class="help-body">
-    <h4>① 导入连线关系表</h4>
-    <p>支持 <code>.csv / .txt / .xlsx / .xls</code> 文件（自动识别 UTF-8 / GBK 编码，兼容中英文表头）。</p>
+    <h4>① 快速开始</h4>
+    <p>三种方式进入：<b>「文件 ▾ 导入表格…」</b>选择连线关系表（自动生成拓扑）、<b>「文件 ▾ 载入示例拓扑」</b>体验内置数据、<b>「文件 ▾ 新建空白画布」</b>直接手动画。导入后自动布局；拖拽调整位置、双击编辑、右键更多操作，<kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd> 撤销重做。</p>
+    <h4>② 表格格式（导入）</h4>
     <table>
       <tr><th>中文表头</th><th>英文表头</th><th>说明</th></tr>
       <tr><td>源设备 / 设备A / 设备1</td><td>source / device_a</td><td>必填</td></tr>
@@ -2366,20 +2367,72 @@ function openHelp() {
       <tr><td>目标设备 / 设备B / 设备2</td><td>target / device_b</td><td>必填</td></tr>
       <tr><td>目标接口 / 接口B</td><td>target_interface</td><td>可选</td></tr>
       <tr><td>目标IP / IP地址B</td><td>target_ip</td><td>可选</td></tr>
-      <tr><td>带宽 / 备注</td><td>bandwidth / note</td><td>可选</td></tr>
+      <tr><td>带宽 / 备注 / 管理地址</td><td>bandwidth / note / mgmt</td><td>可选</td></tr>
     </table>
-    <p>无表头的表格按「设备A, 设备B, 接口A, IP A, 接口B, IP B」顺序识别。</p>
-    <h4>② 自动生成拓扑</h4>
-    <p>导入后自动执行力导向布局，接口名与 IP 标注在连线上；同一对设备的多条链路会自动平行展开。</p>
-    <h4>③ 手动修改</h4>
-    <p>拖拽设备调整位置；<b>双击</b>设备/连线编辑名称、接口、IP；工具栏可<b>添加设备 / 添加连线</b>；选中后按 <kbd>Delete</kbd> 删除，<kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd> 撤销重做；右键空白处可直接添加设备或导入导出。</p>
-    <p><b>设备类型</b>：点工具栏「类型」可添加自定义设备类型并<b>上传设备图片</b>，拓扑中自动以图片显示；设备名称过长时节点宽度会自动加宽。</p>
-    <h4>④ 保存 / 导出</h4>
-    <p><b>导出CSV / 导出Excel</b>：把修改后的拓扑保存回连线关系表；<b>导出PDF</b>：矢量渲染为高清图片后生成 PDF，任何设备上打开效果一致，适合交付与打印；<b>导出Visio</b>：生成 .vsdx 文件（Visio 2013+ 可直接打开继续编辑）。</p>
+    <p>无表头按「设备A, 设备B, 接口A, IP A, 接口B, IP B, 带宽, 备注」顺序识别；自动识别 UTF-8 / GBK 编码，兼容 .csv / .txt / .xlsx / .xls。</p>
+    <h4>③ 画布操作</h4>
+    <p>滚轮缩放（以光标为中心）、拖拽空白或中键平移；<b>Ctrl 点选</b>多选、<b>Shift 拖拽框选</b>；<kbd>Delete</kbd> 删除选中；多选后可整体拖动、批量编辑、对齐/分布。</p>
+    <h4>④ 工具栏菜单</h4>
+    <p><b>文件</b>：新建 / 导入表格 / 示例 / 保存工程(.nettopo) / 打开工程 / 对比工程 / 自动备份。</p>
+    <p><b>编辑</b>：添加设备 / 连线 / 文本框、从模板添加设备、对齐分布、批量重命名、IP 批量改段、类型管理、删除选中。</p>
+    <p><b>布局</b>：力导向 / 环形 / 分层（按类型）/ 三层架构 / 拓扑分层（最少交叉）/ 网格布局、适应视图、路径分析、拓扑校验。</p>
+    <p><b>显示</b>：链路标注、子网分组、清除故障标记、清除路径高亮。</p>
+    <p><b>导出</b>：CSV / Excel / PDF / 图片(PNG/SVG) / 复制图片 / Visio / 设计报告 / 生成设备配置 / IP 规划清单。</p>
+    <h4>⑤ 设备与连线</h4>
+    <p><b>设备</b>可配置多个管理口地址（编辑设备点「＋ 增加管理口」，第一个为默认）、管理 Web 页 URL、备注；「编辑 ▾ 类型管理」可自定义类型并上传设备图片。</p>
+    <p><b>连线</b>可配置接口 / IP / 带宽 / 备注；带宽以 Mbps 数值保存，图上用颜色标识（100M 灰 / 1G 蓝 / 10G 紫 / 40G 橙 / 100G 红）；右键连线可<b>标记故障</b>（模拟断链，路径分析自动绕行）。</p>
+    <h4>⑥ 路径分析 / 拓扑校验</h4>
+    <p><b>路径分析</b>：选两台设备按带宽优选最宽路径并高亮（显示瓶颈带宽），故障链路自动绕行。<b>拓扑校验</b>：一键检查重复 IP / 接口 / 管理地址、孤立设备、环路、平行链路、跨网段等，报告内可点击定位。</p>
+    <h4>⑦ Web Shell（桌面版）</h4>
+    <p>右键设备「Web Shell（SSH/Telnet）…」连接管理口（多管理口可下拉选择）；在<b>独立窗口</b>以<b>多标签</b>管理多台设备，主界面不锁定。终端支持：选中即复制、Ctrl+Shift+C/V 复制粘贴、右键菜单、字号调节（A−/A+ 或 Ctrl+-/Ctrl+=）、底部<b>快捷按钮条</b>（右键或「＋」新建，内容支持 \n 回车、\t 制表、\p 暂停 1 秒）。SSH 主机密钥以 SHA256 指纹展示。</p>
+    <h4>⑧ 设备管理 Web 页（桌面版）</h4>
+    <p>设备编辑中配置「管理Web页URL」，右键设备「打开设备管理页面」在<b>独立窗口</b>以<b>多标签</b>打开；支持地址栏 / 后退 / 前进 / 刷新；HTTPS 自签名 / 无效证书会弹出<b>安全告警</b>，手动确认后可继续访问并记住该站点。</p>
+    <h4>⑨ 保存 / 导出</h4>
+    <p><b>工程文件 .nettopo</b>：保存 / 打开含位置、视图、自定义类型、多管理口的完整工程；<b>CSV / Excel</b>：把修改后的拓扑保存回连线关系表（多管理口逗号分隔，可再导入）；<b>PDF</b>：矢量高清交付；<b>PNG / SVG</b>：图片导出与复制到剪贴板；<b>Visio</b>：.vsdx 原生格式可在 Visio 继续编辑；<b>设计报告</b>：自包含 HTML（设备 / IP / 子网 / 链路 / 配置）；<b>IP 规划清单</b>：Excel 导出含对端接口 IP；<b>生成设备配置</b>：华为 / 思科及自定义模板（{name} {mgmt} {iface} {ip} {peer} {vlan}…）。</p>
     <h4>快捷键</h4>
-    <p><kbd>滚轮</kbd> 缩放 · <kbd>拖拽空白</kbd> 平移 · <kbd>L</kbd> 自动布局 · <kbd>F</kbd> 适应视图 · <kbd>Delete</kbd> 删除选中</p>
+    <table>
+      <tr><td>滚轮</td><td>缩放</td></tr>
+      <tr><td>拖拽空白 / 中键</td><td>平移</td></tr>
+      <tr><td>Ctrl+Z / Ctrl+Y</td><td>撤销 / 重做</td></tr>
+      <tr><td>Delete / Backspace</td><td>删除选中</td></tr>
+      <tr><td>L / F</td><td>自动布局 / 适应视图</td></tr>
+      <tr><td>+ / -</td><td>放大 / 缩小</td></tr>
+      <tr><td>Ctrl+S</td><td>保存工程</td></tr>
+      <tr><td>Ctrl+K</td><td>聚焦搜索</td></tr>
+      <tr><td>Ctrl+E</td><td>打开导出菜单</td></tr>
+      <tr><td>Ctrl+Shift+L</td><td>切换链路标注</td></tr>
+    </table>
+    <h4>说明</h4>
+    <p>浏览器版可编辑与导出；<b>Web Shell 与设备管理 Web 页为桌面版专属</b>（需 Electron 环境）。数据保存在本机，建议用「保存工程」备份。更多信息见右上角「关于」。</p>
   </div>`;
 }
+
+function openAbout() {
+  openModal({
+    title: '关于',
+    submit: '关闭',
+    onSubmit: () => {},
+    fields: []
+  });
+  const ov = $('#modalRoot').lastElementChild;
+  const modal = ov.querySelector('.modal');
+  modal.style.width = '480px';
+  ov.querySelector('form').innerHTML = `
+  <div class="about-body">
+    <div class="about-logo">
+      <svg viewBox="0 0 32 32" width="52" height="52"><rect width="32" height="32" rx="7" fill="#4f46e5"/><circle cx="16" cy="16" r="4.5" fill="#fff"/><circle cx="8" cy="8" r="2.6" fill="#a5b4fc"/><circle cx="24" cy="8" r="2.6" fill="#a5b4fc"/><circle cx="8" cy="24" r="2.6" fill="#a5b4fc"/><circle cx="24" cy="24" r="2.6" fill="#a5b4fc"/><path d="M8 8h6.2M24 8h-6.2M8 24h6.2M24 24h-6.2M16 11.5v4.5M13 20l3-4 3 4" stroke="#a5b4fc" stroke-width="1.6" fill="none"/></svg>
+    </div>
+    <div class="about-title">NetTopo · 网络拓扑设计器</div>
+    <div class="about-row"><b>版本</b><span>${U.APP_VERSION}</span></div>
+    <div class="about-row"><b>用途</b><span>网络拓扑可视化设计、管理与导出工具</span></div>
+    <div class="about-row"><b>运行环境</b><span>Windows 桌面版（Electron）/ 现代浏览器</span></div>
+    <div class="about-row"><b>版权</b><span>© 2026 NetTopo 项目，保留所有权利</span></div>
+    <div class="about-row"><b>许可</b><span>MIT License</span></div>
+    <div class="about-license">本软件基于 MIT 许可证发布：允许自由使用、复制、修改、合并、出版发行、再许可和/或销售副本，但需保留上述版权声明与许可声明。本软件按“现状”提供，不作任何明示或暗示的担保。</div>
+    <div class="about-note">数据仅保存在本机；Web Shell 与设备管理 Web 页为桌面版功能。</div>
+  </div>`;
+}
+
 
 /* ================= 事件接线 ================= */
 function wire() {
@@ -2470,6 +2523,7 @@ function wire() {
   $('#btnRedo').onclick = redo;
   $('#btnTheme').onclick = toggleTheme;
   $('#btnHelp').onclick = openHelp;
+  $('#btnAbout').onclick = openAbout;
 
   $('#zIn').onclick = () => renderer.zoomBy(1.25);
   $('#zOut').onclick = () => renderer.zoomBy(0.8);
