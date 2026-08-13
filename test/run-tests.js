@@ -502,6 +502,15 @@ console.log('== 设备配置生成 / IP 规划 ==');
   ok(hw.includes('interface GE0/0/1') && hw.includes('ip address 10.0.0.1 255.255.255.0') && hw.includes('description -> SW1:GE1/0/1'), '华为配置含接口/IP/对端描述');
   const cisco = U.generateConfigs(gC.nodes, gC.links, 'cisco');
   ok(cisco.includes('!') && cisco.includes('no shutdown') && !hw.includes('no shutdown'), '思科配置含 ! 与 no shutdown，华为不含');
+  // 设备子集：仅生成选中设备，且对端名从全量解析
+  {
+    const subset = new Set(gC.nodes.filter(n => n.name === 'R1').map(n => n.id));
+    const cs = U.generateConfigs(gC.nodes, gC.links, 'huawei', { only: subset });
+    ok(cs.includes('interface GE0/0/1') && cs.includes('description -> SW1:GE1/0/1'), '配置生成：设备子集含对端引用（' + cs.split('\n').filter(l => l.includes('description')).join(';') + '）');
+    ok(!cs.includes('interface GE1/0/1'), '配置生成：子集不含未选设备的接口');
+    const empty = U.generateConfigs(gC.nodes, gC.links, 'huawei', { only: new Set() });
+    ok(empty === '', '配置生成：空子集返回空');
+  }
   const plan = U.ipPlan(gC.nodes, gC.links);
   ok(plan.rows.length >= 2 && plan.rows.some(r => r.IP === '10.0.0.1' && r.网段 === '10.0.0.0/24'), 'IP 规划含接口行与网段');
   ok(plan.rows.some(r => r.IP === '10.0.0.1' && r.对端IP === '10.0.0.2'), 'IP 规划含对端接口 IP');

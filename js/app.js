@@ -378,7 +378,9 @@ function cfgVendorOptions() {
 function openConfigGen() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   const root = $('#modalRoot');
-  const hasSel = renderer.selIds.size > 0;
+  const selIds = renderer.selIds;
+  // 默认选中：画布有选中则取画布选中设备，否则全部
+  const selDev = new Set(selIds.size ? selIds : state.nodes.map(n => n.id));
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.innerHTML = `
@@ -388,11 +390,8 @@ function openConfigGen() {
       <div class="m-row">
         <label>厂家风格</label>
         <select id="cfgVendor">${cfgVendorOptions()}</select>
-        <label style="margin-left:16px">范围</label>
-        <select id="cfgScope">
-          <option value="all">全部设备</option>
-          ${hasSel ? '<option value="sel">仅选中设备（' + renderer.selIds.size + ' 台）</option>' : ''}
-        </select>
+        <button type="button" class="tb" id="cfgPick" title="勾选要生成配置的设备">选择设备</button>
+        <span class="dp-count" id="cfgPickCnt" style="color:var(--muted);font-size:12px"></span>
         <label style="margin-left:16px;display:flex;align-items:center;gap:5px"><input id="cfgRoutes" type="checkbox" checked/> 静态路由</label>
         <label style="display:flex;align-items:center;gap:5px"><input id="cfgVlan" type="checkbox" checked/> VLAN</label>
         <button type="button" class="tb" id="cfgTplMgr" style="margin-left:auto">管理模板…</button>
@@ -407,24 +406,30 @@ function openConfigGen() {
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
   const close = () => ov.remove();
+  const total = state.nodes.length;
+  const refreshCount = () => {
+    const n = selDev.size;
+    ov.querySelector('#cfgPickCnt').textContent = n === total ? `（全部 ${total} 台）` : `（${n} / ${total} 台）`;
+  };
   const gen = () => {
     const vendor = ov.querySelector('#cfgVendor').value;
-    const scope = ov.querySelector('#cfgScope').value;
-    const selIds = renderer.selIds;
-    const nodes = scope === 'sel' && selIds.size ? state.nodes.filter(n => selIds.has(n.id)) : state.nodes;
-    ov.querySelector('#cfgOut').value = U.generateConfigs(nodes, state.links, vendor, {
-      routes: ov.querySelector('#cfgRoutes').checked,
-      vlan: ov.querySelector('#cfgVlan').checked
-    });
+    ov.querySelector('#cfgOut').value = selDev.size
+      ? U.generateConfigs(state.nodes, state.links, vendor, {
+          routes: ov.querySelector('#cfgRoutes').checked,
+          vlan: ov.querySelector('#cfgVlan').checked,
+          only: selDev
+        })
+      : '（未选择任何设备，请点击「选择设备」勾选）';
   };
   ov.querySelector('#cfgVendor').addEventListener('change', gen);
-  ov.querySelector('#cfgScope').addEventListener('change', gen);
   ov.querySelector('#cfgRoutes').addEventListener('change', gen);
   ov.querySelector('#cfgVlan').addEventListener('change', gen);
+  ov.querySelector('#cfgPick').onclick = () => openCfgDevicePicker(selDev, () => { refreshCount(); gen(); });
   ov.querySelector('#cfgTplMgr').onclick = () => openConfigTemplateManager(() => {
     ov.querySelector('#cfgVendor').innerHTML = cfgVendorOptions();
     gen();
   });
+  refreshCount();
   gen();
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.querySelector('[data-act=close]').onclick = close;
@@ -440,6 +445,73 @@ function openConfigGen() {
     toast('已下载设备配置文本');
   };
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
+/* 设备多选选择器：从 state.nodes 勾选子集（供配置生成/其它批量功能复用） */
+function openCfgDevicePicker(selSet, onDone) {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:520px">
+      <h3>选择设备</h3>
+      <div class="m-sub">勾选要生成配置的设备，仅输出所选设备。</div>
+      <div class="search" style="margin:2px 0 8px"><i class="ic" data-ic="search"></i><input id="dpSearch" type="text" placeholder="搜索设备 / 类型 / 管理地址…"/></div>
+      <div class="dp-list" id="dpList"></div>
+      <div class="m-row" style="margin-top:8px">
+        <button type="button" class="tb" data-act="all">全选</button>
+        <button type="button" class="tb" data-act="none">清空</button>
+        <button type="button" class="tb" data-act="inv">反选</button>
+        <span class="dp-count" style="margin-left:auto">已选 <b id="dpCount">0</b> 台</span>
+      </div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="confirm">确定</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  const check = {}; // id -> bool（工作副本，取消时丢弃）
+  for (const n of state.nodes) check[n.id] = selSet.has(n.id);
+  const dpList = ov.querySelector('#dpList');
+  const dpCount = ov.querySelector('#dpCount');
+  const q = () => (ov.querySelector('#dpSearch').value || '').trim().toLowerCase();
+  const updateCount = () => { dpCount.textContent = Object.values(check).filter(Boolean).length; };
+  const render = () => {
+    const list = state.nodes.filter(n => {
+      if (q()) {
+        const name = String(n.name).toLowerCase(), mgmt = String(n.mgmt || '').toLowerCase(), type = U.getType(n.type).label.toLowerCase();
+        if (!(name.includes(q()) || mgmt.includes(q()) || type.includes(q()))) return false;
+      }
+      return true;
+    });
+    dpList.innerHTML = list.map(n => {
+      const t = U.getType(n.type);
+      return `<label class="dp-item"><input type="checkbox" data-id="${n.id}" ${check[n.id] ? 'checked' : ''}/><span class="nm">${U.escHtml(n.name)}<span class="sub">${U.escHtml(t.label)}${n.mgmt ? ' · ' + U.escHtml(n.mgmt) : ''}</span></span></label>`;
+    }).join('');
+    dpList.querySelectorAll('input[type=checkbox]').forEach(i => {
+      i.addEventListener('change', () => { check[i.dataset.id] = i.checked; updateCount(); });
+    });
+    if (!list.length) dpList.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:14px 6px">无匹配设备</div>';
+  };
+  const setAll = (val) => { for (const n of state.nodes) check[n.id] = val; render(); updateCount(); };
+  ov.querySelector('#dpSearch').addEventListener('input', render);
+  ov.querySelector('[data-act=all]').onclick = () => setAll(true);
+  ov.querySelector('[data-act=none]').onclick = () => setAll(false);
+  ov.querySelector('[data-act=inv]').onclick = () => { for (const n of state.nodes) check[n.id] = !check[n.id]; render(); updateCount(); };
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=confirm]').onclick = () => {
+    selSet.clear();
+    for (const n of state.nodes) if (check[n.id]) selSet.add(n.id);
+    close();
+    onDone && onDone();
+  };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  render();
+  updateCount();
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#dpSearch').focus(); }, 200);
 }
 
 /* 配置模板管理：内置模板只读，自定义模板可增删改（占位符 {name}{mgmt}{type}{iface}{ip}{peer}{peerIf}{vlan}{subnet}{nextHop}） */

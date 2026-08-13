@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260813b';
+U.APP_VERSION = 'v20260813c';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -789,6 +789,9 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
   opts = opts || {};
   const tpl = typeof vendor === 'object' ? vendor : U.getCfgTemplate(vendor);
   if (!tpl) return '';
+  // only: 只生成这些设备的配置（Set<id>，空集合则不生成任何设备）；nodes 仍传全量，用于对端名称解析
+  const only = opts.only instanceof Set ? opts.only : null;
+  const targets = only ? nodes.filter(n => only.has(n.id)) : nodes;
   const byId = new Map(nodes.map(n => [n.id, n]));
   const fill = (s, map) => String(s).replace(/\{(\w+)\}/g, (m, k) => map[k] != null ? map[k] : m);
   const maskOf = (ip) => '255.255.255.0';
@@ -807,7 +810,7 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
   for (const n of nodes) linkOf.set(n.id, []);
   for (const l of links) { linkOf.get(l.a).push(l); linkOf.get(l.b).push(l); }
   const out = [];
-  for (const n of nodes) {
+  for (const n of targets) {
     const sec = [];
     sec.push(fill(tpl.deviceHeader, { comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
     const intfs = [];
