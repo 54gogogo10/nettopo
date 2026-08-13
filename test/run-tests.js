@@ -283,6 +283,13 @@ console.log('== 多管理地址 ==');
   ok(td.customTypes.length === 3 && td.customTypes.every(t => /^[A-Za-z0-9_-]{1,64}$/.test(t.key)) && !td.customTypes.some(t => t.key === 'router') && td.customTypes.some(t => t.label === '好' && t.key === 'ct1'), '自定义类型 key 安全化且不与内置冲突');
 }
 
+console.log('== Web 地址规范化 ==');
+{
+  ok(U.normalizeWebUrl('10.255.0.1') === 'http://10.255.0.1', '无协议自动补 http');
+  ok(U.normalizeWebUrl('https://x.com') === 'https://x.com' && U.normalizeWebUrl('http://x.com/path') === 'http://x.com/path', 'http(s) 原样保留');
+  ok(U.normalizeWebUrl('javascript:alert(1)') === null && U.normalizeWebUrl('file:///C:/x') === null && U.normalizeWebUrl('') === null && U.normalizeWebUrl('  ') === null, '拒绝非 http(s) 协议与空值');
+}
+
 console.log('== 布局 ==');
 const posBefore = g1.nodes.map(n => [n.x, n.y]);
 Layout.layoutNow(g1.nodes, g1.links, 200);

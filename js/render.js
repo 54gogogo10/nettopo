@@ -55,6 +55,9 @@ class Renderer {
 
   /* ---------- 视口 ---------- */
   applyView() {
+    // 平移范围钳制，避免把画布拖丢后找不到图
+    this.pan.x = Math.max(-200000, Math.min(200000, this.pan.x));
+    this.pan.y = Math.max(-200000, Math.min(200000, this.pan.y));
     const { x, y } = this.pan;
     this.world.setAttribute('transform', `translate(${x} ${y}) scale(${this.zoom})`);
     if (this.cb.onView) this.cb.onView(this.zoom);

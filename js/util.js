@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260812x';
+U.APP_VERSION = 'v20260812y';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -1238,6 +1238,15 @@ U.measureText = (text, size) => {
 U.nodeWidthForName = (name) => {
   const w = 60 + U.measureText(name, 13.5) + 22;
   return Math.round(U.clamp(w, U.NODE_W, 320));
+};
+
+/* Web 地址规范化：无协议自动补 http://；非 http(s) 协议（javascript:/file: 等）返回 null */
+U.normalizeWebUrl = (v) => {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s)) return null; // 其它协议拒绝
+  return 'http://' + s;
 };
 
 /* ---------- 结构克隆（撤销栈用） ---------- */

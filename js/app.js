@@ -254,7 +254,6 @@ function openPathAnalysis() {
   if (state.nodes.length < 2) { toast('至少需要两台设备才能分析路径'); return; }
   openModal({
     title: '路径分析',
-    sub: '选择起点与终点，高亮显示最短路径（BFS）',
     fields: [
       { name: 'from', label: '起点设备', type: 'select', options: state.nodes.map(n => [n.id, n.name]) },
       { name: 'to', label: '终点设备', type: 'select', options: state.nodes.map(n => [n.id, n.name]) }
@@ -904,7 +903,7 @@ function openAutoBackup() {
   ov.querySelector('[data-act=cancel]').onclick = close;
   ov.querySelector('[data-act=save]').onclick = () => {
     state.autoBackup.on = ov.querySelector('#abOn').checked;
-    state.autoBackup.minutes = Math.max(1, Number(ov.querySelector('#abMin').value || 10));
+    state.autoBackup.minutes = Math.min(120, Math.max(1, Number(ov.querySelector('#abMin').value || 10)));
     localStorage.setItem('nettopo.autoBackup', state.autoBackup.on ? '1' : '0');
     localStorage.setItem('nettopo.autoBackupMin', String(state.autoBackup.minutes));
     close();
@@ -921,13 +920,13 @@ function setupAutoBackup() {
     if (!state.nodes.length) return;
     const data = {
       app: 'NetTopo', version: 1, savedAt: new Date().toISOString(),
-      nodes: state.nodes, links: state.links,
+      nodes: state.nodes, links: state.links, texts: state.texts,
       pan: renderer.pan, zoom: renderer.zoom,
       showLabels: state.showLabels, showSubnets: state.showSubnets,
       subnetNames: state.subnetNames, downLinks: [...state.downLinks],
       customTypes: U.customTypes, typeOverrides: U.typeOverrides
     };
-    const hash = JSON.stringify([state.nodes, state.links, state.downLinks ? [...state.downLinks] : []]);
+    const hash = JSON.stringify([state.nodes, state.links, state.texts, state.downLinks ? [...state.downLinks] : []]);
     if (hash === setupAutoBackup._last) return;
     setupAutoBackup._last = hash;
     U.download(`自动备份_${U.fmtDate()}.nettopo`, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));

@@ -209,8 +209,10 @@
     const doOpen = () => {
       const v = ov.querySelector('#wvUrl').value.trim();
       if (!v) { toast('请输入网址'); return; }
+      const u = TopoUtil.normalizeWebUrl(v);
+      if (!u) { toast('仅支持 http:// 或 https:// 地址'); return; }
       close();
-      addTab({ url: normUrl(v) });
+      addTab({ url: u });
     };
     ov.querySelector('[data-act=open]').onclick = doOpen;
     ov.querySelector('#wvUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doOpen(); } });
@@ -241,7 +243,9 @@
       const id = active();
       if (!id) return;
       const t = tabs.get(id);
-      try { t.wv.loadURL(normUrl(addrEl.value)); } catch (err) { toast('地址无效'); }
+      const u = TopoUtil.normalizeWebUrl(addrEl.value);
+      if (!u) { toast('仅支持 http:// 或 https:// 地址'); return; }
+      try { t.wv.loadURL(u); } catch (err) { toast('地址无效'); }
       t.wv.focus();
     });
     if (zoomValEl) zoomValEl.textContent = Math.round(pageZoom * 100) + '%';
