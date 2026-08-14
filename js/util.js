@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260814b';
+U.APP_VERSION = 'v20260814c';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -47,7 +47,8 @@ U.escHtml = (s) => String(s == null ? '' : s)
 
 U.escXml = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/\n/g, '&#10;').replace(/\r/g, '');
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/\n/g, '&#10;').replace(/\r/g, '')
+  .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ''); // XML 1.0 非法控制字符剔除，防导出文件被 Visio 拒开
 
 U.truncate = (s, n) => {
   s = String(s == null ? '' : s).trim();
@@ -137,7 +138,9 @@ U.parseCSV = (text) => {
 /* ---------- 单元格公式注入防护（Excel/CSV 打开时以 = + - @ 开头会被当公式执行） ---------- */
 U.sanitizeCell = (v) => {
   v = v == null ? '' : String(v);
-  return /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
+  // 先剔除前导空白/零宽不换行空格再判定：Excel 打开时先 trim 再判定公式，故 " =1+1" 也能绕过前缀防护
+  const t = v.replace(/^[\s\uFEFF]+/, '');
+  return /^[=+\-@]/.test(t) ? "'" + v : v;
 };
 
 /* ---------- CSV 构建（Excel 兼容：带 BOM + 引号转义 + 公式注入防护） ---------- */

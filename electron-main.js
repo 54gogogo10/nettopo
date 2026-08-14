@@ -205,6 +205,8 @@ ipcMain.handle('web:cert-allow', (e, payload) => {
   return { ok: true };
 });
 ipcMain.handle('web:open', (e, opts) => {
+  // 仅主窗口可发起（设备右键菜单），防其它渲染层向设备页窗口注入标签
+  if (!mainWin || mainWin.isDestroyed() || e.sender !== mainWin.webContents) return { ok: false, error: 'forbidden' };
   opts = opts || {};
   const url = String(opts.url || '').trim();
   if (!isHttpUrl(url)) return { ok: false, error: 'URL 必须以 http:// 或 https:// 开头' };
@@ -301,6 +303,17 @@ app.whenReady().then(() => {
   });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+  // 导航守卫：宿主窗口（主窗/Shell 窗/设备页宿主窗）只允许 file:// 本地页面——
+  // 一旦被诱导跳转到远程页面，preload 桥（topoShell/topoBackup）将随之泄露；webview guest 不受限
+  app.on('web-contents-created', (e, contents) => {
+    contents.on('will-navigate', (ev, url) => {
+      if (contents.getType() === 'webview') return; // 设备页内嵌 guest 自由导航（另有 popup 拦截）
+      if (!/^file:/i.test(String(url))) ev.preventDefault();
+    });
+    if (contents.getType() !== 'webview') {
+      try { contents.setWindowOpenHandler(() => ({ action: 'deny' })); } catch (err) { /* ignore */ }
+    }
   });
 });
 

@@ -47,11 +47,13 @@ const rt = U.buildCSV([['a', 'b,c'], ['d', 'e"f']]);
 ok(rt.includes('"b,c"') && rt.includes('"e""f"'), 'CSV 构建转义');
 ok(rt.charCodeAt(0) === 0xFEFF, 'CSV 带 BOM');
 ok(U.escXml("a'b<c&d\"e") === 'a&#39;b&lt;c&amp;d&quot;e', 'XML 转义含单引号');
+ok(U.escXml('a\x00b\x1Fc') === 'abc', 'XML 非法控制字符剔除');
 // 公式注入防护：以 = + - @ 开头的单元格加 ' 前缀
 const fi = U.buildCSV([['=1+1', '+x', '-y', '@z', 'normal', 123]]);
 ok(fi.includes("'=1+1") && fi.includes("'+x") && fi.includes("'-y") && fi.includes("'@z"), 'CSV 公式注入加前缀');
 ok(fi.includes(',normal,') && fi.includes(',123'), 'CSV 普通单元格不受影响');
 ok(U.sanitizeCell('=SUM(1)') === "'=SUM(1)" && U.sanitizeCell('hello') === 'hello', 'sanitizeCell 公式注入防护');
+ok(U.sanitizeCell(' =1+1') === "' =1+1" && U.sanitizeCell('\t@x') === "'\t@x" && U.sanitizeCell(' ok') === ' ok', 'sanitizeCell 前导空白绕过修复');
 
 console.log('== 表头映射 ==');
 eq(M.mapHeader('源设备'), 'sa', '中文-源设备');
@@ -447,6 +449,10 @@ console.log('== 表格坐标回环 ==');
     return n1 && Math.abs(n1.x - n2.x) < 0.5 && Math.abs(n1.y - n2.y) < 0.5;
   });
   ok(posOk, '导入后坐标还原');
+  // 回归：坐标解析不得剔除非数字字符后拼接（"1e2" 曾误解析为 12）
+  const gSci = M.textToGraph('源设备,目标设备,源设备X,源设备Y,目标设备X,目标设备Y\nR1,SW1,1e2,5,3,4');
+  const nSci = gSci.nodes.find(n => n.name === 'R1');
+  ok(nSci && nSci.x === 100, '科学计数法坐标解析（1e2=100）');
 }
 
 console.log('== linkGeom（平行链路偏移） ==');

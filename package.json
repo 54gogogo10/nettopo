@@ -8,15 +8,13 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "node bump-version.js && electron-builder --config build/electron-builder.yml",
-    "pack": "electron-packager . NetTopo --platform=win32 --arch=x64 --out=dist --overwrite --icon=icon.ico --asar"
+    "build": "node bump-version.js && electron-builder --config build/electron-builder.yml"
   },
   "devDependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "electron": "^43.3.0",
-    "electron-builder": "^26.15.3",
-    "electron-packager": "^17.1.2"
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "ssh2": "^1.17.0"

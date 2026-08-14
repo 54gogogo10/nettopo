@@ -125,7 +125,14 @@ function recordsToGraph(records) {
     return node;
   };
 
-  const num = (v) => { const f = parseFloat(String(v == null ? '' : v).replace(/[^\d.\-]/g, '')); return Number.isFinite(f) ? f : NaN; };
+  // 数字前缀解析：先去掉 sanitizeCell 为防公式注入加的 ' 前缀（负坐标导出回读时带前缀），
+  // 再按 parseFloat 解析；不再剔除非数字字符拼接，避免 "1e5"→15、"1 200"→1200 之类误解析
+  const num = (v) => {
+    let s = String(v == null ? '' : v).trim();
+    if (/^'[=+\-@]/.test(s)) s = s.slice(1);
+    const f = parseFloat(s);
+    return Number.isFinite(f) ? f : NaN;
+  };
 
   for (const r of records) {
     const a = getNode(r.sa, num(r.sax), num(r.say)), b = getNode(r.sb, num(r.sbx), num(r.sby));

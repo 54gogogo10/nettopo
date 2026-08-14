@@ -142,8 +142,12 @@ function parseDataUrl(dataUrl) {
 
 /* ================= XML 工具 ================= */
 const X = (v) => U.escXml(String(v));
-const XRAW = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const cell = (n, v, extra) => `<Cell N='${n}' V='${v}'${extra ? ' ' + extra : ''}/>`;
+// 与 escXml 保持同一转义集合（& < > " ' + 换行 + 非法控制字符），避免文本节点内容破坏 XML
+const XRAW = (v) => U.escXml(String(v == null ? '' : v));
+// cell 属性值转义：v 当前仅接受数值/白名单颜色/硬编码公式，转义属纵深防御
+const ATTR = (v) => String(v == null ? '' : v)
+  .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
+const cell = (n, v, extra) => `<Cell N='${n}' V='${ATTR(v)}'${extra ? ' ' + extra : ''}/>`; // extra 仅允许硬编码字面量
 const ROW_REL = (t, ix, x, y) =>
   `<Row T='${t}' IX='${ix}'><Cell N='X' V='${x}'/><Cell N='Y' V='${y}'/></Row>`;
 
