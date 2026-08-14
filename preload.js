@@ -30,5 +30,40 @@ contextBridge.exposeInMainWorld('topoBackup', {
   read: (name) => ipcRenderer.invoke('backup:read', { name }),
   remove: (name) => ipcRenderer.invoke('backup:delete', { name }),
   removeAll: () => ipcRenderer.invoke('backup:delete', { all: true }),
-  openFolder: () => ipcRenderer.invoke('backup:open-folder')
+  openFolder: () => ipcRenderer.invoke('backup:open-folder'),
+  getDir: () => ipcRenderer.invoke('backup:get-dir'),
+  chooseDir: () => ipcRenderer.invoke('backup:choose-dir'),
+  resetDir: () => ipcRenderer.invoke('backup:reset-dir')
+});
+
+contextBridge.exposeInMainWorld('topoMonitor', {
+  start: (opts) => ipcRenderer.invoke('monitor:start', opts),
+  stop: (key) => ipcRenderer.invoke('monitor:stop', { key }),
+  stopAll: () => ipcRenderer.invoke('monitor:stopAll'),
+  status: () => ipcRenderer.invoke('monitor:status'),
+  openLogs: (key) => ipcRenderer.invoke('monitor:open-logs', { key }),
+  logsTree: () => ipcRenderer.invoke('monitor:logs-tree'),
+  logsRead: (device, date, file) => ipcRenderer.invoke('monitor:logs-read', { device, date, file }),
+  runBackup: (key) => ipcRenderer.invoke('monitor:run-backup', { key }),
+  getSettings: () => ipcRenderer.invoke('monitor:get-settings'),
+  setSettings: (notify) => ipcRenderer.invoke('monitor:set-settings', { notify }),
+  onStatus: (cb) => ipcRenderer.on('monitor:status', (_e, info) => cb(info)),
+  onProbe: (cb) => ipcRenderer.on('monitor:probe', (_e, info) => cb(info)),
+  onAlert: (cb) => ipcRenderer.on('monitor:alert', (_e, info) => cb(info)),
+  onBackup: (cb) => ipcRenderer.on('monitor:backup', (_e, info) => cb(info))
+});
+
+contextBridge.exposeInMainWorld('topoConfigBackup', {
+  hosts: () => ipcRenderer.invoke('backupcfg:hosts'),
+  list: (device, host) => ipcRenderer.invoke('backupcfg:list', { device, host }),
+  read: (device, host, name) => ipcRenderer.invoke('backupcfg:read', { device, host, name }),
+  remove: (device, host, name) => ipcRenderer.invoke('backupcfg:remove', { device, host, name }),
+  diff: (device, host, a, b) => ipcRenderer.invoke('backupcfg:diff', { device, host, a, b }),
+  openFolder: () => ipcRenderer.invoke('backupcfg:open')
+});
+
+/* 密码等机密字段经主进程 safeStorage 加密后落盘（仅主窗口可用，主进程校验） */
+contextBridge.exposeInMainWorld('topoSecure', {
+  encryptSecret: (text) => ipcRenderer.invoke('secure:encrypt', text),
+  decryptSecret: (cipher) => ipcRenderer.invoke('secure:decrypt', cipher)
 });

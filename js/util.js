@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260814d';
+U.APP_VERSION = 'v20260814r';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -61,6 +61,19 @@ U.truncate = (s, n) => {
 
 U.clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
+U.fmtSize = (n) => {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB';
+};
+U.fmtDateTime = (d) => {
+  d = d || new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate())
+    + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
+};
 U.fmtDate = (d) => {
   d = d || new Date();
   const p = (n) => String(n).padStart(2, '0');
@@ -348,7 +361,15 @@ U.sanitizeGraph = (nodes, links, texts) => {
       x: coord(n.x, 0), y: coord(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',
-      mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20).map(s => s.slice(0, 200))
+      mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20).map(s => s.slice(0, 200)),
+      // 三层 VLAN 接口（interface vlan）：[{id, ip}]，最多 32 个
+      vlans: (Array.isArray(n.vlans) ? n.vlans : []).map(v => {
+        if (!v || typeof v !== 'object') return null;
+        const id = str(v.id).trim().slice(0, 16);
+        const ip = str(v.ip).trim().slice(0, 64);
+        const m = parseInt(v.mask, 10);
+        return (id && ip) ? { id, ip, mask: Number.isFinite(m) && m >= 0 && m <= 32 ? m : 24 } : null;
+      }).filter(Boolean).slice(0, 32)
     };
   }).filter(Boolean);
   const nodeIds = new Set(cleanNodes.map(n => n.id));
@@ -360,7 +381,15 @@ U.sanitizeGraph = (nodes, links, texts) => {
     const a = idMap.get(str(l.a)) || str(l.a);
     const b = idMap.get(str(l.b)) || str(l.b);
     if (!nodeIds.has(a) || !nodeIds.has(b)) return null; // 引用不存在/非法的节点则丢弃
-    return { id, a, b, aIf: str(l.aIf), aIp: str(l.aIp), bIf: str(l.bIf), bIp: str(l.bIp), bw: str(l.bw), note: str(l.note) };
+    const vlanModeOf = (v) => (v === 'access' || v === 'trunk' || v === 'hybrid') ? v : '';
+    return {
+      id, a, b, aIf: str(l.aIf), aIp: str(l.aIp), bIf: str(l.bIf), bIp: str(l.bIp), bw: str(l.bw), note: str(l.note),
+      // 二层接口 / VLAN 配置 / 掩码位（生成配置时使用）
+      aL2: !!l.aL2, bL2: !!l.bL2,
+      aVlan: str(l.aVlan).trim().slice(0, 16), bVlan: str(l.bVlan).trim().slice(0, 16),
+      aVlanMode: vlanModeOf(l.aVlanMode), bVlanMode: vlanModeOf(l.bVlanMode),
+      aMask: num(l.aMask, 24), bMask: num(l.bMask, 24)
+    };
   }).filter(Boolean);
   const cleanTexts = (Array.isArray(texts) ? texts : []).map(t => {
     if (!t || typeof t !== 'object') return null;
@@ -507,7 +536,8 @@ const I = {
   archive: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="7.5" width="17" height="11" rx="2"/><path d="M3.5 7.5v-2h17v2M9.5 12h5"/></svg>',
   terminal: '<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"4.5\" width=\"18\" height=\"15\" rx=\"2.5\"/><path d=\"M6.5 9.5l3 2.5-3 2.5\"/><path d=\"M12 14.5h5.5\"/></svg>',
   web: '<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M3 12h18M12 3c2.5 2.5 3.8 5.6 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.6-3.8-9S9.5 5.5 12 3z\"/></svg>',
-  about: '<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11v5.5\"/><circle cx=\"12\" cy=\"7.8\" r=\"1.1\" fill=\"currentColor\" stroke=\"none\"/></svg>'
+  about: '<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11v5.5\"/><circle cx=\"12\" cy=\"7.8\" r=\"1.1\" fill=\"currentColor\" stroke=\"none\"/></svg>',
+  pulse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6 4 12 2.5-6h5"/></svg>'
 };
 U.ICONS = I;
 
@@ -676,6 +706,38 @@ U.subnetOf = (ip, bits) => {
   const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
   return U.intToIpv4((n & mask) >>> 0) + '/' + bits;
 };
+
+/* 掩码位 → 点分十进制：24 → 255.255.255.0；非法/缺省回退 24 */
+U.maskBitsToDotted = (bits) => {
+  let n = parseInt(bits, 10);
+  if (!Number.isFinite(n) || n < 0 || n > 32) n = 24;
+  const mask = n === 0 ? 0 : (~0 << (32 - n)) >>> 0;
+  return [(mask >>> 24) & 255, (mask >>> 16) & 255, (mask >>> 8) & 255, mask & 255].join('.');
+};
+
+/* CIDR 网段 → 点分掩码：192.168.1.0/24 → 255.255.255.0；非法回退 24 位 */
+U.cidrMask = (cidr) => {
+  const m = /^\d{1,3}(?:\.\d{1,3}){3}\/(\d{1,2})$/.exec(String(cidr || '').trim());
+  return m ? U.maskBitsToDotted(parseInt(m[1], 10)) : '255.255.255.0';
+};
+
+/* 解析 VLAN 表达式为编号列表：支持单个（10）、逗号/分号（10,20;30）、
+ * 空格（10 20）、范围（10-20、10 to 20）。返回升序去重的数字数组。 */
+U.parseVlans = (v) => {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return [];
+  const out = new Set();
+  const norm = s.replace(/\s*to\s*/gi, '-').replace(/\s*-\s*/g, '-');
+  for (const seg of norm.split(/[,，;；\s]+/).filter(Boolean)) {
+    const m = /^(\d{1,4})(?:-(\d{1,4}))?$/.exec(seg);
+    if (!m) continue;
+    const a = parseInt(m[1], 10), b = m[2] ? parseInt(m[2], 10) : a;
+    if (a < 1 || a > 4094 || b < 1 || b > 4094) continue;
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    for (let i = lo; i <= hi; i++) out.add(i);
+  }
+  return [...out].sort((x, y) => x - y);
+};
 /* 子网分组配色（按组序号循环取色） */
 U.SUBNET_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316', '#84cc16', '#ec4899', '#06b6d4', '#a3e635'];
 /* 按接口 IP 网段（优先）/ 管理 IP 网段（兜底）把设备归组，返回可绘制区域 */
@@ -757,14 +819,84 @@ U.CONFIG_TEMPLATES = {
     noIface: '{comment} （无接口配置）',
     interface: [
       'interface {iface}',
-      ' ip address {ip} 255.255.255.0',
+      ' ip address {ip} {mask}',
       ' description -> {peer}{peerSuffix}'
     ],
     switchAccess: [
       ' port link-type access',
       ' port default vlan {vlan}'
     ],
-    route: 'ip route-static {subnet} {mask} {nextHop}',
+    vlanTrunk: [
+      ' port link-type trunk',
+      ' port trunk allow-pass vlan {vlanList}'
+    ],
+    vlanHybrid: [
+      ' port link-type hybrid',
+      ' port hybrid tagged vlan {vlanList}'
+    ],
+    svi: [
+      'interface vlan {vid}',
+      ' ip address {ip} {mask}'
+    ],
+    route: 'ip route-static {net} {mask} {nextHop}',
+    vlanLine: 'vlan {vlan}'
+  },
+  h3c: {
+    key: 'h3c', label: 'H3C（华三）', builtin: true, comment: '#',
+    deviceHeader: '{comment} {name}  管理: {mgmt}  [{type}]',
+    noIface: '{comment} （无接口配置）',
+    interface: [
+      'interface {iface}',
+      ' ip address {ip} {mask}',
+      ' description -> {peer}{peerSuffix}'
+    ],
+    switchAccess: [
+      ' port link-type access',
+      ' port default vlan {vlan}'
+    ],
+    vlanTrunk: [
+      ' port link-type trunk',
+      ' port trunk permit vlan {vlanList}'
+    ],
+    vlanHybrid: [
+      ' port link-type hybrid',
+      ' port hybrid vlan {vlanList} tagged'
+    ],
+    svi: [
+      'interface Vlan-interface{vid}',
+      ' ip address {ip} {mask}'
+    ],
+    route: 'ip route-static {net} {mask} {nextHop}',
+    vlanLine: 'vlan {vlan}'
+  },
+  ruijie: {
+    key: 'ruijie', label: '锐捷', builtin: true, comment: '!',
+    deviceHeader: '{comment} {name}  管理: {mgmt}  [{type}]',
+    noIface: '{comment} （无接口配置）',
+    interface: [
+      'interface {iface}',
+      ' ip address {ip} {mask}',
+      ' description -> {peer}{peerSuffix}',
+      ' no shutdown'
+    ],
+    switchAccess: [
+      ' switchport mode access',
+      ' switchport access vlan {vlan}'
+    ],
+    vlanTrunk: [
+      ' switchport mode trunk',
+      ' switchport trunk allowed vlan {vlanCsv}'
+    ],
+    vlanHybrid: [
+      ' switchport mode hybrid',
+      ' switchport hybrid vlan {vlanCsv} tagged'
+    ],
+    svi: [
+      'interface vlan {vid}',
+      ' ip address {ip} {mask}',
+      ' no shutdown'
+    ],
+    route: 'ip route {net} {mask} {nextHop}',
     vlanLine: 'vlan {vlan}'
   },
   cisco: {
@@ -773,7 +905,7 @@ U.CONFIG_TEMPLATES = {
     noIface: '{comment} （无接口配置）',
     interface: [
       'interface {iface}',
-      ' ip address {ip} 255.255.255.0',
+      ' ip address {ip} {mask}',
       ' description -> {peer}{peerSuffix}',
       ' no shutdown'
     ],
@@ -781,7 +913,21 @@ U.CONFIG_TEMPLATES = {
       ' switchport mode access',
       ' switchport access vlan {vlan}'
     ],
-    route: 'ip route {subnet} {mask} {nextHop}',
+    vlanTrunk: [
+      ' switchport mode trunk',
+      ' switchport trunk allowed vlan {vlanCsv}'
+    ],
+    // 思科无原生 hybrid，近似为 trunk（可手动调整）
+    vlanHybrid: [
+      ' switchport mode trunk',
+      ' switchport trunk allowed vlan {vlanCsv}'
+    ],
+    svi: [
+      'interface vlan {vid}',
+      ' ip address {ip} {mask}',
+      ' no shutdown'
+    ],
+    route: 'ip route {net} {mask} {nextHop}',
     vlanLine: 'vlan {vlan}'
   }
 };
@@ -812,22 +958,13 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
   };
   const byId = new Map(nodes.map(n => [n.id, n]));
   const fill = (s, map) => String(s).replace(/\{(\w+)\}/g, (m, k) => map[k] != null ? map[k] : m);
-  const maskOf = (ip) => '255.255.255.0';
-  // 子网 -> VLAN 号（接入端口按网段分配）
-  const vlanMap = new Map();
-  const subnetList = [];
-  const ensureSubnet = (ip) => {
-    const s = U.subnetOf(ip);
-    if (!s || vlanMap.has(s)) return;
-    vlanMap.set(s, 10 + subnetList.length);
-    subnetList.push(s);
-  };
-  for (const l of links) { if (l.aIp) ensureSubnet(l.aIp); if (l.bIp) ensureSubnet(l.bIp); }
   // 直连子网 / 邻居子网（用于静态路由）
   const linkOf = new Map();
   for (const n of nodes) linkOf.set(n.id, []);
   for (const l of links) { linkOf.get(l.a).push(l); linkOf.get(l.b).push(l); }
   const out = [];
+  // 已知非路由设备类型不生成静态路由（与注释语义一致；自定义类型保留推导能力）
+  const NON_ROUTE_TYPES = new Set(['switch', 'server', 'pc', 'other']);
   for (const n of targets) {
     const tpl = tplOf(n);
     if (!tpl) continue;
@@ -835,40 +972,67 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
     sec.push(fill(tpl.deviceHeader, { comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
     const intfs = [];
     for (const l of links) {
-      let ifn, ip, peerId, peerIf, bw;
-      if (l.a === n.id) { ifn = l.aIf; ip = l.aIp; peerId = l.b; peerIf = l.bIf; bw = l.bw; }
-      else if (l.b === n.id) { ifn = l.bIf; ip = l.bIp; peerId = l.a; peerIf = l.aIf; bw = l.bw; }
+      let ifn, ip, peerId, peerIf, bw, l2, vlan, vlanMode, maskBits;
+      if (l.a === n.id) { ifn = l.aIf; ip = l.aIp; peerId = l.b; peerIf = l.bIf; bw = l.bw; l2 = !!l.aL2; vlan = String(l.aVlan || '').trim(); vlanMode = l.aVlanMode || 'access'; maskBits = l.aMask; }
+      else if (l.b === n.id) { ifn = l.bIf; ip = l.bIp; peerId = l.a; peerIf = l.aIf; bw = l.bw; l2 = !!l.bL2; vlan = String(l.bVlan || '').trim(); vlanMode = l.bVlanMode || 'access'; maskBits = l.bMask; }
       else continue;
       if (!ifn) continue;
       const peer = byId.get(peerId);
-      intfs.push({ ifn, ip, peer: peer ? peer.name : '?', peerIf, bw, peerIsAccess: peer ? ['pc', 'server', 'other'].includes(peer.type) : false, subnet: U.subnetOf(ip) });
+      // 掩码位：按链路配置生成（缺省 24），二层接口不使用
+      const bits = l2 ? 0 : (parseInt(maskBits, 10) > 0 && parseInt(maskBits, 10) <= 32 ? parseInt(maskBits, 10) : 24);
+      intfs.push({ ifn, ip, peer: peer ? peer.name : '?', peerIf, bw, l2, vlan, vlanMode, maskBits: bits, subnet: U.subnetOf(ip, bits) });
     }
+    const vlanDefs = new Set(); // 需要生成 vlan 定义的编号（显式 L2 VLAN + 自动接入 VLAN + SVI）
+    const addVlanDefs = (expr) => { for (const vn of U.parseVlans(expr)) vlanDefs.add(vn); };
     if (!intfs.length) {
       sec.push(fill(tpl.noIface, { comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
     } else {
       for (const it of intfs) {
         sec.push('');
+        // VLAN 只来自接口显式配置（连线弹窗勾选二层并填写 VLAN）；不做自动分配
+        const effVlan = it.vlan;
+        // 展开接口上的 VLAN 表达式（支持 10、10,20、10-20、10 to 20）
+        const vlanNums = U.parseVlans(effVlan);
+        const vlanSingle = vlanNums.length ? String(vlanNums[0]) : effVlan;
         const map = {
-          iface: it.ifn, ip: it.ip || '未配置', mask: maskOf(it.ip), peer: it.peer,
+          iface: it.ifn, ip: it.ip || '未配置', mask: U.maskBitsToDotted(it.maskBits), peer: it.peer,
           peerIf: it.peerIf || '', peerSuffix: it.peerIf ? ':' + it.peerIf : '',
-          bw: U.formatBw(it.bw) || '', vlan: vlanMap.get(it.subnet) || '',
+          bw: U.formatBw(it.bw) || '', vlan: vlanSingle,
+          vlanList: vlanNums.join(' '), vlanCsv: vlanNums.join(','),
           comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label
         };
-        for (const line of (tpl.interface || [])) sec.push(fill(line, map));
-        // 交换机接入端口 VLAN
-        if (opts.vlan !== false && tpl.switchAccess && n.type === 'switch' && it.peerIsAccess && it.subnet && vlanMap.has(it.subnet)) {
-          for (const line of tpl.switchAccess) sec.push(fill(line, { vlan: vlanMap.get(it.subnet), ...map }));
+        // 二层接口：不配置 IP 地址；三层接口照常配置
+        const ifaceLines = (tpl.interface || []).filter(ln => !(it.l2 && /ip\s+address/i.test(ln)));
+        for (const line of ifaceLines) sec.push(fill(line, map));
+        // 二层接口 VLAN 配置（按模式：access / trunk / hybrid，仅显式配置）；与 VLAN 定义区一致，受 opts.vlan 开关控制
+        if (opts.vlan !== false && it.l2 && effVlan) {
+          addVlanDefs(effVlan); // 展开的每个 VLAN 编号都生成 vlan 定义
+          const vlanTpl = it.vlanMode === 'trunk' ? tpl.vlanTrunk : (it.vlanMode === 'hybrid' ? tpl.vlanHybrid : tpl.switchAccess || tpl.vlanTrunk);
+          for (const line of (vlanTpl || [])) sec.push(fill(line, map));
         }
       }
     }
-    // VLAN 定义（交换机）
-    if (opts.vlan !== false && tpl.vlanLine && n.type === 'switch') {
-      const used = new Set();
-      for (const it of intfs) if (it.subnet && vlanMap.has(it.subnet)) used.add(vlanMap.get(it.subnet));
-      for (const v of [...used].sort((a, b) => a - b)) sec.push('', fill(tpl.vlanLine, { vlan: v, comment: tpl.comment }));
+    // 三层 VLAN 接口（SVI）：interface vlan + ip address（受 opts.vlan 开关控制，与 VLAN 定义一致）
+    if (opts.vlan !== false && Array.isArray(n.vlans) && n.vlans.length) {
+      for (const v of n.vlans) {
+        const vid = String(v.id || '').trim(), vip = String(v.ip || '').trim();
+        if (!vid || !vip) continue;
+        addVlanDefs(vid); // 设备配置（三层 VLAN 接口）的 VLAN 编号也生成 vlan 定义
+        sec.push('');
+        const sviMask = U.maskBitsToDotted(v.mask); // 设备 VLAN 接口可带掩码位，缺省 24
+        for (const line of (tpl.svi || ['interface vlan {vid}', ' ip address {ip} {mask}'])) {
+          sec.push(fill(line, { vid, ip: vip, mask: sviMask, comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
+        }
+      }
+    }
+    // VLAN 定义
+    if (opts.vlan !== false && tpl.vlanLine && vlanDefs.size) {
+      for (const v of [...vlanDefs].sort((a, b) => String(a).localeCompare(String(b), 'zh', { numeric: true }))) {
+        sec.push('', fill(tpl.vlanLine, { vlan: v, comment: tpl.comment }));
+      }
     }
     // 静态路由（路由器/防火墙/云）：经直连邻居到达其直连网段
-    if (opts.routes && tpl.route) {
+    if (opts.routes && tpl.route && !NON_ROUTE_TYPES.has(n.type)) {
       const mine = new Set(intfs.filter(i => i.subnet).map(i => i.subnet));
       const routes = [];
       for (const l of linkOf.get(n.id) || []) {
@@ -877,10 +1041,19 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
         const peerIp = l.a === n.id ? l.bIp : l.aIp; // 下一跳 = 对端接口 IP
         if (!other || !peerIp) continue;
         for (const ol of linkOf.get(otherId) || []) {
+          let oBits = (ol.a === otherId ? ol.aMask : ol.bMask);
+          oBits = parseInt(oBits, 10) > 0 && parseInt(oBits, 10) <= 32 ? parseInt(oBits, 10) : 24;
           const oIp = ol.a === otherId ? ol.aIp : ol.bIp;
-          const oSub = U.subnetOf(oIp);
+          const oSub = U.subnetOf(oIp, oBits);
           if (oSub && !mine.has(oSub)) {
-            routes.push(fill(tpl.route, { subnet: oSub, mask: '255.255.255.0', nextHop: peerIp, comment: tpl.comment }));
+            const netInt = U.ipv4ToInt(oSub.split('/')[0]);
+            routes.push(fill(tpl.route, {
+              subnet: oSub,
+              net: netInt == null ? oSub.split('/')[0] : U.intToIpv4(netInt),
+              mask: U.cidrMask(oSub),
+              nextHop: peerIp,
+              comment: tpl.comment
+            }));
           }
         }
       }
@@ -890,6 +1063,154 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
     out.push(sec.join('\n'));
   }
   return out.join('\n\n');
+};
+
+/* ---------- 生成前冲突检查 ---------- */
+/* 检查项：
+ *  error 设备名重复 / 接口 IP 重复 / 链路两端模式或网段矛盾 / 无效 VLAN 表达式
+ *  warn  管理地址重复 / 同网段地址掩码不一致 / 链路两端掩码或 VLAN 不一致 / SVI 无二层端口 /
+ *        接口重复使用 / 管理地址与接口 IP 相同
+ * 返回 { ok, issues: [{level:'error'|'warn', device, msg}] } */
+U.checkConfigs = (nodes, links) => {
+  nodes = nodes || [];
+  links = links || [];
+  const issues = [];
+  const add = (level, device, msg) => issues.push({ level, device, msg });
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const devName = (id) => { const n = byId.get(id); return n ? (String(n.name || '').trim() || String(n.id)) : String(id); };
+
+  // 1. 设备名重复
+  const nameCnt = new Map();
+  for (const n of nodes) {
+    const k = String(n.name || '').trim();
+    if (k) nameCnt.set(k, (nameCnt.get(k) || 0) + 1);
+  }
+  for (const [k, c] of nameCnt) {
+    if (c > 1) add('error', k, '设备名「' + k + '」重复（' + c + ' 台），生成的 hostname 会相互冲突');
+  }
+
+  // 2. 管理地址重复 / 与接口 IP 相同
+  const mgmtSeen = new Map(); // ip -> [设备名]
+  const ifaceIps = new Map(); // ip -> [{device, iface, link}]
+  const regIfaceIp = (device, iface, ip, link) => {
+    if (!U.ipv4ToInt(ip)) return;
+    if (!ifaceIps.has(ip)) ifaceIps.set(ip, []);
+    ifaceIps.get(ip).push({ device, iface, link });
+  };
+  for (const n of nodes) {
+    for (const ip of U.nodeMgmts(n)) {
+      if (!U.ipv4ToInt(ip)) continue;
+      if (!mgmtSeen.has(ip)) mgmtSeen.set(ip, []);
+      mgmtSeen.get(ip).push(devName(n.id));
+    }
+    for (const v of (Array.isArray(n.vlans) ? n.vlans : [])) {
+      regIfaceIp(devName(n.id), 'VLAN' + String(v.id || ''), v.ip);
+    }
+  }
+  for (const [ip, names] of mgmtSeen) {
+    if (names.length > 1) add('warn', names[0], '管理地址 ' + ip + ' 被多台设备同时使用：' + names.join('、'));
+  }
+  // 3. 接口 IP 重复
+  for (const l of links) {
+    if (l.aIp) regIfaceIp(devName(l.a), l.aIf || '', l.aIp, l);
+    if (l.bIp) regIfaceIp(devName(l.b), l.bIf || '', l.bIp, l);
+  }
+  for (const [ip, owners] of ifaceIps) {
+    if (owners.length > 1) {
+      // 同一链路两端填写相同 IP（终端直连等场景）：提示确认，不按错误处理
+      const sameLink = owners.length === 2 && owners[0].link != null && owners[0].link === owners[1].link;
+      const msg = 'IP ' + ip + ' 被多个接口使用：' + owners.map(o => o.device + (o.iface ? '/' + o.iface : '')).join('、');
+      if (sameLink) add('warn', owners[0].device, msg + '（同一链路两端，请确认是否为终端直连场景）');
+      else add('error', owners[0].device, msg);
+    }
+  }
+  for (const [ip, names] of mgmtSeen) {
+    if (ifaceIps.has(ip)) add('warn', names[0], '管理地址 ' + ip + ' 同时被用作接口 IP（' + ifaceIps.get(ip).map(o => o.device + (o.iface ? '/' + o.iface : '')).join('、') + '）');
+  }
+
+  // 4. 链路两端一致性 + 网段/掩码 + VLAN 有效性
+  const ifaceUse = new Map(); // device|iface -> 次数
+  const useIface = (device, iface) => {
+    if (!iface) return;
+    const k = device + '|' + iface;
+    ifaceUse.set(k, (ifaceUse.get(k) || 0) + 1);
+  };
+  for (const l of links) {
+    useIface(devName(l.a), l.aIf);
+    useIface(devName(l.b), l.bIf);
+    const aName = devName(l.a), bName = devName(l.b);
+    const l2a = !!l.aL2, l2b = !!l.bL2;
+    if (l2a !== l2b) {
+      add('error', aName, '链路 ' + aName + '(' + (l.aIf || '?') + ') ⇄ ' + bName + '(' + (l.bIf || '?') + ') 一端为二层、一端为三层，配置矛盾');
+    }
+    if (!l2a && l.aIp && l.bIp) {
+      const aBits = parseInt(l.aMask, 10) > 0 && parseInt(l.aMask, 10) <= 32 ? parseInt(l.aMask, 10) : 24;
+      const bBits = parseInt(l.bMask, 10) > 0 && parseInt(l.bMask, 10) <= 32 ? parseInt(l.bMask, 10) : 24;
+      const sa = U.subnetOf(l.aIp, aBits), sb = U.subnetOf(l.bIp, bBits);
+      if (sa !== sb) add('error', aName, '链路 ' + aName + '(' + (l.aIf || '?') + ') ⇄ ' + bName + '(' + (l.bIf || '?') + ') 两端不在同一网段（' + sa + ' vs ' + sb + '）');
+      else if (aBits !== bBits) add('warn', aName, '链路 ' + aName + '(' + (l.aIf || '?') + ') ⇄ ' + bName + '(' + (l.bIf || '?') + ') 两端掩码位不一致（/' + aBits + ' vs /' + bBits + '）');
+    }
+    for (const side of ['a', 'b']) {
+      const vlan = String(l[side + 'Vlan'] || '').trim();
+      if (l[side + 'L2'] && vlan && !U.parseVlans(vlan).length) {
+        add('warn', side === 'a' ? aName : bName, '二层接口 VLAN「' + vlan + '」无效（需为 1-4094 的数字或范围）');
+      }
+      if (l[side + 'L2'] && l[side + 'VlanMode'] === 'access' && /[-,;，；\s]/.test(vlan)) {
+        const first = U.parseVlans(vlan)[0];
+        add('warn', side === 'a' ? aName : bName, 'access 模式 VLAN「' + vlan + '」含多个编号，生成时只取第一个' + (first ? '（' + first + '）' : ''));
+      }
+    }
+    if (l2a && l2b && String(l.aVlan || '').trim() && String(l.bVlan || '').trim() && String(l.aVlan).trim() !== String(l.bVlan).trim()) {
+      add('warn', aName, '二层链路 ' + aName + ' ⇄ ' + bName + ' 两端 VLAN 不一致（' + l.aVlan + ' vs ' + l.bVlan + '）');
+    }
+  }
+  for (const [k, c] of ifaceUse) {
+    if (c > 1) {
+      const sep = k.indexOf('|');
+      add('warn', k.slice(0, sep), '接口 ' + k.slice(sep + 1) + ' 被 ' + c + ' 条链路同时使用（同一接口只能接一条链路）');
+    }
+  }
+
+  // 5. 同网段地址掩码不一致
+  const netMask = new Map(); // 网络地址 -> Set(位数)
+  const regNet = (ip, bits) => {
+    const n = U.ipv4ToInt(ip);
+    if (n == null) return;
+    bits = parseInt(bits, 10);
+    if (!(bits > 0 && bits <= 32)) bits = 24;
+    const net = U.intToIpv4((n & ((~0 << (32 - bits)) >>> 0)) >>> 0);
+    if (!netMask.has(net)) netMask.set(net, new Set());
+    netMask.get(net).add(bits);
+  };
+  for (const n of nodes) {
+    for (const v of (Array.isArray(n.vlans) ? n.vlans : [])) {
+      if (v.ip) regNet(v.ip, v.mask);
+    }
+  }
+  for (const l of links) {
+    if (!l.aL2 && l.aIp) regNet(l.aIp, l.aMask);
+    if (!l.bL2 && l.bIp) regNet(l.bIp, l.bMask);
+  }
+  for (const [net, bitsSet] of netMask) {
+    if (bitsSet.size > 1) {
+      const first = (nodes[0] && nodes[0].name) || '';
+      add('warn', first, '网段 ' + net + ' 上存在不同掩码位：/' + [...bitsSet].sort((x, y) => x - y).join('、/'));
+    }
+  }
+
+  // 6. SVI（三层 VLAN 接口）无对应二层端口
+  for (const n of nodes) {
+    for (const v of (Array.isArray(n.vlans) ? n.vlans : [])) {
+      const vid = String(v.id || '').trim();
+      if (!vid) continue;
+      const used = links.some(l =>
+        (l.a === n.id && !!l.aL2 && U.parseVlans(l.aVlan).includes(parseInt(vid, 10))) ||
+        (l.b === n.id && !!l.bL2 && U.parseVlans(l.bVlan).includes(parseInt(vid, 10))));
+      if (!used && v.ip) add('warn', devName(n.id), '三层 VLAN 接口 VLAN' + vid + ' 在本设备上没有任何二层端口放通该 VLAN');
+    }
+  }
+
+  return { ok: issues.every(i => i.level !== 'error'), issues };
 };
 
 /* ---------- 拓扑对比（工程 diff） ---------- */

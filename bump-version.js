@@ -16,6 +16,8 @@ const path = require('path');
 
 const ROOT = __dirname;
 const FILES = ['js/util.js', 'index.html', 'shell.html', 'webview.html'];
+const PKG_FILE = 'package.json';   // 构建产物文件名依赖其 version 字段（electron-builder ${version}）
+const PKG_VERSION = '1.0.0';       // 固定的主版本基座；build 版本号以 semver 预发布形式附加（1.0.0-20260814f）
 const dry = process.argv.includes('--dry-run');
 
 const utilSrc = fs.readFileSync(path.join(ROOT, 'js/util.js'), 'utf8');
@@ -49,4 +51,30 @@ for (const f of FILES) {
   if (!dry) fs.writeFileSync(path.join(ROOT, f), out);
 }
 if (!changed) { console.log(`[bump-version] 未找到可替换的版本令牌（当前 ${curVer}）`); }
-console.log(`版本：${curVer} → ${nextVer}${dry ? '（dry-run，未写入）' : '，已写入 ' + changed + ' 个文件'}`);
+
+// 同步 package.json version → 构建产物文件名携带版本号（NetTopo-1.0.0-<stamp>-portable.exe）
+(() => {
+  const pkgPath = path.join(ROOT, PKG_FILE);
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch (e) { console.warn('[bump-version] 读取 package.json 失败，跳过版本写入'); return; }
+  const curPkgVer = (pkg && pkg.version) || '';
+  const nextPkgVer = PKG_VERSION + '-' + nextStamp;
+  if (curPkgVer === nextPkgVer) return; // 幂等
+  if (pkg) pkg.version = nextPkgVer;
+  console.log(`  ${PKG_FILE}: ${curPkgVer} → ${nextPkgVer}`);
+  if (!dry) fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+
+  // 同步 package-lock.json 根版本，避免 lockfile 与 package.json 漂移
+  const lockPath = path.join(ROOT, 'package-lock.json');
+  try {
+    const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    if (lock && lock.packages && lock.packages[''] && lock.packages[''].version !== nextPkgVer) {
+      lock.packages[''].version = nextPkgVer;
+      if (typeof lock.version === 'string') lock.version = nextPkgVer;
+      if (!dry) fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n', 'utf8');
+      console.log(`  package-lock.json: → ${nextPkgVer}`);
+    }
+  } catch (e) { console.warn('[bump-version] 同步 package-lock.json 失败，跳过'); }
+})();
+
+console.log(`版本：${curVer} → ${nextVer}${dry ? '（dry-run，未写入）' : '，已写入 ' + (changed + 1) + ' 个文件及 package.json'}`);

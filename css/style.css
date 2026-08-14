@@ -297,6 +297,25 @@ body:not(.panel-off) #panelOpen { display: none; }
 .pitem .nm { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pitem .sub { color: var(--muted); font-size: 10.5px; font-weight: 400; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pitem .cnt2 { font-size: 10px; color: var(--muted); background: var(--panel2); border-radius: 8px; padding: 0 7px; border: 1px solid var(--border); }
+/* 后台监控状态标记（右侧设备侧栏）：小巧圆点，不挤占设备名，悬停查看详情 */
+.pitem .mon-badge {
+  flex: 0 0 auto; width: 9px; height: 9px;
+  display: inline-block; border-radius: 50%; user-select: none; cursor: help;
+}
+.pitem .mon-badge.ok {
+  background: #22c55e;
+  animation: monPulse 1.5s ease-in-out infinite;
+}
+.pitem .mon-badge.pending {
+  background: #f59e0b;
+}
+.pitem .mon-badge.err {
+  background: #ef4444;
+}
+@keyframes monPulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,.6); }
+  50% { box-shadow: 0 0 0 5px rgba(34,197,94,0); }
+}
 .pitem .ifc { font-size: 10.5px; color: var(--accent); font-weight: 600; flex: 0 0 auto; }
 .pitem .ifc em { font-style: normal; color: var(--muted); font-weight: 400; }
 #legend { border-top: 1px solid var(--border); padding: 8px 12px 10px; display: flex; flex-wrap: wrap; gap: 5px; }
@@ -503,12 +522,74 @@ body:not(.panel-off) #panelOpen { display: none; }
 
 /* Web Shell 连接弹窗：内联行内的 frow 不再产生额外下边距 */
 .ws-dialog .frow-inline .frow { margin-bottom: 0; }
+.mon-dialog #monCmds { height: 92px; font: 12px/1.5 Consolas, monospace; white-space: pre; }
+.mon-dialog #monStatus { margin-top: 4px; font-size: 11.5px; }
+/* 管理地址行：每行独立 协议/端口/账号/密码/命令 */
+.mon-host-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.mon-host-row {
+  display: grid; grid-template-columns: 1.05fr 0.75fr 0.6fr 0.8fr 0.9fr auto auto auto;
+  gap: 5px; align-items: center;
+}
+.mon-host-row .mh-ro {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 11px; color: var(--muted); white-space: nowrap; cursor: pointer;
+  height: 28px; padding: 0 6px; border-radius: 7px; border: 1px dashed var(--border);
+  user-select: none;
+}
+.mon-host-row .mh-ro:hover { color: var(--accent); border-color: var(--accent); }
+.mon-host-row .mh-ro input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+.mon-host-row input, .mon-host-row select {
+  min-width: 0; height: 30px; padding: 0 7px; font-size: 12px;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; outline: none;
+}
+.mon-host-row input:focus, .mon-host-row select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.mon-host-row .mh-port { width: 100%; }
+.mon-host-row .mh-cmd-btn {
+  height: 28px; padding: 0 9px; font-size: 11.5px; white-space: nowrap;
+  border-style: dashed; color: var(--accent); border-radius: 7px;
+}
+.mon-host-row .mh-cmd-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+.mon-host-row .mh-cmd-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.mon-host-row .mh-del { width: 26px; height: 26px; padding: 0; justify-content: center; color: var(--muted); border-radius: 7px; }
+.mon-host-row .mh-del:hover { color: var(--danger); background: rgba(220,38,38,.12); border-color: var(--danger); }
+.mon-host-row .mh-cmds-wrap { grid-column: 1 / -1; }
+.mon-host-row .mh-cmds {
+  width: 100%; height: 66px; padding: 6px 8px; resize: vertical;
+  font: 12px/1.5 Consolas, monospace; white-space: pre;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; outline: none;
+}
+.mon-host-row .mh-cmds:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.mon-host-add { align-self: flex-start; height: 28px; padding: 0 12px; font-size: 12px; border-style: dashed; color: var(--accent); }
+.mon-host-add:hover { background: var(--accent-soft); border-color: var(--accent); }
 .ws-dialog .ws-mgmt {
   font: 600 12px/1.6 Consolas, monospace;
   color: var(--accent); background: var(--accent-soft);
   border: 1px solid var(--accent-soft); border-radius: 6px; padding: 1px 7px; margin: 0 2px;
 }
 
+/* 复选框字段 */
+.ck-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text); cursor: pointer; user-select: none; }
+.ck-field input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+/* 三层 VLAN 接口编辑列表 */
+.vlan-list { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.vlan-row { display: flex; align-items: center; gap: 6px; }
+.vlan-row input {
+  flex: 1; min-width: 0; height: 32px; padding: 0 10px; font-size: 13px;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.vlan-row input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.vlan-row .vlan-del {
+  flex: none; width: 26px; height: 26px; padding: 0; justify-content: center;
+  color: var(--muted); border-radius: 7px; font-size: 12px;
+}
+.vlan-row .vlan-del:hover { color: var(--danger); background: rgba(220, 38, 38, .12); border-color: var(--danger); }
+.vlan-add {
+  align-self: flex-start; height: 28px; padding: 0 12px; font-size: 12px;
+  border-style: dashed; color: var(--accent);
+}
+.vlan-add:hover { background: var(--accent-soft); border-color: var(--accent); }
 /* 多管理地址编辑列表 */
 .mgmt-list { display: flex; flex-direction: column; gap: 6px; flex: 1; }
 .mgmt-row { display: flex; align-items: center; gap: 6px; }
@@ -545,3 +626,98 @@ body:not(.panel-off) #panelOpen { display: none; }
 .about-url { color: var(--accent); font: 12px/1.6 Consolas, monospace; }
 .about-actions { display: flex; gap: 8px; width: 100%; justify-content: center; }
 .about-actions .tb { height: 30px; padding: 0 16px; }
+/* ============ 后台监控扩展（探测/告警/备份） ============ */
+.pitem .mon-badge.alert {
+  background: #f59e0b;
+  animation: monPulseOrange 1.2s ease-in-out infinite;
+}
+.pitem .mon-badge.off {
+  background: #ef4444;
+  animation: monPulseRed 1s ease-in-out infinite;
+}
+@keyframes monPulseOrange {
+  0%,100% { box-shadow: 0 0 0 0 rgba(245,158,11,.7); }
+  50% { box-shadow: 0 0 0 6px rgba(245,158,11,0); }
+}
+@keyframes monPulseRed {
+  0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.7); }
+  50% { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
+}
+
+/* 监控弹窗：管理地址行的扩展区（探测/告警/备份） */
+.mon-host-row .mh-ext {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  background: var(--panel2); border: 1px dashed var(--border); border-radius: 8px;
+  padding: 6px 9px; margin-top: 6px; font-size: 11.5px;
+}
+.mon-host-row .mh-ext label { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: var(--text); font-size: 11.5px; }
+.mon-host-row .mh-ext label input[type=checkbox] { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+.mon-host-row .mh-ext select, .mon-host-row .mh-ext input[type=number], .mon-host-row .mh-ext input[type=text] { height: 24px; font-size: 11.5px; padding: 0 6px; }
+.mon-host-row .mh-ext .mh-pr-int { width: 62px; }
+.mon-host-row .mh-ext .mh-bk-int { width: 62px; }
+.mon-host-row .mh-ext .mh-bk-cmd { flex: 1; min-width: 180px; }
+.mon-host-row .mh-ext .mh-unit { color: var(--muted); font-size: 10.5px; }
+.mon-host-row .mh-ext .mh-alert-btn { height: 24px; padding: 0 10px; font-size: 11.5px; }
+.mon-host-row .mh-ext .mh-alerts-wrap { flex: 1 1 100%; }
+.mon-host-row .mh-ext .mh-alerts { width: 100%; min-height: 44px; font-size: 11.5px; }
+
+/* ============ 日志浏览器 ============ */
+.lb-dialog .lb-main { display: flex; gap: 10px; height: calc(100% - 64px); min-height: 0; }
+.lb-dialog .lb-side { width: 300px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.lb-dialog .lb-nav { display: flex; flex-direction: column; gap: 4px; }
+.lb-dialog .lb-nav label { font-size: 11px; color: var(--muted); }
+.lb-dialog .lb-nav select { height: 28px; }
+.lb-dialog .lb-files { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-height: 0; }
+.lb-file { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 11.5px; }
+.lb-file:hover { background: var(--panel2); }
+.lb-file.sel { background: var(--accent-soft); border: 1px solid var(--accent); padding: 5px 7px; }
+.lb-file .nm { display: block; word-break: break-all; }
+.lb-file .sub { color: var(--muted); font-size: 10px; }
+.lb-dialog .lb-body { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.lb-dialog .lb-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.lb-dialog .lb-toolbar input { flex: 1; height: 28px; }
+.lb-dialog .lb-count { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.lb-content { flex: 1; overflow: auto; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font: 11.5px/1.65 Consolas, 'Courier New', monospace; margin: 0; white-space: pre-wrap; word-break: break-all; }
+.lb-content .lb-line { white-space: pre-wrap; word-break: break-all; }
+.lb-content .lb-line.hit { background: rgba(245,158,11,.12); }
+.lb-content .lb-line.cur { background: rgba(245,158,11,.3); outline: 1px solid rgba(245,158,11,.6); }
+.lb-content mark { background: #fde047; color: #1e293b; border-radius: 2px; padding: 0 1px; }
+.lb-empty { color: var(--muted); font-size: 12px; padding: 14px 8px; }
+
+/* ============ 配置备份中心 ============ */
+.bk-dialog .bk-main { display: flex; gap: 10px; height: calc(100% - 64px); min-height: 0; }
+.bk-dialog .bk-side { width: 320px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.bk-hosts { flex: 0 0 auto; max-height: 40%; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
+.bk-host { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 11.5px; }
+.bk-host:hover { background: var(--panel2); }
+.bk-host.sel { background: var(--accent-soft); border: 1px solid var(--accent); padding: 5px 7px; }
+.bk-host .nm { display: block; font-weight: 500; }
+.bk-host .sub { color: var(--muted); font-size: 10px; }
+.bk-files { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-height: 0; }
+.bk-file { display: flex; align-items: flex-start; gap: 7px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 11.5px; }
+.bk-file:hover { background: var(--panel2); }
+.bk-file.sel { background: var(--accent-soft); }
+.bk-file input { margin-top: 2px; accent-color: var(--accent); }
+.bk-file .nm { word-break: break-all; }
+.bk-file .sub { color: var(--muted); font-size: 10px; display: block; }
+.bk-dialog .bk-body { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.bk-dialog .bk-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.bk-dialog .bk-diffinfo { flex: 1; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bk-content { flex: 1; overflow: auto; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font: 11.5px/1.65 Consolas, 'Courier New', monospace; margin: 0; white-space: pre-wrap; word-break: break-all; }
+.bk-content .dl-ctx { color: var(--text); white-space: pre-wrap; }
+.bk-content .dl-add { color: #16a34a; background: rgba(22,163,74,.1); white-space: pre-wrap; }
+.bk-content .dl-del { color: #dc2626; background: rgba(220,38,38,.1); white-space: pre-wrap; text-decoration: line-through; }
+.bk-content .no { display: inline-block; width: 42px; color: var(--muted); text-align: right; margin-right: 8px; user-select: none; }
+
+/* ============ 配置冲突检查 ============ */
+.cfg-issues { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; max-height: 150px; overflow: auto; font-size: 11.5px; }
+.cfg-issues .ci-head { margin-bottom: 5px; }
+.cfg-issues .ci-head .ci-err { color: #ef4444; }
+.cfg-issues .ci-head .ci-warn { color: #f59e0b; }
+.cfg-issues .ci-head .ci-ok { color: #22c55e; }
+.cfg-issues .ci-item { padding: 2px 0 2px 14px; position: relative; line-height: 1.5; }
+.cfg-issues .ci-item::before { content: '⚠'; position: absolute; left: 0; }
+.cfg-issues .ci-item.ci-err { color: #ef4444; }
+.cfg-issues .ci-item.ci-err::before { content: '✖'; }
+.cfg-issues .ci-item.ci-warn { color: #f59e0b; }

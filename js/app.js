@@ -28,7 +28,9 @@ const state = {
   subnetNames: {},  // 子网 -> 自定义名称（子网分组命名）
   downLinks: new Set(),  // 故障链路 id 集合（模拟断链，路径分析绕行）
   autoBackup: { on: lsGet('nettopo.autoBackup', '0') === '1', minutes: Number(lsGet('nettopo.autoBackupMin', '10') || 10), keep: Math.min(200, Math.max(1, Number(lsGet('nettopo.autoBackupKeep', '30') || 30) || 30)) },
-  texts: []  // 画布文本框（自定义字体样式）
+  texts: [],  // 画布文本框（自定义字体样式）
+  monitorCfg: {},   // 设备后台监控配置：nodeId -> {protocol,host,port,username,password,commands,intervalSec,cmdDelayMs,enabled}
+  monitorStatus: {} // 设备后台监控运行状态：nodeId -> {state,text,since}（运行时态，不持久化）
 };
 let layoutCancel = false;
 
@@ -139,6 +141,7 @@ function restore(s) {
   refreshAll();
   updateLegend();
   renderSelCard(); // 隐藏可能残留的选中卡
+  reconcileMonitors(); // 撤销/重做后对齐后台监控
 }
 function pushUndo(pre) {
   // 快照入栈：pre 为拖拽开始前捕获的状态；其余操作在变更前调用本函数
@@ -201,6 +204,7 @@ async function loadGraph(graph, msg) {
   refreshAll();
   if (msg) toast(msg);
   saveGraph();
+  reconcileMonitors(); // 拓扑变更后对齐后台监控（停止已删除设备的监控、启动启用设备）
   // 带坐标的表格/工程直接还原布局，不带坐标才自动布局
   const hasPos = graph.nodes.some(n => n.x || n.y);
   if (hasPos) renderer.fit();
@@ -397,7 +401,7 @@ function openConfigGen() {
   ov.innerHTML = `
     <div class="modal" role="dialog" style="width:700px">
       <h3>生成设备配置</h3>
-      <div class="m-sub">按拓扑接口/IP 生成配置片段；可选 <b>静态路由</b>（自动推导）与 <b>VLAN</b>（交换机接入端口）；设备可在「编辑设备」中单独指定厂家（默认跟随此处全局选择）</div>
+      <div class="m-sub">按拓扑接口/IP 生成配置片段；可选 <b>静态路由</b>（自动推导）与 <b>VLAN</b>（连线/设备上显式配置的 VLAN 相关配置）；设备可在「编辑设备」中单独指定厂家（默认跟随此处全局选择）</div>
       <div class="m-row">
         <label>厂家风格</label>
         <select id="cfgVendor">${cfgVendorOptions()}</select>
@@ -407,6 +411,7 @@ function openConfigGen() {
         <label style="display:flex;align-items:center;gap:5px"><input id="cfgVlan" type="checkbox" checked/> VLAN</label>
         <button type="button" class="tb" id="cfgTplMgr" style="margin-left:auto">管理模板…</button>
       </div>
+      <div id="cfgIssues" class="cfg-issues" style="display:none"></div>
       <textarea id="cfgOut" class="cfg-box" readonly spellcheck="false"></textarea>
       <div class="m-actions">
         <button type="button" class="tb" data-act="copy">复制配置</button>
@@ -422,7 +427,18 @@ function openConfigGen() {
     const n = selDev.size;
     ov.querySelector('#cfgPickCnt').textContent = n === total ? `（全部 ${total} 台）` : `（${n} / ${total} 台）`;
   };
+  const issuesEl = ov.querySelector('#cfgIssues');
+  const renderIssues = () => {
+    const r = U.checkConfigs(state.nodes, state.links);
+    if (!r.issues.length) { issuesEl.style.display = 'none'; issuesEl.innerHTML = ''; return; }
+    issuesEl.style.display = '';
+    const errs = r.issues.filter(i => i.level === 'error');
+    const warns = r.issues.filter(i => i.level === 'warn');
+    issuesEl.innerHTML = '<div class="ci-head">生成前冲突检查：' + (errs.length ? '<b class="ci-err">' + errs.length + ' 处错误</b>' : '<b class="ci-ok">无错误</b>') + '，' + (warns.length ? '<b class="ci-warn">' + warns.length + ' 处警告</b>' : '无警告') + '</div>'
+      + [...errs, ...warns].map(i => '<div class="ci-item ' + (i.level === 'error' ? 'ci-err' : 'ci-warn') + '">' + U.escHtml(i.device) + '：' + U.escHtml(i.msg) + '</div>').join('');
+  };
   const gen = () => {
+    renderIssues();
     const vendor = ov.querySelector('#cfgVendor').value;
     ov.querySelector('#cfgOut').value = selDev.size
       ? U.generateConfigs(state.nodes, state.links, vendor, {
@@ -976,6 +992,7 @@ function openAutoBackup() {
       <div class="m-row"><label style="display:flex;align-items:center;gap:6px"><input id="abOn" type="checkbox" ${state.autoBackup.on ? 'checked' : ''}/> 启用自动备份</label></div>
       <div class="m-row"><label>间隔（分钟）</label><input id="abMin" type="number" min="1" max="120" value="${state.autoBackup.minutes}" style="width:90px"/></div>
       <div class="m-row"><label>保留最近份数</label><input id="abKeep" type="number" min="1" max="200" value="${Math.min(200, Math.max(1, state.autoBackup.keep))}" style="width:90px"/></div>
+      <div class="m-row" style="align-items:flex-start"><label>${window.topoBackup ? '备份目录' : ''}</label>${window.topoBackup ? `<div style="flex:1;min-width:0"><div id="abDir" title="备份文件存储位置" style="font:11.5px/1.5 Consolas,monospace;color:var(--text);background:var(--panel2);border:1px solid var(--border);border-radius:7px;padding:5px 8px;word-break:break-all;white-space:normal">读取中…</div><div class="frow-inline" style="margin-top:6px;gap:6px;display:flex"><button type="button" class="tb" data-act="chooseDir">更改目录…</button><button type="button" class="tb" data-act="resetDir" style="display:none">恢复默认</button></div></div>` : ''}</div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="cancel">取消</button>
         <button type="button" class="tb primary" data-act="save">保存</button>
@@ -986,6 +1003,37 @@ function openAutoBackup() {
   const close = () => ov.remove();
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.querySelector('[data-act=cancel]').onclick = close;
+
+  // 备份目录：读取 / 更改 / 恢复默认
+  const dirEl = ov.querySelector('#abDir');
+  const resetBtn = ov.querySelector('[data-act=resetDir]');
+  const renderDir = (dir, custom) => {
+    if (!dirEl) return;
+    dirEl.textContent = dir + (custom ? '（自定义）' : '（默认）');
+    if (resetBtn) resetBtn.style.display = custom ? '' : 'none';
+  };
+  if (window.topoBackup && dirEl) {
+    window.topoBackup.getDir().then((res) => {
+      if (res && res.ok) renderDir(res.dir, res.custom);
+      else if (dirEl) dirEl.textContent = '无法读取备份目录';
+    }).catch(() => { if (dirEl) dirEl.textContent = '无法读取备份目录'; });
+    const cBtn = ov.querySelector('[data-act=chooseDir]');
+    if (cBtn) cBtn.onclick = async () => {
+      try {
+        const res = await window.topoBackup.chooseDir();
+        if (res && res.ok) { renderDir(res.dir, true); toast('已更改备份目录'); }
+        else if (!res || !res.canceled) toast((res && res.error) || '未能更改备份目录');
+      } catch (e) { toast('更改备份目录失败'); }
+    };
+    if (resetBtn) resetBtn.onclick = async () => {
+      try {
+        const res = await window.topoBackup.resetDir();
+        if (res && res.ok) { renderDir(res.dir, false); toast('已恢复默认备份目录'); }
+        else toast((res && res.error) || '恢复默认失败');
+      } catch (e) { toast('恢复默认失败'); }
+    };
+  }
+
   ov.querySelector('[data-act=save]').onclick = () => {
     state.autoBackup.on = ov.querySelector('#abOn').checked;
     state.autoBackup.minutes = Math.min(120, Math.max(1, Number(ov.querySelector('#abMin').value || 10)));
@@ -1217,6 +1265,7 @@ function applyProjectData(data) {
   else renderer.fit();
   refreshAll();
   saveGraph();
+  reconcileMonitors();
   return true;
 }
 
@@ -1308,6 +1357,7 @@ function openBackupManager() {
     if (!res || !res.ok) { subEl.textContent = (res && res.error) || '读取备份列表失败'; listEl.innerHTML = ''; return; }
     const items = res.items || [];
     subEl.textContent = `共 ${items.length} 份备份 · 保留最近 ${Math.min(200, Math.max(1, state.autoBackup.keep || 30))} 份 · 内容有变化的自动备份按间隔写入`;
+    (async () => { try { const dr = await window.topoBackup.getDir(); if (dr && dr.ok && subEl.isConnected) subEl.textContent += '\n目录：' + dr.dir + (dr.custom ? '（自定义）' : ''); } catch (e) {} })();
     if (!items.length) {
       listEl.innerHTML = '<div class="vrow ok"><span class="v-ic">✓</span><span class="v-msg">暂无备份，点击「立即备份」创建第一份。</span></div>';
       return;
@@ -1459,8 +1509,11 @@ function addNodeAt(wx, wy) {
     fields: [
       { name: 'name', label: '设备名称', required: true, ph: '例如：核心交换机SW1' },
       { name: 'type', label: '设备类型', type: 'select', options: U.typeList().map(t => [t.key, t.label]) },
+      { name: 'vendor', label: '配置厂家', type: 'select', options: [['', '跟随全局（生成配置时选择）']].concat(cfgVendorOptionList()) },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: [] },
       { name: 'web', label: '管理Web页URL', ph: '例如 http://10.255.0.1（可选）' },
+      { name: 'hasVlanIf', label: '三层 VLAN 接口', type: 'checkbox', value: false, tip: '有 VLAN 接口（生成 interface vlan 及 IP 地址）', toggles: 'vlans' },
+      { name: 'vlans', label: 'VLAN 接口列表（VLAN 编号 + IP 地址）', type: 'vlans', value: [] },
       { name: 'note', label: '备注', type: 'textarea' }
     ],
     submit: '创建',
@@ -1470,9 +1523,11 @@ function addNodeAt(wx, wy) {
       const node = {
         id: U.uid('n'), name: v.name.trim(),
         type: v.type || U.typeOf(v.name),
+        vendor: v.vendor || '',
         x: wx - U.nodeWidthForName(v.name) / 2, y: wy - U.NODE_H / 2,
         w: U.nodeWidthForName(v.name), h: U.NODE_H,
-        note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1), web: v.web.trim()
+        note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1), web: v.web.trim(),
+        vlans: (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : []
       };
       node.h = U.nodeHeightFor(node);
       node.y = wy - node.h / 2;
@@ -1579,6 +1634,8 @@ function editNode(id) {
       { name: 'vendor', label: '配置厂家', type: 'select', options: [['', '跟随全局（生成配置时选择）']].concat(cfgVendorOptionList()), value: n.vendor || '' },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: U.nodeMgmts(n) },
       { name: 'web', label: '管理Web页URL', value: n.web || '', ph: '例如 http://10.255.0.1（可选）' },
+      { name: 'hasVlanIf', label: '三层 VLAN 接口', type: 'checkbox', value: !!(Array.isArray(n.vlans) && n.vlans.length), tip: '有 VLAN 接口（生成 interface vlan 及 IP 地址）', toggles: 'vlans' },
+      { name: 'vlans', label: 'VLAN 接口列表（VLAN 编号 + IP 地址）', type: 'vlans', value: Array.isArray(n.vlans) ? n.vlans : [] },
       { name: 'note', label: '备注', type: 'textarea', value: n.note }
     ],
     submit: '保存',
@@ -1597,6 +1654,7 @@ function editNode(id) {
       n.vendor = v.vendor || '';
       n.web = v.web.trim();
       n.note = v.note.trim();
+      n.vlans = (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : [];
       renderer.setData(state.nodes, state.links, state.texts);
       refreshAll();
       select('node', n.id);
@@ -1608,6 +1666,8 @@ function deleteNode(id) {
   const n = state.nodes.find(n => n.id === id);
   if (!n) return;
   pushUndo(); // 变更前快照
+  stopMonitorForNode(id); // 删除设备时停止其后台监控
+  delete state.monitorCfg[id]; saveMonitorCfg().catch(() => {});
   const removed = state.links.filter(l => l.a === id || l.b === id);
   state.links = state.links.filter(l => l.a !== id && l.b !== id);
   state.nodes = state.nodes.filter(x => x.id !== id);
@@ -1621,61 +1681,128 @@ function addLinkBetween(aId, bId) {
   const a = state.nodes.find(n => n.id === aId);
   const b = state.nodes.find(n => n.id === bId);
   if (!a || !b) return;
-  openModal({
-    title: '添加连线',
-    sub: `${a.name} ⇄ ${b.name}`,
-    fields: [
-      { name: 'aIf', label: `${a.name} 接口`, ph: '例如 GE0/0/1' },
-      { name: 'aIp', label: `${a.name} IP`, ph: '例如 10.0.0.1' },
-      { name: 'bIf', label: `${b.name} 接口`, ph: '例如 GE1/0/1' },
-      { name: 'bIp', label: `${b.name} IP`, ph: '例如 10.0.0.2' },
-      { name: 'bw', label: '带宽 (Mbps)', ph: '例如 1000（百兆=100 / 千兆=1000 / 万兆=10000）' },
-      { name: 'note', label: '备注', type: 'textarea' }
-    ],
-    submit: '创建',
-    onSubmit: (v) => {
-      pushUndo(); // 变更前快照
-      state.links.push({
-        id: U.uid('l'), a: aId, b: bId,
-        aIf: v.aIf.trim(), aIp: v.aIp.trim(),
-        bIf: v.bIf.trim(), bIp: v.bIp.trim(),
-        bw: U.normalizeBw(v.bw), note: v.note.trim()
-      });
-      renderer.setData(state.nodes, state.links, state.texts);
-      refreshAll();
-      select('link', state.links[state.links.length - 1].id);
-    }
-  });
+  openLinkDialog(a, b, null);
 }
 
 function editLink(id) {
-  const l = state.links.find(l => l.id === id);
+  const l = state.links.find(x => x.id === id);
   if (!l) return;
   const a = state.nodes.find(n => n.id === l.a);
   const b = state.nodes.find(n => n.id === l.b);
   if (!a || !b) return;
-  openModal({
-    title: '编辑连线',
-    sub: `${a.name} ⇄ ${b.name}`,
-    fields: [
-      { name: 'aIf', label: `${a.name} 接口`, value: l.aIf },
-      { name: 'aIp', label: `${a.name} IP`, value: l.aIp },
-      { name: 'bIf', label: `${b.name} 接口`, value: l.bIf },
-      { name: 'bIp', label: `${b.name} IP`, value: l.bIp },
-      { name: 'bw', label: '带宽 (Mbps)', value: U.normalizeBw(l.bw), ph: '例如 1000（百兆=100 / 千兆=1000 / 万兆=10000）' },
-      { name: 'note', label: '备注', type: 'textarea', value: l.note }
-    ],
-    submit: '保存',
-    onSubmit: (v) => {
-      pushUndo(); // 变更前快照
-      l.aIf = v.aIf.trim(); l.aIp = v.aIp.trim();
-      l.bIf = v.bIf.trim(); l.bIp = v.bIp.trim();
-      l.bw = U.normalizeBw(v.bw); l.note = v.note.trim();
-      renderer.setData(state.nodes, state.links, state.texts);
-      refreshAll();
-      select('link', l.id);
-    }
+  openLinkDialog(a, b, l);
+}
+
+/** 连线配置弹窗：每端可配置接口名、是否二层接口、VLAN 与 VLAN 模式（access/trunk/hybrid） */
+function openLinkDialog(a, b, l) {
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const vlanModeOpts = (v) => `<select class="lk-vlanmode">
+    <option value="access"${v === 'access' ? ' selected' : ''}>access（仅一个 VLAN）</option>
+    <option value="trunk"${v === 'trunk' ? ' selected' : ''}>trunk（透传）</option>
+    <option value="hybrid"${v === 'hybrid' ? ' selected' : ''}>hybrid（混杂）</option>
+  </select>`;
+  const sideHtml = (nm, p) => `
+    <div class="lk-side" data-side="${p}">
+      <div class="lk-side-title">${U.escHtml(nm)}</div>
+      <div class="frow-inline" style="display:flex;gap:8px">
+        <div class="frow" style="flex:1.4;margin-bottom:0"><label>接口</label><input class="lk-if" type="text" placeholder="例如 GE0/0/1" value="${U.escHtml(l ? l[p + 'If'] : '')}"/></div>
+        <div class="frow" style="flex:1.2;margin-bottom:0"><label>IP（三层）</label><input class="lk-ip" type="text" placeholder="二层无需填写" value="${U.escHtml(l ? l[p + 'Ip'] : '')}"/></div>
+        <div class="frow" style="flex:0.55;margin-bottom:0"><label>掩码位</label><input class="lk-mask" type="number" min="0" max="32" placeholder="24" value="${U.escHtml(l ? (l[p + 'Mask'] || '') : '')}"/></div>
+      </div>
+      <div class="lk-row2">
+        <label class="ck-field"><input class="lk-l2" type="checkbox"${l && l[p + 'L2'] ? ' checked' : ''}/><span>二层接口（不配置 IP）</span></label>
+        <label class="ck-field"><input class="lk-hasvlan" type="checkbox"${l && l[p + 'Vlan'] ? ' checked' : ''}/><span>有 VLAN</span></label>
+        <input class="lk-vlan" type="text" placeholder="VLAN 编号" value="${U.escHtml(l ? l[p + 'Vlan'] : '')}" style="width:92px"/>
+        ${vlanModeOpts(l ? l[p + 'VlanMode'] : 'access')}
+      </div>
+    </div>`;
+  ov.innerHTML = `
+    <div class="modal lk-dialog" role="dialog" style="width:600px">
+      <h3>${l ? '编辑连线' : '添加连线'}</h3>
+      <div class="m-sub">${U.escHtml(a.name)} ⇄ ${U.escHtml(b.name)}。二层接口生成配置时不配置 IP 地址，并按所选 VLAN 模式生成 VLAN 配置；三层接口配置 IP 地址。</div>
+      ${sideHtml(a.name, 'a')}
+      ${sideHtml(b.name, 'b')}
+      <div class="frow" style="margin-top:12px"><div class="frow-inline" style="display:flex;gap:8px">
+        <div class="frow" style="flex:1;margin-bottom:0"><label>带宽 (Mbps)</label><input class="lk-bw" type="text" placeholder="例如 1000" value="${U.escHtml(l ? U.normalizeBw(l.bw) : '')}"/></div>
+        <div class="frow" style="flex:2;margin-bottom:0"><label>备注</label><input class="lk-note" type="text" value="${U.escHtml(l ? l.note : '')}"/></div>
+      </div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">${l ? '保存' : '创建'}</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+
+  // 联动：二层 → 禁用 IP；有 VLAN → 启用 VLAN 值与模式
+  U.$$('.lk-side', ov).forEach(side => {
+    const l2 = side.querySelector('.lk-l2');
+    const ip = side.querySelector('.lk-ip');
+    const mask = side.querySelector('.lk-mask');
+    const hv = side.querySelector('.lk-hasvlan');
+    const vlan = side.querySelector('.lk-vlan');
+    const mode = side.querySelector('.lk-vlanmode');
+    const apply = () => {
+      ip.disabled = l2.checked;
+      ip.style.opacity = l2.checked ? '0.45' : '';
+      ip.placeholder = l2.checked ? '二层接口，不配置 IP' : '例如 10.0.0.1';
+      mask.disabled = l2.checked;
+      mask.style.opacity = l2.checked ? '0.45' : '';
+      vlan.disabled = !hv.checked;
+      mode.disabled = !hv.checked;
+      vlan.style.opacity = hv.checked ? '' : '0.45';
+      mode.style.opacity = hv.checked ? '' : '0.45';
+      if (!hv.checked) vlan.value = '';
+    };
+    l2.addEventListener('change', apply);
+    hv.addEventListener('change', apply);
+    apply();
   });
+
+  const save = () => {
+    const side = (p) => {
+      const s = ov.querySelector('[data-side="' + p + '"]');
+      const ifn = s.querySelector('.lk-if').value.trim();
+      const l2 = s.querySelector('.lk-l2').checked;
+      const hv = s.querySelector('.lk-hasvlan').checked;
+      const mask = parseInt(s.querySelector('.lk-mask').value, 10);
+      return {
+        ifn, ip: l2 ? '' : s.querySelector('.lk-ip').value.trim(),
+        mask: l2 ? 24 : (Number.isFinite(mask) && mask >= 0 && mask <= 32 ? mask : 24),
+        l2, vlan: hv ? s.querySelector('.lk-vlan').value.trim() : '',
+        vlanMode: hv ? s.querySelector('.lk-vlanmode').value : ''
+      };
+    };
+    const sa = side('a'), sb = side('b');
+    if (!sa.ifn || !sb.ifn) { toast('两端接口名不能为空'); return; }
+    pushUndo(); // 变更前快照
+    const base = {
+      aIf: sa.ifn, aIp: sa.ip, aL2: sa.l2, aVlan: sa.vlan, aVlanMode: sa.vlanMode, aMask: sa.mask,
+      bIf: sb.ifn, bIp: sb.ip, bL2: sb.l2, bVlan: sb.vlan, bVlanMode: sb.vlanMode, bMask: sb.mask,
+      bw: U.normalizeBw(ov.querySelector('.lk-bw').value),
+      note: ov.querySelector('.lk-note').value.trim()
+    };
+    let id;
+    if (l) {
+      Object.assign(l, base);
+      id = l.id;
+    } else {
+      id = U.uid('l');
+      state.links.push(Object.assign({ id, a: a.id, b: b.id }, base));
+    }
+    close();
+    renderer.setData(state.nodes, state.links, state.texts);
+    refreshAll();
+    select('link', id);
+  };
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=save]').onclick = save;
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('.lk-if').focus(); }, 250);
 }
 
 function deleteLink(id) {
@@ -1961,11 +2088,18 @@ function openModal(opts) {
     if (f.type === 'select') {
       ctrl = `<select name="${f.name}">${f.options.map(([v, lb]) =>
         `<option value="${v}" ${String(f.value) === String(v) ? 'selected' : ''}>${U.escHtml(lb)}</option>`).join('')}</select>`;
+    } else if (f.type === 'checkbox') {
+      ctrl = `<label class="ck-field"><input name="${f.name}" type="checkbox"${f.value ? ' checked' : ''}/><span>${U.escHtml(f.tip || '')}</span></label>`;
     } else if (f.type === 'mgmts') {
       const vals = Array.isArray(f.value) ? f.value : [];
       const rows = (vals.length ? vals : ['']).map(v =>
         `<div class="mgmt-row"><input type="text" value="${U.escHtml(v)}" placeholder="例如 10.255.0.1（第一个为默认）"/><button type="button" class="tb icon mgmt-del" title="删除该管理口">✕</button></div>`).join('');
       ctrl = `<div class="mgmt-list" data-field="${f.name}">${rows}<button type="button" class="tb mgmt-add" title="再增加一个管理口">＋ 增加管理口</button></div>`;
+    } else if (f.type === 'vlans') {
+      const rows = Array.isArray(f.value) && f.value.length ? f.value : [{ id: '', ip: '' }];
+      const vrows = rows.map(v =>
+        `<div class="vlan-row"><input class="vlan-id" type="text" value="${U.escHtml(String(v.id || ''))}" placeholder="VLAN 编号 如 10"/><input class="vlan-ip" type="text" value="${U.escHtml(String(v.ip || ''))}" placeholder="IP 如 192.168.10.1"/><button type="button" class="tb icon vlan-del" title="删除该 VLAN 接口">✕</button></div>`).join('');
+      ctrl = `<div class="vlan-ctrl" data-vlan-ctrl="${f.name}"><div class="vlan-list" data-field="${f.name}">${vrows}<button type="button" class="tb vlan-add" title="再增加一个 VLAN 接口">＋ 增加 VLAN 接口</button></div></div>`;
     } else if (f.type === 'textarea') {
       ctrl = `<textarea name="${f.name}" placeholder="${U.escHtml(f.ph || '')}">${U.escHtml(f.value || '')}</textarea>`;
     } else {
@@ -2003,12 +2137,45 @@ function openModal(opts) {
     list.querySelector('.mgmt-add').onclick = addRow;
     list.querySelectorAll('.mgmt-del').forEach(b => { b.onclick = () => b.closest('.mgmt-row').remove(); });
   });
+  // VLAN 接口列表（三层 SVI）：增加 / 删除行
+  U.$$('.vlan-list', form).forEach(list => {
+    const addRow = () => {
+      const d = document.createElement('div');
+      d.className = 'vlan-row';
+      d.innerHTML = '<input class="vlan-id" type="text" placeholder="VLAN 编号 如 10"/><input class="vlan-ip" type="text" placeholder="IP 如 192.168.10.1"/><button type="button" class="tb icon vlan-del" title="删除该 VLAN 接口">✕</button>';
+      d.querySelector('.vlan-del').onclick = () => d.remove();
+      list.insertBefore(d, list.querySelector('.vlan-add'));
+      d.querySelector('.vlan-id').focus();
+    };
+    list.querySelector('.vlan-add').onclick = addRow;
+    list.querySelectorAll('.vlan-del').forEach(b => { b.onclick = () => b.closest('.vlan-row').remove(); });
+  });
+  // 复选框联动：勾选时显示关联的字段（如「有VLAN接口」→ VLAN 接口列表）
+  fields.forEach(f => {
+    if (f.type === 'checkbox' && f.toggles) {
+      const cb = form.elements[f.name];
+      const ctrl = form.querySelector('[data-vlan-ctrl="' + f.toggles + '"]') || form.querySelector('[data-field="' + f.toggles + '"]')?.closest('.frow');
+      const apply = () => { if (ctrl) ctrl.style.display = cb.checked ? '' : 'none'; };
+      cb.addEventListener('change', apply);
+      apply();
+    }
+  });
   const grab = () => {
     const o = {};
     fields.forEach(f => {
       if (f.type === 'mgmts') {
         const list = form.querySelector('.mgmt-list[data-field="' + f.name + '"]');
         o[f.name] = list ? [...list.querySelectorAll('.mgmt-row input')].map(i => i.value.trim()).filter(Boolean) : [];
+        return;
+      }
+      if (f.type === 'vlans') {
+        const list = form.querySelector('.vlan-list[data-field="' + f.name + '"]');
+        o[f.name] = list ? [...list.querySelectorAll('.vlan-row')].map(r => ({ id: r.querySelector('.vlan-id').value.trim(), ip: r.querySelector('.vlan-ip').value.trim() })).filter(v => v.id && v.ip) : [];
+        return;
+      }
+      if (f.type === 'checkbox') {
+        const el2 = form.elements[f.name];
+        if (el2) o[f.name] = el2.checked;
         return;
       }
       const el2 = form.elements[f.name];
@@ -2090,6 +2257,7 @@ function openCtx(e, kind, id) {
       { ic: 'edit', label: '编辑设备…', act: () => editNode(id) },
       { ic: 'locate', label: '定位到视图', act: () => { select('node', id); centerOn('node', id); } },
       { ic: 'terminal', label: 'Web Shell（SSH/Telnet）…', act: () => openWebShell(id) },
+      { ic: 'pulse', label: '设备监控（静默采集）…', act: () => openMonitorConfig(id) },
       { ic: 'web', label: '打开设备管理页面', act: () => openDeviceWeb(id) },
       { sep: true },
       { ic: 'trash', label: '删除设备及连线', danger: true, act: () => deleteNode(id) }
@@ -2161,7 +2329,8 @@ function showTooltip(e, kind, id) {
       <div class="tt-r">类型：${U.escHtml(t.label)} · 连线 ${links.length} 条</div>
       ${U.nodeMgmts(n).length ? `<div class="tt-r">管理地址：${U.escHtml(U.nodeMgmts(n).join('、'))}</div>` : ''}
       ${n.web ? `<div class="tt-r">管理Web页：${U.escHtml(n.web)}</div>` : ''}
-      ${n.note ? `<div class="tt-r">备注：${U.escHtml(n.note)}</div>` : ''}`;
+      ${n.note ? `<div class="tt-r">备注：${U.escHtml(n.note)}</div>` : ''}
+      ${state.monitorStatus[id] ? `<div class="tt-r">后台监控：${U.escHtml(state.monitorStatus[id].text || state.monitorStatus[id].state)}</div>` : ''}`;
     posTooltip(e, html);
   } else if (kind === 'link') {
     const l = state.links.find(x => x.id === id);
@@ -2270,6 +2439,7 @@ function renderSelCard() {
       ${U.nodeMgmts(n).length ? `<div class="sc-row">管理地址：<b>${U.escHtml(U.nodeMgmts(n).join('、'))}</b></div>` : ''}
       ${n.web ? `<div class="sc-row">管理Web页：<b>${U.escHtml(n.web)}</b></div>` : ''}
       ${n.note ? `<div class="sc-row">备注：<b>${U.escHtml(n.note)}</b></div>` : ''}
+      ${state.monitorStatus[id] ? `<div class="sc-row">后台监控：<b>${U.escHtml(state.monitorStatus[id].text || state.monitorStatus[id].state)}</b></div>` : ''}
       <div class="sc-actions">
         <button class="tb" data-act="edit">编辑</button>
         <button class="tb" data-act="locate">定位</button>
@@ -2331,6 +2501,7 @@ function refreshPanel() {
       return `<div class="pitem ${state.sel.kind === 'node' && state.sel.id === n.id ? 'sel' : ''}" data-kind="node" data-id="${n.id}">
         <span class="dot" style="background:${t.c1}"></span>
         <span class="nm">${U.escHtml(n.name)}<span class="sub">${U.escHtml(t.label)}${n.note ? ' · ' + U.escHtml(n.note) : ''}</span></span>
+        ${monitorBadgeHtml(n.id)}
         <span class="cnt2">${cnt} 线</span>
       </div>`;
     }).join('');
@@ -2451,6 +2622,12 @@ function restoreGraph() {
     else renderer.fit();
     updateUndoBtns();
     refreshAll();
+    // 先解密加载持久化的监控配置，再对齐主进程状态并自启动已启用的监控
+    loadMonitorCfg().then((saved) => {
+      if (saved && typeof saved === 'object' && Object.keys(saved).length) state.monitorCfg = saved;
+      syncMonitorStatus();  // 对齐主进程监控运行状态
+      reconcileMonitors(); // 自启动已启用的监控
+    }).catch(() => { syncMonitorStatus(); reconcileMonitors(); });
     return true;
   } catch (e) { return false; }
 }
@@ -2652,6 +2829,8 @@ function openHelp() {
     <p>设备编辑中配置「管理Web页URL」，右键设备「打开设备管理页面」在<b>独立窗口</b>以<b>多标签</b>打开；支持地址栏 / 后退 / 前进 / 刷新；HTTPS 自签名 / 无效证书会弹出<b>安全告警</b>，手动确认后可继续访问并记住该站点。</p>
     <h4>⑨ 保存 / 导出</h4>
     <p><b>工程文件 .nettopo</b>：保存 / 打开含位置、视图、自定义类型、多管理口的完整工程；<b>CSV / Excel</b>：把修改后的拓扑保存回连线关系表（多管理口逗号分隔，可再导入）；<b>PDF</b>：矢量高清交付；<b>PNG / SVG</b>：图片导出与复制到剪贴板；<b>Visio</b>：.vsdx 原生格式可在 Visio 继续编辑；<b>设计报告</b>：自包含 HTML（设备 / IP / 子网 / 链路 / 配置）；<b>IP 规划清单</b>：Excel 导出含对端接口 IP；<b>生成设备配置</b>：华为 / 思科及自定义模板（{name} {mgmt} {iface} {ip} {peer} {vlan}…）。</p>
+    <h4>⑩ 后台监控（桌面版）</h4>
+    <p>右键设备「设备监控（静默采集）…」配置协议 / 管理口 / 账号 / 命令与循环间隔后，即可在后台静默通过 SSH/Telnet 定时采集命令输出，<b>全部输出连同时间戳写入本地日志</b>。每个管理口可单独开启<b>在线探测</b>（TCP/ICMP，离线变红并弹通知）、<b>输出关键字告警</b>（正则匹配即告警）与<b>配置自动备份</b>（定时抓取配置、保留历史、可对比差异）。日志与备份可在「监控日志…」与「配置备份…」中浏览（<userData>/monitor-logs/设备名/日期/…），日志按日期自动归档；正在监控的设备在<b>右侧设备列表显示绿色标记</b>（连接失败显示琥珀/红色）。断线自动重连，可在弹窗打开日志目录查看。</p>
     <h4>快捷键</h4>
     <table>
       <tr><td>滚轮</td><td>缩放</td></tr>
@@ -2881,6 +3060,80 @@ function wire() {
     if (e.key === '+' || e.key === '=') { renderer.zoomBy(1.25); return; }
     if (e.key === '-') { renderer.zoomBy(0.8); return; }
   });
+
+  // ---- 后台监控实时状态（侧栏标记；任务 key 为 deviceId@host，按设备聚合） ----
+  if (window.topoMonitor && window.topoMonitor.onStatus) {
+    window.topoMonitor.onStatus((info) => {
+      if (!info || !info.key) return;
+      const did = info.deviceId || deviceIdFromMonitorKey(info.key);
+      const host = info.host || '';
+      if (info.state === 'stopped') {
+        const ms = state.monitorStatus[did];
+        if (ms && ms.perHost) {
+          delete ms.perHost[host];
+          ms.state = aggregateMonitorState(ms.perHost);
+          ms.text = aggregateMonitorText(ms.perHost);
+          if (!ms.state || !Object.keys(ms.perHost).length) delete state.monitorStatus[did];
+        } else delete state.monitorStatus[did];
+      } else {
+        if (!state.monitorStatus[did]) state.monitorStatus[did] = { state: null, text: '', perHost: {} };
+        const oldHost = state.monitorStatus[did].perHost[host] || {};
+        state.monitorStatus[did].perHost[host] = Object.assign({}, oldHost, { state: info.state, text: info.text || '', since: info.since, probeOk: info.probeOk, alert: info.alert, backup: info.backup });
+        state.monitorStatus[did].state = aggregateMonitorState(state.monitorStatus[did].perHost);
+        state.monitorStatus[did].text = aggregateMonitorText(state.monitorStatus[did].perHost);
+      }
+      refreshPanel();
+      renderSelCard();
+    });
+  }
+  // 探测/告警/备份状态（独立通道，合并进 perHost 明细）
+  if (window.topoMonitor && window.topoMonitor.onProbe) {
+    window.topoMonitor.onProbe((info) => {
+      if (!info || !info.key) return;
+      const did = info.deviceId || deviceIdFromMonitorKey(info.key);
+      const host = info.host || '';
+      const ms = state.monitorStatus[did];
+      if (!ms || !ms.perHost || !ms.perHost[host]) return;
+      ms.perHost[host].probeOk = info.ok;
+      ms.perHost[host].probeLatency = info.latencyMs;
+      ms.perHost[host].probeFailSince = info.failSince;
+      ms.state = aggregateMonitorState(ms.perHost);
+      ms.text = aggregateMonitorText(ms.perHost);
+      refreshPanel();
+      renderSelCard();
+    });
+  }
+  if (window.topoMonitor && window.topoMonitor.onAlert) {
+    window.topoMonitor.onAlert((info) => {
+      if (!info || !info.key) return;
+      const did = info.deviceId || deviceIdFromMonitorKey(info.key);
+      const host = info.host || '';
+      const ms = state.monitorStatus[did];
+      if (!ms || !ms.perHost || !ms.perHost[host]) return;
+      if (info.matched) ms.perHost[host].alert = info.pattern || true;
+      else delete ms.perHost[host].alert;
+      ms.state = aggregateMonitorState(ms.perHost);
+      ms.text = aggregateMonitorText(ms.perHost);
+      refreshPanel();
+      renderSelCard();
+    });
+  }
+  if (window.topoMonitor && window.topoMonitor.onBackup) {
+    window.topoMonitor.onBackup((info) => {
+      if (!info || !info.key) return;
+      const did = info.deviceId || deviceIdFromMonitorKey(info.key);
+      const host = info.host || '';
+      const ms = state.monitorStatus[did];
+      if (!ms || !ms.perHost || !ms.perHost[host]) return;
+      if (info.ok) {
+        ms.perHost[host].backup = { name: info.name, changed: !!info.changed, first: !!info.first, added: info.added, removed: info.removed, error: null };
+      } else {
+        ms.perHost[host].backup = { name: null, changed: false, error: info.error || '备份失败' };
+      }
+      refreshPanel();
+      renderSelCard();
+    });
+  }
 }
 
 /* 诊断条（F2 调试）已移除：常驻 setInterval 与全局捕获监听不再随生产包发布；
@@ -2900,7 +3153,839 @@ function openDeviceWeb(id) {
   }).catch(() => toast('无法打开管理页面'));
 }
 
-/* ================= Web Shell（SSH / Telnet 连接设备管理口，独立窗口多标签） ================= */
+/* ================= 设备后台静默监控（Telnet / SSH 定时采集，桌面版） ================= */
+const MON_CFG_KEY = 'nettopo.monitorCfg';
+const SECRET_PREFIX = 'enc:';
+
+/** 密码等机密字段经主进程 safeStorage（Windows DPAPI 等）加密后落盘；无桥/不可用时密码不持久化 */
+function secureBridge() {
+  return (window.topoSecure && window.topoSecure.encryptSecret && window.topoSecure.decryptSecret) ? window.topoSecure : null;
+}
+async function saveMonitorCfg() {
+  try {
+    const sec = secureBridge();
+    const cfg = JSON.parse(JSON.stringify(state.monitorCfg)); // 深拷贝：不改写内存中的明文
+    for (const k of Object.keys(cfg)) {
+      const hosts = (cfg[k] && Array.isArray(cfg[k].hosts)) ? cfg[k].hosts : [];
+      for (const h of hosts) {
+        if (!h || typeof h !== 'object' || !h.password) { if (h && typeof h === 'object') h.password = ''; continue; }
+        if (sec) {
+          try {
+            const r = await sec.encryptSecret(h.password);
+            h.password = (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : ''; // 加密失败则密码不落盘
+          } catch (e) { h.password = ''; }
+        } else {
+          h.password = ''; // 无加密能力（如浏览器版）：密码仅本次运行内存
+        }
+      }
+    }
+    localStorage.setItem(MON_CFG_KEY, JSON.stringify(cfg));
+  } catch (e) { /* 存储超限忽略 */ }
+}
+async function loadMonitorCfg() {
+  try {
+    const raw = localStorage.getItem(MON_CFG_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    if (!obj || typeof obj !== 'object') return {};
+    const sec = secureBridge();
+    for (const k of Object.keys(obj)) {
+      const hosts = (obj[k] && Array.isArray(obj[k].hosts)) ? obj[k].hosts : [];
+      for (const h of hosts) {
+        if (h && typeof h === 'object' && typeof h.password === 'string' && h.password.indexOf(SECRET_PREFIX) === 0) {
+          if (sec) {
+            try {
+              const r = await sec.decryptSecret(h.password.slice(SECRET_PREFIX.length));
+              h.password = (r && r.ok) ? r.text : '';
+            } catch (e) { h.password = ''; }
+          } else h.password = '';
+        }
+        // 旧版明文残留：下次保存时统一加密；本轮不落盘新明文
+      }
+    }
+    return obj;
+  } catch (e) { return {}; }
+}
+
+/** 返回 topoMonitor 桥；缺失（浏览器版）时提示并返回 null */
+function monitorBridge() {
+  if (window.topoMonitor && window.topoMonitor.start) return window.topoMonitor;
+  toast('后台监控需要桌面版 NetTopo（Electron）环境');
+  return null;
+}
+
+/** 侧栏监控状态标记 HTML（无状态返回空串） */
+/** 监控任务 key：nodeId@host（同一设备多个管理口各一个任务） */
+function monitorKey(nodeId, host) { return String(nodeId) + '@' + String(host); }
+
+/** 从 hostKey 解析设备 id */
+function deviceIdFromMonitorKey(key) {
+  const i = String(key || '').lastIndexOf('@');
+  return i > 0 ? key.slice(0, i) : String(key || '');
+}
+
+/** 聚合同一设备多个管理口的监控状态：任一错误→error；否则任一重连/连接中→对应态；全部监控中→monitoring */
+function aggregateMonitorState(perHost) {
+  const states = Object.values(perHost || {});
+  if (!states.length) return null;
+  if (states.some(s => s && s.alert)) return 'alert';
+  if (states.some(s => s && s.probeOk === false)) return 'offline';
+  if (states.some(s => s && s.state === 'error')) return 'error';
+  if (states.some(s => s && s.state === 'reconnecting')) return 'reconnecting';
+  if (states.some(s => s && s.state === 'connecting')) return 'connecting';
+  if (states.every(s => s && s.state === 'monitoring')) return 'monitoring';
+  return 'connecting';
+}
+/** 聚合文本：各管理口状态摘要 */
+function aggregateMonitorText(perHost) {
+  const arr = Object.entries(perHost || {});
+  if (!arr.length) return '';
+  return arr.map(([h, s]) => {
+    let t = h + '：' + (s ? (s.text || s.state) : '未启动');
+    if (s && s.alert) t += '【告警:' + s.alert + '】';
+    else if (s && s.probeOk === false) t += '【探测离线】';
+    if (s && s.backup && s.backup.error) t += '【备份失败】';
+    else if (s && s.backup && s.backup.name) t += '【备份:' + (s.backup.changed ? '有变化' : '一致') + '】';
+    return t;
+  }).join('；');
+}
+
+/** 管理地址行：host + 各自连接方式（协议/端口/用户名/密码）+ 各自执行命令 + 仅读取开关 */
+function monitorRow(host, saved) {
+  saved = saved || {};
+  return {
+    host: String(host == null ? '' : host).trim(),
+    protocol: saved.protocol || 'ssh',
+    port: saved.port != null ? String(saved.port) : '',
+    username: saved.username || 'admin',
+    password: saved.password || '',
+    commands: Array.isArray(saved.commands) ? saved.commands.slice() : [],
+    readOnly: !!saved.readOnly,
+    probeEnabled: !!saved.probeEnabled,
+    probeType: saved.probeType === 'icmp' ? 'icmp' : 'tcp',
+    probeIntervalSec: saved.probeIntervalSec != null ? saved.probeIntervalSec : 30,
+    probePort: saved.probePort != null ? saved.probePort : '',
+    alerts: Array.isArray(saved.alerts) ? saved.alerts.slice() : [],
+    backupEnabled: !!saved.backupEnabled,
+    backupCommand: saved.backupCommand || 'display current-configuration',
+    backupIntervalSec: saved.backupIntervalSec != null ? saved.backupIntervalSec : 3600,
+    backupWaitSec: saved.backupWaitSec != null ? saved.backupWaitSec : 3
+  };
+}
+
+/** 规范化 hosts：兼容字符串数组（用共享连接方式/命令补全）与旧单 host，统一为行对象数组 */
+function normalizeMonitorHosts(cfg) {
+  cfg = cfg || {};
+  const fill = (h) => {
+    if (typeof h === 'string') return monitorRow(h, cfg);
+    if (h && typeof h === 'object' && String(h.host || '').trim()) {
+      return {
+        host: String(h.host).trim(),
+        protocol: h.protocol || 'ssh',
+        port: h.port != null ? String(h.port) : '',
+        username: h.username || 'admin',
+        password: h.password || '',
+        readOnly: !!h.readOnly,
+        probeEnabled: !!h.probeEnabled,
+        probeType: h.probeType === 'icmp' ? 'icmp' : 'tcp',
+        probeIntervalSec: h.probeIntervalSec != null ? h.probeIntervalSec : 30,
+        probePort: h.probePort != null ? h.probePort : '',
+        alerts: Array.isArray(h.alerts) ? h.alerts.slice() : [],
+        backupEnabled: !!h.backupEnabled,
+        backupCommand: h.backupCommand || 'display current-configuration',
+        backupIntervalSec: h.backupIntervalSec != null ? h.backupIntervalSec : 3600,
+        backupWaitSec: h.backupWaitSec != null ? h.backupWaitSec : 3,
+        // 兼容旧配置：行内无 commands 时回退到设备级共享命令
+        commands: Array.isArray(h.commands) ? h.commands.slice() : (Array.isArray(cfg.commands) ? cfg.commands.slice() : [])
+      };
+    }
+    return null;
+  };
+  if (Array.isArray(cfg.hosts) && cfg.hosts.length) return cfg.hosts.map(fill).filter(Boolean);
+  if (cfg.host && String(cfg.host).trim()) return [monitorRow(cfg.host, cfg)];
+  return [];
+}
+
+/** 监控配置弹窗预填：已保存的 hosts 优先，否则用设备全部管理地址，否则留空一行 */
+function monitorHostsForPrefill(saved, mgmts) {
+  const rows = normalizeMonitorHosts(saved);
+  if (rows.length) return rows;
+  const all = (mgmts || []).map(h => String(h).trim()).filter(Boolean);
+  return all.length ? all.map(h => monitorRow(h, saved)) : [monitorRow('', saved)];
+}
+
+function monitorBadgeHtml(nodeId) {
+  const ms = state.monitorStatus[nodeId];
+  if (!ms) return '';
+  if (ms.state === 'alert') return '<span class="mon-badge alert" title="' + U.escHtml(ms.text || '输出匹配告警关键字') + '"></span>';
+  if (ms.state === 'offline') return '<span class="mon-badge off" title="' + U.escHtml(ms.text || '设备探测离线') + '"></span>';
+  if (ms.state === 'monitoring') return '<span class="mon-badge ok" title="' + U.escHtml(ms.text || '正在监控') + '"></span>';
+  if (ms.state === 'connecting') return '<span class="mon-badge pending" title="' + U.escHtml(ms.text || '连接中') + '"></span>';
+  if (ms.state === 'reconnecting') return '<span class="mon-badge pending" title="' + U.escHtml(ms.text || '重连中') + '"></span>';
+  if (ms.state === 'error') return '<span class="mon-badge err" title="' + U.escHtml(ms.text || '监控异常') + '"></span>';
+  return '';
+}
+
+/** 应用监控配置并同步主进程启停（每个管理地址独立连接方式：协议/端口/账号/密码） */
+async function applyMonitor(id, cfg, enabled) {
+  const node = state.nodes.find(n => n.id === id);
+  const bridge = monitorBridge();
+  if (enabled && !bridge) return;
+  const hosts = normalizeMonitorHosts(cfg);
+  try {
+    if (enabled) {
+      // 先校验后持久化：无效配置不落盘
+      if (!hosts.length) { toast('请至少填写一个管理地址'); return false; }
+      if (hosts.some(r => !r.readOnly && !(Array.isArray(r.commands) && r.commands.length))) { toast('每个非「仅读取」的管理地址至少填写一条执行命令'); return false; }
+      const cleanCfg = {
+        hosts,
+        intervalSec: cfg.intervalSec,
+        cmdDelayMs: cfg.cmdDelayMs
+      };
+      state.monitorCfg[id] = Object.assign({}, cleanCfg, { enabled: true });
+      saveMonitorCfg().catch(() => {});
+      const perHost = {};
+      for (const r of hosts) perHost[r.host] = { state: 'connecting', text: '启动监控…', since: Date.now() };
+      state.monitorStatus[id] = { state: 'connecting', text: aggregateMonitorText(perHost), perHost };
+      refreshPanel();
+      let allOk = true;
+      for (const r of hosts) {
+        // 复用 Web Shell 已信任的指纹（若此前通过 Web Shell 信任过该主机，则直接严格校验）
+        let expectFp = '';
+        try {
+          const fp = localStorage.getItem('topoShellFp:' + r.host);
+          if (fp && fp.indexOf('SHA256:') === 0) expectFp = fp;
+        } catch (e) { expectFp = ''; }
+        const res = await bridge.start(Object.assign(
+          { key: monitorKey(id, r.host), deviceId: id, name: node ? node.name : '', expectFp, host: r.host },
+          { protocol: r.protocol, port: r.port, username: r.username, password: r.password },
+          { commands: r.readOnly ? [] : r.commands, readOnly: !!r.readOnly, intervalSec: cleanCfg.intervalSec, cmdDelayMs: cleanCfg.cmdDelayMs },
+          { probe: { enabled: r.probeEnabled && !r.readOnly, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
+          { alerts: r.alerts },
+          { backup: { enabled: r.backupEnabled && !r.readOnly, command: r.backupCommand, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 3) * 1000) } }
+        ));
+        if (!res || !res.ok) {
+          perHost[r.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
+          allOk = false;
+        }
+      }
+      state.monitorStatus[id] = { state: aggregateMonitorState(perHost) || 'connecting', text: aggregateMonitorText(perHost), perHost };
+      refreshPanel();
+      if (allOk) toast('已启动后台监控：' + (node ? node.name : id) + '（' + hosts.length + ' 个管理口）');
+      else toast('部分管理口启动失败：' + (node ? node.name : id));
+      return allOk;
+    } else {
+      // 停止：仅翻转启用位，不覆盖已保存的 hosts/密码（调用方可能传入脱敏后的配置）
+      if (state.monitorCfg[id]) {
+        state.monitorCfg[id].enabled = false;
+        saveMonitorCfg().catch(() => {});
+      } else {
+        state.monitorCfg[id] = { hosts: [], enabled: false };
+      }
+      if (bridge) bridge.stop(id); // deviceId 作用域：停止该设备全部管理口任务
+      delete state.monitorStatus[id];
+      refreshPanel();
+      toast('已停止后台监控');
+      return true;
+    }
+  } catch (err) {
+    toast('监控操作失败：' + String(err && err.message || err));
+    return false;
+  }
+}
+
+function stopMonitorForNode(id) {
+  const bridge = monitorBridge();
+  if (bridge) bridge.stop(id);
+  delete state.monitorStatus[id];
+}
+
+/** 让启用了监控的设备与主进程运行状态对齐：期望集合 = deviceId@host，停止多余任务、启动缺失任务 */
+async function reconcileMonitors() {
+  const bridge = monitorBridge();
+  if (!bridge) return;
+  // 简单互斥：fire-and-forget 的多处调用（loadGraph/loadProject/restoreGraph）并发时防止重复 start
+  if (reconcileMonitors._busy) return;
+  reconcileMonitors._busy = true;
+  try {
+  const validIds = new Set(state.nodes.map(n => n.id));
+  // 清理已不存在节点的配置
+  let changed = false;
+  for (const k of Object.keys(state.monitorCfg)) {
+    if (!validIds.has(k)) { delete state.monitorCfg[k]; changed = true; }
+  }
+  if (changed) saveMonitorCfg().catch(() => {});
+  // 期望任务集合：hostKey -> {cfg, row, node}
+  const desired = new Map();
+  for (const n of state.nodes) {
+    const cfg = state.monitorCfg[n.id];
+    if (!cfg || !cfg.enabled) continue;
+    for (const r of normalizeMonitorHosts(cfg)) desired.set(monitorKey(n.id, r.host), { cfg, row: r, node: n });
+  }
+  // 当前主进程任务
+  let current = [];
+  try { const res = await bridge.status(); current = (res && res.ok && Array.isArray(res.items)) ? res.items : []; } catch (e) {}
+  const currentByKey = new Map(current.map(it => [it.key, it]));
+  // 停止不在期望集合中的任务
+  for (const it of current) {
+    if (!desired.has(it.key)) { try { await bridge.stop(it.key); } catch (e) {} }
+  }
+  // 启动缺失任务，并构造每设备聚合状态（每个地址用各自连接方式）
+  const perDev = {};
+  for (const [hk, { cfg, row, node }] of desired) {
+    if (!perDev[node.id]) perDev[node.id] = {};
+    const cur = currentByKey.get(hk);
+    if (cur && (cur.state === 'monitoring' || cur.state === 'connecting' || cur.state === 'reconnecting')) {
+      perDev[node.id][row.host] = { state: cur.state, text: cur.text, since: cur.since };
+      continue;
+    }
+    perDev[node.id][row.host] = { state: 'connecting', text: '启动监控…', since: Date.now() };
+    try {
+      let expectFp = '';
+      try { const fp = localStorage.getItem('topoShellFp:' + row.host); if (fp && fp.indexOf('SHA256:') === 0) expectFp = fp; } catch (e) {}
+      const res = await bridge.start(Object.assign(
+        { key: hk, deviceId: node.id, name: node.name, expectFp, host: row.host },
+        { protocol: row.protocol, port: row.port, username: row.username, password: row.password },
+        { commands: row.readOnly ? [] : (Array.isArray(row.commands) ? row.commands : []), readOnly: !!row.readOnly, intervalSec: cfg.intervalSec, cmdDelayMs: cfg.cmdDelayMs },
+        { probe: { enabled: row.probeEnabled && !row.readOnly, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
+        { alerts: row.alerts },
+        { backup: { enabled: row.backupEnabled && !row.readOnly, command: row.backupCommand, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 3) * 1000) } }
+      ));
+      if (!res || !res.ok) perDev[node.id][row.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
+    } catch (err) {
+      perDev[node.id][row.host] = { state: 'error', text: String(err && err.message || err), since: Date.now() };
+    }
+  }
+  for (const n of state.nodes) {
+    if (perDev[n.id]) {
+      state.monitorStatus[n.id] = { state: aggregateMonitorState(perDev[n.id]) || 'connecting', text: aggregateMonitorText(perDev[n.id]), perHost: perDev[n.id] };
+    }
+  }
+  refreshPanel();
+  } finally {
+    reconcileMonitors._busy = false;
+  }
+}
+
+/** 从主进程拉取当前运行状态并刷新侧栏（按设备聚合成 perHost 明细） */
+async function syncMonitorStatus() {
+  const bridge = monitorBridge();
+  if (!bridge) return;
+  try {
+    const res = await bridge.status();
+    const items = (res && res.ok && Array.isArray(res.items)) ? res.items : [];
+    const perDev = {};
+    for (const it of items) {
+      const did = it.deviceId || deviceIdFromMonitorKey(it.key);
+      const host = it.host || '';
+      if (!perDev[did]) perDev[did] = {};
+      perDev[did][host] = { state: it.state, text: it.text, since: it.since, probeOk: it.probeOk, alert: it.alert, backup: it.backup };
+    }
+    const next = {};
+    for (const [did, perHost] of Object.entries(perDev)) {
+      next[did] = { state: aggregateMonitorState(perHost) || 'connecting', text: aggregateMonitorText(perHost), perHost };
+    }
+    state.monitorStatus = next;
+    refreshPanel();
+  } catch (e) { /* 忽略 */ }
+}
+
+/* ---------------- 监控配置弹窗 ---------------- */
+function openMonitorConfig(id) {
+  const n = state.nodes.find(x => x.id === id);
+  if (!n) return;
+  const bridge = monitorBridge();
+  if (!bridge) return;
+  const saved = state.monitorCfg[id] || {};
+  const mgmts = U.nodeMgmts(n);
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ws-dialog mon-dialog" role="dialog" style="width:640px">
+      <h3>设备后台监控 — ${U.escHtml(n.name)}</h3>
+      <div class="m-sub">通过 Telnet 或 SSH 在后台静默连接设备，按循环周期定时执行命令，全部输出连同时间戳保存到本地日志（按日期自动归档）。每个管理地址可单独开启<b>在线探测</b>（TCP/ICMP，离线告警）、<b>输出关键字告警</b>与<b>配置自动备份</b>（定时抓取配置并保留历史，可对比差异）。</div>
+      <div class="frow">
+        <label>管理地址与执行配置 <span style="color:var(--muted);font-weight:400">（每个地址可单独设置协议 / 端口 / 账号 / 密码 / 执行命令）</span></label>
+        <div id="monHostList" class="mon-host-list"></div>
+        <button type="button" class="tb mon-host-add" data-act="addHost">＋ 增加管理地址</button>
+      </div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>循环间隔（秒，每轮命令之间）</label><input id="monInterval" type="number" min="1" value="${U.escHtml(saved.intervalSec != null ? saved.intervalSec : 300)}"/></div>
+        <div class="frow"><label>命令间隔（秒，一轮内命令之间）</label><input id="monCmdDelay" type="number" min="0" step="0.1" value="${U.escHtml(saved.cmdDelayMs != null ? saved.cmdDelayMs / 1000 : 1)}"/></div>
+      </div></div>
+      <div class="frow" style="display:flex;align-items:center;gap:16px">
+        <label style="display:flex;align-items:center;gap:6px;margin:0"><input id="monEnable" type="checkbox" style="width:auto"${saved.enabled ? ' checked' : ''}/>启用后台监控</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0" title="设备离线 / 输出匹配告警关键字 / 备份失败时弹出系统通知"><input id="monNotify" type="checkbox" style="width:auto" checked/>离线/告警/备份失败时弹系统通知</label>
+      </div>
+      <div id="monStatus" class="m-sub" style="margin-top:4px"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb" data-act="browse" style="display:${bridge.logsTree ? '' : 'none'}">日志浏览器…</button>
+        <button type="button" class="tb" data-act="bk" style="display:${window.topoConfigBackup ? '' : 'none'}">配置备份…</button>
+        <button type="button" class="tb" data-act="logs" style="display:${bridge.openLogs ? '' : 'none'}">打开日志目录</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+
+  // ---- 管理地址行列表（每行独立协议/端口/账号/密码） ----
+  const listEl = ov.querySelector('#monHostList');
+  const protoOpts = '<option value="ssh">SSH</option><option value="telnet">Telnet</option>';
+  const rowHtml = (r) => `
+    <div class="mon-host-row">
+      <input class="mh-host" type="text" placeholder="管理地址" value="${U.escHtml(r.host)}" autocomplete="off"/>
+      <select class="mh-proto">${protoOpts.replace('value="ssh"', 'value="ssh"' + (r.protocol === 'ssh' ? ' selected' : '')).replace('value="telnet"', 'value="telnet"' + (r.protocol === 'telnet' ? ' selected' : ''))}</select>
+      <input class="mh-port" type="number" min="1" max="65535" placeholder="端口" value="${U.escHtml(r.port)}"/>
+      <input class="mh-user" type="text" placeholder="用户名" value="${U.escHtml(r.username)}" autocomplete="off"/>
+      <input class="mh-pass" type="password" placeholder="密码" value="${U.escHtml(r.password)}" autocomplete="new-password"/>
+      <button type="button" class="tb mh-cmd-btn" title="设置该地址的执行命令">命令${Array.isArray(r.commands) && r.commands.length ? `（${r.commands.length}）` : ''}</button>
+      <label class="mh-ro" title="仅读取模式：连接后不执行命令，只记录设备主动输出的内容"><input type="checkbox" class="mh-ro-cb"${r.readOnly ? ' checked' : ''}/>仅读取</label>
+      <button type="button" class="tb icon mh-del" title="删除该管理地址">✕</button>
+      <div class="mh-cmds-wrap" hidden><textarea class="mh-cmds" rows="3" placeholder="该地址的执行命令（每行一条）：&#10;display version&#10;display current-configuration">${U.escHtml(Array.isArray(r.commands) ? r.commands.join('\n') : '')}</textarea></div>
+      <div class="mh-ext">
+        <label class="mh-pr" title="按间隔探测该地址连通性，失败时侧栏变红并弹通知"><input type="checkbox" class="mh-pr-cb"${r.probeEnabled ? ' checked' : ''}/>在线探测</label>
+        <select class="mh-pr-type" title="探测方式"><option value="tcp"${r.probeType !== 'icmp' ? ' selected' : ''}>TCP</option><option value="icmp"${r.probeType === 'icmp' ? ' selected' : ''}>ICMP</option></select>
+        <input class="mh-pr-int" type="number" min="5" max="3600" title="探测间隔（秒）" value="${U.escHtml(r.probeIntervalSec)}"/><span class="mh-unit">秒</span>
+        <input class="mh-pr-port" type="number" min="1" max="65535" placeholder="端口(默认管理口)" title="探测目标端口，留空 = 管理端口" value="${U.escHtml(r.probePort)}"/>
+        <button type="button" class="tb mh-alert-btn" title="输出匹配这些关键字时告警">告警${Array.isArray(r.alerts) && r.alerts.length ? '（' + r.alerts.length + '）' : ''}</button>
+        <label class="mh-bk" title="定时抓取配置保存为备份，保留历史并可对比差异"><input type="checkbox" class="mh-bk-cb"${r.backupEnabled ? ' checked' : ''}/>自动备份</label>
+        <input class="mh-bk-cmd" type="text" placeholder="备份命令" value="${U.escHtml(r.backupCommand)}" title="抓取配置的命令"/>
+        <input class="mh-bk-int" type="number" min="1" max="1440" title="备份间隔（分钟）" value="${U.escHtml(Math.round((r.backupIntervalSec || 3600) / 60))}"/><span class="mh-unit">分钟</span>
+        <div class="mh-alerts-wrap" hidden><textarea class="mh-alerts" rows="2" placeholder="每行一个正则表达式，输出匹配即告警；可写：error|down # 接口异常">${U.escHtml(Array.isArray(r.alerts) ? r.alerts.map(a => (a && typeof a === 'object' ? (a.pattern || '') + (a.note && a.note !== (a.pattern || '') ? ' # ' + a.note : '') : String(a))) .join('\n') : '')}</textarea></div>
+      </div>
+    </div>`;
+  const autoPort = (proto) => proto === 'telnet' ? '23' : '22';
+  const wireRow = (rowEl) => {
+    const protoEl2 = rowEl.querySelector('.mh-proto');
+    const portEl2 = rowEl.querySelector('.mh-port');
+    protoEl2.addEventListener('change', () => {
+      const cur = portEl2.value.trim();
+      const otherDefault = autoPort(protoEl2.value) === '23' ? '22' : '23';
+      if (!cur || cur === otherDefault) portEl2.value = autoPort(protoEl2.value);
+    });
+    const cmdBtn = rowEl.querySelector('.mh-cmd-btn');
+    const cmdsWrap = rowEl.querySelector('.mh-cmds-wrap');
+    cmdBtn.onclick = () => {
+      const hidden = cmdsWrap.hasAttribute('hidden');
+      cmdsWrap.toggleAttribute('hidden');
+      cmdBtn.classList.toggle('on', hidden);
+      if (hidden) cmdsWrap.querySelector('textarea').focus();
+    };
+    const roCb = rowEl.querySelector('.mh-ro-cb');
+    const extEls = [rowEl.querySelector('.mh-pr-cb'), rowEl.querySelector('.mh-pr-type'), rowEl.querySelector('.mh-pr-int'),
+      rowEl.querySelector('.mh-bk-cb'), rowEl.querySelector('.mh-bk-cmd'), rowEl.querySelector('.mh-bk-int')];
+    const applyRo = () => {
+      cmdBtn.disabled = roCb.checked;
+      cmdBtn.style.opacity = roCb.checked ? '0.45' : '';
+      if (roCb.checked) { cmdsWrap.setAttribute('hidden', ''); cmdBtn.classList.remove('on'); }
+      for (const el of extEls) { el.disabled = roCb.checked; el.style.opacity = roCb.checked ? '0.45' : ''; }
+    };
+    roCb.addEventListener('change', applyRo);
+    applyRo();
+    const alertBtn = rowEl.querySelector('.mh-alert-btn');
+    const alertsWrap = rowEl.querySelector('.mh-alerts-wrap');
+    alertBtn.onclick = () => {
+      const hidden = alertsWrap.hasAttribute('hidden');
+      alertsWrap.toggleAttribute('hidden');
+      alertBtn.classList.toggle('on', hidden);
+      if (hidden) alertsWrap.querySelector('textarea').focus();
+    };
+    rowEl.querySelector('.mh-del').onclick = () => rowEl.remove();
+    for (const inp of rowEl.querySelectorAll('input, select')) {
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } });
+    }
+  };
+  const addRow = (r) => {
+    const d = document.createElement('div');
+    d.innerHTML = rowHtml(r || { host: '', protocol: 'ssh', port: '', username: 'admin', password: '', commands: [] });
+    const rowEl = d.firstElementChild;
+    listEl.appendChild(rowEl);
+    wireRow(rowEl);
+    return rowEl;
+  };
+  const prefillRows = monitorHostsForPrefill(saved, mgmts);
+  if (!prefillRows.length) prefillRows.push(monitorRow('', saved));
+  for (const r of prefillRows) addRow(r);
+  const addBtn = ov.querySelector('[data-act=addHost]');
+  addBtn.onclick = () => { const el = addRow(); setTimeout(() => el.querySelector('.mh-host').focus(), 50); };
+
+  const renderStatus = () => {
+    const st = state.monitorStatus[id];
+    ov.querySelector('#monStatus').textContent = st
+      ? '当前状态：' + (st.text || st.state)
+      : (saved.enabled ? '当前状态：已配置（未运行）' : '当前状态：未启用');
+  };
+  renderStatus();
+  if (bridge.getSettings) {
+    bridge.getSettings().then((r) => {
+      if (r && r.ok && document.body.contains(ov)) ov.querySelector('#monNotify').checked = !!r.notify;
+    }).catch(() => {});
+  }
+
+  const doSave = async () => {
+    const rows = [...listEl.querySelectorAll('.mon-host-row')].map(rowEl => {
+      const alerts = rowEl.querySelector('.mh-alerts').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => {
+        const i = s.indexOf('#');
+        if (i > 0) return { pattern: s.slice(0, i).trim(), note: s.slice(i + 1).trim() };
+        return { pattern: s, note: s };
+      }).filter(a => a.pattern);
+      return {
+        host: rowEl.querySelector('.mh-host').value.trim(),
+        protocol: rowEl.querySelector('.mh-proto').value,
+        port: rowEl.querySelector('.mh-port').value.trim(),
+        username: rowEl.querySelector('.mh-user').value.trim(),
+        password: rowEl.querySelector('.mh-pass').value,
+        readOnly: rowEl.querySelector('.mh-ro-cb').checked,
+        commands: rowEl.querySelector('.mh-cmds').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+        probeEnabled: rowEl.querySelector('.mh-pr-cb').checked,
+        probeType: rowEl.querySelector('.mh-pr-type').value,
+        probeIntervalSec: Math.max(5, Math.min(3600, parseInt(rowEl.querySelector('.mh-pr-int').value, 10) || 30)),
+        probePort: parseInt(rowEl.querySelector('.mh-pr-port').value, 10) > 0 ? parseInt(rowEl.querySelector('.mh-pr-port').value, 10) : '',
+        alerts,
+        backupEnabled: rowEl.querySelector('.mh-bk-cb').checked,
+        backupCommand: rowEl.querySelector('.mh-bk-cmd').value.trim() || 'display current-configuration',
+        backupIntervalSec: Math.max(1, Math.min(1440, parseInt(rowEl.querySelector('.mh-bk-int').value, 10) || 60)) * 60,
+        backupWaitSec: 3
+      };
+    }).filter(r => r.host);
+    if (!rows.length) { toast('请至少填写一个管理地址'); return; }
+    if (rows.some(r => !r.readOnly && !r.commands.length)) { toast('每个非「仅读取」的管理地址至少填写一条执行命令'); return; }
+    const intervalSec = parseFloat(ov.querySelector('#monInterval').value);
+    if (!Number.isFinite(intervalSec) || intervalSec < 1) { toast('循环间隔需 ≥ 1 秒'); return; }
+    const cfg = {
+      hosts: rows,
+      intervalSec: Math.round(intervalSec),
+      cmdDelayMs: Math.round((parseFloat(ov.querySelector('#monCmdDelay').value) || 0) * 1000)
+    };
+    const enabled = ov.querySelector('#monEnable').checked;
+    const notify = ov.querySelector('#monNotify').checked;
+    if (bridge.setSettings) { try { await bridge.setSettings(notify); } catch (e) {} }
+    close();
+    await applyMonitor(id, cfg, enabled);
+  };
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=save]').onclick = doSave;
+  ov.querySelector('[data-act=logs]').onclick = async () => {
+    try { await bridge.openLogs(id); }
+    catch (e) { toast('无法打开日志目录'); }
+  };
+  ov.querySelector('[data-act=browse]').onclick = () => { close(); openMonitorLogs(id); };
+  ov.querySelector('[data-act=bk]').onclick = () => { close(); openConfigBackups(id); };
+  for (const sel of ['#monInterval', '#monCmdDelay']) {
+    ov.querySelector(sel).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } });
+  }
+  setTimeout(() => { if (document.body.contains(ov)) { const f = listEl.querySelector('.mh-host'); if (f) f.focus(); } }, 250);
+}
+
+/* ================= 监控日志浏览器（按设备/日期浏览、搜索） ================= */
+function openMonitorLogs(devicePreset) {
+  const bridge = monitorBridge();
+  if (!bridge || !bridge.logsTree) { toast('日志浏览器需要桌面版 NetTopo（Electron）环境'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal lb-dialog" role="dialog" style="width:900px;height:78vh">
+      <h3>监控日志浏览器</h3>
+      <div class="m-sub">按设备 / 日期 / 文件浏览后台监控日志（<userData>\monitor-logs），可搜索关键字并高亮定位。</div>
+      <div class="lb-main">
+        <div class="lb-side">
+          <div class="lb-nav">
+            <label>设备</label><select id="lbDevice"></select>
+            <label>日期</label><select id="lbDate"></select>
+          </div>
+          <div class="lb-files" id="lbFiles"></div>
+        </div>
+        <div class="lb-body">
+          <div class="lb-toolbar">
+            <input id="lbSearch" type="text" placeholder="搜索关键字…" autocomplete="off"/>
+            <span id="lbCount" class="lb-count"></span>
+            <button type="button" class="tb" id="lbPrev" title="上一个匹配">↑</button>
+            <button type="button" class="tb" id="lbNext" title="下一个匹配">↓</button>
+            <button type="button" class="tb" data-act="openfolder">打开目录</button>
+            <button type="button" class="tb primary" data-act="close">关闭</button>
+          </div>
+          <pre class="lb-content" id="lbContent" spellcheck="false"></pre>
+        </div>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  let tree = { devices: [] };
+  let cur = { device: '', date: '', file: '' };
+  const devSel = ov.querySelector('#lbDevice');
+  const dateSel = ov.querySelector('#lbDate');
+  const filesEl = ov.querySelector('#lbFiles');
+  const contentEl = ov.querySelector('#lbContent');
+  const searchEl = ov.querySelector('#lbSearch');
+  let rawContent = '';
+  let matches = [];   // {line, idx}
+  let matchPos = -1;
+
+  const renderFiles = () => {
+    const dev = tree.devices.find(d => d.device === cur.device);
+    const dt = dev && dev.dates.find(x => x.date === cur.date);
+    const files = dt ? dt.files : [];
+    filesEl.innerHTML = files.map(f => `<div class="lb-file${f.name === cur.file ? ' sel' : ''}" data-name="${U.escHtml(f.name)}"><span class="nm">${U.escHtml(f.name)}</span><span class="sub">${U.fmtSize(f.size)}</span></div>`).join('') || '<div class="lb-empty">该日期无日志文件</div>';
+    filesEl.querySelectorAll('.lb-file').forEach(el => {
+      el.onclick = async () => {
+        cur.file = el.dataset.name;
+        renderFiles();
+        rawContent = '';
+        try {
+          const r = await bridge.logsRead(cur.device, cur.date, cur.file);
+          if (r && r.ok) rawContent = r.content;
+          else rawContent = '（读取失败：' + ((r && r.error) || '未知错误') + '）';
+        } catch (e) { rawContent = '（读取失败）'; }
+        applySearch();
+      };
+    });
+  };
+  const renderNav = () => {
+    const devs = tree.devices.map(d => `<option value="${U.escHtml(d.device)}"${d.device === cur.device ? ' selected' : ''}>${U.escHtml(d.device)}</option>`).join('');
+    devSel.innerHTML = devs || '<option value="">（无日志）</option>';
+    const dev = tree.devices.find(d => d.device === cur.device);
+    const dates = dev ? dev.dates.map(x => `<option value="${U.escHtml(x.date)}"${x.date === cur.date ? ' selected' : ''}>${U.escHtml(x.date)}</option>`).join('') : '';
+    dateSel.innerHTML = dates || '<option value="">（无日期）</option>';
+    renderFiles();
+  };
+  const applySearch = () => {
+    const kw = searchEl.value.trim();
+    matches = [];
+    matchPos = -1;
+    if (!rawContent) { contentEl.textContent = rawContent; ov.querySelector('#lbCount').textContent = ''; return; }
+    const lines = rawContent.split('\n');
+    if (!kw) {
+      contentEl.textContent = rawContent;
+      ov.querySelector('#lbCount').textContent = lines.length + ' 行';
+      return;
+    }
+    const lower = kw.toLowerCase();
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].toLowerCase().indexOf(lower) >= 0) matches.push(i);
+    }
+    ov.querySelector('#lbCount').textContent = matches.length ? matches.length + ' 处匹配' : '无匹配';
+    contentEl.innerHTML = lines.map((ln, i) => {
+      let html = U.escHtml(ln);
+      if (kw) {
+        const idx = ln.toLowerCase().indexOf(lower);
+        if (idx >= 0) html = U.escHtml(ln.slice(0, idx)) + '<mark>' + U.escHtml(ln.slice(idx, idx + kw.length)) + '</mark>' + U.escHtml(ln.slice(idx + kw.length));
+      }
+      return '<div class="lb-line' + (matches.includes(i) ? ' hit' : '') + '">' + html + '</div>';
+    }).join('');
+    jumpTo(matches.length ? 0 : -1);
+  };
+  const jumpTo = (pos) => {
+    if (!matches.length) return;
+    matchPos = (pos + matches.length) % matches.length;
+    const lineEls = contentEl.querySelectorAll('.lb-line');
+    lineEls.forEach((el, i) => el.classList.toggle('cur', i === matches[matchPos]));
+    const el = lineEls[matches[matchPos]];
+    if (el) el.scrollIntoView({ block: 'center' });
+  };
+  devSel.addEventListener('change', () => {
+    cur.device = devSel.value;
+    const dev = tree.devices.find(d => d.device === cur.device);
+    cur.date = dev && dev.dates.length ? dev.dates[0].date : '';
+    cur.file = '';
+    rawContent = '';
+    renderNav();
+    applySearch();
+  });
+  dateSel.addEventListener('change', () => {
+    cur.date = dateSel.value;
+    cur.file = '';
+    rawContent = '';
+    renderNav();
+    applySearch();
+  });
+  searchEl.addEventListener('input', applySearch);
+  ov.querySelector('#lbPrev').onclick = () => jumpTo(matchPos - 1);
+  ov.querySelector('#lbNext').onclick = () => jumpTo(matchPos + 1);
+  ov.querySelector('[data-act=openfolder]').onclick = async () => { try { await bridge.openLogs(cur.device || ''); } catch (e) {} };
+  ov.querySelector('[data-act=close]').onclick = close;
+
+  bridge.logsTree().then((r) => {
+    if (r && r.ok) tree = r;
+    if (devicePreset) {
+      const hit = tree.devices.find(d => d.device === String(devicePreset));
+      if (hit) { cur.device = hit.device; cur.date = hit.dates[0] ? hit.dates[0].date : ''; if (cur.date && hit.dates[0].files.length) cur.file = hit.dates[0].files[0].name; }
+    }
+    if (!cur.device && tree.devices.length) {
+      cur.device = tree.devices[0].device;
+      cur.date = tree.devices[0].dates[0] ? tree.devices[0].dates[0].date : '';
+      if (cur.date && tree.devices[0].dates[0].files.length) cur.file = tree.devices[0].dates[0].files[0].name;
+    }
+    renderNav();
+    if (cur.file) {
+      bridge.logsRead(cur.device, cur.date, cur.file).then((r2) => {
+        if (r2 && r2.ok) rawContent = r2.content;
+        applySearch();
+      }).catch(() => applySearch());
+    } else applySearch();
+  }).catch(() => renderNav());
+}
+
+/* ================= 配置备份中心（自动备份的历史 + 对比差异） ================= */
+function openConfigBackups(devicePreset) {
+  if (!window.topoConfigBackup) { toast('配置备份需要桌面版 NetTopo（Electron）环境'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal bk-dialog" role="dialog" style="width:980px;height:80vh">
+      <h3>配置备份中心</h3>
+      <div class="m-sub">监控中开启「自动备份」后，设备配置会按间隔抓取归档（<userData>\config-backups）。勾选两份备份可对比差异（旧 → 新）。</div>
+      <div class="bk-main">
+        <div class="bk-side">
+          <div class="bk-hosts" id="bkHosts"></div>
+          <div class="bk-files" id="bkFiles"></div>
+        </div>
+        <div class="bk-body">
+          <div class="bk-toolbar">
+            <span id="bkDiffInfo" class="bk-diffinfo"></span>
+            <button type="button" class="tb" id="bkDiff" disabled>对比选中（旧 → 新）</button>
+            <button type="button" class="tb" id="bkDelete" disabled>删除选中</button>
+            <button type="button" class="tb" id="bkNow">立即备份当前地址</button>
+            <button type="button" class="tb" data-act="openfolder">打开目录</button>
+            <button type="button" class="tb primary" data-act="close">关闭</button>
+          </div>
+          <pre class="bk-content" id="bkContent" spellcheck="false"></pre>
+        </div>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  let cur = { device: '', host: '' };
+  let items = [];
+  let sel = new Set();
+
+  const hostEl = ov.querySelector('#bkHosts');
+  const filesEl = ov.querySelector('#bkFiles');
+  const contentEl = ov.querySelector('#bkContent');
+  const diffBtn = ov.querySelector('#bkDiff');
+  const delBtn = ov.querySelector('#bkDelete');
+  const diffInfoEl = ov.querySelector('#bkDiffInfo');
+
+  const renderFiles = () => {
+    filesEl.innerHTML = items.map(f => `<label class="bk-file${sel.has(f.name) ? ' sel' : ''}" data-name="${U.escHtml(f.name)}"><input type="checkbox" class="bk-chk" data-name="${U.escHtml(f.name)}"${sel.has(f.name) ? ' checked' : ''}/><span class="nm">${U.escHtml(f.name)}</span><span class="sub">${U.fmtDateTime(new Date(f.time))} · ${U.fmtSize(f.size)}</span></label>`).join('') || '<div class="bk-empty">该地址暂无备份（开启监控的「自动备份」后自动生成）</div>';
+    filesEl.querySelectorAll('.bk-file').forEach(el => {
+      el.querySelector('input').addEventListener('change', () => {
+        const name = el.dataset.name;
+        if (sel.has(name)) sel.delete(name); else sel.add(name);
+        if (sel.size > 2) { const first = sel.values().next().value; sel.delete(first); }
+        renderFiles();
+        updateBtns();
+      });
+      el.addEventListener('dblclick', () => viewFile(el.dataset.name));
+    });
+  };
+  const updateBtns = () => {
+    diffBtn.disabled = sel.size !== 2;
+    delBtn.disabled = sel.size !== 1;
+  };
+  const viewFile = async (name) => {
+    try {
+      const r = await window.topoConfigBackup.read(cur.device, cur.host, name);
+      contentEl.textContent = r && r.ok ? r.content : ('（读取失败：' + ((r && r.error) || '未知错误') + '）');
+      diffInfoEl.textContent = '查看 ' + name;
+    } catch (e) { contentEl.textContent = '（读取失败）'; }
+  };
+  const fmtDiff = (d) => {
+    if (!d.ok) return '（对比失败：' + (d.error || '') + '）';
+    if (!d.changed) return '两份备份内容一致';
+    const html = [];
+    for (const h of d.hunks) {
+      if (h.type === 'ctx') {
+        for (const ln of h.lines) html.push('<div class="dl-ctx"><span class="no">' + (ln.aNo || '') + '</span>' + U.escHtml(ln.text) + '</div>');
+      } else {
+        for (const ln of h.lines) {
+          const cls = ln.type === 'add' ? 'dl-add' : (ln.type === 'del' ? 'dl-del' : 'dl-ctx');
+          const no = ln.type === 'add' ? ln.bNo : (ln.type === 'del' ? ln.aNo : (ln.aNo || ''));
+          const mark = ln.type === 'add' ? '+' : (ln.type === 'del' ? '-' : ' ');
+          html.push('<div class="' + cls + '"><span class="no">' + (no || '') + '</span>' + mark + ' ' + U.escHtml(ln.text) + '</div>');
+        }
+      }
+    }
+    return html.join('');
+  };
+  const loadHosts = async () => {
+    try {
+      const r = await window.topoConfigBackup.hosts();
+      const items2 = (r && r.ok && r.items) || [];
+      hostEl.innerHTML = items2.map(h => `<div class="bk-host${h.device === cur.device && h.host === cur.host ? ' sel' : ''}" data-d="${U.escHtml(h.device)}" data-h="${U.escHtml(h.host)}"><span class="nm">${U.escHtml(h.device)}</span><span class="sub">${U.escHtml(h.host)} · ${h.count} 份 · 最近 ${U.fmtDateTime(new Date(h.lastAt))}</span></div>`).join('') || '<div class="bk-empty">暂无配置备份（开启监控的「自动备份」后自动生成）</div>';
+      hostEl.querySelectorAll('.bk-host').forEach(el => {
+        el.onclick = async () => {
+          cur.device = el.dataset.d;
+          cur.host = el.dataset.h;
+          sel.clear();
+          loadHosts();
+          const r2 = await window.topoConfigBackup.list(cur.device, cur.host);
+          items = (r2 && r2.ok && r2.items) || [];
+          renderFiles();
+          updateBtns();
+          contentEl.textContent = '';
+          diffInfoEl.textContent = '';
+        };
+      });
+      if (devicePreset) {
+        const hit = items2.find(h => h.device === String(devicePreset));
+        if (hit) {
+          cur.device = hit.device; cur.host = hit.host;
+          const r2 = await window.topoConfigBackup.list(cur.device, cur.host);
+          items = (r2 && r2.ok && r2.items) || [];
+          loadHosts(); // 重绘选中态
+          renderFiles();
+          updateBtns();
+          return;
+        }
+      }
+    } catch (e) { hostEl.innerHTML = '<div class="bk-empty">加载失败</div>'; }
+  };
+  diffBtn.onclick = async () => {
+    if (sel.size !== 2) return;
+    const [a, b] = [...sel];
+    // 时间早的作为旧版本
+    const fa = items.find(i => i.name === a), fb = items.find(i => i.name === b);
+    const [oldN, newN] = (fa && fb && fa.time <= fb.time) ? [a, b] : [b, a];
+    try {
+      const d = await window.topoConfigBackup.diff(cur.device, cur.host, oldN, newN);
+      if (!d || !d.ok) { diffInfoEl.textContent = ''; contentEl.textContent = '（对比失败：' + ((d && d.error) || '') + '）'; return; }
+      diffInfoEl.textContent = '对比 ' + oldN + ' → ' + newN + '（+' + (d.added || 0) + '/-' + (d.removed || 0) + ' 行）';
+      contentEl.innerHTML = fmtDiff(d); // 行内容已逐行 escHtml；失败分支已改走 textContent
+    } catch (e) { contentEl.textContent = '（对比失败）'; }
+  };
+  ov.querySelector('#bkNow').onclick = async () => {
+    if (!cur.host) { toast('请先选择一个管理地址'); return; }
+    if (!window.topoMonitor || !window.topoMonitor.runBackup) { toast('立即备份需要监控任务在运行'); return; }
+    const key = monitorKey(cur.device, cur.host);
+    const r = await window.topoMonitor.runBackup(key);
+    if (r && r.ok) toast('已触发备份，稍后刷新列表查看');
+    else toast((r && r.error) || '触发备份失败');
+  };
+  delBtn.onclick = async () => {
+    if (sel.size !== 1) return;
+    const name = [...sel][0];
+    const r = await window.topoConfigBackup.remove(cur.device, cur.host, name);
+    if (r && r.ok) { sel.clear(); const r2 = await window.topoConfigBackup.list(cur.device, cur.host); items = (r2 && r2.ok && r2.items) || []; renderFiles(); updateBtns(); toast('已删除备份 ' + name); }
+    else toast('删除失败');
+  };
+  ov.querySelector('[data-act=openfolder]').onclick = () => { window.topoConfigBackup.openFolder().catch(() => {}); };
+  ov.querySelector('[data-act=close]').onclick = close;
+  loadHosts();
+}
+
+/* ================= Web Shell ================= */
 function openWebShell(id) {
   const n = state.nodes.find(x => x.id === id);
   if (!n) return;
@@ -3015,7 +4100,21 @@ if (typeof globalThis !== 'undefined') {
     exportCSV,
     exportXlsx,
     exportVisio,
-    exportPdf
+    exportPdf,
+    openMonitorConfig,
+    openMonitorLogs,
+    openConfigBackups,
+    applyMonitor,
+    reconcileMonitors,
+    monitorStatus: state.monitorStatus,
+    // 脱敏副本：调试钩子/自动化不暴露设备密码
+    monitorCfg: (() => {
+      const out = {};
+      for (const [k, v] of Object.entries(state.monitorCfg)) {
+        out[k] = Object.assign({}, v, { hosts: (Array.isArray(v.hosts) ? v.hosts : []).map(h => Object.assign({}, h, { password: h && h.password ? '***' : '' })) });
+      }
+      return out;
+    })()
   };
 }
 })();

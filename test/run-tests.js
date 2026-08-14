@@ -94,7 +94,8 @@ const table = M.graphToTableRows(g1.nodes, g1.links);
 eq(table.length, 11, '导出行数（含表头）');
 eq(table[0][0], '源设备', '导出表头');
 ok(table[0].includes('管理地址'), '导出表头含管理地址列');
-ok(table[1][7] === '10.255.0.1', '导出行含管理地址值');
+const mgmtCol = table[0].indexOf('管理地址');
+ok(mgmtCol >= 0 && table[1][mgmtCol] === '10.255.0.1', '导出行含管理地址值');
 const g2 = M.textToGraph(U.buildCSV(table));
 eq(g2.nodes.length, g1.nodes.length, '回环节点数一致');
 eq(g2.links.length, g1.links.length, '回环连线数一致');
@@ -631,8 +632,15 @@ console.log('== 自定义配置模板 / 对比 / 重命名 ==');
   ok(c2.includes('H3C') === false && c2.includes('ip address 10.0.0.1 24'), '注册的自定义模板可被 key 引用');
   // 静态路由 + VLAN
   const c3 = U.generateConfigs(gT2.nodes, gT2.links, 'huawei', { routes: true, vlan: true });
-  ok(c3.includes('ip route-static 192.168.1.0/24 255.255.255.0 10.0.0.2'), '华为配置含自动推导静态路由（经 SW1 到 192.168.1.0/24）');
-  ok(c3.includes('port link-type access') && c3.includes('port default vlan '), '华为交换机接入端口含 VLAN');
+  ok(c3.includes('ip route-static 192.168.1.0 255.255.255.0 10.0.0.2'), '华为配置含自动推导静态路由（经 SW1 到 192.168.1.0/24）');
+  ok((c3.match(/静态路由（自动推导）/g) || []).length === 1, '静态路由仅路由器等生成（交换机/终端不生成）');
+  ok(!c3.includes('port link-type access') && !c3.includes('port default vlan'), '未显式配置 VLAN 时不生成 VLAN 命令');
+  // VLAN 仅来自显式配置（源二层/源VLAN 字段），不做按网段自动分配
+  const gV = M.textToGraph('源设备,源接口,源IP,源掩码,目标设备,目标接口,目标IP,目标掩码,带宽,管理地址,源二层,源VLAN,源VLAN模式,目标二层,目标VLAN,目标VLAN模式\n核心交换机SW1,GE1/0/2,192.168.1.1,24,办公PC1,eth0,192.168.1.10,24,1000,10.255.0.2,是,10,access,是,10,access');
+  for (const n of gV.nodes) { n.w = U.nodeWidthForName(n.name); n.h = U.nodeHeightFor(n); n.x = 0; n.y = 0; }
+  const cV = U.generateConfigs(gV.nodes, gV.links, 'huawei', { routes: false, vlan: true });
+  ok(cV.includes('port link-type access') && cV.includes('port default vlan 10'), '华为交换机接入端口按显式 VLAN 生成');
+  ok(cV.includes('vlan 10'), '华为配置含 VLAN 定义');
   // 对比
   const gA = M.textToGraph('源设备,源接口,源IP,目标设备,目标接口,目标IP\nR1,G0,10.0.0.1,SW1,G1,10.0.0.2');
   const gB = M.textToGraph('源设备,源接口,源IP,目标设备,目标接口,目标IP\nR1,G0,10.0.0.1,SW1,G1,10.0.0.2\nR1,G2,10.0.0.9,FW1,G3,10.0.0.10');
@@ -1264,6 +1272,43 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     await endedS;
     ok(true, 'SSH 关闭会话触发 end');
     await new Promise((res) => server.close(res));
+  }
+
+  /* ---- 监控模块（monitor.js）单元测试 ---- */
+  {
+    const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+    const tmpBase = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-mon-test-'));
+    const stubShell = { on() {}, connect() { return { ok: true, id: 's1' }; }, close() {}, trustFingerprint() { return true; } };
+    const mgr = new MonitorManager(stubShell, tmpBase, null, {});
+    // 1) expectFp 透传：渲染层复用 Web Shell 已信任指纹时严格比对，不能丢弃
+    const v1 = mgr._validate({ key: 'n1@10.0.0.1', host: '10.0.0.1', commands: ['show version'], expectFp: 'SHA256:abc==' });
+    eq(v1.ok, true, '监控参数校验通过');
+    eq(v1.cfg.expectFp, 'SHA256:abc==', 'expectFp 透传（不丢失）');
+    // 2) 告警正则：嵌套量词模式启发式拒绝（主进程同步执行防灾难性回溯）
+    const v2 = mgr._validate({ key: 'n2@10.0.0.2', host: '10.0.0.2', commands: ['x'], alerts: ['(a+)+', 'error|down'] });
+    eq(v2.ok, true, '含被拒正则时任务仍可启动');
+    eq(v2.cfg.alerts.length, 1, '嵌套量词模式 (a+)+ 被启发式拒绝');
+    eq(v2.cfg.alerts[0].pattern, 'error|down', '正常正则保留');
+    // 3) 超长无换行输出强制断行（lineBuf 上限，防主进程内存无界增长）
+    const job = mgr._newJob(v1.cfg);
+    job.logStream = { bytesWritten: 0, write() {} };
+    mgr.jobs.set(job.key, job);
+    mgr._bySid.set('s1', job.key);
+    mgr._onOutput('s1', 'x'.repeat(300 * 1024));
+    ok(job.lineBuf.length <= 256 * 1024, '无换行超长输出被强制断行（lineBuf 不超限，实际 ' + job.lineBuf.length + '）');
+    // 4) 首连指纹自动信任并发出 trust 事件（主进程据此弹系统通知）
+    let trustEvt = null;
+    mgr.on('trust', (i) => { trustEvt = i; });
+    mgr._handleFingerprint(job, { fp: 'SHA256:test' });
+    ok(trustEvt && trustEvt.fp === 'SHA256:test' && trustEvt.host === '10.0.0.1', '首连信任触发 trust 事件');
+    eq(mgr.trusted.get('10.0.0.1'), 'SHA256:test', '指纹已记录');
+    // 5) 指纹变化拒绝连接且不篡改已信任记录
+    let errEvt = null;
+    mgr.on('status', (i) => { if (i.state === 'error') errEvt = i; });
+    mgr._handleFingerprint(job, { fp: 'SHA256:other' });
+    ok(errEvt && errEvt.text.indexOf('中间人') >= 0, '指纹变化拒绝连接（疑似中间人）');
+    eq(mgr.trusted.get('10.0.0.1'), 'SHA256:test', '已信任指纹不被篡改');
+    fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 })().then(() => {
   console.log('');

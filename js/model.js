@@ -28,7 +28,23 @@ const ROLE_SETS = {
   note:['备注', '说明', '注释', '描述', '备注说明',
         'note', 'remark', 'comment', 'desc', 'description'],
   mgmt:['管理地址', '管理ip', '管理ip地址', '管理', '设备管理地址',
-        'mgmtip', 'mgmt', 'manageip', 'manage_ip', 'management']
+        'mgmtip', 'mgmt', 'manageip', 'manage_ip', 'management'],
+  a2l:  ['源二层', '源二层接口', 'a二层', 'a端二层', '二层a',
+        'srcl2', 'a_l2', 'al2', 'a_l2flag'],
+  avlan:['源vlan', '源vlan值', '源vlan编号', 'a端vlan', 'a vlan',
+        'srcvlan', 'a_vlan', 'avlan'],
+  avm:  ['源vlan模式', '源vlan类型', 'a端vlan模式',
+        'srcvlanmode', 'a_vlanmode', 'avlanmode'],
+  b2l:  ['目标二层', '目标二层接口', 'b二层', 'b端二层', '二层b',
+        'dstl2', 'b_l2', 'bl2', 'b_l2flag'],
+  bvlan:['目标vlan', '目标vlan值', '目标vlan编号', 'b端vlan', 'b vlan',
+        'dstvlan', 'b_vlan', 'bvlan'],
+  bvm:  ['目标vlan模式', '目标vlan类型', 'b端vlan模式',
+        'dstvlanmode', 'b_vlanmode', 'bvlanmode'],
+  amask:['源掩码', '源掩码位', '源掩码长度', 'a端掩码',
+        'srcmask', 'a_mask', 'amask', 'srcnetmask'],
+  bmask:['目标掩码', '目标掩码位', '目标掩码长度', 'b端掩码',
+        'dstmask', 'b_mask', 'bmask', 'dstnetmask']
 };
 
 const RE_ROLES = [
@@ -90,7 +106,7 @@ function parseRows(rows) {
   const records = [];
   data.forEach((cells, ri) => {
     if (!cells || !cells.some(c => String(c).trim() !== '')) return;
-    const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '', sax: '', say: '', sbx: '', sby: '' };
+    const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '', vlans: '', sax: '', say: '', sbx: '', sby: '', a2l: '', avlan: '', avm: '', b2l: '', bvlan: '', bvm: '', amask: '', bmask: '' };
     cells.forEach((c, ci) => {
       const role = roles[ci];
       if (role && rec[role] !== undefined) rec[role] = String(c).trim();
@@ -143,13 +159,28 @@ function recordsToGraph(records) {
       a: a.id, b: b.id,
       aIf: r.si, aIp: r.sip,
       bIf: r.sii, bIp: r.sib,
-      bw: U.normalizeBw(r.bw), note: r.note
+      bw: U.normalizeBw(r.bw), note: r.note,
+      aL2: /^(是|y|yes|1|true|二层)$/i.test(r.a2l), bL2: /^(是|y|yes|1|true|二层)$/i.test(r.b2l),
+      aVlan: r.avlan, aVlanMode: (r.avm === 'trunk' || r.avm === 'hybrid') ? r.avm : (r.avlan ? 'access' : ''),
+      bVlan: r.bvlan, bVlanMode: (r.bvm === 'trunk' || r.bvm === 'hybrid') ? r.bvm : (r.bvlan ? 'access' : ''),
+      aMask: parseInt(r.amask, 10) > 0 && parseInt(r.amask, 10) <= 32 ? parseInt(r.amask, 10) : 24,
+      bMask: parseInt(r.bmask, 10) > 0 && parseInt(r.bmask, 10) <= 32 ? parseInt(r.bmask, 10) : 24
     };
     if (r.mgmt) {
       const ms = U.splitMgmts(r.mgmt);
       if (ms.length) {
         if (!U.nodeMgmts(a).length) { U.setNodeMgmts(a, ms); a.h = U.nodeHeightFor(a); }
         else if (!U.nodeMgmts(b).length) { U.setNodeMgmts(b, ms); b.h = U.nodeHeightFor(b); }
+      }
+    }
+    // 三层 VLAN 接口（格式：10:192.168.10.1;20:192.168.20.1，源端优先，同 mgmt 规则）
+    if (r.vlans) {
+      const vs = String(r.vlans).split(/[;；]+/).map(s => s.trim()).filter(Boolean)
+        .map(s => { const i = s.indexOf(':'); return i > 0 ? { id: s.slice(0, i).trim(), ip: s.slice(i + 1).trim() } : null; })
+        .filter(v => v && v.id && v.ip);
+      if (vs.length) {
+        const target = !(a.vlans && a.vlans.length) ? a : (!(b.vlans && b.vlans.length) ? b : null);
+        if (target) target.vlans = vs;
       }
     }
     links.push(link);
@@ -162,8 +193,8 @@ function recordsToGraph(records) {
 }
 
 /* ---------- 图 → 表格行 ---------- */
-const EXPORT_HEAD = ['源设备', '源接口', '源IP', '目标设备', '目标接口', '目标IP', '带宽', '管理地址', '备注', '源设备X', '源设备Y', '目标设备X', '目标设备Y'];
-const EXPORT_KEYS = ['sa', 'si', 'sip', 'sb', 'sii', 'sib', 'bw', 'mgmt', 'note', 'sax', 'say', 'sbx', 'sby'];
+const EXPORT_HEAD = ['源设备', '源接口', '源IP', '源掩码', '目标设备', '目标接口', '目标IP', '目标掩码', '带宽', '管理地址', 'VLAN接口', '备注', '源二层', '源VLAN', '源VLAN模式', '目标二层', '目标VLAN', '目标VLAN模式', '源设备X', '源设备Y', '目标设备X', '目标设备Y'];
+const EXPORT_KEYS = ['sa', 'si', 'sip', 'amask', 'sb', 'sii', 'sib', 'bmask', 'bw', 'mgmt', 'vlans', 'note', 'a2l', 'avlan', 'avm', 'b2l', 'bvlan', 'bvm', 'sax', 'say', 'sbx', 'sby'];
 
 function graphToRecords(nodes, links) {
   const byId = {};
@@ -174,15 +205,19 @@ function graphToRecords(nodes, links) {
   const emitted = new Set();
   return links.map(l => {
     const a = byId[l.a], b = byId[l.b];
-    let mgmt = '';
-    if (a && !emitted.has(a.id)) { mgmt = U.nodeMgmts(a).join(','); emitted.add(a.id); }
-    else if (b && !emitted.has(b.id)) { mgmt = U.nodeMgmts(b).join(','); emitted.add(b.id); }
+    let mgmt = ''; let vlans = '';
+    if (a && !emitted.has(a.id)) { mgmt = U.nodeMgmts(a).join(','); vlans = (a.vlans || []).map(v => v.id + ':' + v.ip).join(';'); emitted.add(a.id); }
+    else if (b && !emitted.has(b.id)) { mgmt = U.nodeMgmts(b).join(','); vlans = (b.vlans || []).map(v => v.id + ':' + v.ip).join(';'); emitted.add(b.id); }
     return {
       sa: a ? a.name : '', si: l.aIf, sip: l.aIp,
       sb: b ? b.name : '', sii: l.bIf, sib: l.bIp,
       bw: l.bw,
       mgmt,
+      vlans,
       note: l.note,
+      amask: l.aMask || 24, bmask: l.bMask || 24,
+      a2l: l.aL2 ? '是' : '', avlan: l.aVlan || '', avm: l.aVlanMode || '',
+      b2l: l.bL2 ? '是' : '', bvlan: l.bVlan || '', bvm: l.bVlanMode || '',
       sax: a ? Math.round(a.x * 10) / 10 : '', say: a ? Math.round(a.y * 10) / 10 : '',
       sbx: b ? Math.round(b.x * 10) / 10 : '', sby: b ? Math.round(b.y * 10) / 10 : ''
     };

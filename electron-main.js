@@ -1,9 +1,11 @@
 /* NetTopo Electron 主进程 */
 'use strict';
-const { app, BrowserWindow, session, ipcMain } = require('electron');
+const { app, BrowserWindow, session, ipcMain, dialog, Notification } = require('electron');
 const path = require('path');
 const { ShellManager } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
+const { MonitorManager } = require('./js/monitor.js');
+const { ConfigBackupStore } = require('./js/config-backup.js');
 
 // 测试隔离：冒烟测试通过 NETTOPO_USERDATA 覆盖用户数据目录（临时目录），避免污染真实备份数据
 if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_USERDATA);
@@ -22,12 +24,49 @@ const pendingTabs = [];            // 等待新窗口加载完成的 newtab 消�
 const shellQueue = [];             // 窗口就绪前到达的会话事件（避免首屏输出丢失）
 const shell = new ShellManager();
 
-/* ---- 工程备份库（用户数据目录 backups/） ---- */
+/* ---- 设备后台静默监控（复用 Web Shell 底层连接，独立监视任务） ---- */
+const configBackup = new ConfigBackupStore(path.join(app.getPath('userData'), 'config-backups'));
+const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup });
+
+/* ---- 应用设置持久化（备份目录等，存于用户数据目录 settings.json） ---- */
+let appSettings = null;
+function getSettingsFile() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+function loadAppSettings() {
+  if (appSettings) return appSettings;
+  appSettings = {};
+  try {
+    const fs = require('fs');
+    if (fs.existsSync(getSettingsFile())) {
+      const raw = JSON.parse(fs.readFileSync(getSettingsFile(), 'utf8'));
+      if (raw && typeof raw === 'object') appSettings = raw;
+    }
+  } catch (e) { appSettings = {}; }
+  return appSettings;
+}
+function saveAppSettings() {
+  try {
+    const fs = require('fs');
+    fs.writeFileSync(getSettingsFile(), JSON.stringify(appSettings || {}, null, 2), 'utf8');
+  } catch (e) { /* 失败不阻断 */ }
+}
+function defaultBackupDir() {
+  return path.join(app.getPath('userData'), 'backups');
+}
+function effectiveBackupDir() {
+  const cfg = loadAppSettings().backupDir;
+  if (typeof cfg === 'string' && cfg.trim()) return cfg.trim();
+  return defaultBackupDir();
+}
+
+/* ---- 工程备份库（用户数据目录 backups/ 或用户自定义目录） ---- */
 let backupStore = null;
 function getBackupStore() {
-  if (!backupStore) backupStore = new BackupStore(path.join(app.getPath('userData'), 'backups'));
+  if (!backupStore) backupStore = new BackupStore(effectiveBackupDir());
   return backupStore;
 }
+function resetBackupStore() { backupStore = null; }
 
 /* ---- Web Shell 独立窗口（多标签） ---- */
 function createShellWindow() {
@@ -90,6 +129,66 @@ function openShellTab(info) {
 shell.on('output', (id, data) => emitShell('shell:output', id, data));
 shell.on('status', (id, info) => emitShell('shell:status', id, info));
 shell.on('end', (id, reason) => emitShell('shell:end', id, reason));
+
+// 监控状态只发往主窗口（侧栏标记），不打扰其它窗口
+monitor.on('status', (info) => {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('monitor:status', info);
+});
+// 在线探测状态 → 主窗口；离线/恢复转换时弹系统通知（受 settings.monitorNotify 开关控制）
+const lastProbeOk = new Map();      // key -> 上次探测结果
+const lastAlertOn = new Map();      // key -> 上次告警状态
+const lastBackupErrAt = new Map();  // key -> 上次备份失败通知时间
+const notifyEnabled = () => loadAppSettings().monitorNotify !== false;
+function sendMonitor(channel, info) {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(channel, info);
+}
+function notifyUser(title, body) {
+  try {
+    if (!Notification.isSupported()) return;
+    const n = new Notification({ title: title, body: body, silent: false });
+    n.on('click', () => { if (mainWin && !mainWin.isDestroyed()) { if (mainWin.isMinimized()) mainWin.restore(); mainWin.focus(); } });
+    n.show();
+  } catch (e) { /* 通知失败不阻断 */ }
+}
+monitor.on('probe', (info) => {
+  sendMonitor('monitor:probe', info);
+  if (!notifyEnabled()) return;
+  const prev = lastProbeOk.get(info.key);
+  if (info.ok === false && prev !== false) {
+    lastProbeOk.set(info.key, false);
+    notifyUser('NetTopo · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
+  } else if (info.ok === true && prev === false) {
+    lastProbeOk.set(info.key, true);
+    notifyUser('NetTopo · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
+  } else {
+    lastProbeOk.set(info.key, info.ok);
+  }
+});
+monitor.on('alert', (info) => {
+  sendMonitor('monitor:alert', info);
+  if (!notifyEnabled()) return;
+  if (info.matched && lastAlertOn.get(info.key) !== true) {
+    lastAlertOn.set(info.key, true);
+    notifyUser('NetTopo · 输出告警', info.name + '（' + info.host + '）输出匹配告警关键字「' + (info.pattern || '') + '」');
+  } else if (!info.matched && lastAlertOn.get(info.key) === true) {
+    lastAlertOn.set(info.key, false);
+  }
+});
+monitor.on('trust', (info) => {
+  // 首次连接自动信任主机指纹：安全敏感事件，始终通知用户（不随 monitorNotify 开关关闭）
+  notifyUser('NetTopo · 首次信任主机指纹',
+    info.name + '（' + info.host + '）首次连接已自动信任指纹 ' + info.fp + '；后续指纹变化将拒绝连接');
+});
+monitor.on('backup', (info) => {
+  sendMonitor('monitor:backup', info);
+  if (!notifyEnabled() || info.ok) return;
+  const now = Date.now();
+  const prevErr = lastBackupErrAt.get(info.key) || 0;
+  if (now - prevErr > 10 * 60 * 1000) {
+    lastBackupErrAt.set(info.key, now);
+    notifyUser('NetTopo · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
+  }
+});
 
 function createWindow() {
   mainWin = new BrowserWindow({
@@ -277,6 +376,182 @@ ipcMain.handle('backup:delete', (e, p) => {
 ipcMain.handle('backup:open-folder', (e) => backupGuard(e)
   ? require('electron').shell.openPath(getBackupStore().dir).then(() => ({ ok: true }), (err) => ({ ok: false, error: String(err && err.message || err) }))
   : { ok: false, error: 'forbidden' });
+ipcMain.handle('backup:get-dir', (e) => backupGuard(e)
+  ? { ok: true, dir: effectiveBackupDir(), defaultDir: defaultBackupDir(), custom: !!loadAppSettings().backupDir }
+  : { ok: false, error: 'forbidden' });
+ipcMain.handle('backup:choose-dir', async (e) => {
+  if (!backupGuard(e)) return { ok: false, error: 'forbidden' };
+  try {
+    const r = await dialog.showOpenDialog(mainWin, {
+      title: '选择备份工程目录',
+      defaultPath: effectiveBackupDir(),
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: false, canceled: true };
+    const dir = r.filePaths[0];
+    loadAppSettings().backupDir = dir;
+    saveAppSettings();
+    resetBackupStore();
+    return { ok: true, dir: effectiveBackupDir(), custom: true };
+  } catch (err) {
+    return { ok: false, error: '选择目录失败：' + String(err && err.message || err) };
+  }
+});
+ipcMain.handle('backup:reset-dir', (e) => {
+  if (!backupGuard(e)) return { ok: false, error: 'forbidden' };
+  delete loadAppSettings().backupDir;
+  saveAppSettings();
+  resetBackupStore();
+  return { ok: true, dir: effectiveBackupDir(), custom: false };
+});
+
+/* ---- 后台静默监控 IPC（仅主窗口可调用） ---- */
+function monitorGuard(e) {
+  return !!(mainWin && !mainWin.isDestroyed() && e && e.sender === mainWin.webContents);
+}
+ipcMain.handle('monitor:start', (e, opts) => monitorGuard(e) ? monitor.start(opts || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:stop', (e, p) => monitorGuard(e) ? monitor.stop(String((p && p.key) || '')) : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:stopAll', (e) => monitorGuard(e) ? monitor.stopAll() : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:status', (e) => monitorGuard(e) ? { ok: true, items: monitor.status() } : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:open-logs', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const dir = monitor.openLogs(String((p && p.key) || ''));
+  return require('electron').shell.openPath(dir).then(() => ({ ok: true, dir }), (err) => ({ ok: false, error: String(err && err.message || err) }));
+});
+ipcMain.handle('monitor:run-backup', (e, p) => monitorGuard(e) ? monitor.runBackupNow(String((p && p.key) || '')) : { ok: false, error: 'forbidden' });
+ipcMain.handle('secure:encrypt', (e, text) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  text = String(text == null ? '' : text);
+  if (!text) return { ok: true, cipher: '' };
+  if (text.length > 4096) return { ok: false, error: '内容过长' };
+  try {
+    const { safeStorage } = require('electron');
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: '系统加密不可用' };
+    return { ok: true, cipher: safeStorage.encryptString(text).toString('base64') };
+  } catch (err) { return { ok: false, error: '加密失败' }; }
+});
+ipcMain.handle('secure:decrypt', (e, cipher) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  cipher = String(cipher == null ? '' : cipher);
+  if (!cipher || cipher.length > 8192) return { ok: false, error: '密文无效' };
+  try {
+    const { safeStorage } = require('electron');
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: '系统加密不可用' };
+    return { ok: true, text: safeStorage.decryptString(Buffer.from(cipher, 'base64')) };
+  } catch (err) { return { ok: false, error: '解密失败' }; }
+});
+ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? { ok: true, notify: loadAppSettings().monitorNotify !== false } : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:set-settings', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  if (p && typeof p.notify === 'boolean') {
+    loadAppSettings().monitorNotify = p.notify;
+    saveAppSettings();
+  }
+  return { ok: true, notify: loadAppSettings().monitorNotify !== false };
+});
+
+/* ---- 监控日志浏览器：目录树 + 内容读取（路径逐级白名单校验） ---- */
+const LOG_DIR_RE = /^(\d{4}-\d{2}-\d{2})$/;
+function safeLogComponent(name, allowDate) {
+  name = String(name || '');
+  if (!name || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('..') >= 0 || name.length > 120) return null;
+  if (allowDate && !LOG_DIR_RE.test(name)) return null;
+  return name;
+}
+ipcMain.handle('monitor:logs-tree', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const fs = require('fs');
+  const base = monitor.logBaseDir;
+  const devices = [];
+  let names = [];
+  try { names = fs.readdirSync(base); } catch (err) { names = []; }
+  for (const dev of names) {
+    const devDir = path.join(base, dev);
+    let st;
+    try { st = fs.lstatSync(devDir); } catch (err) { continue; }
+    if (!st.isDirectory() || st.isSymbolicLink()) continue;
+    const dates = [];
+    let ds = [];
+    try { ds = fs.readdirSync(devDir); } catch (err) { ds = []; }
+    for (const d of ds) {
+      if (!LOG_DIR_RE.test(d)) continue;
+      const dDir = path.join(devDir, d);
+      try { st = fs.lstatSync(dDir); } catch (err) { continue; }
+      if (!st.isDirectory() || st.isSymbolicLink()) continue;
+      const files = [];
+      let fnames = [];
+      try { fnames = fs.readdirSync(dDir); } catch (err) { fnames = []; }
+      for (const f of fnames.slice(-300)) {
+        if (!/^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_\d{8}_\d{6}(?:_\d+)?\.log$/.test(f)) continue;
+        const full = path.join(dDir, f);
+        try { st = fs.lstatSync(full); } catch (err) { continue; }
+        if (!st.isFile() || st.isSymbolicLink()) continue;
+        files.push({ name: f, time: st.mtimeMs, size: st.size });
+      }
+      files.sort((a, b) => (b.time - a.time) || (a.name < b.name ? 1 : -1));
+      if (files.length) dates.push({ date: d, files: files.slice(0, 100) });
+    }
+    dates.sort((a, b) => (a.date < b.date ? 1 : -1));
+    if (dates.length) devices.push({ device: dev, dates });
+  }
+  devices.sort((a, b) => (a.device < b.device ? 1 : -1));
+  return { ok: true, devices };
+});
+ipcMain.handle('monitor:logs-read', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const device = safeLogComponent(p && p.device, false);
+  const date = safeLogComponent(p && p.date, true);
+  const file = safeLogComponent(p && p.file, false);
+  if (!device || !date || !file || !/^[\u4e00-\u9fa5A-Za-z0-9_.-]+\.log$/.test(file)) return { ok: false, error: '非法的日志文件路径' };
+  const fs = require('fs');
+  const full = path.join(monitor.logBaseDir, device, date, file);
+  try {
+    const st = fs.lstatSync(full);
+    if (!st.isFile() || st.isSymbolicLink()) return { ok: false, error: '日志文件不存在' };
+    if (st.size > 4 * 1024 * 1024) return { ok: false, error: '日志文件过大（超过 4MB），请打开目录查看' };
+    return { ok: true, content: fs.readFileSync(full, 'utf8'), size: st.size };
+  } catch (err) {
+    return { ok: false, error: '读取日志失败' };
+  }
+});
+
+/* ---- 设备配置备份 IPC（复用 monitorGuard 防越权） ---- */
+function backupCfgPath(p) {
+  const device = String((p && p.device) || '');
+  const host = String((p && p.host) || '');
+  if (!device || !host || device.indexOf('..') >= 0 || host.indexOf('..') >= 0) return null;
+  return { device, host };
+}
+ipcMain.handle('backupcfg:hosts', (e) => monitorGuard(e) ? configBackup.hosts() : { ok: false, error: 'forbidden' });
+ipcMain.handle('backupcfg:list', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const dh = backupCfgPath(p);
+  return dh ? configBackup.list(dh.device, dh.host) : { ok: false, error: '非法的设备/主机' };
+});
+ipcMain.handle('backupcfg:read', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const dh = backupCfgPath(p);
+  return dh ? configBackup.read(dh.device, dh.host, String((p && p.name) || '')) : { ok: false, error: '非法的设备/主机' };
+});
+ipcMain.handle('backupcfg:remove', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const dh = backupCfgPath(p);
+  return dh ? configBackup.remove(dh.device, dh.host, String((p && p.name) || '')) : { ok: false, error: '非法的设备/主机' };
+});
+ipcMain.handle('backupcfg:diff', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const dh = backupCfgPath(p);
+  if (!dh) return { ok: false, error: '非法的设备/主机' };
+  const a = String((p && p.a) || ''), b = String((p && p.b) || '');
+  if (!a || !b) return { ok: false, error: '请选择两份备份' };
+  if (a === b) return { ok: false, error: '请选择两份不同的备份' };
+  return configBackup.diff(dh.device, dh.host, a, b);
+});
+ipcMain.handle('backupcfg:open', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  try { require('fs').mkdirSync(configBackup.baseDir, { recursive: true }); } catch (err) { /* ignore */ }
+  return require('electron').shell.openPath(configBackup.baseDir).then(() => ({ ok: true }), (err) => ({ ok: false, error: String(err && err.message || err) }));
+});
 
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框
@@ -318,6 +593,7 @@ app.whenReady().then(() => {
 });
 
 app.on('will-quit', () => {
+  monitor.stopAll();
   shell.closeAll();
 });
 
