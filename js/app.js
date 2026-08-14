@@ -379,6 +379,13 @@ function cfgVendorOptions() {
   }
   return builtin.join('') + (custom.length ? '<optgroup label="自定义厂家">' + custom.join('') + '</optgroup>' : '');
 }
+/* 厂家选项（数组格式，供 openModal 的 select 字段使用） */
+function cfgVendorOptionList() {
+  const tpls = U.cfgTemplates();
+  const out = [];
+  for (const k in tpls) out.push([k, tpls[k].label + (tpls[k].builtin ? '' : '（自定义）')]);
+  return out;
+}
 function openConfigGen() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   const root = $('#modalRoot');
@@ -390,7 +397,7 @@ function openConfigGen() {
   ov.innerHTML = `
     <div class="modal" role="dialog" style="width:700px">
       <h3>生成设备配置</h3>
-      <div class="m-sub">按拓扑接口/IP 生成配置片段；可选 <b>静态路由</b>（自动推导）与 <b>VLAN</b>（交换机接入端口）</div>
+      <div class="m-sub">按拓扑接口/IP 生成配置片段；可选 <b>静态路由</b>（自动推导）与 <b>VLAN</b>（交换机接入端口）；设备可在「编辑设备」中单独指定厂家（默认跟随此处全局选择）</div>
       <div class="m-row">
         <label>厂家风格</label>
         <select id="cfgVendor">${cfgVendorOptions()}</select>
@@ -796,9 +803,9 @@ function openIpRenumber() {
 /* ================= 拓扑设计报告导出 ================= */
 function exportReport() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const html = U.buildReportHtml(state.nodes, state.links, { includeConfig: true });
+  const html = U.buildReportHtml(state.nodes, state.links);
   U.download(`拓扑设计报告_${U.fmtDate()}.html`, new Blob([html], { type: 'text/html;charset=utf-8' }));
-  toast('已导出拓扑设计报告（HTML，含设备/IP/子网/链路/配置）');
+  toast('已导出拓扑设计报告（HTML，含设备/IP/子网/链路）');
 }
 
 /* ================= 多选对齐 / 分布 ================= */
@@ -1569,6 +1576,7 @@ function editNode(id) {
     fields: [
       { name: 'name', label: '设备名称', required: true, value: n.name },
       { name: 'type', label: '设备类型', type: 'select', options: U.typeList().map(t => [t.key, t.label]), value: n.type },
+      { name: 'vendor', label: '配置厂家', type: 'select', options: [['', '跟随全局（生成配置时选择）']].concat(cfgVendorOptionList()), value: n.vendor || '' },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: U.nodeMgmts(n) },
       { name: 'web', label: '管理Web页URL', value: n.web || '', ph: '例如 http://10.255.0.1（可选）' },
       { name: 'note', label: '备注', type: 'textarea', value: n.note }
@@ -1586,6 +1594,7 @@ function editNode(id) {
       const nh = U.nodeHeightFor(n);
       if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
       n.type = v.type;
+      n.vendor = v.vendor || '';
       n.web = v.web.trim();
       n.note = v.note.trim();
       renderer.setData(state.nodes, state.links, state.texts);

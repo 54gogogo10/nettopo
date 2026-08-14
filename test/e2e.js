@@ -503,6 +503,37 @@ const puppeteer = require('puppeteer-core');
   console.log('模板添加核心交换机:', tplAdded && hasTplNode ? 'OK' : 'FAIL');
   if (!(tplAdded && hasTplNode)) errors.push('[template] 模板添加设备失败');
 
+  // ---- 设备编辑：配置厂家（逐设备指定，生成配置时优先于全局） ----
+  await page.evaluate(() => {
+    document.querySelector('.node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, view: window }));
+  });
+  await new Promise(r => setTimeout(r, 250));
+  const vendorSel = await page.evaluate(() => {
+    const sel = document.querySelector('.modal select[name=vendor]');
+    if (!sel) return null;
+    const opts = [...sel.options].map(o => o.textContent);
+    sel.value = 'cisco';
+    document.querySelector('.modal form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    return opts;
+  });
+  await new Promise(r => setTimeout(r, 250));
+  const vendorState = await page.evaluate(() => {
+    const n = window.__topo.state.nodes.find(x => x.vendor);
+    return n ? n.vendor : '';
+  });
+  const vendorOk = vendorSel && vendorSel.some(t => t.includes('跟随全局')) && vendorState === 'cisco';
+  console.log('设备编辑配置厂家:', vendorOk ? 'OK' : 'FAIL', JSON.stringify({ opts: vendorSel && vendorSel.slice(0, 4), vendor: vendorState }));
+  if (!vendorOk) errors.push('[vendor] 编辑设备配置厂家未生效');
+
+  // ---- 设计报告不再附加设备配置 ----
+  const repNoCfg = await page.evaluate(() => {
+    const html = window.TopoUtil.buildReportHtml(window.__topo.state.nodes, window.__topo.state.links);
+    return { hasCfg: html.includes('设备配置'), hasCore: html.includes('设备清单') && html.includes('IP 规划') && html.includes('链路明细') };
+  });
+  const repOk = repNoCfg && repNoCfg.hasCore && !repNoCfg.hasCfg;
+  console.log('设计报告不含配置:', repOk ? 'OK' : 'FAIL');
+  if (!repOk) errors.push('[report] 设计报告仍含设备配置');
+
   // ---- 打开工程（uploadFile 往返） ----
   const tmpProj = path.join(__dirname, '_tmp_open.nettopo');
   require('fs').writeFileSync(tmpProj, JSON.stringify({

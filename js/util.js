@@ -344,6 +344,7 @@ U.sanitizeGraph = (nodes, links, texts) => {
     return {
       id, name: str(n.name).slice(0, 200),
       type: SAFE_ID.test(rawType) ? rawType : 'other',
+      vendor: str(n.vendor).slice(0, 64), // 设备级配置厂家（空 = 跟随全局）
       x: coord(n.x, 0), y: coord(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',
@@ -795,11 +796,20 @@ U.loadCustomCfgTemplates = () => {
 U.generateConfigs = (nodes, links, vendor, opts) => {
   vendor = vendor || 'huawei';
   opts = opts || {};
-  const tpl = typeof vendor === 'object' ? vendor : U.getCfgTemplate(vendor);
-  if (!tpl) return '';
+  const baseTpl = typeof vendor === 'object' ? vendor : U.getCfgTemplate(vendor);
+  if (!baseTpl) return '';
   // only: 只生成这些设备的配置（Set<id>，空集合则不生成任何设备）；nodes 仍传全量，用于对端名称解析
   const only = opts.only instanceof Set ? opts.only : null;
   const targets = only ? nodes.filter(n => only.has(n.id)) : nodes;
+  // 设备级厂家：设备自身配置了厂家（n.vendor，在「编辑设备」中设置）则优先，否则用全局 vendor
+  const tplOf = (n) => {
+    if (typeof vendor === 'object') return baseTpl; // 直接传模板对象时统一使用
+    if (n && typeof n.vendor === 'string' && n.vendor) {
+      const t = U.cfgTemplates()[n.vendor];
+      if (t) return t;
+    }
+    return baseTpl;
+  };
   const byId = new Map(nodes.map(n => [n.id, n]));
   const fill = (s, map) => String(s).replace(/\{(\w+)\}/g, (m, k) => map[k] != null ? map[k] : m);
   const maskOf = (ip) => '255.255.255.0';
@@ -819,6 +829,8 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
   for (const l of links) { linkOf.get(l.a).push(l); linkOf.get(l.b).push(l); }
   const out = [];
   for (const n of targets) {
+    const tpl = tplOf(n);
+    if (!tpl) continue;
     const sec = [];
     sec.push(fill(tpl.deviceHeader, { comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
     const intfs = [];
@@ -1033,8 +1045,7 @@ U.alignNodes = (nodes, mode) => {
 };
 
 /* ---------- 拓扑设计报告（自包含 HTML） ---------- */
-U.buildReportHtml = (nodes, links, opts) => {
-  opts = opts || {};
+U.buildReportHtml = (nodes, links) => {
   const { rows, subnets } = U.ipPlan(nodes, links);
   const esc = U.escHtml;
   const bwMap = new Map();
@@ -1069,7 +1080,6 @@ U.buildReportHtml = (nodes, links, opts) => {
     return `<tr><td><b>${esc(n.name)}</b></td><td>${esc(t.label)}</td><td>${esc(U.nodeMgmts(n).join(', '))}</td><td>${cnt}</td><td>${esc(n.note || '')}</td></tr>`;
   }).join('');
   const subRows = subnets.map(s => `<tr><td><b>${esc(s.cidr)}</b></td><td>${s.devices.length}</td><td>${esc(s.devices.join('、'))}</td></tr>`).join('');
-  const cfg = opts.includeConfig ? U.generateConfigs(nodes, links, 'huawei') : '';
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>网络拓扑设计报告</title>
 <style>
 body{font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif;color:#1e293b;margin:32px auto;max-width:980px;padding:0 16px}
@@ -1100,7 +1110,6 @@ pre{background:#0f172a;color:#e2e8f0;padding:12px 14px;border-radius:10px;font:1
 <h2>链路明细</h2>
 <table><tr><th>A设备</th><th>A接口</th><th>A IP</th><th>B设备</th><th>B接口</th><th>B IP</th><th>带宽</th><th>备注</th></tr>${linkRows}</table>
 ${bwRows ? `<h2>带宽汇总</h2><table><tr><th>带宽</th><th>链路数</th></tr>${bwRows}</table>` : ''}
-${cfg ? `<h2>设备配置（华为风格）</h2><pre>${esc(cfg)}</pre>` : ''}
 </body></html>`;
 };
 

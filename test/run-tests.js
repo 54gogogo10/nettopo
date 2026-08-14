@@ -517,6 +517,22 @@ console.log('== 设备配置生成 / IP 规划 ==');
     const empty = U.generateConfigs(gC.nodes, gC.links, 'huawei', { only: new Set() });
     ok(empty === '', '配置生成：空子集返回空');
   }
+  // 设备级厂家：n.vendor 覆盖全局 vendor（在「编辑设备」中设置）
+  {
+    const gV = M.textToGraph('源设备,源接口,源IP,目标设备,目标接口,目标IP\nR1,GE0/0/1,10.0.0.1,SW1,GE1/0/1,10.0.0.2');
+    for (const n of gV.nodes) { n.w = U.nodeWidthForName(n.name); n.h = U.nodeHeightFor(n); n.x = 0; n.y = 0; }
+    gV.nodes.find(n => n.name === 'R1').vendor = 'cisco';
+    const cv = U.generateConfigs(gV.nodes, gV.links, 'huawei');
+    const r1Idx = cv.indexOf('! R1'), sw1Idx = cv.indexOf('# SW1');
+    const r1sec = r1Idx >= 0 && sw1Idx > r1Idx ? cv.slice(r1Idx, sw1Idx) : '';
+    const sw1sec = sw1Idx >= 0 ? cv.slice(sw1Idx) : '';
+    ok(r1sec.includes('no shutdown'), '设备级厂家：R1 用思科风格（no shutdown）');
+    ok(sw1sec.includes('interface GE1/0/1') && !sw1sec.includes('no shutdown'), '设备级厂家：SW1 无 vendor 时用全局华为风格');
+    gV.nodes.find(n => n.name === 'R1').vendor = 'not-exist';
+    const cv2 = U.generateConfigs(gV.nodes, gV.links, 'huawei');
+    const r1b = cv2.indexOf('# R1');
+    ok(r1b >= 0 && !cv2.slice(r1b).includes('no shutdown'), '设备级厂家：无效 key 回退全局风格');
+  }
   const plan = U.ipPlan(gC.nodes, gC.links);
   ok(plan.rows.length >= 2 && plan.rows.some(r => r.IP === '10.0.0.1' && r.网段 === '10.0.0.0/24'), 'IP 规划含接口行与网段');
   ok(plan.rows.some(r => r.IP === '10.0.0.1' && r.对端IP === '10.0.0.2'), 'IP 规划含对端接口 IP');
@@ -579,13 +595,13 @@ console.log('== IP 改段 / 对齐 / 设计报告 ==');
   ns[0].x = 0; ns[1].x = 200; ns[2].x = 400; // 还原初始位置再测等距
   U.alignNodes(ns, 'hdist');
   ok(ns[0].x === 0 && ns[1].x === 190 && ns[2].x === 400, '水平等距（0/190/400，间隔 90）');
-  // 设计报告
+  // 设计报告（不含设备配置片段）
   const gR = M.textToGraph(M.SAMPLE_CSV);
   for (const n of gR.nodes) { n.w = U.nodeWidthForName(n.name); n.h = U.nodeHeightFor(n); n.x = 0; n.y = 0; }
-  const rep = U.buildReportHtml(gR.nodes, gR.links, { includeConfig: true });
+  const rep = U.buildReportHtml(gR.nodes, gR.links);
   ok(rep.includes('设备清单') && rep.includes('IP 规划') && rep.includes('子网统计') && rep.includes('链路明细'), '设计报告含核心章节');
   ok(rep.includes('rowspan='), '设计报告 IP 规划设备名列合并（rowspan）');
-  ok(rep.includes('<pre>') && rep.includes('interface '), '设计报告含设备配置片段');
+  ok(!rep.includes('设备配置') && !rep.includes('<pre>'), '设计报告不再附加设备配置内容');
   ok(rep.startsWith('<!DOCTYPE html>') && rep.includes('</html>'), '设计报告为完整 HTML');
 }
 
