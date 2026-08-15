@@ -227,24 +227,33 @@ class Renderer {
     const g = el('g', { class: 'node', 'data-id': n.id, transform: `translate(${n.x} ${n.y})` }, this.nodeLayer);
     const body = el('g', { class: 'body' }, g);
     el('rect', { class: 'shape', x: 0, y: 0, width: n.w, height: n.h, rx: 12, fill: `url(#g-${n.type})` }, body);
-    // 图标区：自定义类型用上传图片，否则用内置图标
-    el('rect', { class: 'icon-chip', x: 6, y: 6, width: 44, height: n.h - 12, rx: 8 }, body);
-    const ic = el('g', { transform: `translate(${6 + (44 - 26) / 2} ${(n.h - 26) / 2})` }, body);
-    if (t.img) {
+    // 图标区：设备级自定义图标（n.icon：内置 key 或图片 dataURL）> 类型上传图片 > 内置图标
+    // 图标区恒为正方形圆角方框；上传图片直接缩放拉伸填满整个方框（不裁切、不按比例留白）
+    const iconKey = (n.icon && U.NODE_ICON_KEYS && U.NODE_ICON_KEYS.includes(n.icon)) ? n.icon : null;
+    const iconImg = n.icon && !iconKey ? n.icon : (t.img || '');
+    const nh = Number(n.h) > 0 ? Number(n.h) : U.NODE_H; // 兜底：旧工程可能缺 h
+    const isz = Math.max(24, Math.min(44, nh - 12)); // 方框边长（正方形）
+    const dispW = isz, dispH = isz;
+    const ix = 6, iy = Math.max(0, (nh - dispH) / 2);
+    el('rect', { class: 'icon-chip', x: ix, y: iy, width: dispW, height: dispH, rx: 8, fill: 'rgba(255,255,255,.14)' }, body);
+    const tx = ix + dispW + 8; // 文字起点
+    if (iconImg) {
       const cid = 'clip-' + n.id;
       const cp = el('clipPath', { id: cid }, body);
-      el('rect', { x: 0, y: 0, width: 44, height: n.h - 12, rx: 8 }, cp);
+      // 裁剪区原点必须与图片一致（ix, iy），否则图片右下角被裁掉、内容偏左上
+      el('rect', { x: ix, y: iy, width: dispW, height: dispH, rx: 8 }, cp);
       const img = el('image', {
-        href: t.img, x: 6, y: 6, width: 44, height: n.h - 12,
-        preserveAspectRatio: 'xMidYMid slice',
+        href: iconImg, x: ix, y: iy, width: dispW, height: dispH,
+        preserveAspectRatio: 'none', // 直接拉伸缩放填满方框
         'clip-path': `url(#${cid})`
       }, body);
-      img.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', t.img);
-      el('rect', { x: 6, y: 6, width: 44, height: n.h - 12, rx: 8, fill: 'none', stroke: 'rgba(255,255,255,.35)', 'stroke-width': 1 }, body);
+      img.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', iconImg);
+      el('rect', { x: ix, y: iy, width: dispW, height: dispH, rx: 8, fill: 'none', stroke: 'rgba(255,255,255,.35)', 'stroke-width': 1 }, body);
     } else {
+      const ic = el('g', { transform: `translate(${ix + (dispH - 26) / 2} ${iy + (dispH - 26) / 2})` }, body);
       ic.setAttribute('color', '#ffffff');
       const sv = el('svg', { viewBox: '0 0 24 24', width: 26, height: 26 }, ic);
-      sv.innerHTML = U.ICONS[t.key] || U.ICONS.other;
+      sv.innerHTML = U.ICONS[iconKey || t.key] || U.ICONS.other;
     }
     // 名称 / 类型 / 管理地址（有管理地址时节点加高，多个地址分行显示）
     const mgmts = U.nodeMgmts(n);
@@ -254,23 +263,24 @@ class Renderer {
       const shown = mgmts.slice(0, lines);
       if (mgmts.length > lines) shown[lines - 1] = '+' + (mgmts.length - lines + 1) + ' 个';
       const y0 = n.h / 2 - 12 - (lines - 1) * 8;
-      el('text', { class: 'nm', x: 60, y: y0, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w);
-      el('text', { class: 'tp', x: 60, y: y0 + 16, 'text-anchor': 'start' }, body).textContent = t.label;
+      el('text', { class: 'nm', x: tx, y: y0, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w, tx);
+      el('text', { class: 'tp', x: tx, y: y0 + 16, 'text-anchor': 'start' }, body).textContent = t.label;
       shown.forEach((ip, i) => {
-        const mg = el('text', { class: 'mgmt', x: 60, y: y0 + 32 + i * 14, 'text-anchor': 'start' }, body);
+        const mg = el('text', { class: 'mgmt', x: tx, y: y0 + 32 + i * 14, 'text-anchor': 'start' }, body);
         mg.textContent = '管理: ' + ip;
       });
     } else {
-      el('text', { class: 'nm', x: 60, y: n.h / 2 - 3, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w);
-      el('text', { class: 'tp', x: 60, y: n.h / 2 + 15, 'text-anchor': 'start' }, body).textContent = t.label;
+      el('text', { class: 'nm', x: tx, y: n.h / 2 - 3, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w, tx);
+      el('text', { class: 'tp', x: tx, y: n.h / 2 + 15, 'text-anchor': 'start' }, body).textContent = t.label;
     }
     // 标题提示
     el('title', {}, g).textContent = `${n.name}（${t.label}）`;
     this.nodeEls.set(n.id, g);
   }
 
-  _fitName(name, nodeW) {
-    const avail = (nodeW || 160) - 78;
+  _fitName(name, nodeW, tx) {
+    const start = Number(tx) > 0 ? Number(tx) : 60;
+    const avail = (nodeW || 160) - start - 18;
     const size = 13.5;
     const text = String(name);
     if (U.measureText(text, size) <= avail) return text;
@@ -282,6 +292,26 @@ class Renderer {
       out += ch;
     }
     return out + '…';
+  }
+
+  /* ---------- 图片尺寸缓存（旧工程无尺寸信息时异步补齐） ---------- */
+  _loadIconSize(n, src) {
+    if (!this._imgSize) this._imgSize = new Map();
+    if (this._imgSize.has(src)) return;
+    this._imgSize.set(src, null); // 占位，避免重复加载
+    const im = new Image();
+    im.onload = () => {
+      const w = im.naturalWidth || 0, h = im.naturalHeight || 0;
+      this._imgSize.set(src, { w, h });
+      const node = this.nodes.find(x => x.id === n.id);
+      if (node && w > 0 && h > 0) {
+        node.iconW = w;
+        node.iconH = h;
+        this.setData(this.nodes, this.links, this.texts); // 重渲为按比例完整显示
+      }
+    };
+    im.onerror = () => this._imgSize.set(src, null);
+    im.src = src;
   }
 
   /* ---------- 连线构建 ---------- */

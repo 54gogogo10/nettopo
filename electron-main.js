@@ -1,6 +1,6 @@
 /* NetTopo Electron 主进程 */
 'use strict';
-const { app, BrowserWindow, session, ipcMain, dialog, Notification } = require('electron');
+const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu } = require('electron');
 const path = require('path');
 const { ShellManager } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
@@ -13,6 +13,10 @@ if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_US
 let mainWin = null;
 let shellWin = null;
 let webWin = null;
+let tray = null;
+let trayQuitting = false;
+const trayEnabled = () => loadAppSettings().trayEnabled === true;
+let trayJobCount = 0; // 托盘菜单显示的活动监控任务数
 let webReady = false;              // Web 管理页窗口渲染层是否就绪
 const pendingWebTabs = [];         // 等待 Web 窗口加载完成的 newtab 消息
 let certSeq = 0;
@@ -67,6 +71,34 @@ function getBackupStore() {
   return backupStore;
 }
 function resetBackupStore() { backupStore = null; }
+
+/* ---- 系统托盘常驻 ---- */
+function rebuildTrayMenu() {
+  if (!tray) return;
+  const items = [];
+  items.push({ label: '监控任务：' + trayJobCount + ' 个', enabled: false });
+  items.push({ type: 'separator' });
+  items.push({ label: '显示主窗口', click: () => {
+    if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); }
+  } });
+  items.push({ label: '停止全部监控', click: () => { monitor.stopAll(); trayJobCount = 0; rebuildTrayMenu(); } });
+  items.push({ type: 'separator' });
+  items.push({ label: '退出', click: () => { trayQuitting = true; monitor.stopAll(); shell.closeAll(); app.quit(); } });
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+function applyTray() {
+  if (trayEnabled() && !tray) {
+    try {
+      tray = new Tray(path.join(__dirname, 'icon.png'));
+      tray.setToolTip('NetTopo 网络拓扑设计器（后台监控运行中）');
+      tray.on('click', () => { if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); } });
+      rebuildTrayMenu();
+    } catch (e) { tray = null; }
+  } else if (!trayEnabled() && tray) {
+    try { tray.destroy(); } catch (e) { /* ignore */ }
+    tray = null;
+  }
+}
 
 /* ---- Web Shell 独立窗口（多标签） ---- */
 function createShellWindow() {
@@ -133,7 +165,15 @@ shell.on('end', (id, reason) => emitShell('shell:end', id, reason));
 // 监控状态只发往主窗口（侧栏标记），不打扰其它窗口
 monitor.on('status', (info) => {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('monitor:status', info);
+  const n = monitor.status().length;
+  if (n !== trayJobCount) { trayJobCount = n; if (tray) rebuildTrayMenu(); }
 });
+// 监控事件历史（供监控中心时间线；主进程保存最近 500 条）
+const monitorEvents = [];
+function recordMonitorEvent(info, type, detail) {
+  monitorEvents.push({ ts: Date.now(), type: type, key: info.key, deviceId: info.deviceId, host: info.host, name: info.name || '', detail: detail || '' });
+  if (monitorEvents.length > 500) monitorEvents.splice(0, monitorEvents.length - 500);
+}
 // 在线探测状态 → 主窗口；离线/恢复转换时弹系统通知（受 settings.monitorNotify 开关控制）
 const lastProbeOk = new Map();      // key -> 上次探测结果
 const lastAlertOn = new Map();      // key -> 上次告警状态
@@ -152,26 +192,28 @@ function notifyUser(title, body) {
 }
 monitor.on('probe', (info) => {
   sendMonitor('monitor:probe', info);
-  if (!notifyEnabled()) return;
   const prev = lastProbeOk.get(info.key);
   if (info.ok === false && prev !== false) {
     lastProbeOk.set(info.key, false);
-    notifyUser('NetTopo · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
+    recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
+    if (notifyEnabled()) notifyUser('NetTopo · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
   } else if (info.ok === true && prev === false) {
     lastProbeOk.set(info.key, true);
-    notifyUser('NetTopo · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
+    recordMonitorEvent(info, 'recovery', '探测恢复在线');
+    if (notifyEnabled()) notifyUser('NetTopo · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
   } else {
     lastProbeOk.set(info.key, info.ok);
   }
 });
 monitor.on('alert', (info) => {
   sendMonitor('monitor:alert', info);
-  if (!notifyEnabled()) return;
   if (info.matched && lastAlertOn.get(info.key) !== true) {
     lastAlertOn.set(info.key, true);
-    notifyUser('NetTopo · 输出告警', info.name + '（' + info.host + '）输出匹配告警关键字「' + (info.pattern || '') + '」');
+    recordMonitorEvent(info, 'alert', '输出匹配告警关键字「' + (info.pattern || '') + '」');
+    if (notifyEnabled()) notifyUser('NetTopo · 输出告警', info.name + '（' + info.host + '）输出匹配告警关键字「' + (info.pattern || '') + '」');
   } else if (!info.matched && lastAlertOn.get(info.key) === true) {
     lastAlertOn.set(info.key, false);
+    recordMonitorEvent(info, 'alert-clear', '告警解除');
   }
 });
 monitor.on('trust', (info) => {
@@ -179,14 +221,30 @@ monitor.on('trust', (info) => {
   notifyUser('NetTopo · 首次信任主机指纹',
     info.name + '（' + info.host + '）首次连接已自动信任指纹 ' + info.fp + '；后续指纹变化将拒绝连接');
 });
+const lastBackupChangeAt = new Map(); // key -> 上次变更通知时间（节流）
 monitor.on('backup', (info) => {
   sendMonitor('monitor:backup', info);
-  if (!notifyEnabled() || info.ok) return;
-  const now = Date.now();
-  const prevErr = lastBackupErrAt.get(info.key) || 0;
-  if (now - prevErr > 10 * 60 * 1000) {
-    lastBackupErrAt.set(info.key, now);
-    notifyUser('NetTopo · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
+  if (!notifyEnabled()) return;
+  if (info.ok) {
+    if (info.first) recordMonitorEvent(info, 'backup', (info.name || '') + ' 首次备份');
+    else if (info.changed) recordMonitorEvent(info, 'backup-change', (info.name || '') + ' 配置有变化（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
+    else recordMonitorEvent(info, 'backup', (info.name || '') + ' 与上次一致');
+    if (info.changed) {
+      const now = Date.now();
+      const last = lastBackupChangeAt.get(info.key) || 0;
+      if (now - last > 30 * 60 * 1000) {
+        lastBackupChangeAt.set(info.key, now);
+        notifyUser('NetTopo · 配置变更', info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
+      }
+    }
+  } else {
+    recordMonitorEvent(info, 'backup-error', (info.error || '备份失败'));
+    const now = Date.now();
+    const prevErr = lastBackupErrAt.get(info.key) || 0;
+    if (now - prevErr > 10 * 60 * 1000) {
+      lastBackupErrAt.set(info.key, now);
+      notifyUser('NetTopo · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
+    }
   }
 });
 
@@ -209,6 +267,14 @@ function createWindow() {
   });
   mainWin.loadFile('index.html');
   mainWin.removeMenu();
+  // 托盘常驻：关闭按钮 = 最小化到托盘（后台监控继续）；退出走托盘菜单或设置关闭
+  mainWin.on('close', (e) => {
+    if (trayEnabled() && !trayQuitting) {
+      e.preventDefault();
+      mainWin.hide();
+      if (tray && tray.displayBalloon) { try { tray.displayBalloon({ title: 'NetTopo 已最小化到托盘', content: '后台监控仍在运行，点击托盘图标可恢复主窗口' }); } catch (err) { /* ignore */ } }
+    }
+  });
   mainWin.on('closed', () => { mainWin = null; });
 }
 
@@ -440,7 +506,7 @@ ipcMain.handle('secure:decrypt', (e, cipher) => {
     return { ok: true, text: safeStorage.decryptString(Buffer.from(cipher, 'base64')) };
   } catch (err) { return { ok: false, error: '解密失败' }; }
 });
-ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? { ok: true, notify: loadAppSettings().monitorNotify !== false } : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? { ok: true, notify: loadAppSettings().monitorNotify !== false, tray: trayEnabled() } : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:set-settings', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   if (p && typeof p.notify === 'boolean') {
@@ -448,6 +514,32 @@ ipcMain.handle('monitor:set-settings', (e, p) => {
     saveAppSettings();
   }
   return { ok: true, notify: loadAppSettings().monitorNotify !== false };
+});
+ipcMain.handle('monitor:overview', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  return {
+    ok: true,
+    jobs: monitor.status(),
+    events: monitorEvents.slice(-200).reverse(),
+    backups: (configBackup.hosts().items || []).slice(0, 100)
+  };
+});
+// 测试钩子（仅冒烟测试环境）：模拟用户点击窗口关闭按钮
+if (process.env.NETTOPO_USERDATA) {
+  ipcMain.handle('monitor:test-close', (e) => {
+    if (!monitorGuard(e)) return { ok: false };
+    if (mainWin && !mainWin.isDestroyed()) mainWin.close();
+    return { ok: true };
+  });
+}
+ipcMain.handle('monitor:tray', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  if (p && typeof p.enabled === 'boolean') {
+    loadAppSettings().trayEnabled = p.enabled;
+    saveAppSettings();
+    applyTray();
+  }
+  return { ok: true, enabled: trayEnabled() };
 });
 
 /* ---- 监控日志浏览器：目录树 + 内容读取（路径逐级白名单校验） ---- */
@@ -565,6 +657,7 @@ app.whenReady().then(() => {
   // 弹窗抑制与 window.open 转标签由 webview 元素的 preload/allowpopups 处理
   session.fromPartition('persist:nettopo-web').setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
   createWindow();
+  applyTray();
   // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
   app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
     if (webContents.getType() !== 'webview') return; // 仅处理设备管理页内嵌浏览器
@@ -592,11 +685,14 @@ app.whenReady().then(() => {
   });
 });
 
+app.on('before-quit', () => { trayQuitting = true; });
 app.on('will-quit', () => {
   monitor.stopAll();
   shell.closeAll();
+  if (tray) { try { tray.destroy(); } catch (e) { /* ignore */ } tray = null; }
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // 托盘常驻模式：所有窗口关闭后继续在后台运行监控；否则退出
+  if (process.platform !== 'darwin' && !(trayEnabled() && !trayQuitting)) app.quit();
 });

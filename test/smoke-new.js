@@ -139,9 +139,13 @@ async function connectCDP(target) {
     configVer = 2;
     const rb = await cdp.eval('window.topoMonitor.runBackup(' + JSON.stringify(devName + '@127.0.0.1') + ')');
     ok(rb && rb.ok === true, '立即备份触发成功');
-    await sleep(2500);
-    hosts = await cdp.eval('window.topoConfigBackup.hosts()');
-    h = (hosts && hosts.ok && hosts.items || []).find(x => x.device === devName && x.host === '127.0.0.1');
+    // 轮询等待第二轮备份完成（命令循环 1 秒一轮，备份可能推迟 2 秒执行）
+    for (let w = 0; w < 12; w++) {
+      await sleep(1000);
+      hosts = await cdp.eval('window.topoConfigBackup.hosts()');
+      h = (hosts && hosts.ok && hosts.items || []).find(x => x.device === devName && x.host === '127.0.0.1');
+      if (h && h.count >= 2) break;
+    }
     ok(!!h && h.count === 2, '第二轮备份已生成（共 ' + (h && h.count) + ' 份）');
     const list = await cdp.eval('window.topoConfigBackup.list(' + JSON.stringify(devName) + ", '127.0.0.1')");
     const files = (list && list.ok && list.items || []).map(i => i.name);

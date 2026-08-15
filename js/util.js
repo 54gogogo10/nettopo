@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260814s';
+U.APP_VERSION = 'v20260815l';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -78,6 +78,74 @@ U.fmtDate = (d) => {
   d = d || new Date();
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+};
+
+
+/* ---------- ZIP 打包（无压缩 STORE，UTF-8 文件名，供批量导出配置） ---------- */
+U.zipFiles = (files) => {
+  files = (Array.isArray(files) ? files : []).filter(f => f && typeof f.name === 'string' && f.name.length > 0);
+  const crcTable = (() => {
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[i] = c >>> 0;
+    }
+    return t;
+  })();
+  const crc32 = (buf) => {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  };
+  const enc = (s) => new TextEncoder().encode(s);
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const f of files) {
+    const nameBuf = enc(f.name);
+    const dataBuf = enc(String(f.content == null ? '' : f.content));
+    const crc = crc32(dataBuf);
+    const lh = new Uint8Array(30);
+    const dv = new DataView(lh.buffer);
+    dv.setUint32(0, 0x04034b50, true);
+    dv.setUint16(4, 20, true);
+    dv.setUint16(6, 0x0800, true);  // UTF-8 文件名
+    dv.setUint16(8, 0, true);       // STORE
+    dv.setUint32(14, crc, true);
+    dv.setUint32(18, dataBuf.length, true);
+    dv.setUint32(22, dataBuf.length, true);
+    dv.setUint16(26, nameBuf.length, true);
+    parts.push(lh, nameBuf, dataBuf);
+    const ch = new Uint8Array(46);
+    const cdv = new DataView(ch.buffer);
+    cdv.setUint32(0, 0x02014b50, true);
+    cdv.setUint16(4, 20, true);
+    cdv.setUint16(6, 0x0800, true);
+    cdv.setUint16(8, 0, true);
+    cdv.setUint32(16, crc, true);
+    cdv.setUint32(20, dataBuf.length, true);
+    cdv.setUint32(24, dataBuf.length, true);
+    cdv.setUint16(28, nameBuf.length, true);
+    cdv.setUint32(42, offset, true);
+    central.push(ch, nameBuf);
+    offset += 30 + nameBuf.length + dataBuf.length;
+  }
+  const cdStart = offset;
+  let cdSize = 0;
+  for (const c of central) cdSize += c.length;
+  const eocd = new Uint8Array(22);
+  const edv = new DataView(eocd.buffer);
+  edv.setUint32(0, 0x06054b50, true);
+  edv.setUint16(8, files.length, true);
+  edv.setUint16(10, files.length, true);
+  edv.setUint32(12, cdSize, true);
+  edv.setUint32(16, cdStart, true);
+  const total = offset + cdSize + 22;
+  const all = new Uint8Array(total);
+  let pos = 0;
+  for (const part of [...parts, ...central, eocd]) { all.set(part, pos); pos += part.length; }
+  return all;
 };
 
 /* ---------- 下载 ---------- */
@@ -357,7 +425,11 @@ U.sanitizeGraph = (nodes, links, texts) => {
     return {
       id, name: str(n.name).slice(0, 200),
       type: SAFE_ID.test(rawType) ? rawType : 'other',
-      vendor: str(n.vendor).slice(0, 64), // 设备级配置厂家（空 = 跟随全局）
+      vendor: str(n.vendor).slice(0, 64), // 设备级图标：内置 key 或图片 dataURL
+      icon: (typeof n.icon === 'string' && U.NODE_ICON_KEYS.includes(n.icon)) ? n.icon
+        : (typeof n.icon === 'string' && n.icon.indexOf('data:image/') === 0 && n.icon.length < 1024 * 1024 ? n.icon : ''), // 设备级图标：内置 key 或图片 dataURL
+      iconW: (n.iconW = Number(n.iconW)) > 0 && n.iconW <= 1024 ? n.iconW : 0,
+      iconH: (n.iconH = Number(n.iconH)) > 0 && n.iconH <= 1024 ? n.iconH : 0, // 上传图片原始宽高（用于按比例完整显示）
       x: coord(n.x, 0), y: coord(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',
@@ -539,7 +611,29 @@ const I = {
   about: '<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11v5.5\"/><circle cx=\"12\" cy=\"7.8\" r=\"1.1\" fill=\"currentColor\" stroke=\"none\"/></svg>',
   pulse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6 4 12 2.5-6h5"/></svg>'
 };
+I.grid = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>';
+I.tray = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14.5V5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9"/><path d="M4 14.5a3.5 3.5 0 0 0 3.5 3.5h9a3.5 3.5 0 0 0 3.5-3.5"/><path d="M9 14.5h6"/></svg>';
+I.doc = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h8L18.5 8v12a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4.5 20v-15A1.5 1.5 0 0 1 6 3.5z"/><path d="M14 3.5V8h4.5"/><path d="M8.5 13h7M8.5 16.5h7"/></svg>';
+I.router = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="10" width="17" height="6" rx="3"/><path d="M8.5 10V7.5h7V10"/><path d="M12 7.5V4.5"/><circle cx="7" cy="13" r=".9" fill="currentColor" stroke="none"/><circle cx="10.5" cy="13" r=".9" fill="currentColor" stroke="none"/><circle cx="14" cy="13" r=".9" fill="currentColor" stroke="none"/><path d="M17.5 13h1.5"/></svg>';
+I.switch = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="7.5" width="17" height="9" rx="2"/><circle cx="7" cy="12" r=".9" fill="currentColor" stroke="none"/><circle cx="10.5" cy="12" r=".9" fill="currentColor" stroke="none"/><circle cx="14" cy="12" r=".9" fill="currentColor" stroke="none"/><path d="M17.5 12h1.5"/><path d="M7 7.5V4.5M12 7.5V4.5M17 7.5V4.5"/></svg>';
+I.firewall = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l6.5 2.6v4.8c0 4.3-2.6 7.6-6.5 9.1-3.9-1.5-6.5-4.8-6.5-9.1V6.1z"/><path d="M9.5 11.5l1.8 1.8 3.4-3.6"/></svg>';
+I.server = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3.5" width="16" height="5.5" rx="1.5"/><rect x="4" y="10.5" width="16" height="5.5" rx="1.5"/><rect x="4" y="17.5" width="16" height="3.5" rx="1.5"/><circle cx="7.5" cy="6.2" r=".8" fill="currentColor" stroke="none"/><circle cx="7.5" cy="13.2" r=".8" fill="currentColor" stroke="none"/><circle cx="7.5" cy="19.2" r=".8" fill="currentColor" stroke="none"/><path d="M16.5 5.5h2M16.5 12.5h2M16.5 18.5h2"/></svg>';
+I.pc = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="11" rx="1.5"/><path d="M9 19.5h6M12 15.5v4"/><path d="M6.5 8h11"/></svg>';
+I.cloud = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7.2 17.5a4.3 4.3 0 0 1-.7-8.55 5.6 5.6 0 0 1 10.7-1.25 4.1 4.1 0 0 1-.5 8.16z"/><path d="M9 13.5l2.2 2.2L16 10.5"/></svg>';
+I.other = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9.8 9.3a2.4 2.4 0 0 1 4.5 1.1c0 1.6-2.3 2.1-2.3 3.6"/><path d="M12 17.2h.01"/></svg>';
 U.ICONS = I;
+
+/* 节点可用图标 key（设备级自定义图标选择器） */
+U.NODE_ICON_KEYS = ['router', 'switch', 'firewall', 'server', 'pc', 'cloud', 'other', 'ap', 'camera', 'printer', 'nas'];
+U.NODE_ICON_LABELS = {
+  router: '路由器', switch: '交换机', firewall: '防火墙', server: '服务器',
+  pc: '终端', cloud: '云/外网', other: '其他', ap: '无线AP', camera: '摄像头', printer: '打印机', nas: '存储NAS'
+};
+/* 补充的节点图标（与 U.ICONS 同一集合，供渲染器取用） */
+U.ICONS.ap = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 18.5v.01"/><path d="M7.5 15a6.4 6.4 0 0 1 9 0"/><path d="M4.9 11.6a10.9 10.9 0 0 1 14.2 0"/><path d="M2.4 8a15.4 15.4 0 0 1 19.2 0"/></svg>';
+U.ICONS.camera = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5A1.5 1.5 0 0 1 4.5 7H7l1.4-2.2A1.5 1.5 0 0 1 9.6 4h4.8a1.5 1.5 0 0 1 1.2.8L17 7h2.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/><circle cx="12" cy="13" r="3.2"/></svg>';
+U.ICONS.printer = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7 8V4.5A1.5 1.5 0 0 1 8.5 3h7A1.5 1.5 0 0 1 17 4.5V8"/><rect x="3.5" y="8" width="17" height="8" rx="2"/><path d="M7 15.5h10v4.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 20z"/><circle cx="17.5" cy="12" r=".9" fill="currentColor" stroke="none"/></svg>';
+U.ICONS.nas = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="10" rx="2"/><path d="M3 15h18v4a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19z"/><circle cx="7" cy="9" r="1.1" fill="currentColor" stroke="none"/><circle cx="11" cy="9" r="1.1" fill="currentColor" stroke="none"/><path d="M16.5 8.5h2M16.5 11.5h2M6.5 18h2.5"/></svg>';
 
 /* 填充所有 .ic 元素 */
 U.fillIcons = () => {
@@ -947,7 +1041,7 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
   // only: 只生成这些设备的配置（Set<id>，空集合则不生成任何设备）；nodes 仍传全量，用于对端名称解析
   const only = opts.only instanceof Set ? opts.only : null;
   const targets = only ? nodes.filter(n => only.has(n.id)) : nodes;
-  // 设备级厂家：设备自身配置了厂家（n.vendor，在「编辑设备」中设置）则优先，否则用全局 vendor
+  // 设备级图标：内置 key 或图片 dataURL
   const tplOf = (n) => {
     if (typeof vendor === 'object') return baseTpl; // 直接传模板对象时统一使用
     if (n && typeof n.vendor === 'string' && n.vendor) {
