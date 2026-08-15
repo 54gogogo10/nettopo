@@ -294,26 +294,6 @@ class Renderer {
     return out + '…';
   }
 
-  /* ---------- 图片尺寸缓存（旧工程无尺寸信息时异步补齐） ---------- */
-  _loadIconSize(n, src) {
-    if (!this._imgSize) this._imgSize = new Map();
-    if (this._imgSize.has(src)) return;
-    this._imgSize.set(src, null); // 占位，避免重复加载
-    const im = new Image();
-    im.onload = () => {
-      const w = im.naturalWidth || 0, h = im.naturalHeight || 0;
-      this._imgSize.set(src, { w, h });
-      const node = this.nodes.find(x => x.id === n.id);
-      if (node && w > 0 && h > 0) {
-        node.iconW = w;
-        node.iconH = h;
-        this.setData(this.nodes, this.links, this.texts); // 重渲为按比例完整显示
-      }
-    };
-    im.onerror = () => this._imgSize.set(src, null);
-    im.src = src;
-  }
-
   /* ---------- 连线构建 ---------- */
   _buildLink(l) {
     const g = el('g', { class: 'link', 'data-id': l.id }, this.linkLayer);

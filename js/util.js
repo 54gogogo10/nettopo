@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260815l';
+U.APP_VERSION = 'v20260815o';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -428,8 +428,6 @@ U.sanitizeGraph = (nodes, links, texts) => {
       vendor: str(n.vendor).slice(0, 64), // 设备级图标：内置 key 或图片 dataURL
       icon: (typeof n.icon === 'string' && U.NODE_ICON_KEYS.includes(n.icon)) ? n.icon
         : (typeof n.icon === 'string' && n.icon.indexOf('data:image/') === 0 && n.icon.length < 1024 * 1024 ? n.icon : ''), // 设备级图标：内置 key 或图片 dataURL
-      iconW: (n.iconW = Number(n.iconW)) > 0 && n.iconW <= 1024 ? n.iconW : 0,
-      iconH: (n.iconH = Number(n.iconH)) > 0 && n.iconH <= 1024 ? n.iconH : 0, // 上传图片原始宽高（用于按比例完整显示）
       x: coord(n.x, 0), y: coord(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',

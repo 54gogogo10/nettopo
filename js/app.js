@@ -1539,7 +1539,6 @@ function addNodeAt(wx, wy) {
         type: v.type || U.typeOf(v.name),
         vendor: v.vendor || '',
         icon: v.icon || '',
-        iconW: v.iconW || 0, iconH: v.iconH || 0,
         x: wx - U.nodeWidthForName(v.name) / 2, y: wy - U.NODE_H / 2,
         w: U.nodeWidthForName(v.name), h: U.NODE_H,
         note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1), web: v.web.trim(),
@@ -1648,7 +1647,7 @@ function editNode(id) {
       { name: 'name', label: '设备名称', required: true, value: n.name },
       { name: 'type', label: '设备类型', type: 'select', options: U.typeList().map(t => [t.key, t.label]), value: n.type },
       { name: 'vendor', label: '配置厂家', type: 'select', options: [['', '跟随全局（生成配置时选择）']].concat(cfgVendorOptionList()), value: n.vendor || '' },
-      { name: 'icon', label: '设备图标', type: 'icon', value: n.icon || '', iconW: n.iconW || 0, iconH: n.iconH || 0 },
+      { name: 'icon', label: '设备图标', type: 'icon', value: n.icon || '' },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: U.nodeMgmts(n) },
       { name: 'web', label: '管理Web页URL', value: n.web || '', ph: '例如 http://10.255.0.1（可选）' },
       { name: 'hasVlanIf', label: '三层 VLAN 接口', type: 'checkbox', value: !!(Array.isArray(n.vlans) && n.vlans.length), tip: '有 VLAN 接口（生成 interface vlan 及 IP 地址）', toggles: 'vlans' },
@@ -1670,8 +1669,6 @@ function editNode(id) {
       n.type = v.type;
       n.vendor = v.vendor || '';
       n.icon = v.icon || '';
-      n.iconW = v.iconW || 0;
-      n.iconH = v.iconH || 0;
       n.web = v.web.trim();
       n.note = v.note.trim();
       n.vlans = (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : [];
@@ -2128,8 +2125,6 @@ function openModal(opts) {
       ctrl = `<div class="icon-ctrl" data-icon-ctrl="${f.name}">
         <input type="hidden" name="${f.name}" value="${U.escHtml(curKey)}"/>
         <input type="hidden" name="${f.name}Data" value="${U.escHtml(curImg)}"/>
-        <input type="hidden" name="${f.name}W" value="${f.iconW ? Number(f.iconW) : ''}"/>
-        <input type="hidden" name="${f.name}H" value="${f.iconH ? Number(f.iconH) : ''}"/>
         <div class="icon-line">
           <select name="${f.name}Sel">${optRows.map(([v, lb]) => `<option value="${v}"${String(curKey) === String(v) && !curImg ? ' selected' : ''}>${U.escHtml(lb)}</option>`).join('')}<option value="__upload">＋ 上传图片…（按正方形裁切显示）</option></select>
           <button type="button" class="tb icon-clr" title="清除自定义图标">清除</button>
@@ -2219,15 +2214,6 @@ function openModal(opts) {
         rd.onload = () => {
           keyEl.value = '';
           dataEl.value = String(rd.result);
-          // 读取图片原始宽高（供画布按比例完整显示）
-          const im = new Image();
-          im.onload = () => {
-            const wEl = ctrl.querySelector('input[name="' + ctrl.dataset.iconCtrl + 'W"]');
-            const hEl = ctrl.querySelector('input[name="' + ctrl.dataset.iconCtrl + 'H"]');
-            if (wEl) wEl.value = String(im.naturalWidth || 0);
-            if (hEl) hEl.value = String(im.naturalHeight || 0);
-          };
-          im.src = String(rd.result);
           renderPrev();
         };
         rd.readAsDataURL(f);
@@ -2241,7 +2227,7 @@ function openModal(opts) {
       dataEl.value = '';
       renderPrev();
     });
-    ctrl.querySelector('.icon-clr').onclick = () => { keyEl.value = ''; dataEl.value = ''; sel.value = ''; renderPrev(); const wEl2 = ctrl.querySelector('input[name="' + ctrl.dataset.iconCtrl + 'W"]'); const hEl2 = ctrl.querySelector('input[name="' + ctrl.dataset.iconCtrl + 'H"]'); if (wEl2) wEl2.value = ''; if (hEl2) hEl2.value = ''; };
+    ctrl.querySelector('.icon-clr').onclick = () => { keyEl.value = ''; dataEl.value = ''; sel.value = ''; renderPrev(); };
     renderPrev();
   });
   // 复选框联动：勾选时显示关联的字段（如「有VLAN接口」→ VLAN 接口列表）
@@ -2277,9 +2263,6 @@ function openModal(opts) {
         const dataEl = form.elements[f.name + 'Data'];
         const img = dataEl ? dataEl.value : '';
         o[f.name] = img || (sel ? sel.value : '');
-        const wEl = form.elements[f.name + 'W'], hEl = form.elements[f.name + 'H'];
-        o[f.name + 'W'] = img && wEl ? (Number(wEl.value) || 0) : 0;
-        o[f.name + 'H'] = img && hEl ? (Number(hEl.value) || 0) : 0;
         return;
       }
       const el2 = form.elements[f.name];
