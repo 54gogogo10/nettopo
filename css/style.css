@@ -20,6 +20,7 @@
   --link-sel: #6366f1;
 }
 html[data-theme="dark"] {
+  color-scheme: dark; /* 原生控件（下拉列表/滚动条等）随暗色主题渲染 */
   --bg: #0b1220;
   --panel: #111a2c;
   --panel2: #0e1626;
@@ -657,6 +658,15 @@ body:not(.panel-off) #panelOpen { display: none; }
 .mon-host-row .mh-ext .mh-pr-int { width: 62px; }
 .mon-host-row .mh-ext .mh-bk-int { width: 62px; }
 .mon-host-row .mh-ext .mh-bk-cmd { flex: 1; min-width: 180px; }
+.mon-host-row .mh-ext .mh-onc { flex: 1 1 100%; min-width: 200px; color: var(--text); }
+.mon-host-row .mh-ext .mh-onc-inp { flex: 1; min-width: 120px; }
+.mon-host-row .mh-ext .mh-onc-ta, .mon-host-row .mh-ext .mh-bk-ta {
+  flex: 1; min-width: 160px; height: 40px; padding: 4px 6px;
+  font: 11.5px/1.5 Consolas, 'Courier New', monospace; color: var(--text);
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; resize: vertical;
+}
+.mon-host-row .mh-ext .mh-bk-ta { flex: 1 1 100%; min-width: 200px; }
+.mon-host-row .mh-ext .mh-bk-mode { height: 24px; font-size: 11.5px; padding: 0 6px; }
 .mon-host-row .mh-ext .mh-unit { color: var(--muted); font-size: 10.5px; }
 .mon-host-row .mh-ext .mh-alert-btn { height: 24px; padding: 0 10px; font-size: 11.5px; }
 .mon-host-row .mh-ext .mh-alerts-wrap { flex: 1 1 100%; }
@@ -668,6 +678,12 @@ body:not(.panel-off) #panelOpen { display: none; }
 .lb-dialog .lb-nav { display: flex; flex-direction: column; gap: 4px; }
 .lb-dialog .lb-nav label { font-size: 11px; color: var(--muted); }
 .lb-dialog .lb-nav select { height: 28px; }
+.lb-dialog .lb-nav select,
+.lb-dialog .lb-toolbar input {
+  color: var(--text); background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 0 8px;
+}
+.lb-dialog select option { color: var(--text); background: var(--panel); }
 .lb-dialog .lb-files { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-height: 0; }
 .lb-file { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 11.5px; }
 .lb-file:hover { background: var(--panel2); }
@@ -684,6 +700,18 @@ body:not(.panel-off) #panelOpen { display: none; }
 .lb-content .lb-line.cur { background: rgba(245,158,11,.3); outline: 1px solid rgba(245,158,11,.6); }
 .lb-content mark { background: #fde047; color: #1e293b; border-radius: 2px; padding: 0 1px; }
 .lb-empty { color: var(--muted); font-size: 12px; padding: 14px 8px; }
+/* 全局跨文件搜索结果条目 */
+.lb-content .lb-sres { padding: 6px 9px; margin-bottom: 4px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: var(--panel); }
+.lb-content .lb-sres:hover { background: var(--accent-soft); border-color: var(--accent); }
+.lb-content .lb-sres .fr { display: block; font-size: 10.5px; color: var(--muted); margin-bottom: 2px; }
+.lb-content .lb-sres .mt { display: block; white-space: pre-wrap; word-break: break-all; }
+/* 暗色模式：日志浏览器细节优化（内容区层次、高亮对比、选中态） */
+html[data-theme="dark"] .lb-content { background: var(--panel); }
+html[data-theme="dark"] .lb-content mark { background: #f59e0b; color: #0b1220; }
+html[data-theme="dark"] .lb-file.sel { border-color: var(--accent2); }
+html[data-theme="dark"] .lb-content .lb-line.hit { background: rgba(245,158,11,.16); }
+html[data-theme="dark"] .lb-content .lb-line.cur { background: rgba(245,158,11,.26); outline: 1px solid rgba(245,158,11,.75); }
+html[data-theme="dark"] .lb-content .lb-sres:hover { border-color: var(--accent2); }
 
 /* ============ 配置备份中心 ============ */
 .bk-dialog .bk-main { display: flex; gap: 10px; height: calc(100% - 64px); min-height: 0; }
@@ -731,6 +759,13 @@ body:not(.panel-off) #panelOpen { display: none; }
 .mc-dialog .mc-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .mc-dialog .mc-h { font-size: 12px; font-weight: 600; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .mc-h .cnt { font-size: 10.5px; color: var(--muted); background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; }
+/* 事件时间线 / 配置备份 标签切换 */
+.mc-dialog .mc-tabs { display: flex; align-items: center; gap: 6px; }
+.mc-tab { height: 26px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel2); color: var(--muted); font-size: 11.5px; cursor: pointer; }
+.mc-tab:hover { border-color: var(--accent); color: var(--text); }
+.mc-tab.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
+.mc-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.mc-pane[hidden] { display: none; }
 .mc-jobs, .mc-events, .mc-baks { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 6px; min-height: 0; font-size: 11.5px; }
 .mc-dev { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
 .mc-dev:last-child { border-bottom: none; }
@@ -766,6 +801,24 @@ body:not(.panel-off) #panelOpen { display: none; }
 .mc-bak-nm { font-weight: 500; flex: 0 0 auto; }
 .mc-bak-sub { color: var(--muted); font-size: 10.5px; }
 .mc-empty { color: var(--muted); font-size: 12px; padding: 14px 8px; }
+/* 监控中心：文字指针可见性（暗色下箭头/文本光标不消失）+ 筛选交互反馈 */
+.mc-dialog .mc-ev { cursor: text; user-select: text; }
+.mc-dialog .mc-ev-t, .mc-dialog .mc-ev-d, .mc-dialog .mc-bak-nm, .mc-dialog .mc-bak-sub, .mc-dialog .mc-stat, .mc-dialog .mc-empty { cursor: text; user-select: text; }
+.mc-dialog .mc-ev:hover { background: var(--panel2); }
+/* 暗色模式：hover 行背景加亮一档 + 文字提亮，保证白色光标与文字均有对比 */
+html[data-theme="dark"] .mc-dialog .mc-ev:hover { background: rgba(255, 255, 255, .07); }
+html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
+.mc-dev-nm { cursor: pointer; border-radius: 6px; padding: 1px 4px; margin-left: -4px; }
+.mc-dev-nm:hover { background: var(--accent-soft); }
+.mc-dev-nm.sel { background: var(--accent-soft); color: var(--accent); }
+.mc-job { cursor: pointer; border-radius: 6px; padding: 2px 4px 2px 14px; margin-left: -4px; }
+.mc-job:hover { background: var(--accent-soft); }
+.mc-job.sel { background: var(--accent-soft); }
+.mc-job.sel b { color: var(--accent); }
+.mc-tag.dev { cursor: pointer; background: var(--accent-soft); color: var(--accent); }
+.mc-tag.dev:hover { box-shadow: 0 0 0 1px var(--accent); }
+.mc-filt { cursor: pointer; margin-left: auto; font-size: 10.5px; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; padding: 0 7px; font-weight: 500; }
+.mc-filt:hover { background: var(--accent); color: #fff; }
 
 /* ============ 设备图标字段（下拉列表） ============ */
 .icon-ctrl { display: flex; flex-direction: column; gap: 8px; }

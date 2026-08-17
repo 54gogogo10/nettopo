@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   openLogs: (key) => ipcRenderer.invoke('monitor:open-logs', { key }),
   logsTree: () => ipcRenderer.invoke('monitor:logs-tree'),
   logsRead: (device, date, file) => ipcRenderer.invoke('monitor:logs-read', { device, date, file }),
+  logsSearch: (keyword) => ipcRenderer.invoke('monitor:logs-search', { keyword }),
   runBackup: (key) => ipcRenderer.invoke('monitor:run-backup', { key }),
   getSettings: () => ipcRenderer.invoke('monitor:get-settings'),
   setSettings: (notify) => ipcRenderer.invoke('monitor:set-settings', { notify }),

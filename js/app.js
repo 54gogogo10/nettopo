@@ -29,7 +29,7 @@ const state = {
   downLinks: new Set(),  // 故障链路 id 集合（模拟断链，路径分析绕行）
   autoBackup: { on: lsGet('nettopo.autoBackup', '0') === '1', minutes: Number(lsGet('nettopo.autoBackupMin', '10') || 10), keep: Math.min(200, Math.max(1, Number(lsGet('nettopo.autoBackupKeep', '30') || 30) || 30)) },
   texts: [],  // 画布文本框（自定义字体样式）
-  monitorCfg: {},   // 设备后台监控配置：nodeId -> {protocol,host,port,username,password,commands,intervalSec,cmdDelayMs,enabled}
+  monitorCfg: {},   // 设备后台监控配置：nodeId -> {hosts:[{host,protocol,port,username,password,commands,onConnect,readOnly,...}],intervalSec,cmdDelayMs,enabled}
   monitorStatus: {} // 设备后台监控运行状态：nodeId -> {state,text,since}（运行时态，不持久化）
 };
 let layoutCancel = false;
@@ -2917,7 +2917,7 @@ function openHelp() {
     <h4>⑨ 保存 / 导出</h4>
     <p><b>工程文件 .nettopo</b>：保存 / 打开含位置、视图、自定义类型、多管理口的完整工程；<b>CSV / Excel</b>：把修改后的拓扑保存回连线关系表（多管理口逗号分隔，可再导入）；<b>PDF</b>：矢量高清交付；<b>PNG / SVG</b>：图片导出与复制到剪贴板；<b>Visio</b>：.vsdx 原生格式可在 Visio 继续编辑；<b>设计报告</b>：自包含 HTML（设备 / IP / 子网 / 链路 / 配置）；<b>IP 规划清单</b>：Excel 导出含对端接口 IP；<b>生成设备配置</b>：华为 / H3C / 思科 / 锐捷及自定义模板（{name} {mgmt} {iface} {ip} {peer} {vlan}…），生成前自动做<b>冲突检查</b>，可<b>下载 ZIP</b> 按厂家分目录打包；「编辑设备」中可为设备指定<b>厂家与自定义图标</b>。</p>
     <h4>⑩ 后台监控（桌面版）</h4>
-    <p>右键设备「设备监控（静默采集）…」配置协议 / 管理口 / 账号 / 命令与循环间隔后，即可在后台静默通过 SSH/Telnet 定时采集命令输出，<b>全部输出连同时间戳写入本地日志</b>。每个管理口可单独开启<b>在线探测</b>（TCP/ICMP，离线变红并弹通知）、<b>输出关键字告警</b>（正则匹配即告警）与<b>配置自动备份</b>（定时抓取配置、保留历史、可对比差异）。<b>监控中心…</b>（工具栏「监控」菜单或右键设备）聚合全部设备状态、告警事件时间线与备份差异；「监控日志…」与「配置备份…」可浏览日志与备份。关闭主窗口时可<b>托盘常驻</b>（工具栏「监控」菜单或监控配置弹窗）让后台监控继续运行（<userData>/monitor-logs/设备名/日期/…），日志按日期自动归档；正在监控的设备在<b>右侧设备列表显示绿色标记</b>（连接失败显示琥珀/红色）。断线自动重连，可在弹窗打开日志目录查看。</p>
+    <p>右键设备「设备监控（静默采集）…」配置协议 / 管理口 / 账号 / 命令与循环间隔后，即可在后台静默通过 SSH/Telnet 定时采集命令输出，<b>全部输出连同时间戳写入本地日志</b>。每个管理口可单独设置<b>连接时执行命令</b>（连接成功时仅执行一次，先于周期循环，适合登录后的会话初始化）与<b>在线探测</b>（TCP/ICMP，离线变红并弹通知）、<b>输出关键字告警</b>（周期循环 / 连接时命令 / 仅读取模式的输出均可匹配，正则命中即告警）与<b>配置自动备份</b>（定时抓取配置、保留历史、可对比差异）。<b>监控中心…</b>（工具栏「监控」菜单或右键设备）聚合全部设备状态、告警事件时间线与备份差异；「监控日志…」与「配置备份…」可浏览日志与备份。关闭主窗口时可<b>托盘常驻</b>（工具栏「监控」菜单或监控配置弹窗）让后台监控继续运行（<userData>/monitor-logs/设备名/日期/…），日志按日期自动归档；正在监控的设备在<b>右侧设备列表显示绿色标记</b>（连接失败显示琥珀/红色）。断线自动重连，可在弹窗打开日志目录查看。</p>
     <h4>快捷键</h4>
     <table>
       <tr><td>滚轮</td><td>缩放</td></tr>
@@ -3355,9 +3355,17 @@ function aggregateMonitorText(perHost) {
     if (s && s.alert) t += '【告警:' + s.alert + '】';
     else if (s && s.probeOk === false) t += '【探测离线】';
     if (s && s.backup && s.backup.error) t += '【备份失败】';
-    else if (s && s.backup && s.backup.name) t += '【备份:' + (s.backup.changed ? '有变化' : '一致') + '】';
+    else if (s && s.backup && s.backup.name) t += '【备份:' + (s.backup.first ? '首次' : (s.backup.changed ? '有变化' : '一致')) + '】';
     return t;
   }).join('；');
+}
+
+/** 命令字段统一为数组（兼容旧版单字符串配置） */
+function normCmds(v, def) {
+  const arr = Array.isArray(v) ? v : String(v == null ? '' : v).split(/\r?\n/);
+  const out = [];
+  for (const c of arr) { const s = String(c == null ? '' : c).trim(); if (s) out.push(s); }
+  return out.length ? out : (def || []);
 }
 
 /** 管理地址行：host + 各自连接方式（协议/端口/用户名/密码）+ 各自执行命令 + 仅读取开关 */
@@ -3370,6 +3378,7 @@ function monitorRow(host, saved) {
     username: saved.username || 'admin',
     password: saved.password || '',
     commands: Array.isArray(saved.commands) ? saved.commands.slice() : [],
+    onConnect: normCmds(saved.onConnect, []),
     readOnly: !!saved.readOnly,
     probeEnabled: !!saved.probeEnabled,
     probeType: saved.probeType === 'icmp' ? 'icmp' : 'tcp',
@@ -3377,7 +3386,8 @@ function monitorRow(host, saved) {
     probePort: saved.probePort != null ? saved.probePort : '',
     alerts: Array.isArray(saved.alerts) ? saved.alerts.slice() : [],
     backupEnabled: !!saved.backupEnabled,
-    backupCommand: saved.backupCommand || 'display current-configuration',
+    backupCommand: normCmds(saved.backupCommand, ['display current-configuration']),
+    backupMode: saved.backupMode === 'own' ? 'own' : 'session',
     backupIntervalSec: saved.backupIntervalSec != null ? saved.backupIntervalSec : 3600,
     backupWaitSec: saved.backupWaitSec != null ? saved.backupWaitSec : 3
   };
@@ -3402,11 +3412,13 @@ function normalizeMonitorHosts(cfg) {
         probePort: h.probePort != null ? h.probePort : '',
         alerts: Array.isArray(h.alerts) ? h.alerts.slice() : [],
         backupEnabled: !!h.backupEnabled,
-        backupCommand: h.backupCommand || 'display current-configuration',
+        backupCommand: normCmds(h.backupCommand, ['display current-configuration']),
+        backupMode: h.backupMode === 'own' ? 'own' : 'session',
         backupIntervalSec: h.backupIntervalSec != null ? h.backupIntervalSec : 3600,
         backupWaitSec: h.backupWaitSec != null ? h.backupWaitSec : 3,
         // 兼容旧配置：行内无 commands 时回退到设备级共享命令
-        commands: Array.isArray(h.commands) ? h.commands.slice() : (Array.isArray(cfg.commands) ? cfg.commands.slice() : [])
+        commands: Array.isArray(h.commands) ? h.commands.slice() : (Array.isArray(cfg.commands) ? cfg.commands.slice() : []),
+        onConnect: normCmds(h.onConnect, cfg.onConnect ? normCmds(cfg.onConnect, []) : [])
       };
     }
     return null;
@@ -3469,10 +3481,10 @@ async function applyMonitor(id, cfg, enabled) {
         const res = await bridge.start(Object.assign(
           { key: monitorKey(id, r.host), deviceId: id, name: node ? node.name : '', expectFp, host: r.host },
           { protocol: r.protocol, port: r.port, username: r.username, password: r.password },
-          { commands: r.readOnly ? [] : r.commands, readOnly: !!r.readOnly, intervalSec: cleanCfg.intervalSec, cmdDelayMs: cleanCfg.cmdDelayMs },
-          { probe: { enabled: r.probeEnabled && !r.readOnly, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
+          { commands: r.readOnly ? [] : r.commands, readOnly: !!r.readOnly, onConnect: r.onConnect || [], intervalSec: cleanCfg.intervalSec, cmdDelayMs: cleanCfg.cmdDelayMs },
+          { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
-          { backup: { enabled: r.backupEnabled && !r.readOnly, command: r.backupCommand, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 3) * 1000) } }
+          { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 3) * 1000) } }
         ));
         if (!res || !res.ok) {
           perHost[r.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
@@ -3556,10 +3568,10 @@ async function reconcileMonitors() {
       const res = await bridge.start(Object.assign(
         { key: hk, deviceId: node.id, name: node.name, expectFp, host: row.host },
         { protocol: row.protocol, port: row.port, username: row.username, password: row.password },
-        { commands: row.readOnly ? [] : (Array.isArray(row.commands) ? row.commands : []), readOnly: !!row.readOnly, intervalSec: cfg.intervalSec, cmdDelayMs: cfg.cmdDelayMs },
-        { probe: { enabled: row.probeEnabled && !row.readOnly, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
+        { commands: row.readOnly ? [] : (Array.isArray(row.commands) ? row.commands : []), readOnly: !!row.readOnly, onConnect: row.onConnect || [], intervalSec: cfg.intervalSec, cmdDelayMs: cfg.cmdDelayMs },
+        { probe: { enabled: row.probeEnabled, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
         { alerts: row.alerts },
-        { backup: { enabled: row.backupEnabled && !row.readOnly, command: row.backupCommand, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 3) * 1000) } }
+        { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 3) * 1000) } }
       ));
       if (!res || !res.ok) perDev[node.id][row.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
     } catch (err) {
@@ -3614,9 +3626,9 @@ function openMonitorConfig(id) {
   ov.innerHTML = `
     <div class="modal ws-dialog mon-dialog" role="dialog" style="width:640px">
       <h3>设备后台监控 — ${U.escHtml(n.name)}</h3>
-      <div class="m-sub">通过 Telnet 或 SSH 在后台静默连接设备，按循环周期定时执行命令，全部输出连同时间戳保存到本地日志（按日期自动归档）。每个管理地址可单独开启<b>在线探测</b>（TCP/ICMP，离线告警）、<b>输出关键字告警</b>与<b>配置自动备份</b>（定时抓取配置并保留历史，可对比差异）。</div>
+      <div class="m-sub">通过 Telnet 或 SSH 在后台静默连接设备，按循环周期定时执行命令，全部输出连同时间戳保存到本地日志（按日期自动归档）。每个管理地址可单独开启<b>连接时执行命令</b>（每次连接成功仅执行一次，先于周期循环，适用于登录后会话初始化命令）、<b>在线探测</b>（TCP/ICMP，离线告警）、<b>输出关键字告警</b>与<b>配置自动备份</b>（定时抓取配置并保留历史，可对比差异）。</div>
       <div class="frow">
-        <label>管理地址与执行配置 <span style="color:var(--muted);font-weight:400">（每个地址可单独设置协议 / 端口 / 账号 / 密码 / 执行命令）</span></label>
+        <label>管理地址与执行配置 <span style="color:var(--muted);font-weight:400">（每个地址可单独设置协议 / 端口 / 账号 / 密码 / 执行命令 / 连接时命令）</span></label>
         <div id="monHostList" class="mon-host-list"></div>
         <button type="button" class="tb mon-host-add" data-act="addHost">＋ 增加管理地址</button>
       </div>
@@ -3655,17 +3667,24 @@ function openMonitorConfig(id) {
       <input class="mh-user" type="text" placeholder="用户名" value="${U.escHtml(r.username)}" autocomplete="off"/>
       <input class="mh-pass" type="password" placeholder="密码" value="${U.escHtml(r.password)}" autocomplete="new-password"/>
       <button type="button" class="tb mh-cmd-btn" title="设置该地址的执行命令">命令${Array.isArray(r.commands) && r.commands.length ? `（${r.commands.length}）` : ''}</button>
-      <label class="mh-ro" title="仅读取模式：连接后不执行命令，只记录设备主动输出的内容"><input type="checkbox" class="mh-ro-cb"${r.readOnly ? ' checked' : ''}/>仅读取</label>
+      <label class="mh-ro" title="仅读取模式：只记录设备主动输出的内容，不执行周期循环命令（连接时执行命令仍会执行一次，输出同样参与关键字告警匹配）"><input type="checkbox" class="mh-ro-cb"${r.readOnly ? ' checked' : ''}/>仅读取</label>
       <button type="button" class="tb icon mh-del" title="删除该管理地址">✕</button>
       <div class="mh-cmds-wrap" hidden><textarea class="mh-cmds" rows="3" placeholder="该地址的执行命令（每行一条）：&#10;display version&#10;display current-configuration">${U.escHtml(Array.isArray(r.commands) ? r.commands.join('\n') : '')}</textarea></div>
       <div class="mh-ext">
-        <label class="mh-pr" title="按间隔探测该地址连通性，失败时侧栏变红并弹通知"><input type="checkbox" class="mh-pr-cb"${r.probeEnabled ? ' checked' : ''}/>在线探测</label>
+        <label class="mh-onc" title="连接时执行命令：每次连接成功（含自动重连）仅执行一次，先于周期循环命令发出；每行一条，依次执行">连接时
+          <textarea class="mh-onc-ta" rows="2" placeholder="命令（每行一条，连接成功时依次执行）">${U.escHtml(Array.isArray(r.onConnect) ? r.onConnect.join('\n') : (r.onConnect || ''))}</textarea>
+        </label>
+        <label class="mh-pr" title="按间隔探测该地址连通性，失败时侧栏变红并弹通知（仅读取模式同样适用）"><input type="checkbox" class="mh-pr-cb"${r.probeEnabled ? ' checked' : ''}/>在线探测</label>
         <select class="mh-pr-type" title="探测方式"><option value="tcp"${r.probeType !== 'icmp' ? ' selected' : ''}>TCP</option><option value="icmp"${r.probeType === 'icmp' ? ' selected' : ''}>ICMP</option></select>
         <input class="mh-pr-int" type="number" min="5" max="3600" title="探测间隔（秒）" value="${U.escHtml(r.probeIntervalSec)}"/><span class="mh-unit">秒</span>
         <input class="mh-pr-port" type="number" min="1" max="65535" placeholder="端口(默认管理口)" title="探测目标端口，留空 = 管理端口" value="${U.escHtml(r.probePort)}"/>
         <button type="button" class="tb mh-alert-btn" title="输出匹配这些关键字时告警">告警${Array.isArray(r.alerts) && r.alerts.length ? '（' + r.alerts.length + '）' : ''}</button>
         <label class="mh-bk" title="定时抓取配置保存为备份，保留历史并可对比差异"><input type="checkbox" class="mh-bk-cb"${r.backupEnabled ? ' checked' : ''}/>自动备份</label>
-        <input class="mh-bk-cmd" type="text" placeholder="备份命令" value="${U.escHtml(r.backupCommand)}" title="抓取配置的命令"/>
+        <select class="mh-bk-mode" title="备份连接方式：复用监控连接 = 在监控会话内执行备份命令；独立连接 = 每次备份单独建立连接，不干扰监控会话">
+          <option value="session"${r.backupMode !== 'own' ? ' selected' : ''}>复用监控连接</option>
+          <option value="own"${r.backupMode === 'own' ? ' selected' : ''}>独立连接</option>
+        </select>
+        <textarea class="mh-bk-ta" rows="2" placeholder="备份命令（每行一条，依次执行并合并保存）" title="抓取配置的命令，可多条">${U.escHtml(Array.isArray(r.backupCommand) ? r.backupCommand.join('\n') : (r.backupCommand || ''))}</textarea>
         <input class="mh-bk-int" type="number" min="1" max="1440" title="备份间隔（分钟）" value="${U.escHtml(Math.round((r.backupIntervalSec || 3600) / 60))}"/><span class="mh-unit">分钟</span>
         <div class="mh-alerts-wrap" hidden><textarea class="mh-alerts" rows="2" placeholder="每行一个正则表达式，输出匹配即告警；可写：error|down # 接口异常">${U.escHtml(Array.isArray(r.alerts) ? r.alerts.map(a => (a && typeof a === 'object' ? (a.pattern || '') + (a.note && a.note !== (a.pattern || '') ? ' # ' + a.note : '') : String(a))) .join('\n') : '')}</textarea></div>
       </div>
@@ -3688,8 +3707,8 @@ function openMonitorConfig(id) {
       if (hidden) cmdsWrap.querySelector('textarea').focus();
     };
     const roCb = rowEl.querySelector('.mh-ro-cb');
-    const extEls = [rowEl.querySelector('.mh-pr-cb'), rowEl.querySelector('.mh-pr-type'), rowEl.querySelector('.mh-pr-int'),
-      rowEl.querySelector('.mh-bk-cb'), rowEl.querySelector('.mh-bk-cmd'), rowEl.querySelector('.mh-bk-int')];
+    // 仅读取禁用的控件：仅周期命令按钮（连接时命令、在线探测、自动备份在仅读取模式下仍可用）
+    const extEls = [];
     const applyRo = () => {
       cmdBtn.disabled = roCb.checked;
       cmdBtn.style.opacity = roCb.checked ? '0.45' : '';
@@ -3756,13 +3775,15 @@ function openMonitorConfig(id) {
         password: rowEl.querySelector('.mh-pass').value,
         readOnly: rowEl.querySelector('.mh-ro-cb').checked,
         commands: rowEl.querySelector('.mh-cmds').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+        onConnect: rowEl.querySelector('.mh-onc-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
         probeEnabled: rowEl.querySelector('.mh-pr-cb').checked,
         probeType: rowEl.querySelector('.mh-pr-type').value,
         probeIntervalSec: Math.max(5, Math.min(3600, parseInt(rowEl.querySelector('.mh-pr-int').value, 10) || 30)),
         probePort: parseInt(rowEl.querySelector('.mh-pr-port').value, 10) > 0 ? parseInt(rowEl.querySelector('.mh-pr-port').value, 10) : '',
         alerts,
         backupEnabled: rowEl.querySelector('.mh-bk-cb').checked,
-        backupCommand: rowEl.querySelector('.mh-bk-cmd').value.trim() || 'display current-configuration',
+        backupCommand: (() => { const v = rowEl.querySelector('.mh-bk-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); return v.length ? v : ['display current-configuration']; })(),
+        backupMode: rowEl.querySelector('.mh-bk-mode').value,
         backupIntervalSec: Math.max(1, Math.min(1440, parseInt(rowEl.querySelector('.mh-bk-int').value, 10) || 60)) * 60,
         backupWaitSec: 3
       };
@@ -3821,12 +3842,17 @@ function openMonitorCenter() {
           <div class="mc-jobs" id="mcJobs"></div>
         </div>
         <div class="mc-col">
-          <div class="mc-h">事件时间线</div>
-          <div class="mc-events" id="mcEvents"></div>
-        </div>
-        <div class="mc-col">
-          <div class="mc-h">配置备份</div>
-          <div class="mc-baks" id="mcBaks"></div>
+          <div class="mc-tabs">
+            <button type="button" class="mc-tab on" data-pane="events">事件时间线</button>
+            <button type="button" class="mc-tab" data-pane="baks">配置备份</button>
+            <span id="mcFilter" class="mc-filt" hidden></span>
+          </div>
+          <div class="mc-pane" data-pane="events">
+            <div class="mc-events" id="mcEvents"></div>
+          </div>
+          <div class="mc-pane" data-pane="baks" hidden>
+            <div class="mc-baks" id="mcBaks"></div>
+          </div>
         </div>
       </div>
       <div class="m-actions">
@@ -3844,6 +3870,13 @@ function openMonitorCenter() {
   const jobsEl = ov.querySelector('#mcJobs');
   const evsEl = ov.querySelector('#mcEvents');
   const baksEl = ov.querySelector('#mcBaks');
+  // 事件时间线 / 配置备份 标签切换
+  ov.querySelectorAll('.mc-tab').forEach(tab => {
+    tab.onclick = () => {
+      ov.querySelectorAll('.mc-tab').forEach(t => t.classList.toggle('on', t === tab));
+      ov.querySelectorAll('.mc-pane').forEach(p => { p.hidden = p.dataset.pane !== tab.dataset.pane; });
+    };
+  });
 
   const stateIcon = (s) => {
     if (s && s.alert) return '<span class="mc-dot alert"></span>';
@@ -3857,6 +3890,21 @@ function openMonitorCenter() {
     offline: '🔴', recovery: '🟢', alert: '🟠', 'alert-clear': '⚪',
     backup: '📦', 'backup-change': '📦', 'backup-error': '❌'
   }[t] || '•');
+  const evTypeLabel = {
+    offline: '离线', recovery: '恢复', alert: '告警', 'alert-clear': '解除',
+    backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败'
+  };
+  // 事件时间线筛选：null = 全部；curDev = 设备；curHost = 具体管理地址
+  let curDev = null, curHost = null, curDevName = '';
+  const filterEl = ov.querySelector('#mcFilter');
+  const setFilter = (devId, host, name) => {
+    if (curDev === devId && curHost === (host || null)) { curDev = null; curHost = null; curDevName = ''; }
+    else { curDev = devId; curHost = host || null; curDevName = name || devId || ''; }
+    filterEl.hidden = !curDev;
+    filterEl.textContent = curDev ? ('筛选：' + curDevName + (curHost ? '@' + curHost : '') + ' ✕') : '';
+    load();
+  };
+  filterEl.onclick = () => { curDev = null; curHost = null; curDevName = ''; filterEl.hidden = true; filterEl.textContent = ''; load(); };
 
   async function load() {
     try {
@@ -3872,6 +3920,7 @@ function openMonitorCenter() {
       jobsEl.innerHTML = byDev.size
         ? [...byDev.values()].map(arr => {
             const j = arr[0];
+            const devSelCls = (curDev === j.deviceId && !curHost) ? ' sel' : '';
             const hosts = arr.map(h => {
               const icon = stateIcon(h);
               const bits = [];
@@ -3879,22 +3928,43 @@ function openMonitorCenter() {
               if (h.alert) bits.push('<b class="t-alert">告警:' + U.escHtml(h.alert) + '</b>');
               if (h.probeOk && h.probeLatency != null) bits.push(h.probeLatency + 'ms');
               if (h.backup && h.backup.error) bits.push('<b class="t-off">备份失败</b>');
-              else if (h.backup && h.backup.name) bits.push(h.backup.changed ? '<b class="t-alert">备份有变化</b>' : '备份一致');
-              return '<div class="mc-job">' + icon + ' <b>' + U.escHtml(h.host) + '</b> ' + (bits.length ? '<span class="mc-bits">' + bits.join(' · ') + '</span>' : '') + '</div>';
+              else if (h.backup && h.backup.name) bits.push(h.backup.first ? '首次备份' : (h.backup.changed ? '<b class="t-alert">备份有变化</b>' : '备份一致'));
+              const selCls = (curDev === h.deviceId && curHost === h.host) ? ' sel' : '';
+              return '<div class="mc-job' + selCls + '" data-dev="' + U.escHtml(h.deviceId) + '" data-name="' + U.escHtml(j.name || j.deviceId) + '" data-host="' + U.escHtml(h.host) + '" title="点击筛选该地址的事件">' + icon + ' <b>' + U.escHtml(h.host) + '</b> ' + (bits.length ? '<span class="mc-bits">' + bits.join(' · ') + '</span>' : '') + '</div>';
             }).join('');
-            return '<div class="mc-dev"><div class="mc-dev-nm">' + U.escHtml(j.name || j.deviceId) + '</div>' + hosts + '</div>';
+            return '<div class="mc-dev"><div class="mc-dev-nm' + devSelCls + '" data-dev="' + U.escHtml(j.deviceId) + '" data-name="' + U.escHtml(j.name || j.deviceId) + '" title="点击筛选该设备的事件">' + U.escHtml(j.name || j.deviceId) + '</div>' + hosts + '</div>';
           }).join('')
         : '<div class="mc-empty">暂无监控任务（右键设备 → 设备监控 启动）</div>';
-      // 事件时间线
-      const evs = r.events || [];
+      // 设备名 / 管理地址可点击筛选事件时间线
+      jobsEl.querySelectorAll('[data-dev]').forEach(el => {
+        el.onclick = () => setFilter(el.dataset.dev, el.dataset.host || null, el.dataset.name || '');
+      });
+      // 事件时间线（按设备 / 地址筛选）
+      const evs = (r.events || []).filter(e => (!curDev || e.deviceId === curDev) && (!curHost || (e.host === curHost && e.deviceId === curDev)));
       evsEl.innerHTML = evs.length
-        ? evs.slice(0, 120).map(e => '<div class="mc-ev"><span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span><span class="mc-ev-d">' + U.escHtml((e.name || e.deviceId) + '：' + e.detail) + '</span></div>').join('')
-        : '<div class="mc-empty">暂无事件</div>';
+        ? evs.slice(0, 120).map(e => {
+            const devTag = '<span class="mc-tag dev" data-dev="' + U.escHtml(e.deviceId || '') + '" data-name="' + U.escHtml(e.name || e.deviceId || '') + '"' + (e.host ? ' data-host="' + U.escHtml(e.host) + '"' : '') + ' title="点击筛选该设备的事件">' + U.escHtml(e.name || e.deviceId || '?') + '</span>';
+            const typeTag = '<span class="mc-tag ' + U.escHtml(e.type || '') + '">' + U.escHtml(evTypeLabel[e.type] || e.type || '事件') + '</span>';
+            return '<div class="mc-ev"><span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span>' + devTag + typeTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + '</span></div>';
+          }).join('')
+        : '<div class="mc-empty">' + (curDev ? '该设备暂无事件' : '暂无事件') + '</div>';
+      evsEl.querySelectorAll('.mc-tag.dev').forEach(el => {
+        el.onclick = () => setFilter(el.dataset.dev, el.dataset.host || null, el.dataset.name || '');
+      });
       // 备份
       const baks = r.backups || [];
       baksEl.innerHTML = baks.length
         ? baks.map(b => '<div class="mc-bak"><span class="mc-bak-nm">' + U.escHtml(b.device + '@' + b.host) + '</span><span class="mc-bak-sub">' + b.count + ' 份 · 最近 ' + U.escHtml(U.fmtDateTime(new Date(b.lastAt))) + '</span></div>').join('')
         : '<div class="mc-empty">暂无配置备份</div>';
+      // 顶部统计（任务总数 / 在线 / 离线 / 告警中 / 备份设备）——与设备列表状态图标口径一致
+      const statOk = jobs.filter(j => !j.alert && j.probeOk !== false && j.state === 'monitoring').length;
+      const statOff = jobs.filter(j => j.probeOk === false).length;
+      const statAlert = jobs.filter(j => !!j.alert).length;
+      ov.querySelector('#mcSTotal').textContent = jobs.length;
+      ov.querySelector('#mcSOk').textContent = statOk;
+      ov.querySelector('#mcSOff').textContent = statOff;
+      ov.querySelector('#mcSAlert').textContent = statAlert;
+      ov.querySelector('#mcSBak').textContent = baks.length;
     } catch (e) { jobsEl.innerHTML = '<div class="mc-empty">加载失败</div>'; }
   }
   // 实时事件刷新
@@ -3962,6 +4032,9 @@ function openMonitorLogs(devicePreset) {
   let rawContent = '';
   let matches = [];   // {line, idx}
   let matchPos = -1;
+  let globalHits = []; // 全局跨文件搜索扁平命中：{device,date,file,line,text}
+  let hitPos = -1;
+  let searchJob = 0;   // 竞态防护：只展示最后一次搜索的结果
 
   const renderFiles = () => {
     const dev = tree.devices.find(d => d.device === cur.device);
@@ -3978,7 +4051,9 @@ function openMonitorLogs(devicePreset) {
           if (r && r.ok) rawContent = r.content;
           else rawContent = '（读取失败：' + ((r && r.error) || '未知错误') + '）';
         } catch (e) { rawContent = '（读取失败）'; }
-        applySearch();
+        // 点击具体文件：退出全局搜索态，直接浏览该文件
+        if (searchEl.value.trim()) { searchEl.value = ''; globalHits = []; hitPos = -1; }
+        renderFileWithTarget(-1);
       };
     });
   };
@@ -3992,29 +4067,84 @@ function openMonitorLogs(devicePreset) {
   };
   const applySearch = () => {
     const kw = searchEl.value.trim();
+    if (!kw) { renderFileWithTarget(-1); return; }   // 无关键字：浏览当前文件
+    doGlobalSearch(kw);                               // 有关键字：跨全部文件搜索
+  };
+  // 当前文件浏览渲染（targetLine >= 0 时定位高亮该行）
+  const renderFileWithTarget = (targetLine) => {
     matches = [];
     matchPos = -1;
-    if (!rawContent) { contentEl.textContent = rawContent; ov.querySelector('#lbCount').textContent = ''; return; }
-    const lines = rawContent.split('\n');
-    if (!kw) {
-      contentEl.textContent = rawContent;
-      ov.querySelector('#lbCount').textContent = lines.length + ' 行';
-      return;
-    }
+    const kw = searchEl.value.trim();
+    const lines = rawContent ? rawContent.split('\n') : [];
     const lower = kw.toLowerCase();
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].toLowerCase().indexOf(lower) >= 0) matches.push(i);
+    if (kw) {
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].toLowerCase().indexOf(lower) >= 0) matches.push(i);
+      }
     }
-    ov.querySelector('#lbCount').textContent = matches.length ? matches.length + ' 处匹配' : '无匹配';
+    const targetIdx = targetLine >= 0 ? targetLine : (matches.length ? matches[0] : -1);
     contentEl.innerHTML = lines.map((ln, i) => {
       let html = U.escHtml(ln);
       if (kw) {
         const idx = ln.toLowerCase().indexOf(lower);
         if (idx >= 0) html = U.escHtml(ln.slice(0, idx)) + '<mark>' + U.escHtml(ln.slice(idx, idx + kw.length)) + '</mark>' + U.escHtml(ln.slice(idx + kw.length));
       }
-      return '<div class="lb-line' + (matches.includes(i) ? ' hit' : '') + '">' + html + '</div>';
+      return '<div class="lb-line' + (matches.includes(i) ? ' hit' : '') + (i === targetIdx ? ' cur' : '') + '">' + html + '</div>';
     }).join('');
-    jumpTo(matches.length ? 0 : -1);
+    ov.querySelector('#lbCount').textContent = rawContent ? (matches.length ? matches.length + ' 处匹配' : lines.length + ' 行') : '';
+    if (targetIdx >= 0) {
+      const el = contentEl.querySelectorAll('.lb-line')[targetIdx];
+      if (el) el.scrollIntoView({ block: 'center' });
+    }
+  };
+  // 全局跨文件搜索：主进程扫全部日志文件，结果列表展示每个文件里的匹配行，点击跳转定位
+  const doGlobalSearch = (kw) => {
+    const my = ++searchJob;
+    globalHits = [];
+    hitPos = -1;
+    clearTimeout(doGlobalSearch._t);
+    doGlobalSearch._t = setTimeout(async () => {
+      if (my !== searchJob) return; // 输入已变化，丢弃过期结果
+      if (!bridge.logsSearch) { contentEl.innerHTML = '<div class="lb-empty">当前环境不支持全局搜索</div>'; ov.querySelector('#lbCount').textContent = ''; return; }
+      let r = null;
+      try { r = await bridge.logsSearch(kw); } catch (e) { r = null; }
+      if (my !== searchJob) return;
+      if (!r || !r.ok) {
+        contentEl.innerHTML = '<div class="lb-empty">搜索失败：' + U.escHtml((r && r.error) || '未知错误') + '</div>';
+        ov.querySelector('#lbCount').textContent = '';
+        return;
+      }
+      for (const it of (r.items || [])) {
+        for (const mt of (it.matches || [])) globalHits.push({ device: it.device, date: it.date, file: it.file, line: mt.line, text: mt.text });
+      }
+      ov.querySelector('#lbCount').textContent = r.total + ' 处匹配（' + (r.items || []).length + ' 个文件）';
+      if (!globalHits.length) { contentEl.innerHTML = '<div class="lb-empty">未找到匹配内容</div>'; return; }
+      const kv = kw.toLowerCase();
+      contentEl.innerHTML = globalHits.map((h, i) => {
+        const idx = h.text.toLowerCase().indexOf(kv);
+        let html = U.escHtml(h.text);
+        if (idx >= 0) html = U.escHtml(h.text.slice(0, idx)) + '<mark>' + U.escHtml(h.text.slice(idx, idx + kw.length)) + '</mark>' + U.escHtml(h.text.slice(idx + kw.length));
+        return '<div class="lb-sres" data-i="' + i + '">'
+          + '<span class="fr">' + U.escHtml(h.device) + ' / ' + U.escHtml(h.date) + ' / ' + U.escHtml(h.file) + ' · 第 ' + (h.line + 1) + ' 行</span>'
+          + '<span class="mt">' + html + '</span></div>';
+      }).join('');
+      contentEl.querySelectorAll('.lb-sres').forEach(el => {
+        el.onclick = () => loadHit(parseInt(el.dataset.i, 10));
+      });
+    }, 300);
+  };
+  // 加载命中文件并定位到匹配行（同步侧栏/日期选择器）
+  const loadHit = async (i) => {
+    if (!globalHits.length) return;
+    const h = globalHits[i];
+    hitPos = i;
+    cur.device = h.device; cur.date = h.date; cur.file = h.file;
+    devSel.value = h.device;
+    dateSel.value = h.date;
+    renderNav();
+    rawContent = '';
+    try { const r = await bridge.logsRead(h.device, h.date, h.file); if (r && r.ok) rawContent = r.content; } catch (e) { rawContent = ''; }
+    renderFileWithTarget(h.line);
   };
   const jumpTo = (pos) => {
     if (!matches.length) return;
@@ -4041,8 +4171,15 @@ function openMonitorLogs(devicePreset) {
     applySearch();
   });
   searchEl.addEventListener('input', applySearch);
-  ov.querySelector('#lbPrev').onclick = () => jumpTo(matchPos - 1);
-  ov.querySelector('#lbNext').onclick = () => jumpTo(matchPos + 1);
+  const stepHit = (dir) => {
+    // 全局搜索态：跨文件遍历全部命中；否则当前文件内跳转
+    if (globalHits.length && searchEl.value.trim()) {
+      const i = (hitPos + dir + globalHits.length) % globalHits.length;
+      loadHit(i);
+    } else jumpTo(matchPos + dir);
+  };
+  ov.querySelector('#lbPrev').onclick = () => stepHit(-1);
+  ov.querySelector('#lbNext').onclick = () => stepHit(1);
   ov.querySelector('[data-act=openfolder]').onclick = async () => { try { await bridge.openLogs(cur.device || ''); } catch (e) {} };
   ov.querySelector('[data-act=close]').onclick = close;
 

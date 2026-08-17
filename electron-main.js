@@ -171,12 +171,21 @@ monitor.on('status', (info) => {
 // 监控事件历史（供监控中心时间线；主进程保存最近 500 条）
 const monitorEvents = [];
 function recordMonitorEvent(info, type, detail) {
-  monitorEvents.push({ ts: Date.now(), type: type, key: info.key, deviceId: info.deviceId, host: info.host, name: info.name || '', detail: detail || '' });
+  let name = info.name || '';
+  // 兜底：事件未携带设备名时从任务状态表补齐（避免时间线显示 deviceId）
+  if (!name && info && info.key) {
+    try {
+      const it = monitor.status().find(s => s.key === info.key);
+      if (it && it.name) name = it.name;
+    } catch (e) { /* ignore */ }
+  }
+  monitorEvents.push({ ts: Date.now(), type: type, key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' });
   if (monitorEvents.length > 500) monitorEvents.splice(0, monitorEvents.length - 500);
 }
 // 在线探测状态 → 主窗口；离线/恢复转换时弹系统通知（受 settings.monitorNotify 开关控制）
 const lastProbeOk = new Map();      // key -> 上次探测结果
 const lastAlertOn = new Map();      // key -> 上次告警状态
+const lastAlertPatterns = new Map(); // key -> 上次告警命中关键字集合（新增关键字时再记录事件）
 const lastBackupErrAt = new Map();  // key -> 上次备份失败通知时间
 const notifyEnabled = () => loadAppSettings().monitorNotify !== false;
 function sendMonitor(channel, info) {
@@ -207,12 +216,25 @@ monitor.on('probe', (info) => {
 });
 monitor.on('alert', (info) => {
   sendMonitor('monitor:alert', info);
-  if (info.matched && lastAlertOn.get(info.key) !== true) {
-    lastAlertOn.set(info.key, true);
-    recordMonitorEvent(info, 'alert', '输出匹配告警关键字「' + (info.pattern || '') + '」');
-    if (notifyEnabled()) notifyUser('NetTopo · 输出告警', info.name + '（' + info.host + '）输出匹配告警关键字「' + (info.pattern || '') + '」');
-  } else if (!info.matched && lastAlertOn.get(info.key) === true) {
+  const detail = '输出匹配告警关键字「' + (info.pattern || '') + '」' + (info.matchedText ? '：' + info.matchedText : '');
+  if (info.matched) {
+    // 首次告警，或命中集合新增关键字（多告警陆续出现）时各记录一条事件
+    const cur = (info.patterns || []).filter(Boolean);
+    const prev = lastAlertPatterns.get(info.key);
+    const added = prev ? cur.filter(p => !prev.includes(p)) : cur;
+    if (!prev) {
+      lastAlertOn.set(info.key, true);
+      lastAlertPatterns.set(info.key, cur);
+      recordMonitorEvent(info, 'alert', detail);
+      if (notifyEnabled()) notifyUser('NetTopo · 输出告警', info.name + '（' + info.host + '）' + detail);
+    } else if (added.length) {
+      lastAlertPatterns.set(info.key, cur);
+      recordMonitorEvent(info, 'alert', detail + '（新增 ' + added.join('、') + '）');
+      if (notifyEnabled()) notifyUser('NetTopo · 输出告警', info.name + '（' + info.host + '）' + detail);
+    }
+  } else if (lastAlertOn.get(info.key) === true) {
     lastAlertOn.set(info.key, false);
+    lastAlertPatterns.delete(info.key);
     recordMonitorEvent(info, 'alert-clear', '告警解除');
   }
 });
@@ -226,9 +248,9 @@ monitor.on('backup', (info) => {
   sendMonitor('monitor:backup', info);
   if (!notifyEnabled()) return;
   if (info.ok) {
-    if (info.first) recordMonitorEvent(info, 'backup', (info.name || '') + ' 首次备份');
-    else if (info.changed) recordMonitorEvent(info, 'backup-change', (info.name || '') + ' 配置有变化（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
-    else recordMonitorEvent(info, 'backup', (info.name || '') + ' 与上次一致');
+    if (info.first) recordMonitorEvent(info, 'backup', '首次备份：' + (info.fileName || ''));
+    else if (info.changed) recordMonitorEvent(info, 'backup-change', '配置有变化（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）：' + (info.fileName || ''));
+    else recordMonitorEvent(info, 'backup', '与上次一致：' + (info.fileName || ''));
     if (info.changed) {
       const now = Date.now();
       const last = lastBackupChangeAt.get(info.key) || 0;
@@ -574,7 +596,8 @@ ipcMain.handle('monitor:logs-tree', (e) => {
       let fnames = [];
       try { fnames = fs.readdirSync(dDir); } catch (err) { fnames = []; }
       for (const f of fnames.slice(-300)) {
-        if (!/^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_\d{8}_\d{6}(?:_\d+)?\.log$/.test(f)) continue;
+        // 兼容按天固定文件名（设备_管理口.log）与超限滚动/历史格式（设备_管理口_日期_时间[_n].log）
+        if (!/^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)(?:_\d{8}_\d{6}(?:_\d+)?)?\.log$/.test(f)) continue;
         const full = path.join(dDir, f);
         try { st = fs.lstatSync(full); } catch (err) { continue; }
         if (!st.isFile() || st.isSymbolicLink()) continue;
@@ -605,6 +628,66 @@ ipcMain.handle('monitor:logs-read', (e, p) => {
   } catch (err) {
     return { ok: false, error: '读取日志失败' };
   }
+});
+
+ipcMain.handle('monitor:logs-search', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const fs = require('fs');
+  const keyword = String((p && p.keyword) || '').trim().slice(0, 200);
+  if (!keyword) return { ok: false, error: '关键字为空' };
+  const lower = keyword.toLowerCase();
+  // 防护上限：防目录爆炸 / 超大文件 / 命中过多拖慢界面
+  const MAX_FILES = 300;                     // 最多扫描的日志文件数
+  const MAX_PER_FILE = 4 * 1024 * 1024;      // 单文件最多读取 4MB
+  const MAX_TOTAL_HITS = 500;                // 总命中行数上限
+  const FILE_RE = /^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)(?:_\d{8}_\d{6}(?:_\d+)?)?\.log$/;
+  const items = [];
+  let total = 0, scanned = 0;
+  let devs = [];
+  try { devs = fs.readdirSync(monitor.logBaseDir); } catch (err) { devs = []; }
+  outer:
+  for (const dev of devs) {
+    const devDir = path.join(monitor.logBaseDir, dev);
+    let st;
+    try { st = fs.lstatSync(devDir); } catch (err) { continue; }
+    if (!st.isDirectory() || st.isSymbolicLink()) continue;
+    let ds = [];
+    try { ds = fs.readdirSync(devDir); } catch (err) { ds = []; }
+    for (const d of ds) {
+      if (!LOG_DIR_RE.test(d)) continue;
+      const dDir = path.join(devDir, d);
+      try { st = fs.lstatSync(dDir); } catch (err) { continue; }
+      if (!st.isDirectory() || st.isSymbolicLink()) continue;
+      let fnames = [];
+      try { fnames = fs.readdirSync(dDir); } catch (err) { fnames = []; }
+      for (const f of fnames) {
+        if (!FILE_RE.test(f)) continue;
+        const full = path.join(dDir, f);
+        try { st = fs.lstatSync(full); } catch (err) { continue; }
+        if (!st.isFile() || st.isSymbolicLink()) continue;
+        if (++scanned > MAX_FILES) break outer;
+        let content = '';
+        try {
+          const fd = fs.openSync(full, 'r');
+          const buf = Buffer.alloc(Math.min(st.size, MAX_PER_FILE));
+          fs.readSync(fd, buf, 0, buf.length, 0);
+          fs.closeSync(fd);
+          content = buf.toString('utf8');
+        } catch (err) { continue; }
+        const lines = content.split(/\r?\n/);
+        const matches = [];
+        for (let i = 0; i < lines.length; i++) {
+          if (total >= MAX_TOTAL_HITS) break outer;
+          if (lines[i].toLowerCase().indexOf(lower) >= 0) {
+            matches.push({ line: i, text: lines[i].slice(0, 300) });
+            total++;
+          }
+        }
+        if (matches.length) items.push({ device: dev, date: d, file: f, size: st.size, matches });
+      }
+    }
+  }
+  return { ok: true, keyword, total, items: items.slice(0, 200) };
 });
 
 /* ---- 设备配置备份 IPC（复用 monitorGuard 防越权） ---- */

@@ -25,3 +25,6 @@ test/_*.js
 task_plan.md
 findings.md
 progress.md
+
+# 构建日志
+build-last.log
