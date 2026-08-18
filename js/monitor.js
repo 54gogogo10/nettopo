@@ -132,7 +132,6 @@ class MonitorManager extends EventEmitter {
       if (commands.length >= 64) break;
       commands.push(s.length > 512 ? s.slice(0, 512) : s);
     }
-    if (!commands.length && !readOnly) return { ok: false, error: '未配置要执行的命令' };
     // 连接时执行命令：每次连接建立成功时仅执行一次（先于周期循环；重连后的新会话也会再执行一次）；支持多条（数组或按行分割）
     const onConnectCmds = [];
     {
@@ -166,6 +165,8 @@ class MonitorManager extends EventEmitter {
     let probeIntervalSec = parseFloat(pOpt.intervalSec);
     if (!Number.isFinite(probeIntervalSec)) probeIntervalSec = 30;
     probe.intervalSec = Math.max(5, Math.min(3600, probeIntervalSec));
+    // 命令与模式校验：非仅读取须有周期命令，或勾选在线探测使用「仅探测」模式（保持连接、不执行周期命令）
+    if (!commands.length && !readOnly && !probe.enabled) return { ok: false, error: '未配置要执行的命令，或勾选「在线探测」使用仅探测模式' };
     // ---- 输出关键字告警（每行一个正则，可带 # 备注） ----
     const alerts = [];
     const aRaw = Array.isArray(opts.alerts) ? opts.alerts : [];
@@ -426,11 +427,14 @@ class MonitorManager extends EventEmitter {
   /* ---------------- 命令循环 ---------------- */
   _bootstrap(job) {
     job.state = 'monitoring';
-    job.statusText = (job.readOnly ? '仅读取中：' : '监控中：') + job.host + ':' + job.port + '（' + job.protocol.toUpperCase() + '）';
+    // 状态文本三态：监控中（有周期命令）/ 仅读取中 / 仅探测中（无命令无仅读取，只做在线探测）
+    const modeText = job.readOnly ? '仅读取中：' : (job.commands.length ? '监控中：' : '仅探测中：');
+    job.statusText = modeText + job.host + ':' + job.port + '（' + job.protocol.toUpperCase() + '）';
     this._openLog(job);
     this._logLine(job, '===== 开始后台监控 =====');
     this._logLine(job, '主机: ' + job.host + ':' + job.port + ' 协议: ' + job.protocol.toUpperCase() + ' 用户名: ' + job.username);
     if (job.readOnly) this._logLine(job, '模式: 仅读取（不执行命令，持续记录设备输出）');
+    else if (!job.commands.length) this._logLine(job, '模式: 仅探测（不执行命令，只做在线状态探测）');
     this._emit(job);
     // 在线探测：连接建立后立即探测一次，并按间隔调度
     if (job.probe.enabled) {
@@ -451,17 +455,18 @@ class MonitorManager extends EventEmitter {
     const gen = job.gen;
     clearTimeout(job.loopTimer);
     if (job.onConnect && job.onConnect.length) {
-      // 连接时执行命令：每次连接建立成功仅执行一次，先于周期循环（仅读取模式同样执行，用于会话初始化）
+      // 连接时执行命令：每次连接建立成功仅执行一次，先于周期循环（仅读取/仅探测模式同样执行，用于会话初始化）
       this._logLine(job, '连接时执行命令（每次连接成功仅执行一次）: ' + job.onConnect.join('；'));
       job.loopTimer = setTimeout(() => {
         this._runOnConnect(job, gen);
-        if (job.readOnly) return; // 仅读取模式：不进入周期循环
+        if (job.readOnly || !job.commands.length) return; // 仅读取/仅探测模式：不进入周期循环
         if (!job.enabled || job.stopping || gen !== job.gen) return;
         job.loopTimer = setTimeout(() => this._runCycle(job, gen), job.initDelayMs + 800);
       }, job.initDelayMs);
-    } else {
+    } else if (job.commands.length) {
       job.loopTimer = setTimeout(() => this._runCycle(job, gen), job.initDelayMs);
     }
+    // 无命令且无连接时命令（仅探测模式）：不调度周期循环
     // 配置自动备份：先于命令循环执行一次，之后按备份间隔调度（用当前 gen，避免快照过期）
     if (job.backup.enabled) {
       clearTimeout(job.backupTimer);
@@ -634,7 +639,7 @@ class MonitorManager extends EventEmitter {
       job.probeOk = ok;
       job.probeLatency = latency;
       if (!ok) { if (!job.probeFailSince) job.probeFailSince = Date.now(); job.statusText = job.statusText.split('（')[0] + '（探测离线，自 ' + fmtTimestamp(new Date(job.probeFailSince)) + '）'; }
-      else { job.probeFailSince = null; if (job.statusText.indexOf('探测离线') >= 0) job.statusText = (job.readOnly ? '仅读取中：' : '监控中：') + job.host + ':' + job.port + '（' + job.protocol.toUpperCase() + '）'; }
+      else { job.probeFailSince = null; if (job.statusText.indexOf('探测离线') >= 0) job.statusText = (job.readOnly ? '仅读取中：' : (job.commands.length ? '监控中：' : '仅探测中：')) + job.host + ':' + job.port + '（' + job.protocol.toUpperCase() + '）'; }
       if (changed) {
         this._logLine(job, ok ? '探测恢复：' + job.host + ':' + job.port + '（' + latency + 'ms）' : '警告：探测失败，' + job.host + ':' + job.port + ' 可能离线');
         this.emit('probe', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok, latencyMs: latency, failSince: job.probeFailSince });
