@@ -204,6 +204,8 @@ class MonitorManager extends EventEmitter {
     backup.commands = backupCmds.length ? backupCmds : ['display current-configuration'];
     // 备份连接方式：session = 复用监控会话；own = 每次备份单独建立连接
     backup.mode = String(bOpt.mode || 'session').toLowerCase() === 'own' ? 'own' : 'session';
+    // 无变化不新增：内容与上一份完全一致时跳过保存（不生成新文件），仅更新状态
+    backup.skipIfSame = !!bOpt.skipIfSame;
     let backupIntervalSec = parseFloat(bOpt.intervalSec);
     if (!Number.isFinite(backupIntervalSec)) backupIntervalSec = 3600;
     backup.intervalSec = Math.max(60, Math.min(86400, backupIntervalSec));
@@ -229,7 +231,7 @@ class MonitorManager extends EventEmitter {
       initDelayMs: cfg.initDelayMs,
       probe: Object.assign({ enabled: false, type: 'tcp', intervalSec: 30 }, cfg.probe || {}),
       alerts: (cfg.alerts || []).map(a => ({ pattern: a.pattern, note: a.note, re: a.re })),
-      backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', intervalSec: 3600, waitMs: 3000 }, cfg.backup || {}),
+      backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 3000 }, cfg.backup || {}),
       probeOk: null, probeLatency: null, probeFailSince: null, probeTimer: null, _probeBusy: false,
       alerting: false, alertInfo: null, _cycleActive: false, _alertPending: [],
       backupTimer: null, backupRunning: false, backupLast: null, _backupCap: null,
@@ -824,7 +826,8 @@ class MonitorManager extends EventEmitter {
     })();
   }
 
-  /** 保存备份内容并广播结果（含 first 标记：首份不算“有变化”） */
+  /** 保存备份内容并广播结果（含 first 标记：首份不算“有变化”）
+   *  可选「无变化不新增」（job.backup.skipIfSame）：与最近一份完全一致时跳过保存 */
   _saveBackup(job, gen, content) {
     if (!this.backupStore) return;
     if (!content.trim()) {
@@ -832,7 +835,22 @@ class MonitorManager extends EventEmitter {
       this._logLine(job, '配置备份：命令无输出，已跳过');
       return;
     }
-    const r = this.backupStore.save(job.name || job.deviceId, job.host, content);
+    const deviceKey = job.name || job.deviceId;
+    if (job.backup.skipIfSame) {
+      const prevName = this.backupStore.latest(deviceKey, job.host);
+      if (prevName) {
+        const prev = this.backupStore.read(deviceKey, job.host, prevName);
+        if (prev.ok && prev.content === content) {
+          // 与上一份完全一致：不新增备份文件，仅刷新状态与广播
+          job.backupLast = { name: prevName, at: Date.now(), changed: false, same: true };
+          this._logLine(job, '配置备份：与上次一致，未新增备份文件（' + prevName + '）');
+          this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, skipped: true, changed: false, fileName: prevName, first: false });
+          this._emit(job);
+          return;
+        }
+      }
+    }
+    const r = this.backupStore.save(deviceKey, job.host, content);
     if (!r.ok) {
       job.backupLast = { at: Date.now(), error: r.error };
       this._logLine(job, '配置备份失败：' + r.error);

@@ -3396,6 +3396,7 @@ function monitorRow(host, saved) {
     backupEnabled: !!saved.backupEnabled,
     backupCommand: normCmds(saved.backupCommand, ['display current-configuration']),
     backupMode: saved.backupMode === 'own' ? 'own' : 'session',
+    backupSkipSame: !!saved.backupSkipSame,
     backupIntervalSec: saved.backupIntervalSec != null ? saved.backupIntervalSec : 3600,
     backupWaitSec: saved.backupWaitSec != null ? saved.backupWaitSec : 3
   };
@@ -3422,6 +3423,7 @@ function normalizeMonitorHosts(cfg) {
         backupEnabled: !!h.backupEnabled,
         backupCommand: normCmds(h.backupCommand, ['display current-configuration']),
         backupMode: h.backupMode === 'own' ? 'own' : 'session',
+        backupSkipSame: !!h.backupSkipSame,
         backupIntervalSec: h.backupIntervalSec != null ? h.backupIntervalSec : 3600,
         backupWaitSec: h.backupWaitSec != null ? h.backupWaitSec : 3,
         // 兼容旧配置：行内无 commands 时回退到设备级共享命令
@@ -3492,7 +3494,7 @@ async function applyMonitor(id, cfg, enabled) {
           { commands: r.readOnly ? [] : r.commands, readOnly: !!r.readOnly, onConnect: r.onConnect || [], intervalSec: cleanCfg.intervalSec, cmdDelayMs: cleanCfg.cmdDelayMs },
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
-          { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 3) * 1000) } }
+          { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 3) * 1000) } }
         ));
         if (!res || !res.ok) {
           perHost[r.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
@@ -3579,7 +3581,7 @@ async function reconcileMonitors() {
         { commands: row.readOnly ? [] : (Array.isArray(row.commands) ? row.commands : []), readOnly: !!row.readOnly, onConnect: row.onConnect || [], intervalSec: cfg.intervalSec, cmdDelayMs: cfg.cmdDelayMs },
         { probe: { enabled: row.probeEnabled, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
         { alerts: row.alerts },
-        { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 3) * 1000) } }
+        { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 3) * 1000) } }
       ));
       if (!res || !res.ok) perDev[node.id][row.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
     } catch (err) {
@@ -3688,6 +3690,7 @@ function openMonitorConfig(id) {
         <input class="mh-pr-port" type="number" min="1" max="65535" placeholder="端口(默认管理口)" title="探测目标端口，留空 = 管理端口" value="${U.escHtml(r.probePort)}"/>
         <button type="button" class="tb mh-alert-btn" title="输出匹配这些关键字时告警">告警${Array.isArray(r.alerts) && r.alerts.length ? '（' + r.alerts.length + '）' : ''}</button>
         <label class="mh-bk" title="定时抓取配置保存为备份，保留历史并可对比差异"><input type="checkbox" class="mh-bk-cb"${r.backupEnabled ? ' checked' : ''}/>自动备份</label>
+        <label class="mh-bk-skip" title="配置无变化时不新增备份文件，只有配置变化时才新增（开启后备份库只保留发生变化的版本）"><input type="checkbox" class="mh-bk-skip-cb"${r.backupSkipSame ? ' checked' : ''}/>无变化不新增</label>
         <select class="mh-bk-mode" title="备份连接方式：复用监控连接 = 在监控会话内执行备份命令；独立连接 = 每次备份单独建立连接，不干扰监控会话">
           <option value="session"${r.backupMode !== 'own' ? ' selected' : ''}>复用监控连接</option>
           <option value="own"${r.backupMode === 'own' ? ' selected' : ''}>独立连接</option>
@@ -3792,6 +3795,7 @@ function openMonitorConfig(id) {
         backupEnabled: rowEl.querySelector('.mh-bk-cb').checked,
         backupCommand: (() => { const v = rowEl.querySelector('.mh-bk-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); return v.length ? v : ['display current-configuration']; })(),
         backupMode: rowEl.querySelector('.mh-bk-mode').value,
+        backupSkipSame: rowEl.querySelector('.mh-bk-skip-cb').checked,
         backupIntervalSec: Math.max(1, Math.min(1440, parseInt(rowEl.querySelector('.mh-bk-int').value, 10) || 60)) * 60,
         backupWaitSec: 3
       };

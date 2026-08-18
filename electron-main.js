@@ -246,6 +246,8 @@ monitor.on('trust', (info) => {
 const lastBackupChangeAt = new Map(); // key -> 上次变更通知时间（节流）
 monitor.on('backup', (info) => {
   sendMonitor('monitor:backup', info);
+  // 开启了「无变化不新增」且本次内容与上次一致（skipped）：不新增文件，时间线不刷“与上次一致”事件
+  if (info.skipped) return;
   if (!notifyEnabled()) return;
   if (info.ok) {
     if (info.first) recordMonitorEvent(info, 'backup', '首次备份：' + (info.fileName || ''));
