@@ -52,7 +52,7 @@ for (const f of FILES) {
 }
 if (!changed) { console.log(`[bump-version] 未找到可替换的版本令牌（当前 ${curVer}）`); }
 
-// 同步 package.json version → 构建产物文件名携带版本号（NetTopo-1.0.0-<stamp>-portable.exe）
+// 同步 package.json version → 构建产物文件名携带版本号（网络拓扑管理软件-1.0.0-<stamp>-portable.exe）
 (() => {
   const pkgPath = path.join(ROOT, PKG_FILE);
   let pkg;

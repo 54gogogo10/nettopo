@@ -283,9 +283,9 @@ ${textBlock()}
   const xml = `<?xml version='1.0' encoding='UTF-8'?>
 <VisioDocument start='190' metric='0' xml:space='preserve' xmlns='http://schemas.microsoft.com/visio/2003/core'>
   <DocumentProperties>
-    <Creator>NetTopo 网络拓扑设计器</Creator>
+    <Creator>网络拓扑管理软件</Creator>
     <Company>NetTopo</Company>
-    <Desc>由 NetTopo 导出的网络拓扑图，可在 Visio 中继续编辑</Desc>
+    <Desc>由网络拓扑管理软件导出的网络拓扑图，可在 Visio 中继续编辑</Desc>
     <BuildNumberCreated>805312791</BuildNumberCreated>
     <BuildNumberEdited>805312791</BuildNumberEdited>
   </DocumentProperties>

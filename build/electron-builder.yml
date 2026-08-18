@@ -1,5 +1,5 @@
 appId: com.nettopo.app
-productName: NetTopo 网络拓扑设计器
+productName: 网络拓扑管理软件
 electronDist: node_modules/electron/dist
 directories:
   output: dist/portable
@@ -23,5 +23,5 @@ win:
       arch:
         - x64
 portable:
-  artifactName: NetTopo-${version}-portable.exe
+  artifactName: 网络拓扑管理软件-${version}-portable.exe
 npmRebuild: false

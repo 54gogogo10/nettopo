@@ -2959,9 +2959,9 @@ function openAbout() {
     <div class="about-logo">
       <svg viewBox="0 0 32 32" width="52" height="52"><rect width="32" height="32" rx="7" fill="#4f46e5"/><circle cx="16" cy="16" r="4.5" fill="#fff"/><circle cx="8" cy="8" r="2.6" fill="#a5b4fc"/><circle cx="24" cy="8" r="2.6" fill="#a5b4fc"/><circle cx="8" cy="24" r="2.6" fill="#a5b4fc"/><circle cx="24" cy="24" r="2.6" fill="#a5b4fc"/><path d="M8 8h6.2M24 8h-6.2M8 24h6.2M24 24h-6.2M16 11.5v4.5M13 20l3-4 3 4" stroke="#a5b4fc" stroke-width="1.6" fill="none"/></svg>
     </div>
-    <div class="about-title">NetTopo · 网络拓扑设计器</div>
+    <div class="about-title">网络拓扑管理软件</div>
     <div class="about-row"><b>版本</b><span>${U.APP_VERSION}</span></div>
-    <div class="about-row"><b>用途</b><span>网络拓扑可视化设计、管理与导出工具</span></div>
+    <div class="about-row"><b>用途</b><span>网络拓扑可视化设计、后台监控与配置管理工具</span></div>
     <div class="about-row"><b>运行环境</b><span>Windows 桌面版（Electron）/ 现代浏览器</span></div>
     <div class="about-row"><b>版权</b><span>© 2026 NetTopo 项目，保留所有权利</span></div>
     <div class="about-row"><b>许可</b><span>MIT License</span></div>
@@ -3052,7 +3052,7 @@ function wire() {
     } },
     { sep: true },
     { ic: 'tray', label: '托盘常驻（关闭窗口后台继续监控）', act: async () => {
-      if (!window.topoMonitor || !window.topoMonitor.setTray) { toast('托盘常驻需要桌面版 NetTopo'); return; }
+      if (!window.topoMonitor || !window.topoMonitor.setTray) { toast('托盘常驻需要桌面版软件'); return; }
       let cur = false;
       try { const s = await window.topoMonitor.getSettings(); cur = !!(s && s.tray); } catch (e) {}
       const r = await window.topoMonitor.setTray(!cur);
@@ -3262,7 +3262,7 @@ function wire() {
 function openDeviceWeb(id) {
   const n = state.nodes.find(x => x.id === id);
   if (!n) return;
-  if (!window.topoWeb) { toast('打开设备管理页面需要桌面版 NetTopo（Electron）环境'); return; }
+  if (!window.topoWeb) { toast('打开设备管理页面需要桌面版（Electron）环境'); return; }
   const url = String(n.web || '').trim();
   if (!url) { toast(`设备「${n.name}」未设置管理 Web 页 URL，请在编辑设备中添加`); return; }
   if (!/^https?:\/\//i.test(url)) { toast('管理 Web 页 URL 必须以 http:// 或 https:// 开头'); return; }
@@ -3328,7 +3328,7 @@ async function loadMonitorCfg() {
 /** 返回 topoMonitor 桥；缺失（浏览器版）时提示并返回 null */
 function monitorBridge() {
   if (window.topoMonitor && window.topoMonitor.start) return window.topoMonitor;
-  toast('后台监控需要桌面版 NetTopo（Electron）环境');
+  toast('后台监控需要桌面版（Electron）环境');
   return null;
 }
 
@@ -3398,7 +3398,7 @@ function monitorRow(host, saved) {
     backupMode: saved.backupMode === 'own' ? 'own' : 'session',
     backupSkipSame: !!saved.backupSkipSame,
     backupIntervalSec: saved.backupIntervalSec != null ? saved.backupIntervalSec : 3600,
-    backupWaitSec: saved.backupWaitSec != null ? saved.backupWaitSec : 3
+    backupWaitSec: saved.backupWaitSec != null ? saved.backupWaitSec : 1
   };
 }
 
@@ -3425,7 +3425,7 @@ function normalizeMonitorHosts(cfg) {
         backupMode: h.backupMode === 'own' ? 'own' : 'session',
         backupSkipSame: !!h.backupSkipSame,
         backupIntervalSec: h.backupIntervalSec != null ? h.backupIntervalSec : 3600,
-        backupWaitSec: h.backupWaitSec != null ? h.backupWaitSec : 3,
+        backupWaitSec: h.backupWaitSec != null ? h.backupWaitSec : 1,
         // 兼容旧配置：行内无 commands 时回退到设备级共享命令
         commands: Array.isArray(h.commands) ? h.commands.slice() : (Array.isArray(cfg.commands) ? cfg.commands.slice() : []),
         onConnect: normCmds(h.onConnect, cfg.onConnect ? normCmds(cfg.onConnect, []) : [])
@@ -3494,7 +3494,7 @@ async function applyMonitor(id, cfg, enabled) {
           { commands: r.readOnly ? [] : r.commands, readOnly: !!r.readOnly, onConnect: r.onConnect || [], intervalSec: cleanCfg.intervalSec, cmdDelayMs: cleanCfg.cmdDelayMs },
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
-          { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 3) * 1000) } }
+          { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000) } }
         ));
         if (!res || !res.ok) {
           perHost[r.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
@@ -3581,7 +3581,7 @@ async function reconcileMonitors() {
         { commands: row.readOnly ? [] : (Array.isArray(row.commands) ? row.commands : []), readOnly: !!row.readOnly, onConnect: row.onConnect || [], intervalSec: cfg.intervalSec, cmdDelayMs: cfg.cmdDelayMs },
         { probe: { enabled: row.probeEnabled, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
         { alerts: row.alerts },
-        { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 3) * 1000) } }
+        { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000) } }
       ));
       if (!res || !res.ok) perDev[node.id][row.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
     } catch (err) {
@@ -3797,7 +3797,7 @@ function openMonitorConfig(id) {
         backupMode: rowEl.querySelector('.mh-bk-mode').value,
         backupSkipSame: rowEl.querySelector('.mh-bk-skip-cb').checked,
         backupIntervalSec: Math.max(1, Math.min(1440, parseInt(rowEl.querySelector('.mh-bk-int').value, 10) || 60)) * 60,
-        backupWaitSec: 3
+        backupWaitSec: 1
       };
     }).filter(r => r.host);
     if (!rows.length) { toast('请至少填写一个管理地址'); return; }
@@ -3833,7 +3833,7 @@ function openMonitorConfig(id) {
 /* ================= 监控中心总览（设备状态 + 告警历史 + 备份差异） ================= */
 function openMonitorCenter() {
   const bridge = monitorBridge();
-  if (!bridge || !bridge.overview) { toast('监控中心需要桌面版 NetTopo（Electron）环境'); return; }
+  if (!bridge || !bridge.overview) { toast('监控中心需要桌面版（Electron）环境'); return; }
   const root = $('#modalRoot');
   const ov = document.createElement('div');
   ov.className = 'overlay';
@@ -4000,7 +4000,7 @@ function openMonitorCenter() {
 /* ================= 监控日志浏览器（按设备/日期浏览、搜索） ================= */
 function openMonitorLogs(devicePreset) {
   const bridge = monitorBridge();
-  if (!bridge || !bridge.logsTree) { toast('日志浏览器需要桌面版 NetTopo（Electron）环境'); return; }
+  if (!bridge || !bridge.logsTree) { toast('日志浏览器需要桌面版（Electron）环境'); return; }
   const root = $('#modalRoot');
   const ov = document.createElement('div');
   ov.className = 'overlay';
@@ -4218,7 +4218,7 @@ function openMonitorLogs(devicePreset) {
 
 /* ================= 配置备份中心（自动备份的历史 + 对比差异） ================= */
 function openConfigBackups(devicePreset) {
-  if (!window.topoConfigBackup) { toast('配置备份需要桌面版 NetTopo（Electron）环境'); return; }
+  if (!window.topoConfigBackup) { toast('配置备份需要桌面版（Electron）环境'); return; }
   const root = $('#modalRoot');
   const ov = document.createElement('div');
   ov.className = 'overlay';
@@ -4305,8 +4305,21 @@ function openConfigBackups(devicePreset) {
   const loadHosts = async () => {
     try {
       const r = await window.topoConfigBackup.hosts();
-      const items2 = (r && r.ok && r.items) || [];
-      hostEl.innerHTML = items2.map(h => `<div class="bk-host${h.device === cur.device && h.host === cur.host ? ' sel' : ''}" data-d="${U.escHtml(h.device)}" data-h="${U.escHtml(h.host)}"><span class="nm">${U.escHtml(h.device)}</span><span class="sub">${U.escHtml(h.host)} · ${h.count} 份 · 最近 ${U.fmtDateTime(new Date(h.lastAt))}</span></div>`).join('') || '<div class="bk-empty">暂无配置备份（开启监控的「自动备份」后自动生成）</div>';
+      const items2 = (r && r.ok && Array.isArray(r.items)) ? r.items.slice() : [];
+      // 合并「正在监控且已开启自动备份、但尚未产生备份」的地址，让首份备份也能用「立即备份」触发
+      try {
+        const st = await window.topoMonitor.status();
+        const mon = (st && st.ok && Array.isArray(st.items)) ? st.items : [];
+        const known = new Set(items2.map(h => h.device + '@' + h.host));
+        for (const it of mon) {
+          if (!it.backupEnabled || !it.host) continue;
+          const dev = it.name || it.deviceId || '';
+          if (!dev || known.has(dev + '@' + it.host)) continue;
+          known.add(dev + '@' + it.host);
+          items2.push({ device: dev, host: it.host, count: 0, lastAt: 0, last: null, pending: true });
+        }
+      } catch (e) { /* 忽略：监控桥不可用时仅展示已有备份 */ }
+      hostEl.innerHTML = items2.map(h => `<div class="bk-host${h.device === cur.device && h.host === cur.host ? ' sel' : ''}" data-d="${U.escHtml(h.device)}" data-h="${U.escHtml(h.host)}"><span class="nm">${U.escHtml(h.device)}</span><span class="sub">${U.escHtml(h.host)} · ${h.pending ? '监控中' : h.count + ' 份'} · ${h.pending ? '尚未产生备份' : '最近 ' + U.fmtDateTime(new Date(h.lastAt))}</span></div>`).join('') || '<div class="bk-empty">暂无配置备份（开启监控的「自动备份」后自动生成）</div>';
       hostEl.querySelectorAll('.bk-host').forEach(el => {
         el.onclick = async () => {
           cur.device = el.dataset.d;
@@ -4353,8 +4366,13 @@ function openConfigBackups(devicePreset) {
     if (!window.topoMonitor || !window.topoMonitor.runBackup) { toast('立即备份需要监控任务在运行'); return; }
     const key = monitorKey(cur.device, cur.host);
     const r = await window.topoMonitor.runBackup(key);
-    if (r && r.ok) toast('已触发备份，稍后刷新列表查看');
-    else toast((r && r.error) || '触发备份失败');
+    if (r && r.ok) {
+      if (r.saved) { toast('已保存新备份：' + (r.name || '')); loadHosts(); }
+      else if (r.skipped) toast('已备份：内容与上次一致，未新增文件（「无变化不新增」已开启）');
+      else toast('备份未产生新文件：' + (r.error || '命令无输出'));
+    } else {
+      toast((r && r.error) || '触发备份失败');
+    }
   };
   delBtn.onclick = async () => {
     if (sel.size !== 1) return;
@@ -4372,7 +4390,7 @@ function openConfigBackups(devicePreset) {
 function openWebShell(id) {
   const n = state.nodes.find(x => x.id === id);
   if (!n) return;
-  if (!window.topoShell) { toast('Web Shell 需要桌面版 NetTopo（Electron）环境'); return; }
+  if (!window.topoShell) { toast('Web Shell 需要桌面版（Electron）环境'); return; }
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem('topoShellCfg') || 'null'); } catch (e) { saved = null; }
   saved = saved || {};
@@ -4458,9 +4476,9 @@ function openWebShell(id) {
 
 /* ================= 启动 ================= */
 // 版本号统一取自 U.APP_VERSION（唯一来源），并同步到界面显示
-console.log('[NetTopo] 版本 ' + U.APP_VERSION);
+console.log('[网络拓扑管理软件] 版本 ' + U.APP_VERSION);
 $('#statVer').textContent = U.APP_VERSION;
-document.title = 'NetTopo · 网络拓扑设计器 ' + U.APP_VERSION;
+document.title = '网络拓扑管理软件 ' + U.APP_VERSION;
 // 启动时强制隐藏悬浮层（避免上次会话残留的黑点/提示条）
 $('#tooltip').classList.add('hidden');
 $('#hintBar').classList.add('hidden');

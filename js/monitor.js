@@ -23,6 +23,23 @@ function sanitizeFilename(s) {
   return out;
 }
 
+/** 清理备份捕获行：只保留命令执行后的输出内容。
+ *  - 输入的命令行（或其终端回显，可能带「提示符+命令」前缀，如 Switch#display current-configuration）一律不保留
+ *  - 提示符行（Switch# / R1> 等）不保留
+ *  返回：过滤后的行数组（保留原始行文本） */
+function cleanBackupLines(lines, cmds) {
+  const out = [];
+  const list = Array.isArray(cmds) ? cmds : [];
+  for (const raw of (Array.isArray(lines) ? lines : [])) {
+    const t = String(raw == null ? '' : raw).replace(/\s+$/, '');
+    if (!t) continue;
+    if (list.some(c => c && (t === c || t.endsWith(c)))) continue; // 输入的命令行（可能带提示符前缀）
+    if (/^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#]$/.test(t)) continue; // 提示符行
+    out.push(raw);
+  }
+  return out;
+}
+
 const pad2 = (n) => String(n).padStart(2, '0');
 function fmtDateTime(d) {
   d = d || new Date();
@@ -210,7 +227,7 @@ class MonitorManager extends EventEmitter {
     if (!Number.isFinite(backupIntervalSec)) backupIntervalSec = 3600;
     backup.intervalSec = Math.max(60, Math.min(86400, backupIntervalSec));
     let backupWaitMs = parseFloat(bOpt.waitMs);
-    if (!Number.isFinite(backupWaitMs)) backupWaitMs = 3000;
+    if (!Number.isFinite(backupWaitMs)) backupWaitMs = 1000; // 备份命令每条间隔默认 1 秒
     backup.waitMs = Math.max(500, Math.min(60000, backupWaitMs));
     return {
       ok: true,
@@ -231,7 +248,7 @@ class MonitorManager extends EventEmitter {
       initDelayMs: cfg.initDelayMs,
       probe: Object.assign({ enabled: false, type: 'tcp', intervalSec: 30 }, cfg.probe || {}),
       alerts: (cfg.alerts || []).map(a => ({ pattern: a.pattern, note: a.note, re: a.re })),
-      backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 3000 }, cfg.backup || {}),
+      backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 1000 }, cfg.backup || {}),
       probeOk: null, probeLatency: null, probeFailSince: null, probeTimer: null, _probeBusy: false,
       alerting: false, alertInfo: null, _cycleActive: false, _alertPending: [],
       backupTimer: null, backupRunning: false, backupLast: null, _backupCap: null,
@@ -286,14 +303,16 @@ class MonitorManager extends EventEmitter {
         state: job.state, text: job.statusText, since: job.since, readOnly: !!job.readOnly,
         probeOk: job.probeOk, probeLatency: job.probeLatency, probeFailSince: job.probeFailSince,
         alert: job.alertInfo ? job.alertInfo.pattern : null,
-        backup: job.backupLast ? { name: job.backupLast.name, at: job.backupLast.at, changed: !!job.backupLast.changed, first: !!job.backupLast.first, error: job.backupLast.error || null } : null
+        backup: job.backupLast ? { name: job.backupLast.name, at: job.backupLast.at, changed: !!job.backupLast.changed, first: !!job.backupLast.first, error: job.backupLast.error || null } : null,
+        backupEnabled: !!job.backup.enabled, backupMode: job.backup.mode
       });
     }
     return out;
   }
 
-  /** 立即触发一次配置备份（用于界面「立即备份」按钮）；key 为 deviceId@host */
-  runBackupNow(key) {
+  /** 立即触发一次配置备份（用于界面「立即备份」按钮）；key 可为 deviceId@host 或 设备名@主机。
+   *  返回 {ok, saved, skipped, name, error}，界面据此给出明确反馈（保存 / 无变化跳过 / 失败原因）。 */
+  async runBackupNow(key) {
     key = String(key || '');
     let job = this.jobs.get(key);
     // 兼容用设备名@主机（备份中心目录名）触发：按 name+host 匹配
@@ -301,12 +320,20 @@ class MonitorManager extends EventEmitter {
       const sp = key.indexOf('@');
       const nm = key.slice(0, sp), hst = key.slice(sp + 1);
       job = [...this.jobs.values()].find(j => (j.name || j.deviceId) === nm && j.host === hst) || null;
+      // 兼容备份目录名被安全化（含特殊字符）后的设备名/主机名
+      if (!job) {
+        job = [...this.jobs.values()].find(j => sanitizeFilename(j.name || j.deviceId) === nm && sanitizeFilename(j.host) === hst) || null;
+      }
     }
-    if (!job) return { ok: false, error: '任务不存在' };
+    if (!job) return { ok: false, error: '该地址没有正在运行的监控任务（请先在「设备监控」中启动）' };
     if (!job.backup.enabled) return { ok: false, error: '该任务未开启自动备份' };
-    if (job.state !== 'monitoring') return { ok: false, error: '任务未在运行' };
-    this._runBackup(job, job.gen);
-    return { ok: true };
+    if (job.stopping || !job.enabled) return { ok: false, error: '任务已停止' };
+    // 复用监控会话的备份要求会话在线；独立连接模式内部自建会话，断线重连时也能立即备份
+    if (job.backup.mode !== 'own' && job.state !== 'monitoring') return { ok: false, error: '监控会话未在线（当前：' + (job.statusText || job.state) + '）' };
+    job._bkResult = null;
+    await this._runBackup(job, job.gen);
+    const r = job._bkResult || {};
+    return { ok: true, saved: !!r.saved, skipped: !!r.skipped, name: r.name || null, error: r.error || null };
   }
 
   /** 返回某设备日志目录（不存在则返回日志根目录）；key 可为 deviceId 或 deviceId@host */
@@ -487,14 +514,17 @@ class MonitorManager extends EventEmitter {
     this._rollLogIfNeeded(job);
     this._logLine(job, '----- 命令轮次 ' + fmtTimestamp() + ' -----');
     job._cycleActive = true;
-    const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
-    for (const cmd of job.commands) {
-      if (!job.enabled || job.state !== 'monitoring' || gen !== job.gen) return;
-      this._logCmd(job, cmd);
-      try { this.shell.write(job.sid, cmd + eol); } catch (e) { /* ignore */ }
-      if (job.cmdDelayMs > 0) await sleep(job.cmdDelayMs);
+    try {
+      const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
+      for (const cmd of job.commands) {
+        if (!job.enabled || job.state !== 'monitoring' || gen !== job.gen) break;
+        this._logCmd(job, cmd);
+        try { this.shell.write(job.sid, cmd + eol); } catch (e) { /* ignore */ }
+        if (job.cmdDelayMs > 0) await sleep(job.cmdDelayMs);
+      }
+    } finally {
+      job._cycleActive = false; // 中途退出（会话断开/停止）也必须释放互斥位，避免永久卡死
     }
-    job._cycleActive = false;
     if (!job.enabled || gen !== job.gen) return;
     this._checkAlerts(job);
     job.loopTimer = setTimeout(() => this._runCycle(job, job.gen), job.intervalSec * 1000);
@@ -548,14 +578,9 @@ class MonitorManager extends EventEmitter {
         if (job.enabled && !job.stopping) this._checkAlerts(job);
       }, 500);
     }
-    // 备份捕获：过滤命令回显（多条命令集合）与提示符行
+    // 备份捕获：过滤命令回显（多条命令集合，含「提示符+命令」整行）与提示符行
     if (job._backupCap && captured.length) {
-      const cmds = job._backupCap.commands;
-      for (const t of captured) {
-        if (cmds.some(c => t === c || t.indexOf(c) === 0)) continue;
-        if (/^[A-Za-z0-9_.\-\[\]()/:<> ]{0,64}\s*[>#]$/.test(t)) continue; // 提示符行
-        job._backupCap.lines.push(t);
-      }
+      for (const t of cleanBackupLines(captured, job._backupCap.commands)) job._backupCap.lines.push(t);
     }
   }
 
@@ -710,13 +735,35 @@ class MonitorManager extends EventEmitter {
     job.backupTimer = setTimeout(() => this._runBackup(job, job.gen), job.backup.intervalSec * 1000);
   }
   async _runBackup(job, gen) {
-    if (!job.enabled || !job.backup.enabled || job.state !== 'monitoring' || gen !== job.gen || !this.backupStore) return;
-    if (job.backupRunning || job._cycleActive) {
-      // 与命令循环撞车：2 秒后再试，不跳过本轮
-      clearTimeout(job.backupTimer);
-      job.backupTimer = setTimeout(() => this._runBackup(job, job.gen), 2000);
-      return;
+    if (!job.enabled || !job.backup.enabled || gen !== job.gen || !this.backupStore) {
+      job._bkResult = { saved: false, skipped: false, error: '任务未在运行' };
+      return job._bkResult;
     }
+    if (job.stopping || job.fatal) {
+      job._bkResult = { saved: false, skipped: false, error: '任务已停止' };
+      return job._bkResult;
+    }
+    // 复用监控会话必须在线；独立连接模式可自建会话（监控断线重连时也能立即备份）
+    if (job.backup.mode !== 'own' && job.state !== 'monitoring') {
+      job._bkResult = { saved: false, skipped: false, error: '监控会话未在线（当前：' + (job.statusText || job.state) + '）' };
+      return job._bkResult;
+    }
+    if (job.backupRunning || job._cycleActive) {
+      // 与命令循环撞车：等待其结束再执行（至多 40 秒），不让本轮被甩掉
+      const t0 = Date.now();
+      while ((job.backupRunning || job._cycleActive) && !job.stopping && !job.fatal) {
+        if (Date.now() - t0 > 40000) {
+          job._bkResult = { saved: false, skipped: false, error: '备份/命令循环持续进行中，已放弃本轮' };
+          return job._bkResult;
+        }
+        await sleep(200);
+      }
+      if (job.stopping || job.fatal || gen !== job.gen) {
+        job._bkResult = { saved: false, skipped: false, error: '任务已停止' };
+        return job._bkResult;
+      }
+    }
+    job._bkResult = null;
     job.backupRunning = true;
     job._cycleActive = true; // 备份期间暂停命令循环（独立连接模式同样占用该互斥位）
     try {
@@ -729,6 +776,7 @@ class MonitorManager extends EventEmitter {
       job._cycleActive = false;
       if (job.enabled && !job.stopping && gen === job.gen) this._scheduleBackup(job);
     }
+    return job._bkResult || { saved: false, skipped: false, error: '未产生备份结果' };
   }
 
   /** 备份方式 A：复用监控会话执行备份命令（输出经 _backupCap 捕获） */
@@ -815,14 +863,8 @@ class MonitorManager extends EventEmitter {
       this.shell.removeListener('output', onOut);
       try { this.shell.close(sid); } catch (e) { /* ignore */ }
       if (!job.enabled || job.stopping || gen !== job.gen) return;
-      // 过滤命令回显与提示符行
-      const cmds = job.backup.commands;
-      const clean = lines.filter(l => {
-        if (cmds.some(c => l === c || l.indexOf(c) === 0)) return false;
-        if (/^[A-Za-z0-9_.\-\[\]()/:<> ]{0,64}\s*[>#]$/.test(l)) return false;
-        return true;
-      });
-      this._saveBackup(job, gen, clean.join('\n'));
+      // 过滤命令回显（含提示符前缀整行）与提示符行：只保留命令执行后的输出内容
+      this._saveBackup(job, gen, cleanBackupLines(lines, job.backup.commands).join('\n'));
     })();
   }
 
@@ -831,6 +873,7 @@ class MonitorManager extends EventEmitter {
   _saveBackup(job, gen, content) {
     if (!this.backupStore) return;
     if (!content.trim()) {
+      job._bkResult = { saved: false, skipped: false, error: '命令无输出' };
       job.backupLast = { at: Date.now(), error: '无输出' };
       this._logLine(job, '配置备份：命令无输出，已跳过');
       return;
@@ -842,6 +885,7 @@ class MonitorManager extends EventEmitter {
         const prev = this.backupStore.read(deviceKey, job.host, prevName);
         if (prev.ok && prev.content === content) {
           // 与上一份完全一致：不新增备份文件，仅刷新状态与广播
+          job._bkResult = { saved: false, skipped: true, name: prevName };
           job.backupLast = { name: prevName, at: Date.now(), changed: false, same: true };
           this._logLine(job, '配置备份：与上次一致，未新增备份文件（' + prevName + '）');
           this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, skipped: true, changed: false, fileName: prevName, first: false });
@@ -852,6 +896,7 @@ class MonitorManager extends EventEmitter {
     }
     const r = this.backupStore.save(deviceKey, job.host, content);
     if (!r.ok) {
+      job._bkResult = { saved: false, skipped: false, error: r.error };
       job.backupLast = { at: Date.now(), error: r.error };
       this._logLine(job, '配置备份失败：' + r.error);
       this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: false, error: r.error });
@@ -863,6 +908,7 @@ class MonitorManager extends EventEmitter {
       if (d.ok) diffInfo = { added: d.added, removed: d.removed, changed: d.changed };
     }
     const changed = diffInfo ? diffInfo.changed : true;
+    job._bkResult = { saved: true, skipped: false, name: r.name, first: !!r.first, changed };
     job.backupLast = { name: r.name, at: Date.now(), changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null, first: !!r.first };
     this._logLine(job, '配置备份已保存：' + r.name + '（' + content.split('\n').length + ' 行）' + (r.first ? '（首份）' : (diffInfo ? (changed ? '，与上次差异 +' + diffInfo.added + '/-' + diffInfo.removed + ' 行' : '，与上次一致') : '')));
     this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, fileName: r.name, first: !!r.first, prev: r.prev, changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null });
@@ -870,6 +916,7 @@ class MonitorManager extends EventEmitter {
   /** 备份失败收尾（仅记录与广播；下次调度由 _runBackup 的 finally 负责） */
   _finishBackup(job, gen, res) {
     if (res && !res.ok) {
+      job._bkResult = { saved: false, skipped: false, error: res.error };
       job.backupLast = { at: Date.now(), error: res.error };
       this._logLine(job, '配置备份失败：' + res.error);
       this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: false, error: res.error });
@@ -893,5 +940,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, sanitizeFilename };
+module.exports = { MonitorManager, sanitizeFilename, cleanBackupLines };
 

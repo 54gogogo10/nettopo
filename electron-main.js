@@ -90,7 +90,7 @@ function applyTray() {
   if (trayEnabled() && !tray) {
     try {
       tray = new Tray(path.join(__dirname, 'icon.png'));
-      tray.setToolTip('NetTopo 网络拓扑设计器（后台监控运行中）');
+      tray.setToolTip('网络拓扑管理软件（后台监控运行中）');
       tray.on('click', () => { if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); } });
       rebuildTrayMenu();
     } catch (e) { tray = null; }
@@ -113,7 +113,7 @@ function createShellWindow() {
     minWidth: 640,
     minHeight: 400,
     autoHideMenuBar: true,
-    title: 'NetTopo Web Shell',
+    title: '网络拓扑管理软件 · Web Shell',
     icon: path.join(__dirname, 'icon.png'),
     webPreferences: {
       contextIsolation: true,
@@ -205,11 +205,11 @@ monitor.on('probe', (info) => {
   if (info.ok === false && prev !== false) {
     lastProbeOk.set(info.key, false);
     recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
-    if (notifyEnabled()) notifyUser('NetTopo · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
+    if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
   } else if (info.ok === true && prev === false) {
     lastProbeOk.set(info.key, true);
     recordMonitorEvent(info, 'recovery', '探测恢复在线');
-    if (notifyEnabled()) notifyUser('NetTopo · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
+    if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
   } else {
     lastProbeOk.set(info.key, info.ok);
   }
@@ -226,11 +226,11 @@ monitor.on('alert', (info) => {
       lastAlertOn.set(info.key, true);
       lastAlertPatterns.set(info.key, cur);
       recordMonitorEvent(info, 'alert', detail);
-      if (notifyEnabled()) notifyUser('NetTopo · 输出告警', info.name + '（' + info.host + '）' + detail);
+      if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
     } else if (added.length) {
       lastAlertPatterns.set(info.key, cur);
       recordMonitorEvent(info, 'alert', detail + '（新增 ' + added.join('、') + '）');
-      if (notifyEnabled()) notifyUser('NetTopo · 输出告警', info.name + '（' + info.host + '）' + detail);
+      if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
     }
   } else if (lastAlertOn.get(info.key) === true) {
     lastAlertOn.set(info.key, false);
@@ -240,7 +240,7 @@ monitor.on('alert', (info) => {
 });
 monitor.on('trust', (info) => {
   // 首次连接自动信任主机指纹：安全敏感事件，始终通知用户（不随 monitorNotify 开关关闭）
-  notifyUser('NetTopo · 首次信任主机指纹',
+  notifyUser('网络拓扑管理软件 · 首次信任主机指纹',
     info.name + '（' + info.host + '）首次连接已自动信任指纹 ' + info.fp + '；后续指纹变化将拒绝连接');
 });
 const lastBackupChangeAt = new Map(); // key -> 上次变更通知时间（节流）
@@ -258,7 +258,7 @@ monitor.on('backup', (info) => {
       const last = lastBackupChangeAt.get(info.key) || 0;
       if (now - last > 30 * 60 * 1000) {
         lastBackupChangeAt.set(info.key, now);
-        notifyUser('NetTopo · 配置变更', info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
+        notifyUser('网络拓扑管理软件 · 配置变更', info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
       }
     }
   } else {
@@ -267,7 +267,7 @@ monitor.on('backup', (info) => {
     const prevErr = lastBackupErrAt.get(info.key) || 0;
     if (now - prevErr > 10 * 60 * 1000) {
       lastBackupErrAt.set(info.key, now);
-      notifyUser('NetTopo · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
+      notifyUser('网络拓扑管理软件 · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
     }
   }
 });
@@ -279,7 +279,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 640,
     autoHideMenuBar: true,
-    title: 'NetTopo 网络拓扑设计器',
+    title: '网络拓扑管理软件',
     icon: path.join(__dirname, 'icon.png'),
     webPreferences: {
       contextIsolation: true,
@@ -296,7 +296,7 @@ function createWindow() {
     if (trayEnabled() && !trayQuitting) {
       e.preventDefault();
       mainWin.hide();
-      if (tray && tray.displayBalloon) { try { tray.displayBalloon({ title: 'NetTopo 已最小化到托盘', content: '后台监控仍在运行，点击托盘图标可恢复主窗口' }); } catch (err) { /* ignore */ } }
+      if (tray && tray.displayBalloon) { try { tray.displayBalloon({ title: '网络拓扑管理软件 已最小化到托盘', content: '后台监控仍在运行，点击托盘图标可恢复主窗口' }); } catch (err) { /* ignore */ } }
     }
   });
   mainWin.on('closed', () => { mainWin = null; });
@@ -315,7 +315,7 @@ function createWebWindow() {
     minWidth: 720,
     minHeight: 480,
     autoHideMenuBar: true,
-    title: 'NetTopo 设备管理页',
+    title: '网络拓扑管理软件 · 设备管理页',
     icon: path.join(__dirname, 'icon.png'),
     webPreferences: {
       contextIsolation: true,

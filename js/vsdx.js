@@ -570,8 +570,8 @@ ${[...new Set([...imageParts.values()].map(p => p.ext))].map(ext => `<Default Ex
 
   const coreProps = `<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 <dc:title>${X(pageName)}</dc:title>
-<dc:creator>NetTopo</dc:creator>
-<cp:lastModifiedBy>NetTopo</cp:lastModifiedBy>
+<dc:creator>网络拓扑管理软件</dc:creator>
+<cp:lastModifiedBy>网络拓扑管理软件</cp:lastModifiedBy>
 <dcterms:created xsi:type="dcterms:W3CDTF">2024-01-01T00:00:00Z</dcterms:created>
 <dcterms:modified xsi:type="dcterms:W3CDTF">2024-01-01T00:00:00Z</dcterms:modified>
 </cp:coreProperties>`;

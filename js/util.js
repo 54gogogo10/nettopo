@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260818d';
+U.APP_VERSION = 'v20260819a';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);

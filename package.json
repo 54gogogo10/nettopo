@@ -1,8 +1,8 @@
 {
   "name": "nettopo",
-  "productName": "NetTopo 网络拓扑设计器",
-  "version": "1.0.0-20260818d",
-  "description": "网络拓扑设计与导出工具",
+  "productName": "网络拓扑管理软件",
+  "version": "1.0.0-20260819a",
+  "description": "网络拓扑设计与后台监控管理软件",
   "main": "electron-main.js",
   "author": "NetTopo",
   "license": "MIT",
