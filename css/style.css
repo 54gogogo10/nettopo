@@ -166,6 +166,12 @@ html[data-theme="dark"] .node .shape { stroke: rgba(0, 0, 0, .55); }
   background: var(--panel2); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 5px 8px; font: inherit; outline: none;
 }
+.m-row input {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 8px; font: inherit; outline: none;
+  height: 32px;
+}
+.m-row textarea { flex: 1; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font: 12px/1.5 Consolas, monospace; resize: vertical; outline: none; }
 
 .align-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
 .align-grid .tb { justify-content: center; }
