@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260818a';
+U.APP_VERSION = 'v20260818b';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -807,6 +807,21 @@ U.maskBitsToDotted = (bits) => {
   return [(mask >>> 24) & 255, (mask >>> 16) & 255, (mask >>> 8) & 255, mask & 255].join('.');
 };
 
+/* 掩码位 → 反掩码（通配掩码，点分）：24 → 0.0.0.255；非法/缺省回退 24 位 */
+U.maskBitsToWildcard = (bits) => {
+  let n = parseInt(bits, 10);
+  if (!Number.isFinite(n) || n < 0 || n > 32) n = 24;
+  const w = n === 0 ? 0xffffffff : (~(~0 << (32 - n))) >>> 0;
+  return [(w >>> 24) & 255, (w >>> 16) & 255, (w >>> 8) & 255, w & 255].join('.');
+};
+
+/* 掩码位 → CIDR 前缀：24 → '/24'；非法/缺省回退 24 位 */
+U.maskBitsToCidr = (bits) => {
+  let n = parseInt(bits, 10);
+  if (!Number.isFinite(n) || n < 0 || n > 32) n = 24;
+  return '/' + n;
+};
+
 /* CIDR 网段 → 点分掩码：192.168.1.0/24 → 255.255.255.0；非法回退 24 位 */
 U.cidrMask = (cidr) => {
   const m = /^\d{1,3}(?:\.\d{1,3}){3}\/(\d{1,2})$/.exec(String(cidr || '').trim());
@@ -895,7 +910,9 @@ U.subnetGroups = (nodes, links, names) => {
    接口级（接口块/接入端口行可用）：
      {iface}    本端接口名（如 GE0/0/1）
      {ip}       本端接口 IP
-     {mask}     子网掩码（255.255.255.0）
+     {mask}     子网掩码，点分形式（255.255.255.0）
+     {maskCidr} 子网掩码，CIDR 形式（/24）
+     {wildcard} 子网掩码的反掩码/通配掩码（0.0.0.255，Cisco ACL/OSPF 常用）
      {peer}     对端设备名
      {peerIf}   对端接口名（如 GE1/0/1）
      {peerSuffix} 对端接口前缀（:GE1/0/1，无对端接口则为空，兼容旧模板）
@@ -903,6 +920,10 @@ U.subnetGroups = (nodes, links, names) => {
      {vlan}     自动分配的 VLAN 号
    路由级（路由行可用）：
      {subnet}   远端网段 CIDR（如 192.168.1.0/24）
+     {net}      远端网段地址（无前缀，如 192.168.1.0）
+     {mask}     远端网段点分掩码（255.255.255.0）
+     {maskCidr} 远端网段 CIDR（/24）
+     {wildcard} 远端网段反掩码（0.0.0.255）
      {nextHop}  下一跳 IP（对端接口 IP） */
 U.CONFIG_TEMPLATES = {
   huawei: {
@@ -1087,7 +1108,7 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
         const vlanNums = U.parseVlans(effVlan);
         const vlanSingle = vlanNums.length ? String(vlanNums[0]) : effVlan;
         const map = {
-          iface: it.ifn, ip: it.ip || '未配置', mask: U.maskBitsToDotted(it.maskBits), peer: it.peer,
+          iface: it.ifn, ip: it.ip || '未配置', mask: U.maskBitsToDotted(it.maskBits), maskCidr: U.maskBitsToCidr(it.maskBits), wildcard: U.maskBitsToWildcard(it.maskBits), peer: it.peer,
           peerIf: it.peerIf || '', peerSuffix: it.peerIf ? ':' + it.peerIf : '',
           bw: U.formatBw(it.bw) || '', vlan: vlanSingle,
           vlanList: vlanNums.join(' '), vlanCsv: vlanNums.join(','),
@@ -1111,9 +1132,9 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
         if (!vid || !vip) continue;
         addVlanDefs(vid); // 设备配置（三层 VLAN 接口）的 VLAN 编号也生成 vlan 定义
         sec.push('');
-        const sviMask = U.maskBitsToDotted(v.mask); // 设备 VLAN 接口可带掩码位，缺省 24
+        const sviMaskD = U.maskBitsToDotted(v.mask); // 设备 VLAN 接口可带掩码位，缺省 24
         for (const line of (tpl.svi || ['interface vlan {vid}', ' ip address {ip} {mask}'])) {
-          sec.push(fill(line, { vid, ip: vip, mask: sviMask, comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
+          sec.push(fill(line, { vid, ip: vip, mask: sviMaskD, maskCidr: U.maskBitsToCidr(v.mask), wildcard: U.maskBitsToWildcard(v.mask), comment: tpl.comment, name: n.name || '', mgmt: U.nodeMgmts(n).join(', ') || '—', type: U.getType(n.type).label }));
         }
       }
     }
@@ -1139,13 +1160,17 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
           const oSub = U.subnetOf(oIp, oBits);
           if (oSub && !mine.has(oSub)) {
             const netInt = U.ipv4ToInt(oSub.split('/')[0]);
-            routes.push(fill(tpl.route, {
+            const oBits2 = parseInt((oSub.match(/\/(\d+)$/) || ['', '24'])[1], 10) || 24;
+            const ROUTE_FILL = {
               subnet: oSub,
               net: netInt == null ? oSub.split('/')[0] : U.intToIpv4(netInt),
               mask: U.cidrMask(oSub),
+              maskCidr: U.maskBitsToCidr(oBits2),
+              wildcard: U.maskBitsToWildcard(oBits2),
               nextHop: peerIp,
               comment: tpl.comment
-            }));
+            };
+            routes.push(fill(tpl.route, ROUTE_FILL));
           }
         }
       }
@@ -1159,8 +1184,8 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
 
 /* ---------- 生成前冲突检查 ---------- */
 /* 检查项：
- *  error 设备名重复 / 接口 IP 重复 / 链路两端模式或网段矛盾 / 无效 VLAN 表达式
- *  warn  管理地址重复 / 同网段地址掩码不一致 / 链路两端掩码或 VLAN 不一致 / SVI 无二层端口 /
+ *  error 设备名重复 / 接口 IP 重复 / 链路两端网段矛盾（三层对三层不在同网段）/ 无效 VLAN 表达式
+ *  warn  管理地址重复 / 同网段地址掩码不一致 / 链路两端掩码或 VLAN 不一致 / 一端二层一端三层（正常桥接场景，仅提示） /
  *        接口重复使用 / 管理地址与接口 IP 相同
  * 返回 { ok, issues: [{level:'error'|'warn', device, msg}] } */
 U.checkConfigs = (nodes, links) => {
@@ -1233,7 +1258,8 @@ U.checkConfigs = (nodes, links) => {
     const aName = devName(l.a), bName = devName(l.b);
     const l2a = !!l.aL2, l2b = !!l.bL2;
     if (l2a !== l2b) {
-      add('error', aName, '链路 ' + aName + '(' + (l.aIf || '?') + ') ⇄ ' + bName + '(' + (l.bIf || '?') + ') 一端为二层、一端为三层，配置矛盾');
+      // 一端二层（交换机二层口接入）一端三层（路由器/防火墙三层口）属正常桥接场景，非矛盾：仅提示并存档为警告
+      add('warn', aName, '链路 ' + aName + '(' + (l.aIf || '?') + ') ⇄ ' + bName + '(' + (l.bIf || '?') + ') 两端分别为二层/三层接口（正常桥接场景；生成配置时二层端不配 IP、三层端配 IP）');
     }
     if (!l2a && l.aIp && l.bIp) {
       const aBits = parseInt(l.aMask, 10) > 0 && parseInt(l.aMask, 10) <= 32 ? parseInt(l.aMask, 10) : 24;

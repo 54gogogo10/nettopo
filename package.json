@@ -1,7 +1,7 @@
 {
   "name": "nettopo",
   "productName": "NetTopo 网络拓扑设计器",
-  "version": "1.0.0-20260818a",
+  "version": "1.0.0-20260818b",
   "description": "网络拓扑设计与导出工具",
   "main": "electron-main.js",
   "author": "NetTopo",

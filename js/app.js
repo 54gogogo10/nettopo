@@ -564,7 +564,7 @@ function openConfigTemplateManager(done) {
       <h3>配置模板管理</h3>
       <div class="m-sub" style="line-height:1.7">占位符（模板里直接写，生成时替换）：
         设备级 <b>{name}</b> 设备名 · <b>{mgmt}</b> 管理地址 · <b>{type}</b> 类型 · <b>{comment}</b> 注释符
-        接口级 <b>{iface}</b> 本端接口 · <b>{ip}</b> 接口 IP · <b>{mask}</b> 掩码 · <b>{peer}</b> 对端设备 · <b>{peerIf}</b> 对端接口 · <b>{bw}</b> 带宽 · <b>{vlan}</b> VLAN 号
+        接口级 <b>{iface}</b> 本端接口 · <b>{ip}</b> 接口 IP · <b>{mask}</b> 掩码(255.255.255.0) · <b>{maskCidr}</b>(/24) · <b>{wildcard}</b>(0.0.0.255) · <b>{peer}</b> 对端设备 · <b>{peerIf}</b> 对端接口 · <b>{bw}</b> 带宽 · <b>{vlan}</b> VLAN · <b>{vlanList}</b>/<b>{vlanCsv}</b> VLAN列表 · <b>{vid}</b> SVI编号
         路由级 <b>{subnet}</b> 远端网段 · <b>{nextHop}</b> 下一跳</div>
       <div id="tplList" style="max-height:46vh;overflow:auto"></div>
       <div class="m-actions">
@@ -612,10 +612,15 @@ function openConfigTemplateManager(done) {
         <h3>${t.builtin ? '查看模板' : '编辑模板'}：${U.escHtml(t.label)}</h3>
         <div class="m-row"><label>名称</label><input id="tplLabel" type="text" value="${U.escHtml(t.label)}" ${t.builtin ? 'disabled' : ''}/></div>
         <div class="m-row"><label>注释符</label><input id="tplComment" type="text" value="${U.escHtml(t.comment || '')}" style="width:70px" ${t.builtin ? 'disabled' : ''}/></div>
-        <div class="m-sub" style="line-height:1.6">可用占位符：<b>{name}</b>设备名 <b>{mgmt}</b>管理 <b>{type}</b>类型 <b>{comment}</b>注释符 <b>{iface}</b>接口 <b>{ip}</b>IP <b>{mask}</b>掩码 <b>{peer}</b>对端设备 <b>{peerIf}</b>对端接口 <b>{bw}</b>带宽 <b>{vlan}</b>VLAN <b>{subnet}</b>网段 <b>{nextHop}</b>下一跳</div>
+        <div class="m-sub" style="line-height:1.6">可用占位符：<b>{name}</b>设备名 <b>{mgmt}</b>管理 <b>{type}</b>类型 <b>{comment}</b>注释符 <b>{iface}</b>接口 <b>{ip}</b>IP <b>{mask}</b>掩码(255.255.255.0) <b>{maskCidr}</b>/24 <b>{wildcard}</b>反掩码 <b>{peer}</b>对端设备 <b>{peerIf}</b>对端接口 <b>{bw}</b>带宽 <b>{vlan}</b>VLAN <b>{vid}</b>SVI编号 <b>{vlanList}</b>VLAN列表(空格) <b>{vlanCsv}</b>VLAN列表(逗号) <b>{net}</b>远端网段 <b>{subnet}</b>网段CIDR <b>{nextHop}</b>下一跳</div>
         <div class="m-row" style="align-items:flex-start"><label>设备头</label><textarea id="tplHeader" style="height:54px">${U.escHtml(t.deviceHeader || '')}</textarea></div>
-        <div class="m-row" style="align-items:flex-start"><label>接口块<br/><small>每行一条</small></label><textarea id="tplIface" style="height:110px">${U.escHtml((t.interface || []).join('\n'))}</textarea></div>
-        <div class="m-row" style="align-items:flex-start"><label>接入端口<br/><small>VLAN</small></label><textarea id="tplAccess" style="height:54px">${U.escHtml((t.switchAccess || []).join('\n'))}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>无接口行<br/><small>无接口时显示</small></label><textarea id="tplNoIface" style="height:40px">${U.escHtml(t.noIface || '')}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>接口块<br/><small>每行一条，三层口</small></label><textarea id="tplIface" style="height:110px">${U.escHtml((t.interface || []).join('\n'))}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>接入端口<br/><small>access 模式</small></label><textarea id="tplAccess" style="height:48px">${U.escHtml((t.switchAccess || []).join('\n'))}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>Trunk 口<br/><small>trunk 模式</small></label><textarea id="tplTrunk" style="height:48px">${U.escHtml((t.vlanTrunk || []).join('\n'))}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>Hybrid 口<br/><small>hybrid 模式</small></label><textarea id="tplHybrid" style="height:48px">${U.escHtml((t.vlanHybrid || []).join('\n'))}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>三层VLAN接口<br/><small>SVI，每行一条</small></label><textarea id="tplSvi" style="height:66px">${U.escHtml((t.svi || []).join('\n'))}</textarea></div>
+        <div class="m-row" style="align-items:flex-start"><label>VLAN定义行<br/><small>单个</small></label><input id="tplVlanLine" type="text" value="${U.escHtml(t.vlanLine || '')}" style="flex:1" placeholder="如 vlan {vlan}"/></div>
         <div class="m-row" style="align-items:flex-start"><label>路由行<br/><small>可选</small></label><input id="tplRoute" type="text" value="${U.escHtml(t.route || '')}" style="flex:1"/></div>
         <div class="m-actions">
           <button type="button" class="tb" data-act="cancel">取消</button>
@@ -636,10 +641,13 @@ function openConfigTemplateManager(done) {
         key: k, label,
         comment: edit.querySelector('#tplComment').value.trim() || '#',
         deviceHeader: edit.querySelector('#tplHeader').value,
-        noIface: U.cfgTemplates().huawei.noIface,
+        noIface: edit.querySelector('#tplNoIface').value,
         interface: edit.querySelector('#tplIface').value.split('\n').map(s => s.trim()).filter(Boolean),
         switchAccess: edit.querySelector('#tplAccess').value.split('\n').map(s => s.trim()).filter(Boolean),
-        vlanLine: U.cfgTemplates().huawei.vlanLine,
+        vlanTrunk: edit.querySelector('#tplTrunk').value.split('\n').map(s => s.trim()).filter(Boolean),
+        vlanHybrid: edit.querySelector('#tplHybrid').value.split('\n').map(s => s.trim()).filter(Boolean),
+        svi: edit.querySelector('#tplSvi').value.split('\n').map(s => s.trim()).filter(Boolean),
+        vlanLine: edit.querySelector('#tplVlanLine').value.trim(),
         route: edit.querySelector('#tplRoute').value.trim() || null
       };
       U.saveCustomCfgTemplates();
@@ -658,7 +666,7 @@ function openConfigTemplateManager(done) {
       noIface: '{comment} （无接口配置）',
       interface: ['interface {iface}', ' ip address {ip} 255.255.255.0', ' description -> {peer}{peerIf}'],
       switchAccess: [],
-      vlanLine: '',
+      vlanTrunk: [], vlanHybrid: [], svi: [], vlanLine: '',
       route: null
     };
     U.saveCustomCfgTemplates();
@@ -2915,7 +2923,7 @@ function openHelp() {
     <h4>⑧ 设备管理 Web 页（桌面版）</h4>
     <p>设备编辑中配置「管理Web页URL」，右键设备「打开设备管理页面」在<b>独立窗口</b>以<b>多标签</b>打开；支持地址栏 / 后退 / 前进 / 刷新；HTTPS 自签名 / 无效证书会弹出<b>安全告警</b>，手动确认后可继续访问并记住该站点。</p>
     <h4>⑨ 保存 / 导出</h4>
-    <p><b>工程文件 .nettopo</b>：保存 / 打开含位置、视图、自定义类型、多管理口的完整工程；<b>CSV / Excel</b>：把修改后的拓扑保存回连线关系表（多管理口逗号分隔，可再导入）；<b>PDF</b>：矢量高清交付；<b>PNG / SVG</b>：图片导出与复制到剪贴板；<b>Visio</b>：.vsdx 原生格式可在 Visio 继续编辑；<b>设计报告</b>：自包含 HTML（设备 / IP / 子网 / 链路 / 配置）；<b>IP 规划清单</b>：Excel 导出含对端接口 IP；<b>生成设备配置</b>：华为 / H3C / 思科 / 锐捷及自定义模板（{name} {mgmt} {iface} {ip} {peer} {vlan}…），生成前自动做<b>冲突检查</b>，可<b>下载 ZIP</b> 按厂家分目录打包；「编辑设备」中可为设备指定<b>厂家与自定义图标</b>。</p>
+    <p><b>工程文件 .nettopo</b>：保存 / 打开含位置、视图、自定义类型、多管理口的完整工程；<b>CSV / Excel</b>：把修改后的拓扑保存回连线关系表（多管理口逗号分隔，可再导入）；<b>PDF</b>：矢量高清交付；<b>PNG / SVG</b>：图片导出与复制到剪贴板；<b>Visio</b>：.vsdx 原生格式可在 Visio 继续编辑；<b>设计报告</b>：自包含 HTML（设备 / IP / 子网 / 链路 / 配置）；<b>IP 规划清单</b>：Excel 导出含对端接口 IP；<b>生成设备配置</b>：华为 / H3C / 思科 / 锐捷及自定义模板（{name} {mgmt} {iface} {ip} {peer} {vlan}…），生成前自动做<b>冲突检查</b>，可<b>下载 ZIP</b> 按厂家分目录打包；模板掩码变量支持点分 / CIDR / 反掩码三种：{mask}（255.255.255.0）、{maskCidr}（/24）、{wildcard}（0.0.0.255）；「编辑设备」中可为设备指定<b>厂家与自定义图标</b>。</p>
     <h4>⑩ 后台监控（桌面版）</h4>
     <p>右键设备「设备监控（静默采集）…」配置协议 / 管理口 / 账号 / 命令与循环间隔后，即可在后台静默通过 SSH/Telnet 定时采集命令输出，<b>全部输出连同时间戳写入本地日志（按天归档）</b>：<userData>/monitor-logs/设备名/日期/<设备名>_<管理口>.log，同一天内连接/重连只追加同一文件，不再重复生成。每个管理口可单独配置：<b>连接时执行命令</b>（每行一条可多条，每次连接成功仅执行一次、先于周期循环，适合登录后的会话初始化）、<b>在线探测</b>（TCP/ICMP，离线变红并弹通知）、<b>输出关键字告警</b>（正则匹配即告警，周期循环 / 连接时命令 / 仅读取模式的输出均可匹配；多条关键字同时命中时全部显示，<b>全部不再命中才解除</b>；告警事件携带具体匹配行）与<b>配置自动备份</b>（命令可多条、输出合并保存；连接方式可选<b>复用监控连接</b>或<b>独立连接</b>；首份备份显示「首次」而非「有变化」）。<b>仅读取模式</b>不执行周期命令，但连接时命令、在线探测、关键字告警、自动备份均可用；<b>仅探测模式</b>可不勾选仅读取、不填命令、只勾选「在线探测」，保持连接并仅做连通性探测。<b>监控中心…</b>（工具栏「监控」菜单或右键设备）聚合全部设备状态与统计，「事件时间线 / 配置备份」以<b>标签页</b>切换，<b>点击左侧设备名或管理地址可筛选时间线</b>，事件带设备徽标与类型标签，告警事件显示匹配到的具体内容；「监控日志…」支持<b>全局跨文件搜索</b>（一次搜全部设备 / 日期 / 文件，点击结果直接定位到对应行）。关闭主窗口时可<b>托盘常驻</b>（工具栏「监控」菜单或监控配置弹窗）让后台监控继续运行；正在监控的设备在<b>右侧设备列表显示绿色标记</b>（连接失败显示琥珀/红色）。断线自动重连，可在弹窗打开日志目录查看。</p>
     <h4>快捷键</h4>
