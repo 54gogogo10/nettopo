@@ -518,6 +518,26 @@ ok(geom.l1.labelA.anchor === 'start' && geom.l1.labelB.anchor === 'end', '标签
 const lx = geom.l1.x1, rx = geom.l1.x2;
 ok(lx > 158 && lx < 162, 'A 端锚点在边框上（x=' + lx + '）');
 
+console.log('== 标注行按设备上下方位排序（orderLabelLines） ==');
+{
+  const upA = { id: 'A', x: 0, y: 0, w: 160, h: 56 };   // A 在上
+  const downB = { id: 'B', x: 0, y: 300, w: 160, h: 56 }; // B 在下
+  const lines = ['G0  1.1.1.1', 'G1  1.1.1.2'];          // [a端行, b端行]；渲染 index0 在下
+  // A 在上、B 在下：A 行排上方、B 行排下方（swap）
+  const ab = U.orderLabelLines(lines, upA, downB);
+  ok(ab[0] === 'G1  1.1.1.2' && ab[1] === 'G0  1.1.1.1', 'A 在上：A 行在上、B 行在下方（' + ab.join(' | ') + '）');
+  // A 在下、B 在上：A 行排下方（保持默认，a 行在 index0）
+  const ba = U.orderLabelLines(lines, downB, upA);
+  ok(ba[0] === 'G0  1.1.1.1' && ba[1] === 'G1  1.1.1.2', 'A 在下：A 行在下方、B 行在上方（' + ba.join(' | ') + '）');
+  // 水平等高（y 相同）：不交换
+  const levelA = { id: 'A', x: 0, y: 100, w: 160, h: 56 };
+  const levelB = { id: 'B', x: 400, y: 100, w: 160, h: 56 };
+  ok(U.orderLabelLines(lines, levelA, levelB)[0] === lines[0], '水平等高：保持默认顺序');
+  // 单行 / 缺节点：原样返回
+  ok(U.orderLabelLines(['only'], upA, downB)[0] === 'only', '单行标注不排序');
+  ok(U.orderLabelLines(lines, null, downB) === lines && U.orderLabelLines(lines, upA, undefined) === lines, '缺节点不排序');
+}
+
 console.log('== 子网分组 ==');
 {
   eq(U.subnetOf('10.255.0.1'), '10.255.0.0/24', '子网计算 /24');

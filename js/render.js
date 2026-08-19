@@ -325,11 +325,17 @@ class Renderer {
     const SIZE = 11;
     const labelBoxes = [];
     const labelData = [];
+    const nodeById = new Map();
+    for (const n of this.nodes) nodeById.set(n.id, n);
     for (const l of this.links) {
       const q = geom[l.id];
       if (!q) continue;
       const lines = this.showLabels ? U.labelLines(l) : [];
       if (!lines.length) { labelBoxes.push(null); labelData.push(null); continue; }
+      // 标记排列跟随设备在画布上的上下方位（orders 约定 [a端行, b端行]，见 U.orderLabelLines）
+      if (lines.length === 2) {
+        lines = U.orderLabelLines(lines, nodeById.get(l.a), nodeById.get(l.b));
+      }
       const mx = (q.x1 + q.x2) / 2, my = (q.y1 + q.y2) / 2;
       const dx = q.x2 - q.x1, dy = q.y2 - q.y1;
       const len = Math.hypot(dx, dy) || 1;

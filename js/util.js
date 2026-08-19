@@ -793,6 +793,14 @@ U.labelLines = (l) => [
   [l.bIf, l.bIp].filter(Boolean).join('  ')
 ].filter(Boolean);
 
+/* 链路标注两行按设备在画布上的上下方位排序（交互画布显示用）：
+ * 下方设备的行排在下、上方设备的行排在上。lines 约定 [a端行, b端行]（渲染时 index0 在下、index1 在上）。
+ * 设备水平等高（y 相同）时不交换，保持默认顺序；单行/缺节点原样返回。 */
+U.orderLabelLines = (lines, na, nb) => {
+  if (!lines || lines.length !== 2 || !na || !nb) return lines;
+  return (na.y + na.h / 2) < (nb.y + nb.h / 2) ? [lines[1], lines[0]] : lines;
+};
+
 /* ---------- 子网分组（按 /24 网段归类设备） ---------- */
 U.ipv4ToInt = (ip) => {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip || '').trim());
