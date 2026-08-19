@@ -7,6 +7,14 @@ const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 
+/* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
+ *   否则 SUID 沙箱初始化直接 fatal abort（"Running as root without --no-sandbox is not supported"）。
+ *   仅在 root 下自动追加该开关；普通桌面用户保留完整 Chromium 沙箱（评审安全基线 sandbox:true 不受影响）。
+ *   注：appendSwitch 在首个渲染进程创建前（window 创建前）同步执行，root 检查有效。 */
+if (process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() === 0) {
+  app.commandLine.appendSwitch('no-sandbox');
+}
+
 // 测试隔离：冒烟测试通过 NETTOPO_USERDATA 覆盖用户数据目录（临时目录），避免污染真实备份数据
 if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_USERDATA);
 

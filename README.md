@@ -38,6 +38,15 @@
 2. 自动布局后即可拖拽调整；双击设备/连线编辑接口与 IP
 3. 「导出CSV / 导出Excel / 导出PDF / 导出图片 / 导出Visio」交付；「保存工程」随时存档，下次「打开工程」继续编辑
 
+### Linux（麒麟/服务器）运行
+
+构建产物：`dist/linux/nettopo-<版本>-linux-x64.tar.gz`（本地用 `build/electron-builder-linux.yml` 交叉打包，`npmRebuild=false`，产物不入库）。
+
+- **root / sudo 运行**：已内置自动兜底——主进程检测到 Linux 且 `getuid()===0` 时自动追加 `--no-sandbox`，无需手动传参即可启动。
+- **普通用户启动报 SUID 沙箱错误**（`chrome-sandbox is not configured correctly`）：解包后执行
+  `sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox` 修复；部分发行版禁用了用户命名空间时，可临时以 `./nettopo --no-sandbox` 启动。
+- 注意：以 root 运行需 `--no-sandbox` 是 Chromium 的安全限制，此时进程级沙箱被旁路；建议权限允许时用普通用户 + 正确 setuid 的 chrome-sandbox 运行，以保留完整沙箱保护。普通用户的正常运行不受本兜底逻辑影响。
+
 ## 表格格式
 
 | 表头（中）        | 表头（英）          | 必填 |
