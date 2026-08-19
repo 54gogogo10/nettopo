@@ -1084,9 +1084,9 @@ function setupAutoBackup() {
   if (setupAutoBackup._timer) { clearInterval(setupAutoBackup._timer); setupAutoBackup._timer = null; }
   if (!state.autoBackup.on) return;
   setupAutoBackup._last = '';
-  setupAutoBackup._timer = setInterval(() => {
+  setupAutoBackup._timer = setInterval(async () => {
     if (!state.nodes.length) return;
-    const data = buildProjectData();
+    const data = await buildProjectData();
     const hash = JSON.stringify([state.nodes, state.links, state.texts, state.downLinks ? [...state.downLinks] : []]);
     if (hash === setupAutoBackup._last) return;
     setupAutoBackup._last = hash;
@@ -1238,11 +1238,69 @@ function openImageExport() {
 }
 
 /* ================= 工程文件（.nettopo 保存/打开） ================= */
+/** 监控配置加密快照（密码经 safeStorage 加密后随工程/备份文件落盘；明文永不进文件） */
+async function monitorCfgSnapshot() {
+  const cfg = JSON.parse(JSON.stringify(state.monitorCfg || {})); // 深拷贝：不改写内存明文
+  const sec = secureBridge();
+  for (const k of Object.keys(cfg)) {
+    const hosts = (cfg[k] && Array.isArray(cfg[k].hosts)) ? cfg[k].hosts : [];
+    for (const h of hosts) {
+      if (!h || typeof h !== 'object' || !h.password) { if (h && typeof h === 'object') h.password = ''; continue; }
+      if (String(h.password).indexOf(SECRET_PREFIX) === 0) continue; // 已是密文（防御）
+      if (sec) {
+        try { const r = await sec.encryptSecret(h.password); h.password = (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : ''; }
+        catch (e) { h.password = ''; } // 加密失败则密码不随工程保存
+      } else h.password = ''; // 无加密能力（浏览器版）：不随工程保存
+    }
+  }
+  return cfg;
+}
+
+/** 工程/备份恢复监控配置：结构清洗（复用 normalizeMonitorHosts）、密码仅接受密文/空，
+ *  解密回内存后持久化（DPAPI 密文本机可解；跨机器/密钥变更时密码留空需重新输入） */
+async function restoreMonitorCfgFromProject(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+  const cleaned = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof k !== 'string' || !k.trim() || k.length > 64) continue;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+    const hosts = (normalizeMonitorHosts(v) || []).map(h => {
+      const pw = (typeof h.password === 'string' && (h.password === '' || h.password.indexOf(SECRET_PREFIX) === 0)) ? h.password : '';
+      return Object.assign({}, h, { password: pw });
+    });
+    cleaned[k] = {
+      hosts,
+      intervalSec: v.intervalSec,
+      cmdDelayMs: v.cmdDelayMs,
+      enabled: !!v.enabled
+    };
+  }
+  state.monitorCfg = cleaned;
+  const sec = secureBridge();
+  let recovered = false;
+  for (const k of Object.keys(cleaned)) {
+    for (const h of cleaned[k].hosts) {
+      if (h.password && h.password.indexOf(SECRET_PREFIX) === 0) {
+        const cipher = h.password;
+        h.password = '';
+        if (sec) {
+          try {
+            const r = await sec.decryptSecret(cipher.slice(SECRET_PREFIX.length));
+            if (r && r.ok) { h.password = r.text; recovered = true; }
+          } catch (e) { /* 跨机/密钥变更：密码留空 */ }
+        }
+      }
+    }
+  }
+  await saveMonitorCfg(); // 持久化（明文重新加密后写 localStorage）
+  if (Object.keys(cleaned).length) toast(recovered ? '已恢复监控配置（密码本机解密；跨机器工程密码需重新输入）' : '已恢复监控配置（账号/命令/告警等；密码需重新输入）');
+}
+
 /** 构建工程数据对象（保存工程 / 自动备份 / 立即备份共用） */
-function buildProjectData() {
+async function buildProjectData() {
   return {
     app: 'NetTopo',
-    version: 1,
+    version: 2,
     savedAt: new Date().toISOString(),
     nodes: state.nodes,
     links: state.links,
@@ -1254,19 +1312,21 @@ function buildProjectData() {
     showLabels: state.showLabels,
     showSubnets: state.showSubnets,
     subnetNames: state.subnetNames,
-    downLinks: [...state.downLinks]
+    downLinks: [...state.downLinks],
+    monitorCfg: await monitorCfgSnapshot(),  // 监控配置（密码 safeStorage 密文）
+    cfgTemplates: U.customCfgTemplates || {} // 自定义配置模板（纯文本，无敏感数据）
   };
 }
 
-function saveProject() {
-  const data = buildProjectData();
+async function saveProject() {
+  const data = await buildProjectData();
   U.download(`网络拓扑工程_${U.fmtDate()}.nettopo`,
     new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));
-  toast('已保存工程文件（.nettopo，含位置与自定义类型）');
+  toast('已保存工程文件（.nettopo，含位置、自定义类型、监控配置与配置模板）');
 }
 
 /** 解析并应用工程数据（打开工程 / 恢复备份共用） */
-function applyProjectData(data) {
+async function applyProjectData(data) {
   if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) {
     toast('工程文件格式不正确'); return false;
   }
@@ -1292,6 +1352,13 @@ function applyProjectData(data) {
   renderer.subnetNames = state.subnetNames;
   renderer.setDownLinks(state.downLinks);
   U.seedCounters(state.nodes, state.links, state.texts);
+  // 恢复自定义配置模板（B）：白名单合并，工程覆盖本机同名
+  if (data.cfgTemplates) {
+    const n = U.mergeCustomCfgTemplates(data.cfgTemplates);
+    if (n > 0) toast('已恢复自定义配置模板（' + n + ' 个，覆盖本机同名）');
+  }
+  // 恢复监控配置（A）：结构清洗 + 密码密文校验 + 解密 + 持久化（在 reconcileMonitors 之前完成）
+  if (data.monitorCfg) await restoreMonitorCfgFromProject(data.monitorCfg);
   updateUndoBtns();
   renderer.setData(state.nodes, state.links, state.texts);
   if (data.pan && data.zoom) renderer.setView(data.pan, data.zoom);
@@ -1314,7 +1381,7 @@ async function loadProject(file) {
     toast('工程文件格式不正确'); return;
   }
   if (state.nodes.length && !(await confirmBox('打开工程将替换当前拓扑，是否继续？'))) return;
-  if (applyProjectData(data)) toast(`已打开工程：${state.nodes.length} 台设备、${state.links.length} 条链路`);
+  if (await applyProjectData(data)) toast(`已打开工程：${state.nodes.length} 台设备、${state.links.length} 条链路`);
 }
 
 /* ================= 备份管理（桌面版本地备份库） ================= */
@@ -1332,9 +1399,9 @@ function fmtBackupSize(n) {
 }
 
 /** 立即备份当前工程（桌面版写入备份库，浏览器版回退为下载） */
-function backupNow() {
+async function backupNow() {
   if (!state.nodes.length) { toast('画布为空，无需备份'); return; }
-  const data = buildProjectData();
+  const data = await buildProjectData();
   if (window.topoBackup) {
     window.topoBackup.save({ content: JSON.stringify(data, null, 2), label: 'manual', keep: state.autoBackup.keep }).then((res) => {
       if (res && res.ok) toast('已备份工程（' + res.name + '，共 ' + res.count + ' 份）');
@@ -1437,7 +1504,7 @@ function openBackupManager() {
       try { data = JSON.parse(res.content); } catch (e) { toast('备份内容解析失败'); return; }
       if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) { toast('备份文件格式不正确'); return; }
       close();
-      if (applyProjectData(data)) toast(`已恢复备份：${state.nodes.length} 台设备、${state.links.length} 条链路`);
+      if (await applyProjectData(data)) toast(`已恢复备份：${state.nodes.length} 台设备、${state.links.length} 条链路`);
     }
   });
 
@@ -1447,7 +1514,7 @@ function openBackupManager() {
   };
   ov.querySelector('[data-act=now]').onclick = async () => {
     if (!state.nodes.length) { toast('画布为空，无需备份'); return; }
-    const data = buildProjectData();
+    const data = await buildProjectData();
     let res;
     try { res = await window.topoBackup.save({ content: JSON.stringify(data, null, 2), label: 'manual', keep: state.autoBackup.keep }); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
     if (res && res.ok) toast('已备份工程（' + res.name + '）');

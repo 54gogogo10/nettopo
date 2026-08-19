@@ -90,6 +90,16 @@ ok(U.sanitizeCell('\u200B=1+1') === "'\u200B=1+1" && U.sanitizeCell('\u200Bok') 
   const sn = U.sanitizeSubnetNames({ '10.0.0.0/24': '核心区', '__proto__': { x: 1 }, 'not-a-cidr': 'x', '10.1.0.0/16': 123 });
   ok(sn['10.0.0.0/24'] === '核心区' && !Object.prototype.hasOwnProperty.call(sn, '__proto__') && Object.keys(sn).length === 1, 'sanitizeSubnetNames 仅保留 CIDR+字符串键');
 }
+// 回归：工程恢复自定义配置模板（白名单合并，工程覆盖本机同名）
+{
+  U.customCfgTemplates = {};
+  const n = U.mergeCustomCfgTemplates({ 'huawei': { x: 1 }, 'ok-tpl': { k: 1 }, '__proto__': { p: 2 }, 'constructor': { c: 3 }, 'bad key': { z: 1 } });
+  ok(n === 2 && !!U.customCfgTemplates['ok-tpl'] && !!U.customCfgTemplates.huawei
+    && !Object.prototype.hasOwnProperty.call(U.customCfgTemplates, '__proto__')
+    && !Object.prototype.hasOwnProperty.call(U.customCfgTemplates, 'constructor')
+    && !('bad key' in U.customCfgTemplates), 'mergeCustomCfgTemplates 白名单合并（工程模板）');
+  U.customCfgTemplates = {}; // 恢复初始态
+}
 
 console.log('== 表头映射 ==');
 eq(M.mapHeader('源设备'), 'sa', '中文-源设备');

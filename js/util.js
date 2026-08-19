@@ -1060,21 +1060,32 @@ U.getCfgTemplate = (key) => U.cfgTemplates()[key] || U.cfgTemplates().huawei;
 U.saveCustomCfgTemplates = () => {
   try { localStorage.setItem('nettopo.cfgTemplates', JSON.stringify(U.customCfgTemplates || {})); } catch (e) {}
 };
-U.loadCustomCfgTemplates = () => {
-  // 键白名单重建：丢弃 __proto__/constructor/prototype 等危险键，防 Object.assign 合并时原型污染（CWE-1321）
+/* 自定义配置模板键白名单重建：丢弃 __proto__/constructor/prototype 等危险键，
+ * 防 Object.assign 合并时原型污染（CWE-1321）。localStorage 与本机/工程文件数据均走此清洗。 */
+function cleanCfgTemplates(raw) {
   const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
   const DANGEROUS = new Set(['__proto__', 'constructor', 'prototype']);
-  U.customCfgTemplates = {};
-  try {
-    const raw = JSON.parse(localStorage.getItem('nettopo.cfgTemplates') || '{}');
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      for (const [k, v] of Object.entries(raw)) {
-        if (!SAFE_KEY.test(k) || DANGEROUS.has(k)) continue;
-        if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
-        U.customCfgTemplates[k] = v;
-      }
-    }
-  } catch (e) { U.customCfgTemplates = {}; }
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw)) {
+    if (!SAFE_KEY.test(k) || DANGEROUS.has(k)) continue;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+U.loadCustomCfgTemplates = () => {
+  try { U.customCfgTemplates = cleanCfgTemplates(JSON.parse(localStorage.getItem('nettopo.cfgTemplates') || '{}')); }
+  catch (e) { U.customCfgTemplates = {}; }
+};
+/** 合并工程文件携带的自定义配置模板（白名单过滤；工程覆盖本机同名；返回新增/覆盖数量） */
+U.mergeCustomCfgTemplates = (raw) => {
+  const fromProj = cleanCfgTemplates(raw);
+  const merged = Object.assign({}, U.customCfgTemplates || {});
+  for (const [k, v] of Object.entries(fromProj)) merged[k] = v;
+  U.customCfgTemplates = merged;
+  U.saveCustomCfgTemplates();
+  return Object.keys(fromProj).length;
 };
 U.generateConfigs = (nodes, links, vendor, opts) => {
   vendor = vendor || 'huawei';
