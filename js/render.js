@@ -330,7 +330,7 @@ class Renderer {
     for (const l of this.links) {
       const q = geom[l.id];
       if (!q) continue;
-      const lines = this.showLabels ? U.labelLines(l) : [];
+      let lines = this.showLabels ? U.labelLines(l) : [];
       if (!lines.length) { labelBoxes.push(null); labelData.push(null); continue; }
       // 标记排列跟随设备在画布上的上下方位（orders 约定 [a端行, b端行]，见 U.orderLabelLines）
       if (lines.length === 2) {

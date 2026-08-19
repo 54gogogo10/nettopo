@@ -39,6 +39,12 @@ const puppeteer = require('puppeteer-core');
   const stats = await page.evaluate(() => ({
     nodes: document.querySelectorAll('.node').length,
     links: document.querySelectorAll('.link').length,
+    // 回归：连线必须真实落位（非 (0,0) 剩余）；渲染层 update() 若中途抛错，连线会全部停在原点不可见
+    visibleLinks: [...document.querySelectorAll('g.link line.ln')].filter(li => {
+      const x1 = li.getAttribute('x1'), y1 = li.getAttribute('y1'), x2 = li.getAttribute('x2'), y2 = li.getAttribute('y2');
+      return x1 !== null && y1 !== null && x2 !== null && y2 !== null
+        && (Math.abs(Number(x2) - Number(x1)) + Math.abs(Number(y2) - Number(y1))) > 0.01;
+    }).length,
     labels: [...document.querySelectorAll('.link .lb')].filter(t => t.textContent.trim()).length,
     statGraph: document.querySelector('#statGraph').textContent,
     emptyHidden: document.querySelector('#empty').classList.contains('hidden'),
@@ -46,6 +52,7 @@ const puppeteer = require('puppeteer-core');
     zoom: document.querySelector('#zVal').textContent
   }));
   console.log('画布统计:', JSON.stringify(stats));
+  if (stats.visibleLinks !== stats.links) errors.push('[render] 连线不可见或数量不符 visible=' + stats.visibleLinks + ' total=' + stats.links);
   await page.screenshot({ path: 'shot_light.png' });
 
   // 选中一个节点 → 详情卡（真实鼠标事件）
