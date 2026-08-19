@@ -172,6 +172,11 @@ function updateUndoBtns() {
 
 /* ================= 导入 ================= */
 async function handleImport(file) {
+  // 导入大小上限（20MB）：防超大 CSV/Excel 拖垮渲染线程（本地内存 DoS 纵深）
+  if (file && typeof file.size === 'number' && file.size > 20 * 1024 * 1024) {
+    toast('文件过大（超过 20MB），请拆分后导入');
+    return;
+  }
   const { name, buffer } = await U.readFile(file);
   const ext = (name.split('.').pop() || '').toLowerCase();
   let graph = null;
@@ -192,9 +197,12 @@ async function loadGraph(graph, msg) {
   if (state.nodes.length && !(await confirmBox('导入将替换当前拓扑，是否继续？'))) return;
   layoutCancel = true;
   setMode('normal');
-  state.nodes = graph.nodes;
-  state.links = graph.links;
-  state.texts = [];
+  // 与工程/备份路径（applyProjectData）一致：导入数据统一过 sanitizeGraph 清洗
+  // （ID 白名单、名称限长、坐标钳制 ±1e6、字段截断），防恶意表格/超大坐标/超长字段
+  const cleaned = U.sanitizeGraph(graph.nodes || [], graph.links || [], graph.texts || []);
+  state.nodes = cleaned.nodes;
+  state.links = cleaned.links;
+  state.texts = cleaned.texts;
   state.sel = { kind: null, id: null };
   state.undoStack = []; // 初始状态无需撤销
   state.redoStack = [];
@@ -206,7 +214,7 @@ async function loadGraph(graph, msg) {
   saveGraph();
   reconcileMonitors(); // 拓扑变更后对齐后台监控（停止已删除设备的监控、启动启用设备）
   // 带坐标的表格/工程直接还原布局，不带坐标才自动布局
-  const hasPos = graph.nodes.some(n => n.x || n.y);
+  const hasPos = state.nodes.some(n => n.x || n.y);
   if (hasPos) renderer.fit();
   else autoLayout();
 }
@@ -478,7 +486,11 @@ function openConfigGen() {
     const targets = selDev.size ? state.nodes.filter(n => selDev.has(n.id)) : state.nodes;
     const files = targets.map(n => {
       const v = tplOf(n);
-      return { name: (v || 'huawei') + '/' + (n.name || n.id) + '.txt', content: U.generateConfigs(state.nodes, state.links, v, { routes: ov.querySelector('#cfgRoutes').checked, vlan: ov.querySelector('#cfgVlan').checked, only: new Set([n.id]) }) };
+      // 设备名做条目名消毒：剔除路径分隔符/保留字符/..，防 ZIP 条目名穿越（zip-slip 生成面）
+      const safeName = String(n.name || n.id)
+        .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').replace(/\.\./g, '_')
+        .replace(/^\.+/, '').replace(/[. ]+$/, '').trim().slice(0, 60) || n.id;
+      return { name: (v || 'huawei') + '/' + safeName + '.txt', content: U.generateConfigs(state.nodes, state.links, v, { routes: ov.querySelector('#cfgRoutes').checked, vlan: ov.querySelector('#cfgVlan').checked, only: new Set([n.id]) }) };
     });
     if (!files.length) { toast('没有可导出的设备'); return; }
     U.download(`设备配置_${U.fmtDate()}.zip`, new Blob([U.zipFiles(files)], { type: 'application/zip' }));
@@ -1273,7 +1285,7 @@ function applyProjectData(data) {
   state.redoStack = [];
   if (typeof data.showLabels === 'boolean') state.showLabels = data.showLabels;
   if (typeof data.showSubnets === 'boolean') state.showSubnets = data.showSubnets;
-  if (data.subnetNames && typeof data.subnetNames === 'object') state.subnetNames = data.subnetNames;
+  if (data.subnetNames && typeof data.subnetNames === 'object') state.subnetNames = U.sanitizeSubnetNames(data.subnetNames);
   state.downLinks = new Set(Array.isArray(data.downLinks) ? data.downLinks : []);
   renderer.showLabels = state.showLabels;
   renderer.showSubnets = state.showSubnets;
@@ -2706,7 +2718,7 @@ function restoreGraph() {
     state.redoStack = [];
     if (typeof d.showLabels === 'boolean') state.showLabels = d.showLabels;
     if (typeof d.showSubnets === 'boolean') state.showSubnets = d.showSubnets;
-    if (d.subnetNames && typeof d.subnetNames === 'object') state.subnetNames = d.subnetNames;
+    if (d.subnetNames && typeof d.subnetNames === 'object') state.subnetNames = U.sanitizeSubnetNames(d.subnetNames);
     state.downLinks = new Set(Array.isArray(d.downLinks) ? d.downLinks : []);
     renderer.showLabels = state.showLabels;
     renderer.showSubnets = state.showSubnets;
@@ -4491,9 +4503,20 @@ restoreGraph(); // 恢复上次的拓扑（刷新不丢失）
 
 // 自动化/调试钩子
 if (typeof globalThis !== 'undefined') {
+  // 脱敏副本：调试钩子/自动化不暴露设备密码（state 直出时经 Proxy 拦截 monitorCfg 返回脱敏视图）
+  const maskMonitorCfg = () => {
+    const out = {};
+    for (const [k, v] of Object.entries(state.monitorCfg)) {
+      out[k] = Object.assign({}, v, { hosts: (Array.isArray(v.hosts) ? v.hosts : []).map(h => Object.assign({}, h, { password: h && h.password ? '***' : '' })) });
+    }
+    return out;
+  };
   globalThis.__topo = {
     _closeHint: () => setMode('normal'),
-    state,
+    state: new Proxy(state, {
+      get: (t, k) => (k === 'monitorCfg' ? maskMonitorCfg() : t[k]),
+      set: (t, k, v) => { t[k] = v; return true; }
+    }),
     renderer,
     loadSample: () => loadGraph(M.textToGraph(M.SAMPLE_CSV), '示例'),
     newGraph,
@@ -4509,14 +4532,7 @@ if (typeof globalThis !== 'undefined') {
     applyMonitor,
     reconcileMonitors,
     monitorStatus: state.monitorStatus,
-    // 脱敏副本：调试钩子/自动化不暴露设备密码
-    monitorCfg: (() => {
-      const out = {};
-      for (const [k, v] of Object.entries(state.monitorCfg)) {
-        out[k] = Object.assign({}, v, { hosts: (Array.isArray(v.hosts) ? v.hosts : []).map(h => Object.assign({}, h, { password: h && h.password ? '***' : '' })) });
-      }
-      return out;
-    })()
+    monitorCfg: maskMonitorCfg()
   };
 }
 })();

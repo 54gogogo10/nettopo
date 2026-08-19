@@ -54,6 +54,42 @@ ok(fi.includes("'=1+1") && fi.includes("'+x") && fi.includes("'-y") && fi.includ
 ok(fi.includes(',normal,') && fi.includes(',123'), 'CSV 普通单元格不受影响');
 ok(U.sanitizeCell('=SUM(1)') === "'=SUM(1)" && U.sanitizeCell('hello') === 'hello', 'sanitizeCell 公式注入防护');
 ok(U.sanitizeCell(' =1+1') === "' =1+1" && U.sanitizeCell('\t@x') === "'\t@x" && U.sanitizeCell(' ok') === ' ok', 'sanitizeCell 前导空白绕过修复');
+// 回归：零宽空格绕过（\s 不含 \u200B，Excel trim 会处理）
+ok(U.sanitizeCell('\u200B=1+1') === "'\u200B=1+1" && U.sanitizeCell('\u200Bok') === '\u200Bok', 'sanitizeCell 零宽空格绕过修复');
+// 回归：ZIP 条目名穿越过滤（zip-slip 生成面）
+{
+  const zSafe = U.zipFiles([{ name: 'huawei/R1.txt', content: 'a' }]);
+  ok(zSafe.length > 22, 'ZIP 正常条目保留');
+  const zBad = U.zipFiles([
+    { name: 'huawei/..\\..\\evil.txt', content: 'a' },
+    { name: 'x/../y.txt', content: 'b' },
+    { name: '/abs.txt', content: 'c' },
+    { name: 'C:\\x.txt', content: 'd' }
+  ]);
+  ok(zBad.length === 22, 'ZIP 危险条目（..\\、绝对路径、盘符）被过滤');
+}
+// 回归：自定义配置模板加载键白名单（防 Object.assign 原型污染 CWE-1321）
+{
+  const savedLS = sandbox.localStorage;
+  sandbox.localStorage = {
+    getItem: (k) => k === 'nettopo.cfgTemplates' ? '{"__proto__":{"polluted":1},"constructor":{"y":1},"huawei":{"x":1}}' : null,
+    setItem: () => {}
+  };
+  vm.runInContext('TopoUtil.loadCustomCfgTemplates()', sandbox);
+  sandbox.localStorage = savedLS;
+  ok(!Object.prototype.hasOwnProperty.call(U.customCfgTemplates, '__proto__')
+    && !Object.prototype.hasOwnProperty.call(U.customCfgTemplates, 'constructor')
+    && !Object.prototype.hasOwnProperty.call(U.customCfgTemplates, 'prototype')
+    && !!U.customCfgTemplates.huawei, '模板加载键白名单（拒 __proto__/constructor/prototype）');
+  const merged = U.cfgTemplates();
+  ok(merged.polluted === undefined && ({}).polluted === undefined, '模板合并无原型污染');
+  U.customCfgTemplates = {}; // 恢复初始态，避免影响后续配置生成测试
+}
+// 回归：子网自定义名称安全化（仅保留 CIDR 键 + 字符串值）
+{
+  const sn = U.sanitizeSubnetNames({ '10.0.0.0/24': '核心区', '__proto__': { x: 1 }, 'not-a-cidr': 'x', '10.1.0.0/16': 123 });
+  ok(sn['10.0.0.0/24'] === '核心区' && !Object.prototype.hasOwnProperty.call(sn, '__proto__') && Object.keys(sn).length === 1, 'sanitizeSubnetNames 仅保留 CIDR+字符串键');
+}
 
 console.log('== 表头映射 ==');
 eq(M.mapHeader('源设备'), 'sa', '中文-源设备');
@@ -946,6 +982,29 @@ console.log('== 性能：复杂拓扑（核心-汇聚-接入-终端 分层网络
   console.log('性能耗时明细：' + report.join(' | '));
 }
 
+console.log('== 回归：大图布局钳制（>2500 节点跳过 O(n²) 斥力/碰撞分离） ==');
+{
+  // 10000 节点：修复前单步斥力约 5000 万次运算会明显卡顿；修复后 O(n)，单步应在毫秒级
+  const big = [];
+  for (let i = 0; i < 10000; i++) big.push({ id: 'n' + i, name: 'N' + i, x: 0, y: 0, w: 60, h: 40 });
+  const sim = Layout.simulate(big, [], { steps: 10 });
+  ok(!!sim, '大图 simulate 正常创建');
+  const t0 = Date.now();
+  let e = 0;
+  for (let k = 0; k < 10; k++) e = sim.step();
+  const dt = Date.now() - t0;
+  ok(Number.isFinite(e) && dt < 500, '大图单步 10 次 < 500ms（实际 ' + dt + 'ms，跳过 O(n²) 斥力）');
+  // 常规小图不受影响：布局仍正常收敛
+  const small = [
+    { id: 'n1', name: 'A', x: 0, y: 0, w: 60, h: 40 },
+    { id: 'n2', name: 'B', x: 0, y: 0, w: 60, h: 40 },
+    { id: 'n3', name: 'C', x: 0, y: 0, w: 60, h: 40 }
+  ];
+  const sim2 = Layout.simulate(small, [{ id: 'l1', a: 'n1', b: 'n2' }], { steps: 50 });
+  const p0 = sim2.step();
+  ok(Number.isFinite(p0), '小图步进正常');
+}
+
 console.log('== 打包配置 ==');
 {
   const yml = fs.readFileSync(path.join(root, 'build', 'electron-builder.yml'), 'utf8');
@@ -1276,7 +1335,15 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
   /* ---- 监控模块（monitor.js）单元测试 ---- */
   {
-    const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+    const { MonitorManager, sanitizeFilename } = require(path.join(root, 'js', 'monitor.js'));
+    // 0) sanitizeFilename 路径穿越回归（R3 修复：正则曾写成 "/字符类" 永不匹配）
+    eq(sanitizeFilename('..\\..\\escape'), '____escape', 'sanitizeFilename 剔除 ..（防路径穿越）');
+    eq(sanitizeFilename('a/b'), 'a_b', 'sanitizeFilename 剔除斜杠');
+    eq(sanitizeFilename('my:device'), 'my_device', 'sanitizeFilename 剔除冒号');
+    eq(sanitizeFilename('ok-name'), 'ok-name', 'sanitizeFilename 正常名不变');
+    eq(sanitizeFilename('R1.core'), 'R1.core', 'sanitizeFilename 保留单点');
+    eq(sanitizeFilename('abc.'), 'abc', 'sanitizeFilename 剔除尾点');
+    eq(sanitizeFilename(''), 'device', 'sanitizeFilename 空值兜底');
     const tmpBase = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-mon-test-'));
     const stubShell = { on() {}, connect() { return { ok: true, id: 's1' }; }, close() {}, trustFingerprint() { return true; } };
     const mgr = new MonitorManager(stubShell, tmpBase, null, {});

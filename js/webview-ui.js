@@ -11,10 +11,11 @@
   const tabs = new Map(); // id -> { tabEl, pageEl, wv, spinEl, titleEl }
   let seq = 0;
 
+  // URL 规范化：与 TopoUtil.normalizeWebUrl 单一实现收敛——仅放行 http(s)，无协议自动补 http://，危险协议返回 null
   const normUrl = (u) => {
     u = String(u || '').trim();
-    if (!/^https?:\/\//i.test(u)) u = 'http://' + u;
-    return u;
+    if (!u) return null;
+    return TopoUtil.normalizeWebUrl(u);
   };
   /* ---- 页面显示缩放（0.6~2.0，本机记忆） ---- */
   const ZOOM_KEY = 'webviewZoom';
@@ -45,6 +46,7 @@
   function addTab(info) {
     info = info || {};
     const url = normUrl(info.url);
+    if (!url) { toast('仅支持 http:// 或 https:// 地址'); return; } // 危险协议（javascript:/file: 等）拒绝
     emptyEl.classList.add('hidden');
     navEl.classList.remove('hidden');
     const id = 'w' + (++seq);

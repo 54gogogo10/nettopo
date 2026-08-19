@@ -16,14 +16,14 @@ echo.
 where python >nul 2>nul
 if %errorlevel%==0 (
   start "" http://localhost:8765
-  python -m http.server 8765
+  python -m http.server 8765 --bind 127.0.0.1
   goto :end
 )
 
 where node >nul 2>nul
 if %errorlevel%==0 (
   start "" http://localhost:8765
-  npx --yes http-server -p 8765
+  npx --yes http-server -p 8765 -a 127.0.0.1 -c-1
   goto :end
 )
 

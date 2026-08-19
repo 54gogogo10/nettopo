@@ -14,6 +14,9 @@ function simulate(nodes, links, opts) {
 
   const N = nodes.length;
   if (N === 0) return null;
+  // 大图钳制：节点数超过阈值时跳过 O(n²) 斥力与碰撞分离，仅保留弹簧/重力（O(n)），
+  // 防恶意大工程卡死渲染线程（布局退化为初始圆环近似分布，仍可交互）
+  const heavy = N > 2500;
   const pos = nodes.map(n => ({ x: n.x + n.w / 2, y: n.y + n.h / 2 }));
   const vel = nodes.map(() => ({ x: 0, y: 0 }));
 
@@ -40,18 +43,20 @@ function simulate(nodes, links, opts) {
   nodes.forEach((n, i) => idIndex.set(n.id, i));
 
   const step = () => {
-    // 斥力（O(n²)，节点数通常 < 200）
-    for (let i = 0; i < N; i++) {
-      for (let j = i + 1; j < N; j++) {
-        let dx = pos[j].x - pos[i].x;
-        let dy = pos[j].y - pos[i].y;
-        let d2 = dx * dx + dy * dy;
-        if (d2 < 1) { dx = (Math.random() - .5) * 4; dy = (Math.random() - .5) * 4; d2 = dx * dx + dy * dy; }
-        const d = Math.sqrt(d2);
-        const f = Math.min(180000 / d2, 40) / d;
-        const fx = dx * f, fy = dy * f;
-        vel[i].x -= fx; vel[i].y -= fy;
-        vel[j].x += fx; vel[j].y += fy;
+    // 斥力（O(n²)，节点数通常 < 200；heavy 时跳过防卡死）
+    if (!heavy) {
+      for (let i = 0; i < N; i++) {
+        for (let j = i + 1; j < N; j++) {
+          let dx = pos[j].x - pos[i].x;
+          let dy = pos[j].y - pos[i].y;
+          let d2 = dx * dx + dy * dy;
+          if (d2 < 1) { dx = (Math.random() - .5) * 4; dy = (Math.random() - .5) * 4; d2 = dx * dx + dy * dy; }
+          const d = Math.sqrt(d2);
+          const f = Math.min(180000 / d2, 40) / d;
+          const fx = dx * f, fy = dy * f;
+          vel[i].x -= fx; vel[i].y -= fy;
+          vel[j].x += fx; vel[j].y += fy;
+        }
       }
     }
     // 弹簧
@@ -79,8 +84,8 @@ function simulate(nodes, links, opts) {
       pos[i].y += vel[i].y;
       energy += Math.abs(vel[i].x) + Math.abs(vel[i].y);
     }
-    // 矩形碰撞分离：保证节点之间绝不遮挡
-    separateRects(pos, nodes);
+    // 矩形碰撞分离：保证节点之间绝不遮挡（heavy 时跳过，O(n²)×3 在大图下同样昂贵）
+    if (!heavy) separateRects(pos, nodes);
     return energy;
   };
 

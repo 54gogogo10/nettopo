@@ -26,7 +26,8 @@ class ShellManager extends EventEmitter {
     const host = String(opts.host || '').trim();
     if (!host) return { ok: false, error: '未填写主机地址' };
     let port = parseInt(opts.port, 10);
-    if (!(port > 0)) port = protocol === 'telnet' ? 23 : 22;
+    if (!(port >= 1)) port = protocol === 'telnet' ? 23 : 22;
+    if (!(port <= 65535)) port = protocol === 'telnet' ? 23 : 22; // 端口钳制，防异常大端口
     const base = {
       host, port,
       username: String(opts.username || '').trim() || 'admin',
@@ -83,6 +84,7 @@ class ShellManager extends EventEmitter {
     const client = new Client();
     let stream = null;
     let closed = false;
+    let kiPrompt = 0; // keyboard-interactive 提示计数（仅首个回填密码）
     const pendingRec = { verify: null }; // 本会话的指纹确认记录（结束时只移除自己的，不影响同主机其它会话）
     const finish = (reason) => {
       if (closed) return;
@@ -109,7 +111,10 @@ class ShellManager extends EventEmitter {
       });
     });
     client.on('keyboard-interactive', (name, instructions, lang, prompts, respond) => {
-      respond([o.password]);
+      // 仅首个提示回填密码（密码类提示）；后续提示（OTP/验证码/二次确认等）回空，
+      // 避免把密码发送到非密码提示位
+      kiPrompt++;
+      respond(kiPrompt === 1 ? [o.password] : prompts.map(() => ''));
     });
     client.on('error', (err) => {
       em.emit('status', { state: 'error', text: err.message });

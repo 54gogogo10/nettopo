@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260819a';
+U.APP_VERSION = 'v20260819b';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -84,6 +84,16 @@ U.fmtDate = (d) => {
 /* ---------- ZIP 打包（无压缩 STORE，UTF-8 文件名，供批量导出配置） ---------- */
 U.zipFiles = (files) => {
   files = (Array.isArray(files) ? files : []).filter(f => f && typeof f.name === 'string' && f.name.length > 0);
+  // 条目名安全校验（zip-slip 生成面防护）：拒绝路径穿越（..）、反斜杠、绝对路径、盘符、NUL
+  files = files.filter(f => {
+    const n = f.name;
+    if (n.indexOf('..') >= 0) return false;
+    if (n.indexOf('\\') >= 0) return false;
+    if (n.indexOf('\u0000') >= 0) return false;
+    if (n.startsWith('/')) return false;
+    if (/^[a-zA-Z]:/.test(n)) return false;
+    return true;
+  });
   const crcTable = (() => {
     const t = new Uint32Array(256);
     for (let i = 0; i < 256; i++) {
@@ -219,8 +229,9 @@ U.parseCSV = (text) => {
 /* ---------- 单元格公式注入防护（Excel/CSV 打开时以 = + - @ 开头会被当公式执行） ---------- */
 U.sanitizeCell = (v) => {
   v = v == null ? '' : String(v);
-  // 先剔除前导空白/零宽不换行空格再判定：Excel 打开时先 trim 再判定公式，故 " =1+1" 也能绕过前缀防护
-  const t = v.replace(/^[\s\uFEFF]+/, '');
+  // 先剔除前导空白/零宽不换行空格/零宽空格再判定：Excel 打开时先 trim 再判定公式，
+  // 故 " =1+1"、"\u200B=1+1"（\s 不含 \u200B）都能绕过前缀防护
+  const t = v.replace(/^[\s\uFEFF\u200B\u200C\u200D\u2060]+/, '');
   return /^[=+\-@]/.test(t) ? "'" + v : v;
 };
 
@@ -1050,7 +1061,20 @@ U.saveCustomCfgTemplates = () => {
   try { localStorage.setItem('nettopo.cfgTemplates', JSON.stringify(U.customCfgTemplates || {})); } catch (e) {}
 };
 U.loadCustomCfgTemplates = () => {
-  try { U.customCfgTemplates = JSON.parse(localStorage.getItem('nettopo.cfgTemplates') || '{}') || {}; } catch (e) { U.customCfgTemplates = {}; }
+  // 键白名单重建：丢弃 __proto__/constructor/prototype 等危险键，防 Object.assign 合并时原型污染（CWE-1321）
+  const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
+  const DANGEROUS = new Set(['__proto__', 'constructor', 'prototype']);
+  U.customCfgTemplates = {};
+  try {
+    const raw = JSON.parse(localStorage.getItem('nettopo.cfgTemplates') || '{}');
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw)) {
+        if (!SAFE_KEY.test(k) || DANGEROUS.has(k)) continue;
+        if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+        U.customCfgTemplates[k] = v;
+      }
+    }
+  } catch (e) { U.customCfgTemplates = {}; }
 };
 U.generateConfigs = (nodes, links, vendor, opts) => {
   vendor = vendor || 'huawei';
@@ -1721,6 +1745,18 @@ U.normalizeWebUrl = (v) => {
   if (/^(?:javascript|data|file|vbscript|about):/i.test(s)) return null;
   // 其余视为 主机[:端口][/路径]（如 example.com:8080、10.0.0.1:8080），补 http://
   return 'http://' + s;
+};
+
+/* 子网自定义名称安全化：仅保留 CIDR 键 + 字符串值，防 __proto__ 键经原型链混淆子网名（渲染为文本，防混淆） */
+U.sanitizeSubnetNames = (o) => {
+  const out = {};
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return out;
+  for (const [k, v] of Object.entries(o)) {
+    if (!/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(k)) continue;
+    if (typeof v !== 'string' || v.length > 64) continue;
+    out[k] = v;
+  }
+  return out;
 };
 
 /* ---------- 结构克隆（撤销栈用） ---------- */

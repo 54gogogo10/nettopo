@@ -63,7 +63,10 @@ const webServer = http.createServer((req, res) => {
   res.end('<!DOCTYPE html><html><head><title>NetTopo Web Test</title></head><body>Hello from device web</body></html>');
 });
 
-/* ---- 本地模拟设备 HTTPS 管理页（自签名证书） ---- */
+/* ---- 本地模拟设备 HTTPS 管理页（自签名证书） ----
+ * 注意：test/fixtures/selfsigned.key 为一次性测试私钥，仅用于本冒烟测试的本地 127.0.0.1 服务器，
+ * 不代表任何生产凭据；如需更换，可用 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+ *   -keyout test/fixtures/selfsigned.key -out test/fixtures/selfsigned.crt -subj "/CN=localhost" 重新生成。 */
 const httpsServer = https.createServer({
   key: fs.readFileSync(path.join(root, 'test', 'fixtures', 'selfsigned.key')),
   cert: fs.readFileSync(path.join(root, 'test', 'fixtures', 'selfsigned.crt'))

@@ -20,8 +20,8 @@ let trayJobCount = 0; // 托盘菜单显示的活动监控任务数
 let webReady = false;              // Web 管理页窗口渲染层是否就绪
 const pendingWebTabs = [];         // 等待 Web 窗口加载完成的 newtab 消息
 let certSeq = 0;
-const pendingCert = new Map();     // id -> { callback, host, url, error }
-const allowedCerts = new Set();    // 本次运行已手动允许的主机（host）
+const pendingCert = new Map();     // id -> { callback, host, url, error, fp }
+const allowedCerts = new Map();    // host -> 已允许的证书指纹（按指纹固定，指纹变化重新询问）
 const certQueue = [];              // 窗口未就绪时到达的证书告警
 let shellReady = false;            // Shell 窗口渲染层是否已就绪（did-finish-load）
 const pendingTabs = [];            // 等待新窗口加载完成的 newtab 消息
@@ -389,7 +389,8 @@ ipcMain.handle('web:cert-allow', (e, payload) => {
   const rec = pendingCert.get(payload && payload.id);
   if (!rec) return { ok: false, error: '请求已过期' };
   pendingCert.delete(payload.id);
-  if (payload.allow && payload.remember) allowedCerts.add(rec.host);
+  // 记住的是「主机 + 证书指纹」：同主机指纹变化后仍需重新确认（防证书被替换的中间人）
+  if (payload.allow && payload.remember && rec.fp) allowedCerts.set(rec.host, rec.fp);
   rec.callback(!!payload.allow);
   return { ok: true };
 });
@@ -741,6 +742,13 @@ app.whenReady().then(() => {
   // 设备管理 Web 页兼容性：使用干净的 Chrome UA（去掉 Electron 标识，避免设备页面误判）
   // 弹窗抑制与 window.open 转标签由 webview 元素的 preload/allowpopups 处理
   session.fromPartition('persist:nettopo-web').setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+  // 设备管理页（webview 分区，远程不可信内容）下载同样弹出「另存为」，避免静默写文件到下载目录
+  session.fromPartition('persist:nettopo-web').on('will-download', (e, item) => {
+    item.setSaveDialogOptions({
+      title: '保存下载文件',
+      defaultPath: path.join(app.getPath('downloads'), item.getFilename())
+    });
+  });
   createWindow();
   applyTray();
   // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
@@ -748,10 +756,11 @@ app.whenReady().then(() => {
     if (webContents.getType() !== 'webview') return; // 仅处理设备管理页内嵌浏览器
     let host = '';
     try { host = new URL(url).host; } catch (e) { host = url; }
-    if (allowedCerts.has(host)) { callback(true); return; }
+    // 按证书指纹信任：仅当「本次运行已允许该主机且指纹一致」才静默放行；指纹变化视为证书被替换，重新询问
+    if (allowedCerts.get(host) === certificate.fingerprint) { callback(true); return; }
     event.preventDefault();
     const id = 'cert' + (++certSeq);
-    pendingCert.set(id, { callback, host, url, error });
+    pendingCert.set(id, { callback, host, url, error, fp: certificate.fingerprint });
     emitCertError({ id, host, url, error });
   });
   app.on('activate', () => {

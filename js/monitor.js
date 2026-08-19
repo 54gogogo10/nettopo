@@ -14,10 +14,13 @@ const { spawn } = require('child_process');
 const path = require('path');
 const { EventEmitter } = require('events');
 
-/** 文件名/目录名安全化：去掉 Windows 与常见控制字符，去空白、限长 */
+/** 文件名/目录名安全化：去掉 Windows 与常见控制字符，去空白、限长。
+ *  注意：正则必须独立匹配字符类（不得写成 "/字符类"——那要求字面 / 前缀，永不匹配），
+ *  并额外剔除路径穿越成分（..）与首尾点号/空白（防日志目录逃逸 + Windows 命名限制）。 */
 function sanitizeFilename(s) {
   let out = String(s == null ? '' : s);
-  out = out.replace(/\/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').trim();
+  out = out.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').trim();
+  out = out.replace(/\.\./g, '_').replace(/^\.+/, '').replace(/[. ]+$/, '');
   if (!out) out = 'device';
   if (out.length > 60) out = out.slice(0, 60);
   return out;
