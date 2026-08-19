@@ -17,7 +17,9 @@ test/*.svg
 test/*.vsdx
 test/_*.py
 test/_*.js
-/shot_*.png                  # e2e 根目录截图输出
+
+# e2e 根目录截图输出
+/shot_*.png
 
 # 根目录生成的 Visio 样例/临时文件
 *.vsdx
