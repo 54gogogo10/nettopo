@@ -36,7 +36,13 @@ function cleanBackupLines(lines, cmds) {
   for (const raw of (Array.isArray(lines) ? lines : [])) {
     const t = String(raw == null ? '' : raw).replace(/\s+$/, '');
     if (!t) continue;
-    if (list.some(c => c && (t === c || t.endsWith(c)))) continue; // 输入的命令行（可能带提示符前缀）
+    if (list.some(c => {
+      if (!c) return false;
+      if (t === c || t.endsWith(c)) return true; // 输入的命令行（可能带提示符前缀）
+      // 命令回显被折行/分片（一条命令显示成很多行）的残片：行是某命令的前缀/后缀/片段。
+      // 长度≥4 才处理，避免误杀短的真实输出行（如状态值）。
+      return c.length >= 8 && t.length >= 4 && (c.startsWith(t) || c.endsWith(t) || c.includes(t));
+    })) continue;
     if (/^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]$/.test(t)) continue; // 提示符行（含 [SW1] 系统视图形态）
     // 提示符与 Telnet 协商残渣粘连的行（如 <SW1>\uFFFD..x(）：行首即提示符形态、后随噪声、非命令输出，剔除
     if (t.length <= 160 && /^[<\[][A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/.test(t)) continue;

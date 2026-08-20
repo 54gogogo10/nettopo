@@ -1457,6 +1457,23 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         '两条命令回显全部剔除（首条+次条）');
       ok(got.includes('sysname SW1') && got.includes('return'), '命令真实输出保留');
     }
+    // 8) cleanBackupLines：命令回显折行/分片残片（一条命令显示成很多行）剔除
+    {
+      const { cleanBackupLines } = require(path.join(root, 'js', 'monitor.js'));
+      const cmds3 = ['screen-length 0 temporary', 'display current-configuration'];
+      const got = cleanBackupLines([
+        '<SW1>display current-configur',  // 折行首片（含提示符）
+        'ation',                          // 折行尾片
+        'lay current-configuration',      // 重打分片（无提示符前缀）
+        '#',
+        'sysname SW1',
+        'return'
+      ], cmds3);
+      ok(got.length >= 2 && got.includes('sysname SW1') && got.includes('return'),
+        '命令折行/分片残片全部剔除，真实输出保留（' + JSON.stringify(got) + '）');
+      ok(!got.some(l => l.trim() === 'ation' || l.trim() === 'lay current-configuration' || l.trim() === 'current-configur'),
+        '命令碎片不再漏入备份');
+    }
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 })().then(() => {
