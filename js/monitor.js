@@ -37,7 +37,9 @@ function cleanBackupLines(lines, cmds) {
     const t = String(raw == null ? '' : raw).replace(/\s+$/, '');
     if (!t) continue;
     if (list.some(c => c && (t === c || t.endsWith(c)))) continue; // 输入的命令行（可能带提示符前缀）
-    if (/^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#]$/.test(t)) continue; // 提示符行
+    if (/^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]$/.test(t)) continue; // 提示符行（含 [SW1] 系统视图形态）
+    // 提示符与 Telnet 协商残渣粘连的行（如 <SW1>\uFFFD..x(）：行首即提示符形态、后随噪声、非命令输出，剔除
+    if (t.length <= 160 && /^[<\[][A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/.test(t)) continue;
     out.push(raw);
   }
   return out;
@@ -825,7 +827,9 @@ class MonitorManager extends EventEmitter {
     this._saveBackup(job, gen, cap.lines.join('\n'));
   }
 
-  /** 备份方式 B：每次备份单独建立连接执行命令（不干扰监控会话，输出独立收集） */
+  /** 备份方式 B：每次备份单独建立连接执行命令（不干扰监控会话，输出独立收集）。
+   *  Promise 在【命令执行 + 备份保存完成】后才 resolve——runBackupNow 需在其后读到真实 _bkResult，
+   *  否则会在连接刚建立时误读为「未产生新文件」（文件稍后才落盘）。 */
   _runBackupOwn(job, gen) {
     return new Promise((resolve) => {
       const r = this.shell.connect({
@@ -844,8 +848,8 @@ class MonitorManager extends EventEmitter {
         if (info.state === 'connected') {
           clearTimeout(connTimer);
           this.shell.removeListener('status', onStatus);
-          settle();
-          this._runBackupOwnCmds(job, gen, sid);
+          // 命令执行与保存全部完成后才 resolve（含 _bkResult 就绪）
+          this._runBackupOwnCmds(job, gen, sid).then(settle, settle);
         } else if (info.state === 'fingerprint') {
           const host = job.host;
           const fp = String(info.fp || '');
@@ -868,39 +872,43 @@ class MonitorManager extends EventEmitter {
     });
   }
 
-  /** 独立备份会话：写命令序列并收集输出（不进监控日志） */
+  /** 独立备份会话：写命令序列并收集输出（不进监控日志）。
+   *  返回 Promise：命令执行 + 过滤 + 保存全部完成后 resolve。 */
   _runBackupOwnCmds(job, gen, sid) {
-    const lines = [];
-    let ownReady = false; // 独立新会话的就绪标志（与监控会话 _ready 互不干扰）
-    const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
-    const onOut = (sid2, data) => {
-      if (sid2 !== sid) return;
-      let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-      for (const ln of text.split('\n')) {
-        const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
-        if (!ownReady && PROMPT_RE.test(t.trim())) ownReady = true; // 独立会话就绪判据
-        if (t) lines.push(t);
-      }
-    };
-    this.shell.on('output', onOut);
-    (async () => {
-      try { this.shell.write(sid, '\r\n'); } catch (e) { /* ignore */ } // 空行探测提示符
-      const t0 = Date.now();
-      while (!ownReady && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
-        await sleep(200);
-      }
-      for (const cmd of job.backup.commands) {
-        if (!job.enabled || job.stopping || gen !== job.gen) break;
-        try { this.shell.write(sid, cmd + eol); } catch (e) { /* ignore */ }
-        await sleep(job.backup.waitMs);
-      }
-      await sleep(400); // 尾部输出缓冲
-      this.shell.removeListener('output', onOut);
-      try { this.shell.close(sid); } catch (e) { /* ignore */ }
-      if (!job.enabled || job.stopping || gen !== job.gen) return;
-      // 过滤命令回显（含提示符前缀整行）与提示符行：只保留命令执行后的输出内容
-      this._saveBackup(job, gen, cleanBackupLines(lines, job.backup.commands).join('\n'));
-    })();
+    return new Promise((resolveCmds) => {
+      const lines = [];
+      let ownReady = false; // 独立新会话的就绪标志（与监控会话 _ready 互不干扰）
+      const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
+      const onOut = (sid2, data) => {
+        if (sid2 !== sid) return;
+        let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        for (const ln of text.split('\n')) {
+          const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          if (!ownReady && PROMPT_RE.test(t.trim())) ownReady = true; // 独立会话就绪判据
+          if (t) lines.push(t);
+        }
+      };
+      this.shell.on('output', onOut);
+      (async () => {
+        try { this.shell.write(sid, '\r\n'); } catch (e) { /* ignore */ } // 空行探测提示符
+        const t0 = Date.now();
+        while (!ownReady && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
+          await sleep(200);
+        }
+        for (const cmd of job.backup.commands) {
+          if (!job.enabled || job.stopping || gen !== job.gen) break;
+          try { this.shell.write(sid, cmd + eol); } catch (e) { /* ignore */ }
+          await sleep(job.backup.waitMs);
+        }
+        await sleep(400); // 尾部输出缓冲
+        this.shell.removeListener('output', onOut);
+        try { this.shell.close(sid); } catch (e) { /* ignore */ }
+        if (!job.enabled || job.stopping || gen !== job.gen) { resolveCmds(); return; }
+        // 过滤命令回显（含提示符前缀整行）与提示符行：只保留命令执行后的输出内容
+        this._saveBackup(job, gen, cleanBackupLines(lines, job.backup.commands).join('\n'));
+        resolveCmds();
+      })().catch(() => resolveCmds());
+    });
   }
 
   /** 保存备份内容并广播结果（含 first 标记：首份不算“有变化”）

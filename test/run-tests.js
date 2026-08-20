@@ -1438,6 +1438,25 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         ok(gotReady === false && (Date.now() - t0) < 3000, '就绪等待超时返回且不长时间阻塞');
       }
     }
+    // 7) cleanBackupLines：系统视图提示符（[SW1]）/ Telnet 协商残渣粘连行（<SW1>\uFFFD..x(）必须剔除
+    {
+      const { cleanBackupLines } = require(path.join(root, 'js', 'monitor.js'));
+      const cmds2 = ['screen-length 0 temporary', 'display current-configuration'];
+      const got = cleanBackupLines([
+        '[SW1]',                                       // 系统视图提示符（旧正则漏剔）
+        '<SW1>\uFFFD\u0001\u0003\u001f\u0000x\u0000(',  // 提示符+协商残渣粘连（own 连接空行探测常见）
+        '[SW1]screen-length 0 temporary',              // 首条命令回显（带提示符前缀）
+        '<SW1>display current-configuration',          // 次条命令回显
+        '#',
+        'sysname SW1',
+        'return'
+      ], cmds2);
+      ok(!got.includes('[SW1]') && !got.some(l => l.indexOf('\uFFFD') >= 0) && !got.some(l => l.indexOf('x(') >= 0),
+        '提示符粘连行被剔除');
+      ok(!got.some(l => l.includes('screen-length 0 temporary') || l.includes('display current-configuration')),
+        '两条命令回显全部剔除（首条+次条）');
+      ok(got.includes('sysname SW1') && got.includes('return'), '命令真实输出保留');
+    }
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 })().then(() => {
