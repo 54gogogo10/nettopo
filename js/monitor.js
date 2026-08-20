@@ -43,6 +43,12 @@ function cleanBackupLines(lines, cmds) {
   return out;
 }
 
+/** 命令提示符行（会话就绪判据）：<SW1> / [SW1] / R1> / R1# / Huawei> 等。
+ *  覆盖华为用户/系统视图、思科/锐捷/华三等常见提示符形态。 */
+const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{1,80}[>#\]]\s*$/;
+/** 会话就绪等待上限：设备登录/初始化（banner）通常数秒内完成，超时兜底照常执行不阻塞 */
+const READY_TIMEOUT_MS = 15000;
+
 const pad2 = (n) => String(n).padStart(2, '0');
 function fmtDateTime(d) {
   d = d || new Date();
@@ -257,7 +263,7 @@ class MonitorManager extends EventEmitter {
       backupTimer: null, backupRunning: false, backupLast: null, _backupCap: null,
       sid: null, state: 'connecting', statusText: '连接中…',
       enabled: true, stopping: false, fatal: false,
-      since: Date.now(), gen: 1,
+      since: Date.now(), gen: 1, _ready: false,
       logStream: null, logPath: '', logDate: '',
       lineBuf: '', loopTimer: null, retryTimer: null
     };
@@ -459,6 +465,10 @@ class MonitorManager extends EventEmitter {
   /* ---------------- 命令循环 ---------------- */
   _bootstrap(job) {
     job.state = 'monitoring';
+    // 会话就绪门槛：TCP/认证完成 ≠ 设备命令行就绪（banner/初始化期间下发的首条命令会被吞）。
+    // 发送空行探测，收到设备提示符行后 _ready=true，命令才正式下发；超时兜底照常执行。
+    job._ready = false;
+    if (job.sid) { try { this.shell.write(job.sid, '\r\n'); } catch (e) { /* ignore */ } }
     // 状态文本三态：监控中（有周期命令）/ 仅读取中 / 仅探测中（无命令无仅读取，只做在线探测）
     const modeText = job.readOnly ? '仅读取中：' : (job.commands.length ? '监控中：' : '仅探测中：');
     job.statusText = modeText + job.host + ':' + job.port + '（' + job.protocol.toUpperCase() + '）';
@@ -506,6 +516,17 @@ class MonitorManager extends EventEmitter {
     }
   }
 
+  /** 等待会话就绪（收到设备命令提示符行）。设备登录/初始化未完成时下发的命令会被吞；
+   *  超时（READY_TIMEOUT_MS）后照常执行，不让监控/备份被长时间阻塞。 */
+  async _waitReady(job, gen, timeoutMs) {
+    if (job._ready) return true;
+    const t0 = Date.now();
+    while (job.enabled && !job.stopping && gen === job.gen && !job._ready && (Date.now() - t0) < timeoutMs) {
+      await sleep(200);
+    }
+    return !!job._ready;
+  }
+
   async _runCycle(job, gen) {
     if (!job.enabled || job.state !== 'monitoring' || gen !== job.gen || job.readOnly) return;
     // 配置备份捕获期间暂停命令循环（避免输出互相污染），1 秒后再试
@@ -518,6 +539,7 @@ class MonitorManager extends EventEmitter {
     this._logLine(job, '----- 命令轮次 ' + fmtTimestamp() + ' -----');
     job._cycleActive = true;
     try {
+      await this._waitReady(job, gen, READY_TIMEOUT_MS); // 会话就绪后再下发首条命令（防被设备初始化期吞掉）
       const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
       for (const cmd of job.commands) {
         if (!job.enabled || job.state !== 'monitoring' || gen !== job.gen) break;
@@ -538,6 +560,7 @@ class MonitorManager extends EventEmitter {
     if (!job.enabled || job.stopping || gen !== job.gen || job.state !== 'monitoring' || !job.sid) return;
     const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
     (async () => {
+      await this._waitReady(job, gen, READY_TIMEOUT_MS); // 连接时命令同样等会话就绪
       for (const cmd of job.onConnect) {
         if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) return;
         this._logCmd(job, cmd + '（连接时执行）');
@@ -569,6 +592,7 @@ class MonitorManager extends EventEmitter {
       const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
       if (t) {
         this._logLine(job, t);
+        if (!job._ready && PROMPT_RE.test(t.trim())) job._ready = true; // 会话就绪：收到命令提示符行（banner 期拼接的底层报文不触发）
         // 告警缓冲：周期循环、连接时执行命令、仅读取模式的设备主动输出，全部纳入关键字告警匹配
         if (job.alerts.length && job._alertPending && job._alertPending.length < 20000) job._alertPending.push(t);
         if (job._backupCap) captured.push(t);
@@ -786,6 +810,7 @@ class MonitorManager extends EventEmitter {
   async _runBackupShared(job, gen) {
     this._rollLogIfNeeded(job);
     this._logCmd(job, job.backup.commands.join('；') + '（配置备份）');
+    await this._waitReady(job, gen, READY_TIMEOUT_MS); // 复用监控会话：等会话就绪再下发首条备份命令
     job._backupCap = { commands: job.backup.commands.slice(), lines: [], startedAt: Date.now() };
     const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
     for (const cmd of job.backup.commands) {
@@ -846,17 +871,24 @@ class MonitorManager extends EventEmitter {
   /** 独立备份会话：写命令序列并收集输出（不进监控日志） */
   _runBackupOwnCmds(job, gen, sid) {
     const lines = [];
+    let ownReady = false; // 独立新会话的就绪标志（与监控会话 _ready 互不干扰）
     const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
     const onOut = (sid2, data) => {
       if (sid2 !== sid) return;
       let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       for (const ln of text.split('\n')) {
         const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+        if (!ownReady && PROMPT_RE.test(t.trim())) ownReady = true; // 独立会话就绪判据
         if (t) lines.push(t);
       }
     };
     this.shell.on('output', onOut);
     (async () => {
+      try { this.shell.write(sid, '\r\n'); } catch (e) { /* ignore */ } // 空行探测提示符
+      const t0 = Date.now();
+      while (!ownReady && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
+        await sleep(200);
+      }
       for (const cmd of job.backup.commands) {
         if (!job.enabled || job.stopping || gen !== job.gen) break;
         try { this.shell.write(sid, cmd + eol); } catch (e) { /* ignore */ }

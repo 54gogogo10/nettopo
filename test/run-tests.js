@@ -1405,6 +1405,39 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     mgr._handleFingerprint(job, { fp: 'SHA256:other' });
     ok(errEvt && errEvt.text.indexOf('中间人') >= 0, '指纹变化拒绝连接（疑似中间人）');
     eq(mgr.trusted.get('10.0.0.1'), 'SHA256:test', '已信任指纹不被篡改');
+    // 6) 会话就绪门槛（回归：首条命令打在设备 banner/登录期会被吞，必须先等提示符）
+    //    _onOutput 收提示符行（<SW1>/[SW1]/R1#/Huawei> 等）后才置 _ready
+    {
+      const job2 = mgr._newJob(v1.cfg);
+      job2.logStream = { bytesWritten: 0, write() {} };
+      mgr.jobs.set(job2.key, job2); mgr._bySid.set('s1', job2.key);
+      eq(job2._ready, false, '新任务初始未就绪');
+      mgr._onOutput('s1', 'Device init...\r\n<SW1>\r\n');
+      ok(job2._ready === true, '收到提示符行后会话就绪（banner 期间输出不影响）');
+      const job3 = mgr._newJob(v1.cfg);
+      job3.logStream = { bytesWritten: 0, write() {} };
+      mgr.jobs.set(job3.key, job3); mgr._bySid.set('s1', job3.key);
+      mgr._onOutput('s1', 'Info: config...\r\nsysname SW1\r\n');
+      eq(job3._ready, false, '无提示符行（仅正文）不触发就绪');
+      // 提示符形态覆盖：华为用户/系统视图 + 思科风格 + H3C。
+      const promptShapes = ['<SW1>', '<SW1> ', '[SW1]', 'R1>', 'R1#', 'Huawei>', '[H3C-GigabitEthernet0/0/0]'];
+      let pShapeOk = true;
+      for (const p of promptShapes) {
+        const j = mgr._newJob(v1.cfg); j.logStream = { bytesWritten: 0, write() {} };
+        j.key = 'pshape' + promptShapes.indexOf(p);
+        mgr.jobs.set(j.key, j); mgr._bySid.set('s1', j.key);
+        mgr._onOutput('s1', p + '\r\n');
+        if (j._ready !== true) { pShapeOk = false; console.log('  提示符未识别: ' + JSON.stringify(p)); }
+      }
+      ok(pShapeOk, '常见厂商提示符全部识别为就绪');
+      // _waitReady 超时兜底：设备长时间无提示符也不阻塞
+      {
+        const j4 = mgr._newJob(v1.cfg); j4.logStream = { bytesWritten: 0, write() {} };
+        const t0 = Date.now();
+        const gotReady = await mgr._waitReady(j4, j4.gen, 300);
+        ok(gotReady === false && (Date.now() - t0) < 3000, '就绪等待超时返回且不长时间阻塞');
+      }
+    }
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 })().then(() => {
