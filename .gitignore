@@ -31,3 +31,6 @@ progress.md
 
 # 构建日志
 build-last.log
+
+# vision 工具产物快照（不入库）
+/.dsh-vision-router/
