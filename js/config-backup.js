@@ -15,10 +15,11 @@ const MAX_KEEP = 50;                          // 每台设备保留份数上限
 const MAX_BYTES = 8 * 1024 * 1024;            // 单份配置上限 8MB
 const NAME_RE = /^cfg_\d{8}_\d{6}(?:_\d+)?\.cfg$/;
 
-/** 文件名/目录名安全化（与 monitor.js 一致） */
+/** 文件名/目录名安全化（与 monitor.js 一致）：白名单外的字符替换外，剔除穿越成分与首尾点号 */
 function sanitizeFilename(s) {
   let out = String(s == null ? '' : s);
   out = out.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').trim();
+  out = out.replace(/\.\./g, '_').replace(/^\.+/, '').replace(/[. ]+$/, '');
   if (!out) out = 'device';
   if (out.length > 60) out = out.slice(0, 60);
   return out;
@@ -37,7 +38,10 @@ class ConfigBackupStore {
   }
 
   _hostDir(device, host) {
-    return path.join(this.baseDir, sanitizeFilename(device), sanitizeFilename(host));
+    // 纵深兜底：清洗后的最终路径必须仍落在库内，否则回退库内占位目录，杜绝任何残留穿越面
+    const dir = path.resolve(this.baseDir, sanitizeFilename(device), sanitizeFilename(host));
+    const base = path.resolve(this.baseDir) + path.sep;
+    return dir.startsWith(base) ? dir : path.resolve(this.baseDir, '_', 'device');
   }
 
   static validName(name) {
@@ -64,7 +68,8 @@ class ConfigBackupStore {
       tmpPath = path.join(dir, name + '.tmp-' + process.pid);
       fs.writeFileSync(tmpPath, content, 'utf8');
       fs.renameSync(tmpPath, path.join(dir, name));
-      this._trim(device, host);
+      const trimFailed = this._trim(device, host);
+      if (trimFailed.length) console.warn('[config-backup] 滚动清理失败 ' + trimFailed.length + ' 份（' + trimFailed.map(f => f.code).join(',') + '）');
       return { ok: true, name, first: !prevBefore, prev: prevBefore };
     } catch (err) {
       if (tmpPath) { try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ } }
@@ -111,7 +116,9 @@ class ConfigBackupStore {
       fs.unlinkSync(path.join(this._hostDir(device, host), name));
       return { ok: true, removed: 1 };
     } catch (err) {
-      return { ok: false, error: '备份不存在' };
+      // 如实区分「不存在」与真实失败（占用/权限等谎报会误导排查）
+      if (err && err.code === 'ENOENT') return { ok: false, error: '备份不存在' };
+      return { ok: false, error: '删除失败：' + ((err && err.code) || '') + ((err && err.message) || err || '') };
     }
   }
 
@@ -235,15 +242,18 @@ class ConfigBackupStore {
     return { ok: true, added, removed, changed: added + removed > 0, hunks };
   }
 
-  /** 滚动清理：每台设备仅保留最新 keep 份 */
+  /** 滚动清理：每台设备仅保留最新 keep 份。返回删除失败的 [{name, code}]（主线程可据此告警） */
   _trim(device, host, keep) {
     keep = Math.floor(Number(keep));
     if (!(keep >= 1)) keep = MAX_KEEP;
     keep = Math.min(keep, MAX_KEEP);
     const items = this.list(device, host).items || [];
+    const failed = [];
     for (const it of items.slice(keep)) {
-      try { fs.unlinkSync(path.join(this._hostDir(device, host), it.name)); } catch (e) { /* ignore */ }
+      try { fs.unlinkSync(path.join(this._hostDir(device, host), it.name)); }
+      catch (err) { failed.push({ name: it.name, code: (err && err.code) || String(err) }); }
     }
+    return failed;
   }
 }
 

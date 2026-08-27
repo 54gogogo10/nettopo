@@ -1474,6 +1474,188 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!got.some(l => l.trim() === 'ation' || l.trim() === 'lay current-configuration' || l.trim() === 'current-configur'),
         '命令碎片不再漏入备份');
     }
+
+    /* ================= 回归（R4 审查修复项·第二批） ================= */
+    console.log('== 回归：isValidImg 收紧与节点图标口径统一（R4/F-2②③） ==');
+    {
+      ok(U.isValidImg('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='), '常规 PNG dataURL 通过');
+      ok(U.isValidImg('data:image/JPEG;base64,/9j/4AAQ'), 'MIME 大小写不敏感');
+      ok(!U.isValidImg('data:image/png;base64,QUFB" onerror="alert(1)'), '载荷体含引号等非法字符被拒（前缀穿透封死）');
+      ok(!U.isValidImg('data:image/svg+xml;base64,PHN2Zy8+'), '类型图片不接受 svg（类型面走 innerHTML img）');
+      ok(!U.isValidImg('data:image/png;base64,' + 'A'.repeat(1600 * 1024)), '超过长度上限拒绝');
+      const g5 = U.sanitizeGraph([
+        { id: 'n1', name: 'R1', type: 'router', x: 0, y: 0, icon: 'data:image/svg+xml;base64,PHN2Zy8+' },
+        { id: 'n2', name: 'SW', type: 'switch', x: 0, y: 0, icon: 'data:image/png;base64,QUFB' },
+        { id: 'n3', name: 'FW', type: 'firewall', x: 0, y: 0, icon: 'data:image/svg+xml;base64,QUFB" onload="x' },
+        { id: 'n4', name: 'PC', type: 'pc', x: 0, y: 0, icon: 'server' }
+      ], [], []);
+      const ic = Object.fromEntries(g5.nodes.map(n => [n.id, n.icon]));
+      ok(ic.n1 === 'data:image/svg+xml;base64,PHN2Zy8+', '节点图标 svg dataURL 保留（渲染走 image/href 安全上下文）');
+      ok(ic.n2 === 'data:image/png;base64,QUFB', '节点图标 png dataURL 保留');
+      ok(ic.n3 === '', '节点图标载荷含引号清除（与 isValidImg 同一口径）');
+      ok(ic.n4 === 'server', '内置图标 key 保留');
+    }
+
+    console.log('== 回归：删除错误如实上报（R4/L-8） ==');
+    {
+      const os = require('os');
+      const { BackupStore } = require(path.join(root, 'js', 'backup-store.js'));
+      const dir8 = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-rm8-'));
+      const store8 = new BackupStore(dir8);
+      store8.save('A', 'manual'); store8.save('B', 'manual');
+      const missing = store8.remove('备份_20990101_000000.nettopo');
+      ok(missing.ok === false && /不存在/.test(missing.error), '删除不存在备份仍报「不存在」');
+      const rma = store8.removeAll();
+      ok(rma.ok === true && rma.removed === 2 && Array.isArray(rma.failed) && rma.failed.length === 0,
+        'removeAll 成功路径返回 failed 明细数组（新增形状向后兼容）');
+      fs.rmSync(dir8, { recursive: true, force: true });
+    }
+    {
+      // 确定性失败模拟：合法备份名处放同位名目录 → unlink 必失败（Linux EISDIR / Windows EPERM），
+      // 断言错误如实携带码值而非谎报「不存在」
+      const os = require('os');
+      const dir9 = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-bk9-'));
+      fs.mkdirSync(path.join(dir9, '备份_20990101_000000.nettopo'));
+      const { BackupStore } = require(path.join(root, 'js', 'backup-store.js'));
+      const store9 = new BackupStore(dir9);
+      const rr = store9.remove('备份_20990101_000000.nettopo');
+      ok(rr.ok === false && !/不存在/.test(rr.error), '删除失败的错误如实上报而非「不存在」（' + rr.error + '）');
+      fs.rmSync(dir9, { recursive: true, force: true });
+    }
+
+    /* ================= 回归（R4 审查修复项） ================= */
+    console.log('== 回归：config-backup 目录穿越（R4/F-1） ==');
+    {
+      const os = require('os');
+      const cbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-cb-'));
+      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const store = new ConfigBackupStore(cbDir);
+      const rs = store.save('..', '..', 'sysname SW1\nreturn');
+      ok(rs.ok === true, '.. 作为 device/host 仍可正常保存（不被误拒）');
+      const written = path.join(cbDir, '_', '_', rs.name || '#');
+      ok(fs.existsSync(written), '备份落在库内清洗后的占位目录 _/_（含 monitor.js 同款 ".." 剔除）');
+      const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true })
+        .flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.basename(e.name)]);
+      const inLib = walk(cbDir).filter(n => /^cfg_\d{8}_\d{6}(_\d+)?\.cfg$/.test(n));
+      ok(inLib.length === 1, '整库仅此一份备份，无库外落盘（旧实现会把 cfg 文件写到临时目录上级）');
+      fs.rmSync(cbDir, { recursive: true, force: true });
+    }
+
+    console.log('== 回归：负数 timeout 与 SSH 多字节撕裂（R4/L-1、L-2） ==');
+    {
+      const socks = [];
+      const server = net.createServer((s) => { socks.push(s); s.on('error', () => {}); });
+      await new Promise((res) => server.listen(0, '127.0.0.1', res));
+      const mgr = new ShellManager();
+      let threw = null, rr = null;
+      try { rr = mgr.connect({ protocol: 'telnet', host: '127.0.0.1', port: server.address().port, timeout: -5 }); }
+      catch (e) { threw = e; }
+      ok(!threw && rr && rr.ok === true, 'Telnet 负数 timeout 不同步抛错（旧行为抛 ERR_OUT_OF_RANGE）');
+      if (rr && rr.ok) mgr.close(rr.id);
+      for (const s of socks) s.destroy();
+      await new Promise((res) => server.close(res));
+    }
+    {
+      const { Server } = require('ssh2');
+      const hostKey = fs.readFileSync(path.join(root, 'node_modules', 'ssh2', 'test', 'fixtures', 'ssh_host_rsa_key'));
+      const socks = [];
+      const server = new Server({ hostKeys: [hostKey] }, (client) => {
+        client.on('error', () => {});
+        client.on('authentication', (ctx) => ctx.accept());
+        client.on('ready', () => {
+          client.on('session', (accept) => {
+            const sess = accept();
+            sess.on('pty', (a, r2, info) => a());
+            sess.on('shell', (acc) => {
+              const st = acc();
+              const b = Buffer.from('中文OK', 'utf8');
+              st.write(b.slice(0, 1)); // 把首个多字节字符按字节撕裂
+              setTimeout(() => st.write(b.slice(1)), 60);
+            });
+          });
+        });
+      });
+      await new Promise((res) => server.listen(0, '127.0.0.1', res));
+      const mgr = new ShellManager();
+      const outs = [], statuses = [];
+      mgr.on('output', (id, d) => outs.push(d));
+      mgr.on('status', (id, info) => statuses.push(info));
+      const r = mgr.connect({ protocol: 'ssh', host: '127.0.0.1', port: server.address().port, username: 'admin', password: 'secret' });
+      await waitFor(() => statuses.some(s => s.state === 'fingerprint'), 4000);
+      ok(mgr.trustFingerprint('127.0.0.1', true), 'SSH 指纹确认放行');
+      await waitFor(() => outs.join('').includes('OK'), 4000);
+      ok(outs.join('').includes('中文OK'), 'SSH 跨包多字节 UTF-8 正常（' + JSON.stringify(outs.join('')) + '）');
+      ok(!outs.join('').includes('\uFFFD'), 'SSH 输出无替换符（旧实现 toString 撕裂半字符）');
+      mgr.close(r.id);
+      for (const s of socks) s.destroy();
+      await new Promise((res) => server.close(res));
+    }
+
+    console.log('== 回归：NAWS 0xFF 双写转义与尺寸钳制（R4/F-3） ==');
+    {
+      const nawsData = [];
+      const nawsSocks = [];
+      const server = net.createServer((sock) => {
+        nawsSocks.push(sock);
+        sock.on('data', (d) => nawsData.push(d));
+        sock.on('error', () => {});
+        sock.write('\r\nOK\r\n> ');
+      });
+      await new Promise((res) => server.listen(0, '127.0.0.1', res));
+      const mgr = new ShellManager();
+      const outs = [];
+      mgr.on('output', (id, d) => outs.push(d));
+      const r = mgr.connect({ protocol: 'telnet', host: '127.0.0.1', port: server.address().port, cols: 80, rows: 255 });
+      await waitFor(() => outs.join('').includes('> '), 3000);
+      // rows=255：载荷低字节恰为 0xFF，必须双写（wire …00 FF FF… 后接 IAC SE）；旧实现少一个 FF 致服务端解协商错乱
+      await waitFor(() => nawsData.some(b => b.includes(Buffer.from([255, 250, 31, 0, 80, 0, 255, 255, 255, 240]))), 3000);
+      ok(nawsData.some(b => b.includes(Buffer.from([255, 250, 31, 0, 80, 0, 255, 255, 255, 240]))),
+        'NAWS 载荷 0xFF 双写转义（rows=255）');
+      mgr.resize(r.id, 70000, 30); // 上限钳制 65535（16 位语义），不再回绕
+      await waitFor(() => nawsData.some(b => b.includes(Buffer.from([255, 250, 31, 255, 255, 255, 255, 0, 30, 255, 240]))), 3000);
+      ok(nawsData.some(b => b.includes(Buffer.from([255, 250, 31, 255, 255, 255, 255, 0, 30, 255, 240]))),
+        'resize 超上限钳制为 65535 且转义正确');
+      mgr.close(r.id);
+      for (const s of nawsSocks) s.destroy();
+      await new Promise((res) => server.close(res));
+    }
+
+    // RFC 4256 数量契约（R4/L-3）：多提示服务器下应答数必须等于提示数、密码只进口令位
+    {
+      const { Server } = require('ssh2');
+      const hostKey = fs.readFileSync(path.join(root, 'node_modules', 'ssh2', 'test', 'fixtures', 'ssh_host_rsa_key'));
+      const socks = [];
+      let got = null;
+      let connected = false;
+      const server = new Server({ hostKeys: [hostKey] }, (client) => {
+        client.on('error', () => {});
+        client.on('authentication', (ctx) => {
+          if (ctx.method === 'password') return ctx.reject(['keyboard-interactive']); // 引导客户端进入 KI 流程
+          if (ctx.method !== 'keyboard-interactive') return ctx.reject();
+          ctx.prompt(['Username: ', { prompt: 'Password: ', echo: false }], '', '', (answers) => {
+            got = { n: answers.length, first: answers[0], second: answers[1] };
+            if (answers.length === 2 && answers[0] === '' && answers[1] === 'secret') ctx.accept();
+            else ctx.reject();
+          });
+        });
+        client.on('ready', () => { connected = true; client.end(); });
+      });
+      await new Promise((res) => server.listen(0, '127.0.0.1', res));
+      const mgr = new ShellManager();
+      const statuses = [], ends = [];
+      mgr.on('status', (id, info) => statuses.push(info));
+      mgr.on('end', (id, reason) => ends.push(reason));
+      const r = mgr.connect({ protocol: 'ssh', host: '127.0.0.1', port: server.address().port, username: 'user1', password: 'secret' });
+      await waitFor(() => statuses.some(s => s.state === 'fingerprint'), 4000);
+      ok(mgr.trustFingerprint('127.0.0.1', true), 'KI 测试指纹确认放行');
+      await waitFor(() => connected || ends.length, 6000);
+      ok(connected === true, '双提示 keyboard-interactive 认证成功（旧实现固定回 1 个应答必败）');
+      ok(got !== null && got.n === 2 && got.first === '' && got.second === 'secret',
+        '应答数==提示数且密码只进 Password 位（' + JSON.stringify(got) + '）');
+      mgr.close(r.id);
+      for (const s of socks) s.destroy();
+      await new Promise((res) => server.close(res));
+    }
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 })().then(() => {

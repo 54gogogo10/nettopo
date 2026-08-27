@@ -113,25 +113,30 @@ class BackupStore {
       fs.unlinkSync(full);
       return { ok: true, removed: 1 };
     } catch (err) {
-      return { ok: false, error: '备份不存在' };
+      // 如实区分「不存在」与真实失败（Windows 句柄占用 EBUSY 等谎报会误导排查）
+      if (err && err.code === 'ENOENT') return { ok: false, error: '备份不存在' };
+      return { ok: false, error: '删除失败：' + ((err && err.code) || '') + ((err && err.message) || err || '') };
     }
   }
 
-  /** 清空全部备份 */
+  /** 清空全部备份。返回 {ok:true, removed, failed:[{name, code}]}：
+   *  部分失败（如文件被占用）仍如实保留 failed 明细，UI 可据此提示残留 */
   removeAll() {
     let removed = 0;
-    const names = this.list().items || [];
-    for (const it of names) {
-      try { fs.unlinkSync(path.join(this.dir, it.name)); removed++; } catch (e) { /* ignore */ }
+    const failed = [];
+    for (const it of (this.list().items || [])) {
+      try { fs.unlinkSync(path.join(this.dir, it.name)); removed++; }
+      catch (err) { failed.push({ name: it.name, code: (err && err.code) || String(err) }); }
     }
-    return { ok: true, removed };
+    return { ok: true, removed, failed };
   }
 
-  /** 滚动清理：仅保留最新的 keep 份（按修改时间倒序） */
+  /** 滚动清理：仅保留最新的 keep 份（按修改时间倒序）。删除失败不静默：记日志 */
   _trim(keep) {
     const items = this.list().items || [];
     for (const it of items.slice(keep)) {
-      try { fs.unlinkSync(path.join(this.dir, it.name)); } catch (e) { /* ignore */ }
+      try { fs.unlinkSync(path.join(this.dir, it.name)); }
+      catch (err) { console.warn('[backup-store] 滚动清理失败:', it.name, (err && err.code) || err); }
     }
   }
 

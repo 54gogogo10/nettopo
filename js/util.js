@@ -379,7 +379,16 @@ U.saveTypeOverrides = () => {
 
 /* ---------- 类型数据安全校验（防止恶意工程/本地存储注入 HTML/SVG） ---------- */
 U.isValidColor = (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
-U.isValidImg = (v) => typeof v === 'string' && (v === '' || /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(v));
+/* 图片 dataURL 白名单：data:image MIME + 纯 base64 字符载荷 + 总长上限。
+ * 前缀正则之外必须限定载荷字符集——否则 '……base64,QUFB" onerror="x' 会穿透前缀校验（R4/F-2）。
+ * opts.svg=true 用于节点级图标（编辑器允许上传 SVG，渲染面为 image/href 安全上下文）。 */
+U.MAX_IMG_CHARS = 1500 * 1024;
+U.isValidImg = (v, opts) => {
+  if (v === '') return true;
+  if (typeof v !== 'string' || v.length > U.MAX_IMG_CHARS) return false;
+  const mime = (opts && opts.svg) ? '(?:png|jpe?g|gif|webp|svg\\+xml)' : '(?:png|jpe?g|gif|webp)';
+  return new RegExp('^data:image\\/' + mime + ';base64,[A-Za-z0-9+/=\\s]*$', 'i').test(v);
+};
 /* 清洗 typeOverrides / customTypes：剔除非法颜色与图片，避免拼入 innerHTML/SVG 时注入 */
 U.sanitizeTypeData = (overrides, customTypes) => {
   const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
@@ -438,7 +447,7 @@ U.sanitizeGraph = (nodes, links, texts) => {
       type: SAFE_ID.test(rawType) ? rawType : 'other',
       vendor: str(n.vendor).slice(0, 64), // 设备级图标：内置 key 或图片 dataURL
       icon: (typeof n.icon === 'string' && U.NODE_ICON_KEYS.includes(n.icon)) ? n.icon
-        : (typeof n.icon === 'string' && n.icon.indexOf('data:image/') === 0 && n.icon.length < 1024 * 1024 ? n.icon : ''), // 设备级图标：内置 key 或图片 dataURL
+        : (U.isValidImg(n.icon, { svg: true }) ? n.icon : ''), // 设备级图标：内置 key 或白名单 dataURL（与 isValidImg 同口径）
       x: coord(n.x, 0), y: coord(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',

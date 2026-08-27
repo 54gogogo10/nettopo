@@ -28,13 +28,15 @@ class ShellManager extends EventEmitter {
     let port = parseInt(opts.port, 10);
     if (!(port >= 1)) port = protocol === 'telnet' ? 23 : 22;
     if (!(port <= 65535)) port = protocol === 'telnet' ? 23 : 22; // 端口钳制，防异常大端口
+    let tout = opts.timeout != null ? parseInt(opts.timeout, 10) : undefined;
+    if (!(tout > 0)) tout = undefined; // NaN/0/负数回落默认：负数会让 setTimeout 同步抛错并留下尚未挂监听的 socket
     const base = {
       host, port,
       username: String(opts.username || '').trim() || 'admin',
       password: String(opts.password || ''),
       cols: Math.max(parseInt(opts.cols, 10) || 80, 10),
       rows: Math.max(parseInt(opts.rows, 10) || 24, 5),
-      timeout: opts.timeout != null ? parseInt(opts.timeout, 10) : undefined,
+      timeout: tout,
       expectFp: String(opts.expectFp || '').trim()
     };
     let session;
@@ -59,7 +61,10 @@ class ShellManager extends EventEmitter {
   }
   resize(id, cols, rows) {
     const s = this.sessions.get(id);
-    if (s) s.resize(Math.max(parseInt(cols, 10) || 80, 10), Math.max(parseInt(rows, 10) || 24, 5));
+    if (!s) return;
+    // 上限钳制 65535：防止 16 位编码回绕出无意义尺寸
+    s.resize(Math.min(Math.max(parseInt(cols, 10) || 80, 10), 65535),
+             Math.min(Math.max(parseInt(rows, 10) || 24, 5), 65535));
   }
   close(id) {
     const s = this.sessions.get(id);
@@ -81,6 +86,7 @@ class ShellManager extends EventEmitter {
   /* ---------- SSH（ssh2） ---------- */
   _ssh(o) {
     const em = new EventEmitter();
+    const decoder = new StringDecoder('utf8'); // 与 telnet 路径一致：缓存跨包的多字节 UTF-8 半字符
     const client = new Client();
     let stream = null;
     let closed = false;
@@ -97,6 +103,7 @@ class ShellManager extends EventEmitter {
       }
       try { if (stream && !stream.destroyed) stream.end(); } catch (e) { /* ignore */ }
       try { client.end(); } catch (e) { /* ignore */ }
+      try { const rest = decoder.end(); if (rest) em.emit('output', rest); } catch (e) { /* ignore */ } // 冲洗残留半字符
       em.emit('end', reason || '连接已关闭');
     };
 
@@ -105,16 +112,25 @@ class ShellManager extends EventEmitter {
       client.shell({ term: 'xterm-256color', cols: o.cols, rows: o.rows }, (err, s) => {
         if (err) { finish('无法打开远程 Shell：' + err.message); return; }
         stream = s;
-        s.on('data', (d) => em.emit('output', d.toString('utf8')));
+        s.on('data', (d) => em.emit('output', decoder.write(d)));
         s.on('close', () => finish('连接已关闭'));
         s.on('error', (e) => em.emit('status', { state: 'error', text: e.message }));
       });
     });
     client.on('keyboard-interactive', (name, instructions, lang, prompts, respond) => {
-      // 仅首个提示回填密码（密码类提示）；后续提示（OTP/验证码/二次确认等）回空，
-      // 避免把密码发送到非密码提示位
       kiPrompt++;
-      respond(kiPrompt === 1 ? [o.password] : prompts.map(() => ''));
+      // RFC 4256 要求应答数 == 提示数：按位映射，密码只回填到首个「口令类」提示，
+      // 其余位与后续轮次一律空串（旧实现固定回 1 个应答——多提示服务器认证必败且有账号锁定风险）
+      if (kiPrompt > 4) { finish('keyboard-interactive 认证轮次过多，已中止'); return; }
+      let used = false;
+      respond(prompts.map((p) => {
+        const t = String((p && p.prompt) || '');
+        // 无文案的单提示兼容旧行为（部分设备不下发提示文本但期待密码），其余非口令位一律空
+        const secretish = /pass\s?(word|code)|口令|密码/i.test(t)
+          || (!t && !used && prompts.length === 1);
+        if (!used && secretish) { used = true; return o.password; }
+        return '';
+      }));
     });
     client.on('error', (err) => {
       em.emit('status', { state: 'error', text: err.message });
@@ -181,8 +197,12 @@ class ShellManager extends EventEmitter {
       em.emit('end', reason || '连接已关闭');
     };
     const sendNaws = () => {
-      const c = Math.max(o.cols, 10), r = Math.max(o.rows, 5);
-      send(Buffer.from([IAC, SB, OPT_NAWS, (c >> 8) & 0xff, c & 0xff, (r >> 8) & 0xff, r & 0xff, IAC, SE]));
+      // RFC1073：NAWS 载荷为 16 位大端（65535 表示「未知」），载荷内出现 0xFF 必须双写 IAC 转义，否则被服务端当作 IAC 误读
+      const enc = (v) => {
+        v = Math.min(Math.max(v, 10), 65535);
+        return [(v >> 8) & 0xff, v & 0xff].flatMap((b) => (b === IAC ? [IAC, IAC] : [b]));
+      };
+      send(Buffer.from([IAC, SB, OPT_NAWS, ...enc(o.cols), ...enc(o.rows), IAC, SE]));
     };
 
     sock.on('connect', () => {

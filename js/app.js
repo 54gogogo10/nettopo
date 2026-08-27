@@ -1258,11 +1258,19 @@ async function monitorCfgSnapshot() {
 
 /** 工程/备份恢复监控配置：结构清洗（复用 normalizeMonitorHosts）、密码仅接受密文/空，
  *  解密回内存后持久化（DPAPI 密文本机可解；跨机器/密钥变更时密码留空需重新输入） */
+/** 恢复自不可信工程文件的数值钳制：非有限数回落默认，并夹到边界内（与主进程 _validate 口径一致） */
+function restoreNum(v, def, lo, hi) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= lo && n <= hi ? n : def;
+}
+
 async function restoreMonitorCfgFromProject(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
   const cleaned = {};
+  // 键黑名单对齐 util 的 cleanCfgTemplates：__proto__ 能过「普通字符串」检查但会命中原型 setter
+  const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
   for (const [k, v] of Object.entries(raw)) {
-    if (typeof k !== 'string' || !k.trim() || k.length > 64) continue;
+    if (typeof k !== 'string' || !k.trim() || k.length > 64 || DANGEROUS_KEYS.has(k)) continue;
     if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
     const hosts = (normalizeMonitorHosts(v) || []).map(h => {
       const pw = (typeof h.password === 'string' && (h.password === '' || h.password.indexOf(SECRET_PREFIX) === 0)) ? h.password : '';
@@ -1270,8 +1278,8 @@ async function restoreMonitorCfgFromProject(raw) {
     });
     cleaned[k] = {
       hosts,
-      intervalSec: v.intervalSec,
-      cmdDelayMs: v.cmdDelayMs,
+      intervalSec: restoreNum(v.intervalSec, 300, 1, 86400),
+      cmdDelayMs: restoreNum(v.cmdDelayMs, 1000, 0, 60000),
       enabled: !!v.enabled
     };
   }
@@ -2872,7 +2880,7 @@ function openTypeManager() {
   const rowHtml = (t, isCustom) => {
     const c = U.getType(t.key);
     const thumb = c.img
-      ? `<img class="tm-thumb" src="${c.img}" alt=""/>`
+      ? `<img class="tm-thumb" src="${U.escHtml(c.img)}" alt=""/>`
       : `<span class="dot" style="background:${c.c1};width:26px;height:26px;border-radius:7px"></span>`;
     return `
       <div class="tm-row" data-key="${t.key}">
