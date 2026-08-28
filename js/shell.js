@@ -37,12 +37,20 @@ class ShellManager extends EventEmitter {
       cols: Math.max(parseInt(opts.cols, 10) || 80, 10),
       rows: Math.max(parseInt(opts.rows, 10) || 24, 5),
       timeout: tout,
-      expectFp: String(opts.expectFp || '').trim()
+      expectFp: String(opts.expectFp || '').trim(),
+      // SSH 公钥认证（可选）：私钥内容 + 私钥口令；缺省仍走密码/keyboard-interactive
+      privateKey: typeof opts.privateKey === 'string' ? opts.privateKey.trim() : '',
+      keyPassphrase: typeof opts.keyPassphrase === 'string' ? opts.keyPassphrase.slice(0, 1024) : ''
     };
     let session;
-    if (protocol === 'ssh') session = this._ssh(base);
-    else if (protocol === 'telnet') session = this._telnet(base);
-    else return { ok: false, error: '不支持的协议：' + protocol };
+    try {
+      if (protocol === 'ssh') session = this._ssh(base);
+      else if (protocol === 'telnet') session = this._telnet(base);
+      else return { ok: false, error: '不支持的协议：' + protocol };
+    } catch (err) {
+      // 私钥解析失败等初始化异常转为常规失败，避免监控侧任务已登记却同步抛出成僵尸
+      return { ok: false, error: '连接初始化失败：' + ((err && err.message) || err) };
+    }
 
     const id = 's' + (++this._seq);
     session.on('output', (d) => this.emit('output', id, d));
@@ -170,6 +178,10 @@ class ShellManager extends EventEmitter {
         }
       }
     };
+    if (o.privateKey) {
+      cfg.privateKey = o.privateKey;
+      if (o.keyPassphrase) cfg.passphrase = o.keyPassphrase; // 私钥口令错误时 ssh2 报 decrypt 错误走 error 状态
+    }
     if (o.password) { cfg.password = o.password; cfg.tryKeyboard = true; }
     client.connect(cfg);
 

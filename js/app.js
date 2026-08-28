@@ -897,6 +897,34 @@ function openAlign() {
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
 }
 
+/** 工程对比结果弹窗（复用：文件对比 / 备份库对比） */
+function showProjectDiff(d, vsTitle, vsMeta) {
+  const row = (items) => items.length ? items.map(x => `<div class="tt-r">· ${U.escHtml(x)}</div>`).join('') : '<div class="tt-r" style="color:var(--muted)">无</div>';
+  const chg = d.changedNodes.length ? d.changedNodes.map(c => `<div class="tt-r">· ${U.escHtml(c.name)}：${U.escHtml(c.from.mgmt || '-')} → ${U.escHtml(c.to.mgmt || '-')}</div>`).join('') : '<div class="tt-r" style="color:var(--muted)">无</div>';
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:560px">
+      <h3>工程对比结果</h3>
+      <div class="m-sub">当前工程 vs ${U.escHtml(vsTitle)}${vsMeta ? `（${U.escHtml(vsMeta)}）` : ''}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;max-height:48vh;overflow:auto">
+        <div><b style="color:var(--danger)">新增设备 ${d.addedNodes.length}</b>${row(d.addedNodes)}</div>
+        <div><b style="color:var(--danger)">删除设备 ${d.removedNodes.length}</b>${row(d.removedNodes)}</div>
+        <div><b>变更设备 ${d.changedNodes.length}</b>${chg}</div>
+        <div><b style="color:var(--accent)">新增链路 ${d.addedLinks.length}</b>${row(d.addedLinks)}</div>
+        <div><b style="color:var(--accent)">删除链路 ${d.removedLinks.length}</b>${row(d.removedLinks)}</div>
+      </div>
+      <div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
 /* ================= 工程对比（diff） ================= */
 function openProjectDiff() {
   if (!state.nodes.length) { toast('请先打开或导入一个拓扑作为对比基准'); return; }
@@ -910,30 +938,7 @@ function openProjectDiff() {
       const data = JSON.parse(U.decodeBytes(buffer));
       if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) { toast('对比文件不是有效的 .nettopo 工程'); return; }
       const d = U.diffProjects({ nodes: state.nodes, links: state.links }, { nodes: data.nodes, links: data.links || [] });
-      const row = (items) => items.length ? items.map(x => `<div class="tt-r">· ${U.escHtml(x)}</div>`).join('') : '<div class="tt-r" style="color:var(--muted)">无</div>';
-      const chg = d.changedNodes.length ? d.changedNodes.map(c => `<div class="tt-r">· ${U.escHtml(c.name)}：${U.escHtml(c.from.mgmt || '-')} → ${U.escHtml(c.to.mgmt || '-')}</div>`).join('') : '<div class="tt-r" style="color:var(--muted)">无</div>';
-      const root = $('#modalRoot');
-      const ov = document.createElement('div');
-      ov.className = 'overlay';
-      ov.innerHTML = `
-        <div class="modal" role="dialog" style="width:560px">
-          <h3>工程对比结果</h3>
-          <div class="m-sub">当前工程 vs ${U.escHtml(f.name)}（${data.nodes.length} 设备 / ${(data.links||[]).length} 链路）</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;max-height:48vh;overflow:auto">
-            <div><b style="color:var(--danger)">新增设备 ${d.addedNodes.length}</b>${row(d.addedNodes)}</div>
-            <div><b style="color:var(--danger)">删除设备 ${d.removedNodes.length}</b>${row(d.removedNodes)}</div>
-            <div><b>变更设备 ${d.changedNodes.length}</b>${chg}</div>
-            <div><b style="color:var(--accent)">新增链路 ${d.addedLinks.length}</b>${row(d.addedLinks)}</div>
-            <div><b style="color:var(--accent)">删除链路 ${d.removedLinks.length}</b>${row(d.removedLinks)}</div>
-          </div>
-          <div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div>
-        </div>`;
-      root.appendChild(ov);
-      ov.tabIndex = -1; ov.focus();
-      const close = () => ov.remove();
-      ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
-      ov.querySelector('[data-act=close]').onclick = close;
-      ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+      showProjectDiff(d, f.name, `${data.nodes.length} 设备 / ${(data.links || []).length} 链路`);
     } catch (err) { toast('对比文件解析失败：' + err.message); }
     e.target.value = '';
   };
@@ -1124,6 +1129,31 @@ function exportXlsx() {
   toast('已导出 Excel 连线表');
 }
 
+/** 设备资产清单：拓扑设备 + 管理地址 + 监控状态 + 配置备份概况，汇总导出 Excel（无 XLSX 库时回退 CSV） */
+async function exportInventory() {
+  if (!state.nodes.length) { toast('画布为空，请先添加设备'); return; }
+  const backupInfo = {};
+  if (window.topoConfigBackup && window.topoConfigBackup.hosts) {
+    try {
+      const r = await window.topoConfigBackup.hosts();
+      for (const it of ((r && r.items) || [])) backupInfo[it.device] = { lastAt: it.lastAt, count: it.count };
+    } catch (e) { /* 备份信息缺失不影响清单 */ }
+  }
+  const rows = U.buildInventoryRows(state.nodes, state.monitorStatus, backupInfo);
+  if (window.XLSX) {
+    const ws = window.XLSX.utils.aoa_to_sheet(rows.map(r => r.map(U.sanitizeCell)));
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, '资产清单');
+    const buf = window.XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    U.download(`设备资产清单_${U.fmtDate()}.xlsx`,
+      new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    toast('已导出资产清单（Excel，' + (rows.length - 1) + ' 台设备）');
+  } else {
+    U.download(`设备资产清单_${U.fmtDate()}.csv`, new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出资产清单（CSV）');
+  }
+}
+
 function exportVisio() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
@@ -1238,19 +1268,22 @@ function openImageExport() {
 }
 
 /* ================= 工程文件（.nettopo 保存/打开） ================= */
-/** 监控配置加密快照（密码经 safeStorage 加密后随工程/备份文件落盘；明文永不进文件） */
+/** 监控配置加密快照（密码/私钥等机密经 safeStorage 加密后随工程/备份文件落盘；明文永不进文件） */
 async function monitorCfgSnapshot() {
   const cfg = JSON.parse(JSON.stringify(state.monitorCfg || {})); // 深拷贝：不改写内存明文
   const sec = secureBridge();
   for (const k of Object.keys(cfg)) {
     const hosts = (cfg[k] && Array.isArray(cfg[k].hosts)) ? cfg[k].hosts : [];
     for (const h of hosts) {
-      if (!h || typeof h !== 'object' || !h.password) { if (h && typeof h === 'object') h.password = ''; continue; }
-      if (String(h.password).indexOf(SECRET_PREFIX) === 0) continue; // 已是密文（防御）
-      if (sec) {
-        try { const r = await sec.encryptSecret(h.password); h.password = (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : ''; }
-        catch (e) { h.password = ''; } // 加密失败则密码不随工程保存
-      } else h.password = ''; // 无加密能力（浏览器版）：不随工程保存
+      if (!h || typeof h !== 'object') continue;
+      for (const f of MON_SECRET_FIELDS) {
+        if (!h[f]) { h[f] = ''; continue; }
+        if (String(h[f]).indexOf(SECRET_PREFIX) === 0) continue; // 已是密文（防御）
+        if (sec) {
+          try { const r = await sec.encryptSecret(h[f]); h[f] = (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : ''; }
+          catch (e) { h[f] = ''; } // 加密失败则机密不随工程保存
+        } else h[f] = ''; // 无加密能力（浏览器版）：不随工程保存
+      }
     }
   }
   return cfg;
@@ -1273,8 +1306,12 @@ async function restoreMonitorCfgFromProject(raw) {
     if (typeof k !== 'string' || !k.trim() || k.length > 64 || DANGEROUS_KEYS.has(k)) continue;
     if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
     const hosts = (normalizeMonitorHosts(v) || []).map(h => {
-      const pw = (typeof h.password === 'string' && (h.password === '' || h.password.indexOf(SECRET_PREFIX) === 0)) ? h.password : '';
-      return Object.assign({}, h, { password: pw });
+      const clean = Object.assign({}, h);
+      // 工程文件只接受密文/空：明文机密一律丢弃（与密码同语义）
+      for (const f of MON_SECRET_FIELDS) {
+        clean[f] = (typeof clean[f] === 'string' && (clean[f] === '' || clean[f].indexOf(SECRET_PREFIX) === 0)) ? clean[f] : '';
+      }
+      return clean;
     });
     cleaned[k] = {
       hosts,
@@ -1288,14 +1325,16 @@ async function restoreMonitorCfgFromProject(raw) {
   let recovered = false;
   for (const k of Object.keys(cleaned)) {
     for (const h of cleaned[k].hosts) {
-      if (h.password && h.password.indexOf(SECRET_PREFIX) === 0) {
-        const cipher = h.password;
-        h.password = '';
-        if (sec) {
-          try {
-            const r = await sec.decryptSecret(cipher.slice(SECRET_PREFIX.length));
-            if (r && r.ok) { h.password = r.text; recovered = true; }
-          } catch (e) { /* 跨机/密钥变更：密码留空 */ }
+      for (const f of MON_SECRET_FIELDS) {
+        if (h[f] && h[f].indexOf(SECRET_PREFIX) === 0) {
+          const cipher = h[f];
+          h[f] = '';
+          if (sec) {
+            try {
+              const r = await sec.decryptSecret(cipher.slice(SECRET_PREFIX.length));
+              if (r && r.ok) { h[f] = r.text; recovered = true; }
+            } catch (e) { /* 跨机/密钥变更：机密留空 */ }
+          }
         }
       }
     }
@@ -1477,6 +1516,7 @@ function openBackupManager() {
           <b style="color:var(--text)">${U.escHtml(it.name)}</b><br>
           <span style="color:var(--muted)">${fmtBackupTime(it.time)} · ${fmtBackupSize(it.size)}</span>
         </span>
+        <button type="button" class="tb" data-act="diff" title="当前画布 vs 该备份：设备与链路差异">对比</button>
         <button type="button" class="tb" data-act="restore" title="恢复该备份（替换当前拓扑）">恢复</button>
         <button type="button" class="tb icon danger" data-act="del" title="删除该备份">
           <i class="ic" data-ic="trash"></i>
@@ -1501,6 +1541,17 @@ function openBackupManager() {
       if (res && res.ok) toast('已删除备份');
       else toast('删除失败：' + ((res && res.error) || '未知错误'));
       refreshList();
+    } else if (act === 'diff') {
+      busy.add(name + act);
+      let res;
+      try { res = await window.topoBackup.read(name); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
+      busy.delete(name + act);
+      if (!res || !res.ok) { toast('读取备份失败：' + ((res && res.error) || '未知错误')); return; }
+      let data;
+      try { data = JSON.parse(res.content); } catch (e) { toast('备份内容解析失败'); return; }
+      if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) { toast('备份文件格式不正确'); return; }
+      const d = U.diffProjects({ nodes: state.nodes, links: state.links }, { nodes: data.nodes, links: data.links || [] });
+      showProjectDiff(d, name, `${data.nodes.length} 设备 / ${(data.links || []).length} 链路`);
     } else if (act === 'restore') {
       if (state.nodes.length && !(await confirmBox(`恢复备份「${name}」将替换当前拓扑，是否继续？`))) return;
       busy.add(name + act);
@@ -3156,6 +3207,7 @@ function wire() {
   $('#btnDropExport').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'csv', label: '导出 CSV 表格', act: exportCSV },
     { ic: 'xlsx', label: '导出 Excel 表格', act: exportXlsx },
+    { ic: 'archive', label: '导出资产清单（Excel）', act: exportInventory },
     { ic: 'pdf', label: '导出 PDF', act: exportPdf },
     { ic: 'image', label: '导出图片（PNG / SVG）', act: openImageExport },
     { ic: 'copy', label: '复制图片到剪贴板', act: copyImageToClipboard },
@@ -3367,6 +3419,9 @@ const SECRET_PREFIX = 'enc:';
 function secureBridge() {
   return (window.topoSecure && window.topoSecure.encryptSecret && window.topoSecure.decryptSecret) ? window.topoSecure : null;
 }
+/** 监控配置中的机密字段（密码 / 私钥口令 / 私钥内容），落盘与工程快照统一走 enc: 密文 */
+const MON_SECRET_FIELDS = ['password', 'keyPass', 'privateKey'];
+
 async function saveMonitorCfg() {
   try {
     const sec = secureBridge();
@@ -3374,14 +3429,17 @@ async function saveMonitorCfg() {
     for (const k of Object.keys(cfg)) {
       const hosts = (cfg[k] && Array.isArray(cfg[k].hosts)) ? cfg[k].hosts : [];
       for (const h of hosts) {
-        if (!h || typeof h !== 'object' || !h.password) { if (h && typeof h === 'object') h.password = ''; continue; }
-        if (sec) {
-          try {
-            const r = await sec.encryptSecret(h.password);
-            h.password = (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : ''; // 加密失败则密码不落盘
-          } catch (e) { h.password = ''; }
-        } else {
-          h.password = ''; // 无加密能力（如浏览器版）：密码仅本次运行内存
+        if (!h || typeof h !== 'object') continue;
+        for (const f of MON_SECRET_FIELDS) {
+          if (!h[f]) { h[f] = ''; continue; }
+          if (sec) {
+            try {
+              const r = await sec.encryptSecret(h[f]);
+              h[f] = (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : ''; // 加密失败则机密不落盘
+            } catch (e) { h[f] = ''; }
+          } else {
+            h[f] = ''; // 无加密能力（如浏览器版）：机密仅本次运行内存
+          }
         }
       }
     }
@@ -3397,15 +3455,18 @@ async function loadMonitorCfg() {
     for (const k of Object.keys(obj)) {
       const hosts = (obj[k] && Array.isArray(obj[k].hosts)) ? obj[k].hosts : [];
       for (const h of hosts) {
-        if (h && typeof h === 'object' && typeof h.password === 'string' && h.password.indexOf(SECRET_PREFIX) === 0) {
-          if (sec) {
-            try {
-              const r = await sec.decryptSecret(h.password.slice(SECRET_PREFIX.length));
-              h.password = (r && r.ok) ? r.text : '';
-            } catch (e) { h.password = ''; }
-          } else h.password = '';
+        if (!h || typeof h !== 'object') continue;
+        for (const f of MON_SECRET_FIELDS) {
+          if (typeof h[f] === 'string' && h[f].indexOf(SECRET_PREFIX) === 0) {
+            if (sec) {
+              try {
+                const r = await sec.decryptSecret(h[f].slice(SECRET_PREFIX.length));
+                h[f] = (r && r.ok) ? r.text : '';
+              } catch (e) { h[f] = ''; }
+            } else h[f] = '';
+          }
+          // 旧版明文残留：下次保存时统一加密；本轮不落盘新明文
         }
-        // 旧版明文残留：下次保存时统一加密；本轮不落盘新明文
       }
     }
     return obj;
@@ -3472,6 +3533,9 @@ function monitorRow(host, saved) {
     port: saved.port != null ? String(saved.port) : '',
     username: saved.username || 'admin',
     password: saved.password || '',
+    authMode: saved.authMode === 'key' ? 'key' : 'password',
+    privateKey: typeof saved.privateKey === 'string' ? saved.privateKey : '',
+    keyPass: typeof saved.keyPass === 'string' ? saved.keyPass : '',
     commands: Array.isArray(saved.commands) ? saved.commands.slice() : [],
     onConnect: normCmds(saved.onConnect, []),
     readOnly: !!saved.readOnly,
@@ -3501,6 +3565,9 @@ function normalizeMonitorHosts(cfg) {
         port: h.port != null ? String(h.port) : '',
         username: h.username || 'admin',
         password: h.password || '',
+        authMode: h.authMode === 'key' ? 'key' : 'password',
+        privateKey: typeof h.privateKey === 'string' ? h.privateKey.slice(0, 65536) : '',
+        keyPass: typeof h.keyPass === 'string' ? h.keyPass.slice(0, 1024) : '',
         readOnly: !!h.readOnly,
         probeEnabled: !!h.probeEnabled,
         probeType: h.probeType === 'icmp' ? 'icmp' : 'tcp',
@@ -3664,7 +3731,7 @@ async function reconcileMonitors() {
       try { const fp = localStorage.getItem('topoShellFp:' + row.host); if (fp && fp.indexOf('SHA256:') === 0) expectFp = fp; } catch (e) {}
       const res = await bridge.start(Object.assign(
         { key: hk, deviceId: node.id, name: node.name, expectFp, host: row.host },
-        { protocol: row.protocol, port: row.port, username: row.username, password: row.password },
+        { protocol: row.protocol, port: row.port, username: row.username, password: row.password, privateKey: row.privateKey || '', keyPassphrase: row.keyPass || '' },
         { commands: row.readOnly ? [] : (Array.isArray(row.commands) ? row.commands : []), readOnly: !!row.readOnly, onConnect: row.onConnect || [], intervalSec: cfg.intervalSec, cmdDelayMs: cfg.cmdDelayMs },
         { probe: { enabled: row.probeEnabled, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
         { alerts: row.alerts },
@@ -3771,6 +3838,16 @@ function openMonitorConfig(id) {
         <label class="mh-onc" title="连接时执行命令：每次连接成功（含自动重连）仅执行一次，先于周期循环命令发出；每行一条，依次执行">连接时
           <textarea class="mh-onc-ta" rows="2" placeholder="命令（每行一条，连接成功时依次执行）">${U.escHtml(Array.isArray(r.onConnect) ? r.onConnect.join('\n') : (r.onConnect || ''))}</textarea>
         </label>
+        <label class="mh-auth" title="SSH 认证方式：密码，或公钥（粘贴/导入私钥，Telnet 不适用）">认证
+          <select class="mh-auth-sel"><option value="password"${r.authMode !== 'key' ? ' selected' : ''}>密码</option><option value="key"${r.authMode === 'key' ? ' selected' : ''}>私钥</option></select>
+        </label>
+        <div class="mh-key-wrap" style="display:none;width:100%">
+          <textarea class="mh-key" rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;粘贴 OpenSSH / PEM / PKCS#8 私钥，或点「导入私钥文件」">${U.escHtml(typeof r.privateKey === 'string' ? r.privateKey : '')}</textarea>
+          <div style="display:flex;gap:8px;margin-top:4px;align-items:center">
+            <input class="mh-keypass" type="password" placeholder="私钥口令（可空）" value="${U.escHtml(typeof r.keyPass === 'string' ? r.keyPass : '')}" autocomplete="new-password"/>
+            <button type="button" class="tb mh-keyfile">导入私钥文件…</button>
+          </div>
+        </div>
         <label class="mh-pr" title="按间隔探测该地址连通性，失败时侧栏变红并弹通知（仅读取模式同样适用）"><input type="checkbox" class="mh-pr-cb"${r.probeEnabled ? ' checked' : ''}/>在线探测</label>
         <select class="mh-pr-type" title="探测方式"><option value="tcp"${r.probeType !== 'icmp' ? ' selected' : ''}>TCP</option><option value="icmp"${r.probeType === 'icmp' ? ' selected' : ''}>ICMP</option></select>
         <input class="mh-pr-int" type="number" min="5" max="3600" title="探测间隔（秒）" value="${U.escHtml(r.probeIntervalSec)}"/><span class="mh-unit">秒</span>
@@ -3824,13 +3901,31 @@ function openMonitorConfig(id) {
       if (hidden) alertsWrap.querySelector('textarea').focus();
     };
     rowEl.querySelector('.mh-del').onclick = () => rowEl.remove();
+    // 认证方式切换：私钥模式展开私钥区（仅 SSH 生效；Telnet 仍走密码）
+    const authSel = rowEl.querySelector('.mh-auth-sel');
+    const keyWrap = rowEl.querySelector('.mh-key-wrap');
+    const applyAuthUi = () => { keyWrap.style.display = (authSel.value === 'key' && rowEl.querySelector('.mh-proto').value === 'ssh') ? '' : 'none'; };
+    authSel.addEventListener('change', applyAuthUi);
+    rowEl.querySelector('.mh-proto').addEventListener('change', applyAuthUi);
+    rowEl.querySelector('.mh-keyfile').onclick = () => {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = '.pem,.key,.txt,.id_rsa,.ed25519,.ecdsa';
+      inp.onchange = () => {
+        const f = inp.files && inp.files[0];
+        if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => { rowEl.querySelector('.mh-key').value = String(rd.result || ''); toast('已导入私钥：' + f.name); };
+        rd.readAsText(f);
+      };
+      inp.click();
+    };
     for (const inp of rowEl.querySelectorAll('input, select')) {
       inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } });
     }
   };
   const addRow = (r) => {
     const d = document.createElement('div');
-    d.innerHTML = rowHtml(r || { host: '', protocol: 'ssh', port: '', username: 'admin', password: '', commands: [] });
+    d.innerHTML = rowHtml(r || { host: '', protocol: 'ssh', port: '', username: 'admin', password: '', authMode: 'password', privateKey: '', keyPass: '', commands: [] });
     const rowEl = d.firstElementChild;
     listEl.appendChild(rowEl);
     wireRow(rowEl);
@@ -3871,6 +3966,9 @@ function openMonitorConfig(id) {
         port: rowEl.querySelector('.mh-port').value.trim(),
         username: rowEl.querySelector('.mh-user').value.trim(),
         password: rowEl.querySelector('.mh-pass').value,
+        authMode: rowEl.querySelector('.mh-auth-sel').value === 'key' ? 'key' : 'password',
+        privateKey: rowEl.querySelector('.mh-key').value.trim().slice(0, 65536),
+        keyPass: rowEl.querySelector('.mh-keypass').value.slice(0, 1024),
         readOnly: rowEl.querySelector('.mh-ro-cb').checked,
         commands: rowEl.querySelector('.mh-cmds').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
         onConnect: rowEl.querySelector('.mh-onc-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
@@ -3889,6 +3987,7 @@ function openMonitorConfig(id) {
     }).filter(r => r.host);
     if (!rows.length) { toast('请至少填写一个管理地址'); return; }
     if (rows.some(r => !r.readOnly && !r.commands.length && !r.probeEnabled)) { toast('每个非「仅读取」的管理地址至少填写一条执行命令，或勾选「在线探测」仅探测'); return; }
+    if (rows.some(r => r.protocol === 'ssh' && r.authMode === 'key' && !r.privateKey)) { toast('选了「私钥」认证的管理地址需粘贴或导入私钥（或改回密码认证）'); return; }
     const intervalSec = parseFloat(ov.querySelector('#monInterval').value);
     if (!Number.isFinite(intervalSec) || intervalSec < 1) { toast('循环间隔需 ≥ 1 秒'); return; }
     const cfg = {
@@ -4505,7 +4604,20 @@ function openWebShell(id) {
         <div class="frow"><label>端口</label><input id="wsPort" type="number" min="1" max="65535" value="${U.escHtml(saved.port || '')}"/></div>
         <div class="frow"><label>用户名</label><input id="wsUser" type="text" placeholder="admin" value="${U.escHtml(saved.username || 'admin')}" autocomplete="off"/></div>
       </div></div>
-      <div class="frow">
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>SSH 认证</label>
+          <select id="wsAuth"><option value="password">密码</option><option value="key">私钥</option></select>
+        </div>
+        <div class="frow" style="flex:1"><label>私钥口令（可空）</label>
+          <input id="wsKeyPass" type="password" autocomplete="new-password"/>
+        </div>
+      </div></div>
+      <div class="frow" id="wsKeyRow" style="display:none">
+        <label>私钥（OpenSSH / PEM / PKCS#8，粘贴或导入）</label>
+        <textarea id="wsKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+        <div style="margin-top:6px"><button type="button" class="tb" id="wsKeyFile">导入私钥文件…</button></div>
+      </div>
+      <div class="frow" id="wsPassRow">
         <label>密码</label>
         <input id="wsPass" type="password" placeholder="SSH 密码；Telnet 通常可留空" autocomplete="new-password"/>
       </div>
@@ -4529,6 +4641,27 @@ function openWebShell(id) {
     if (!cur || cur === otherDefault) portEl.value = autoPort();
   });
   if (!portEl.value.trim()) portEl.value = autoPort();
+  // 认证方式切换：私钥模式显示私钥区、隐藏密码行（Telnet 固定密码模式）
+  const authEl = ov.querySelector('#wsAuth');
+  const applyAuthUi = () => {
+    const key = authEl.value === 'key' && protoEl.value === 'ssh';
+    ov.querySelector('#wsKeyRow').style.display = key ? '' : 'none';
+    ov.querySelector('#wsPassRow').style.display = (authEl.value === 'key' && protoEl.value === 'ssh') ? 'none' : '';
+  };
+  authEl.addEventListener('change', applyAuthUi);
+  protoEl.addEventListener('change', applyAuthUi);
+  ov.querySelector('#wsKeyFile').onclick = () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.pem,.key,.txt,.id_rsa,.ed25519,.ecdsa';
+    inp.onchange = () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      const rd = new FileReader();
+      rd.onload = () => { ov.querySelector('#wsKey').value = String(rd.result || ''); toast('已导入私钥：' + f.name); };
+      rd.readAsText(f);
+    };
+    inp.click();
+  };
   const doConnect = async () => {
     const cfg = {
       protocol: protoEl.value,
@@ -4538,6 +4671,11 @@ function openWebShell(id) {
       password: ov.querySelector('#wsPass').value,
       title: n.name
     };
+    if (cfg.protocol === 'ssh' && authEl.value === 'key') {
+      cfg.privateKey = ov.querySelector('#wsKey').value.trim().slice(0, 65536);
+      cfg.keyPassphrase = ov.querySelector('#wsKeyPass').value.slice(0, 1024);
+      if (!cfg.privateKey) { toast('请粘贴或导入私钥（或改回密码认证）'); return; }
+    }
     try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
     if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
     try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username })); } catch (e) {}
@@ -4582,7 +4720,11 @@ if (typeof globalThis !== 'undefined') {
   const maskMonitorCfg = () => {
     const out = {};
     for (const [k, v] of Object.entries(state.monitorCfg)) {
-      out[k] = Object.assign({}, v, { hosts: (Array.isArray(v.hosts) ? v.hosts : []).map(h => Object.assign({}, h, { password: h && h.password ? '***' : '' })) });
+      out[k] = Object.assign({}, v, { hosts: (Array.isArray(v.hosts) ? v.hosts : []).map(h => {
+        const m = Object.assign({}, h);
+        for (const f of MON_SECRET_FIELDS) m[f] = (h && h[f]) ? '***' : '';
+        return m;
+      }) });
     }
     return out;
   };

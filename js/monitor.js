@@ -51,9 +51,11 @@ function cleanBackupLines(lines, cmds) {
   return out;
 }
 
-/** 命令提示符行（会话就绪判据）：<SW1> / [SW1] / R1> / R1# / Huawei> 等。
- *  覆盖华为用户/系统视图、思科/锐捷/华三等常见提示符形态。 */
-const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{1,80}[>#\]]\s*$/;
+/** 命令提示符形态（会话就绪判据）：<SW1> / [SW1] / R1> / R1# / Huawei> / 裸 > 等常见形态。
+ *  不锚定行尾：真实设备的首包提示符常与 Telnet 协商残渣/回显粘连成一行（如 "R1> <FFFD>..x("），
+ *  整行匹配会漏判、导致每轮等满就绪超时（15s）。就绪判定只看行首形态：
+ *  误提前只会让命令早发（等价于超时兜底的旧行为），无副作用。 */
+const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/;
 /** 会话就绪等待上限：设备登录/初始化（banner）通常数秒内完成，超时兜底照常执行不阻塞 */
 const READY_TIMEOUT_MS = 15000;
 
@@ -157,6 +159,9 @@ class MonitorManager extends EventEmitter {
     if (port < 1 || port > 65535) return { ok: false, error: '端口无效' };
     const username = String(opts.username || '').trim().slice(0, 128) || DEFAULTS.username;
     const password = String(opts.password || '').slice(0, 1024);
+    // SSH 公钥认证（可选）：私钥 PEM/OpenSSH 文本 + 私钥口令；两者均可为空（回退密码认证）
+    const privateKey = typeof opts.privateKey === 'string' ? opts.privateKey.trim().slice(0, 65536) : '';
+    const keyPassphrase = typeof opts.keyPassphrase === 'string' ? opts.keyPassphrase.slice(0, 1024) : '';
     const readOnly = !!opts.readOnly; // 仅读取模式：不执行周期循环命令，只记录设备主动输出（连接时执行命令仍会执行一次）
     const cmds = Array.isArray(opts.commands) ? opts.commands : [];
     const commands = [];
@@ -248,7 +253,7 @@ class MonitorManager extends EventEmitter {
     backup.waitMs = Math.max(500, Math.min(60000, backupWaitMs));
     return {
       ok: true,
-      cfg: { key, deviceId, name, protocol, host, port, username, password, expectFp, commands, onConnect: onConnectCmds, readOnly, intervalSec, cmdDelayMs, retrySec, initDelayMs, probe, alerts, backup }
+      cfg: { key, deviceId, name, protocol, host, port, username, password, privateKey, keyPassphrase, expectFp, commands, onConnect: onConnectCmds, readOnly, intervalSec, cmdDelayMs, retrySec, initDelayMs, probe, alerts, backup }
     };
   }
 
@@ -257,6 +262,7 @@ class MonitorManager extends EventEmitter {
       key: cfg.key, deviceId: cfg.deviceId, name: cfg.name,
       protocol: cfg.protocol, host: cfg.host, port: cfg.port,
       username: cfg.username, password: cfg.password,
+      privateKey: cfg.privateKey || '', keyPassphrase: cfg.keyPassphrase || '',
       expectFp: cfg.expectFp || '',
       commands: cfg.commands.slice(),
       onConnect: (cfg.onConnect || []).slice(),
@@ -398,6 +404,8 @@ class MonitorManager extends EventEmitter {
       port: job.port,
       username: job.username,
       password: job.password,
+      privateKey: job.privateKey || '',
+      keyPassphrase: job.keyPassphrase || '',
       cols: 120, rows: 40,
       expectFp: job.expectFp || ''
     });
@@ -525,11 +533,14 @@ class MonitorManager extends EventEmitter {
   }
 
   /** 等待会话就绪（收到设备命令提示符行）。设备登录/初始化未完成时下发的命令会被吞；
-   *  超时（READY_TIMEOUT_MS）后照常执行，不让监控/备份被长时间阻塞。 */
+   *  超时（READY_TIMEOUT_MS）后照常执行，不让监控/备份被长时间阻塞。
+   *  另探测 lineBuf 残段：设备提示符常不带换行结尾（如首包 "…\r\n> " 截止于提示符），
+   *  若只等完整行会白等满超时。 */
   async _waitReady(job, gen, timeoutMs) {
     if (job._ready) return true;
     const t0 = Date.now();
     while (job.enabled && !job.stopping && gen === job.gen && !job._ready && (Date.now() - t0) < timeoutMs) {
+      if (job.lineBuf && PROMPT_RE.test(job.lineBuf.trim())) { job._ready = true; break; }
       await sleep(200);
     }
     return !!job._ready;
@@ -841,6 +852,7 @@ class MonitorManager extends EventEmitter {
       const r = this.shell.connect({
         protocol: job.protocol, host: job.host, port: job.port,
         username: job.username, password: job.password,
+        privateKey: job.privateKey || '', keyPassphrase: job.keyPassphrase || '',
         cols: 120, rows: 40, expectFp: job.expectFp || ''
       });
       if (!r.ok) { this._finishBackup(job, gen, { ok: false, error: r.error || '备份连接失败' }); resolve(); return; }

@@ -1430,6 +1430,19 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         if (j._ready !== true) { pShapeOk = false; console.log('  提示符未识别: ' + JSON.stringify(p)); }
       }
       ok(pShapeOk, '常见厂商提示符全部识别为就绪');
+      // 冒烟暴露的两类漏判（R4 修复）：提示符粘连协商残渣/回显、裸提示符（如思科 SSH 的 "> "）
+      {
+        const j5 = mgr._newJob(v1.cfg); j5.logStream = { bytesWritten: 0, write() {} };
+        j5.key = 'promptdirty'; mgr.jobs.set(j5.key, j5); mgr._bySid.set('s1', j5.key);
+        mgr._onOutput('s1', 'R1> \uFFFD..x(\r\n');
+        eq(j5._ready, true, '提示符粘连协商残渣（R1> <FFFD>..x(）仍判就绪');
+        const j6 = mgr._newJob(v1.cfg); j6.logStream = { bytesWritten: 0, write() {} };
+        j6.key = 'promptbare'; mgr.jobs.set(j6.key, j6); mgr._bySid.set('s1', j6.key);
+        mgr._onOutput('s1', 'SSH-READY\r\n> '); // 裸提示符无换行结尾：残留在 lineBuf
+        const t6 = Date.now();
+        const got6 = await mgr._waitReady(j6, j6.gen, 2000);
+        ok(got6 === true && (Date.now() - t6) < 1500, 'lineBuf 残段中的裸提示符（> ）判就绪（不等满超时）');
+      }
       // _waitReady 超时兜底：设备长时间无提示符也不阻塞
       {
         const j4 = mgr._newJob(v1.cfg); j4.logStream = { bytesWritten: 0, write() {} };
@@ -1655,6 +1668,87 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       mgr.close(r.id);
       for (const s of socks) s.destroy();
       await new Promise((res) => server.close(res));
+    }
+
+    // SSH 公钥认证（R4 新功能）：PKCS#8 私钥完成认证（服务端仅放行 publickey）
+    {
+      const { generateKeyPairSync } = require('crypto');
+      const { privateKey: privPem } = generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs1', format: 'pem' } // PKCS#1（ssh2 1.17 对 Node 生成的 PKCS#8 解析不支持）
+      });
+      const { Server } = require('ssh2');
+      const hostKey = fs.readFileSync(path.join(root, 'node_modules', 'ssh2', 'test', 'fixtures', 'ssh_host_rsa_key'));
+      const socks = [];
+      const server = new Server({ hostKeys: [hostKey] }, (client) => {
+        client.on('error', () => {});
+        client.on('authentication', (ctx) => {
+          if (ctx.method === 'publickey') return ctx.accept();
+          ctx.reject(); // 密码/keyboard-interactive 一律拒绝：证明走的是公钥
+        });
+        client.on('ready', () => {
+          client.on('session', (accept) => {
+            const sess = accept();
+            sess.on('pty', (a, r2, info) => a());
+            sess.on('shell', (acc) => { acc().write('PUBKEY-OK\r\n'); });
+          });
+        });
+      });
+      await new Promise((res) => server.listen(0, '127.0.0.1', res));
+      const mgr = new ShellManager();
+      const outs = [], statuses = [];
+      mgr.on('output', (id, d) => outs.push(d));
+      mgr.on('status', (id, info) => statuses.push(info));
+      const r = mgr.connect({ protocol: 'ssh', host: '127.0.0.1', port: server.address().port, username: 'ops', privateKey: privPem });
+      await waitFor(() => statuses.some(s => s.state === 'fingerprint'), 4000);
+      ok(mgr.trustFingerprint('127.0.0.1', true), '公钥测试指纹确认放行');
+      await waitFor(() => outs.join('').includes('PUBKEY-OK'), 5000);
+      ok(outs.join('').includes('PUBKEY-OK'), 'SSH 私钥（PKCS#1 PEM）认证成功建立会话');
+      ok(!statuses.some(s => s.state === 'error'), '私钥认证过程无错误状态');
+      mgr.close(r.id);
+      for (const s of socks) s.destroy();
+      await new Promise((res) => server.close(res));
+    }
+
+    // 监控私钥链路：start 接受私钥参数且 status() 不泄露机密字段
+    {
+      const os = require('os');
+      const tmpM = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-mon-'));
+      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+      const mm = new MonitorManager(new ShellManager(), tmpM, path.join(tmpM, 'trust.json'));
+      const rs = mm.start({
+        key: 'devA@10.255.255.1', deviceId: 'devA', name: 'devA',
+        protocol: 'ssh', host: '10.255.255.1', port: 22, commands: ['display version'],
+        password: 'pw1', privateKey: '-----BEGIN TEST KEY-----', keyPassphrase: 'topsecret'
+      });
+      ok(rs.ok === true, '监控任务接受私钥/口令参数');
+      const items = mm.status();
+      const it = items[0] || {};
+      ok(items.length === 1, '任务已登记');
+      ok(!('privateKey' in it) && !('password' in it) && !('keyPassphrase' in it),
+        'status() 不输出 password/privateKey/keyPassphrase 字段');
+      mm.stopAll();
+      fs.rmSync(tmpM, { recursive: true, force: true });
+    }
+
+    // 资产清单行构建（R4 新功能）
+    console.log('== 回归：资产清单行构建（新功能） ==');
+    {
+      const nodes = [
+        { id: 'n1', name: '核心-R1', type: 'router', mgmt: '10.0.0.1', note: '出口' },
+        { id: 'n2', name: '接入-SW1', type: 'switch', mgmt: '10.0.0.2', mgmts: ['10.0.0.2', '192.168.1.2'], note: '' }
+      ];
+      const mon = { n1: { state: 'monitoring', text: '监控中：10.0.0.1:22（SSH）' } };
+      const bk = { '核心-R1': { lastAt: Date.now(), count: 3 } };
+      const rows = U.buildInventoryRows(nodes, mon, bk);
+      ok(rows[0].join(',') === '设备名,类型,管理地址,备注,监控状态,最近配置备份,备份份数', '表头完整');
+      ok(rows[1][0] === '核心-R1' && rows[1][1] === '路由器', '内置类型中文标签');
+      ok(rows[1][2] === '10.0.0.1' && rows[1][4].indexOf('监控中') === 0, '管理地址与监控状态取值');
+      ok(/^\d{8}_\d{4}$/.test(rows[1][5]) && rows[1][6] === '3', '最近备份时间与份数');
+      ok(rows[2][2] === '10.0.0.2 / 192.168.1.2', '多管理口斜杠连接');
+      ok(rows[2][4] === '未监控', '无监控状态设备回退「未监控」');
+      ok(U.buildInventoryRows(null, null, null)[0].length === 7, '空入参不抛错仅表头');
     }
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }

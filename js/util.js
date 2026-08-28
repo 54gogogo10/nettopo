@@ -7,7 +7,7 @@
 const U = {};
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260820b';
+U.APP_VERSION = 'v20260828b';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -808,6 +808,35 @@ U.labelLines = (l) => [
 U.orderLabelLines = (lines, na, nb) => {
   if (!lines || lines.length !== 2 || !na || !nb) return lines;
   return (na.y + na.h / 2) < (nb.y + nb.h / 2) ? [lines[1], lines[0]] : lines;
+};
+
+/* ---------- 资产清单行构建（导出 Excel/CSV 用；纯函数，Node 测试可调用） ---------- */
+U.buildInventoryRows = (nodes, monStatus, backupInfo) => {
+  nodes = Array.isArray(nodes) ? nodes : [];
+  monStatus = monStatus || {};
+  backupInfo = backupInfo || {}; // 设备名 -> { lastAt, count }
+  const label = (t) => {
+    const def = U.TYPES[t] || U.TYPES.other;
+    const ct = (Array.isArray(U.customTypes) ? U.customTypes : []).find(x => x && x.key === t);
+    return (ct && ct.label) || def.label || String(t || 'other');
+  };
+  const rows = [['设备名', '类型', '管理地址', '备注', '监控状态', '最近配置备份', '备份份数']];
+  for (const n of nodes) {
+    if (!n) continue;
+    const st = monStatus[n.id] || {};
+    const bi = backupInfo[n.name] || backupInfo[n.id] || {};
+    const mgmts = U.nodeMgmts(n);
+    rows.push([
+      String(n.name || ''),
+      label(n.type),
+      (mgmts.length ? mgmts : [n.mgmt]).filter(Boolean).join(' / '),
+      String(n.note || ''),
+      String(st.text || st.state || '未监控'),
+      bi.lastAt ? U.fmtDate(new Date(bi.lastAt)) : '',
+      bi.count != null ? String(bi.count) : ''
+    ]);
+  }
+  return rows;
 };
 
 /* ---------- 子网分组（按 /24 网段归类设备） ---------- */
