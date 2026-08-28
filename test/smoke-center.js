@@ -127,6 +127,27 @@ async function connectCDP(target) {
     await sleep(300);
     ok(!(await cdp.eval("!!document.querySelector('.mc-dialog')")), '监控中心可关闭');
 
+    // ---- 配置合规检查 UI（默认规则 + 扫描备份库） ----
+    await cdp.eval('__topo.openComplianceCheck(); true');
+    await sleep(400);
+    ok(await cdp.eval("!!document.querySelector('#compRules')"), '合规检查弹窗打开');
+    ok(await cdp.eval("document.querySelectorAll('.comp-rule').length >= 5"), '默认规则已加载（≥5 条）');
+    await cdp.eval("(() => { const b = [...document.querySelectorAll('.modal [data-act=run]')].pop(); b && b.click(); return true; })()");
+    let compTotal = '';
+    const tComp = Date.now();
+    while (Date.now() - tComp < 6000) {
+      compTotal = await cdp.eval("((document.querySelector('.comp-total') || {}).textContent || '').trim()");
+      if (compTotal) break;
+      await sleep(200);
+    }
+    ok(compTotal.includes('1 个地址') && compTotal.includes('违规'), '扫描备份库返回结果（' + compTotal + '）');
+    ok(await cdp.eval("document.querySelectorAll('.comp-chip').length >= 5"), '逐规则通过/违规芯片已渲染');
+    ok(await cdp.eval("!!document.querySelector('.comp-chip.fail')"), '示例配置无 NTP/AAA/默认路由被正确判违规');
+    ok(await cdp.eval(`(() => { const b = document.querySelector('#compRules').closest('.modal').querySelector('[data-act=export]'); return b && !b.disabled; })()`), '扫描后「导出报告」按钮可用');
+    await cdp.eval("(() => { const m = document.querySelector('#compRules').closest('.modal'); const b = m && m.querySelector('[data-act=close]'); b && b.click(); return true; })()");
+    await sleep(300);
+    ok(!(await cdp.eval("!!document.querySelector('#compRules')")), '合规检查弹窗可关闭');
+
     // ---- ZIP 导出 ----
     const zip = await cdp.eval("(()=>{ const files = [{ name: 'huawei/R1.txt', content: 'ip address 10.0.0.1' }, { name: '思科 设备/Core.txt', content: '! test' }]; const b = TopoUtil.zipFiles(files); return { len: b.length, pk: b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04 }; })()");
     ok(zip && zip.pk && zip.len > 60, 'zipFiles 生成合法 ZIP（PK 头，' + zip.len + ' 字节）');

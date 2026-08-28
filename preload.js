@@ -51,10 +51,12 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   setTray: (enabled) => ipcRenderer.invoke('monitor:tray', { enabled }),
   testClose: () => ipcRenderer.invoke('monitor:test-close'),
   overview: () => ipcRenderer.invoke('monitor:overview'),
+  uptime: () => ipcRenderer.invoke('monitor:uptime'),
   onStatus: (cb) => ipcRenderer.on('monitor:status', (_e, info) => cb(info)),
   onProbe: (cb) => ipcRenderer.on('monitor:probe', (_e, info) => cb(info)),
   onAlert: (cb) => ipcRenderer.on('monitor:alert', (_e, info) => cb(info)),
-  onBackup: (cb) => ipcRenderer.on('monitor:backup', (_e, info) => cb(info))
+  onBackup: (cb) => ipcRenderer.on('monitor:backup', (_e, info) => cb(info)),
+  onSysinfo: (cb) => ipcRenderer.on('monitor:sysinfo', (_e, info) => cb(info))
 });
 
 contextBridge.exposeInMainWorld('topoConfigBackup', {

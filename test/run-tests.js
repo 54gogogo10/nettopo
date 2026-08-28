@@ -6,7 +6,7 @@ const vm = require('vm');
 const { execSync } = require('child_process');
 
 const root = path.join(__dirname, '..');
-const sandbox = { console, Uint8Array, TextEncoder, TextDecoder, structuredClone, Map, Set, Promise, Math, requestAnimationFrame: (fn) => setTimeout(fn, 0), localStorage: { getItem: () => null, setItem: () => {} } };
+const sandbox = { console, Uint8Array, TextEncoder, TextDecoder, structuredClone, Map, Set, Promise, Math, requestAnimationFrame: (fn) => setTimeout(fn, 0), localStorage: { getItem: () => null, setItem: () => {} }, crypto: require('crypto').webcrypto, btoa: (s) => Buffer.from(s, 'binary').toString('base64'), atob: (s) => Buffer.from(s, 'base64').toString('binary') };
 vm.createContext(sandbox);
 
 for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/visio.js', 'js/pdf.js']) {
@@ -1733,8 +1733,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     }
 
     // 资产清单行构建（R4 新功能）
-    console.log('== 回归：资产清单行构建（新功能） ==');
-    {
+    console.log('== 回归：资产清单行构建（新功能） ==');    {
       const nodes = [
         { id: 'n1', name: '核心-R1', type: 'router', mgmt: '10.0.0.1', note: '出口' },
         { id: 'n2', name: '接入-SW1', type: 'switch', mgmt: '10.0.0.2', mgmts: ['10.0.0.2', '192.168.1.2'], note: '' }
@@ -1742,13 +1741,321 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const mon = { n1: { state: 'monitoring', text: '监控中：10.0.0.1:22（SSH）' } };
       const bk = { '核心-R1': { lastAt: Date.now(), count: 3 } };
       const rows = U.buildInventoryRows(nodes, mon, bk);
-      ok(rows[0].join(',') === '设备名,类型,管理地址,备注,监控状态,最近配置备份,备份份数', '表头完整');
+      ok(rows[0].join(',') === '设备名,类型,管理地址,设备型号,软件版本,备注,监控状态,最近配置备份,备份份数', '表头完整（含型号/软件版本列）');
       ok(rows[1][0] === '核心-R1' && rows[1][1] === '路由器', '内置类型中文标签');
-      ok(rows[1][2] === '10.0.0.1' && rows[1][4].indexOf('监控中') === 0, '管理地址与监控状态取值');
-      ok(/^\d{8}_\d{4}$/.test(rows[1][5]) && rows[1][6] === '3', '最近备份时间与份数');
+      ok(rows[1][2] === '10.0.0.1' && rows[1][6].indexOf('监控中') === 0, '管理地址与监控状态取值');
+      ok(/^\d{8}_\d{4}$/.test(rows[1][7]) && rows[1][8] === '3', '最近备份时间与份数');
       ok(rows[2][2] === '10.0.0.2 / 192.168.1.2', '多管理口斜杠连接');
-      ok(rows[2][4] === '未监控', '无监控状态设备回退「未监控」');
-      ok(U.buildInventoryRows(null, null, null)[0].length === 7, '空入参不抛错仅表头');
+      ok(rows[2][6] === '未监控', '无监控状态设备回退「未监控」');
+      ok(U.buildInventoryRows(null, null, null)[0].length === 9, '空入参不抛错仅表头（9 列）');
+    }
+
+    // 本批新功能：直角布线几何 / 工程口令加密 / SNMP 编解码 / 备份自动合规巡检
+    console.log('== 回归：直角布线几何（新功能） ==');
+    {
+      const nodes = [
+        { id: 'a', name: 'A', type: 'router', x: 0, y: 0, w: 160, h: 56 },
+        { id: 'b', name: 'B', type: 'switch', x: 500, y: 300, w: 160, h: 56 }
+      ];
+      const links = [{ id: 'l1', a: 'a', b: 'b', aIf: 'GE0/0/1', aIp: '10.0.0.1', bIf: 'GE0/0/2', bIp: '10.0.0.2', bw: '1000' }];
+      const straight = U.linkGeom(nodes, links);
+      ok(!straight.l1.pts && straight.l1.x1 != null, '默认直线模式无 pts');
+      const ortho = U.linkGeom(nodes, links, { ortho: true });
+      ok(Array.isArray(ortho.l1.pts) && ortho.l1.pts.length === 4, '直角模式产出 4 点折线');
+      const p = ortho.l1.pts;
+      ok(p[0][1] === p[1][1] && p[1][0] === p[2][0] && p[2][1] === p[3][1], '折线为正交（横-竖-横三段）');
+      ok(p[0][0] === straight.l1.x1 && p[3][0] === straight.l1.x2, '端点与直线模式一致');
+      const same = U.linkGeom(
+        [{ id: 'a', name: 'A', type: 'router', x: 0, y: 0, w: 160, h: 56 }, { id: 'b', name: 'B', type: 'switch', x: 500, y: 0, w: 160, h: 56 }],
+        [{ id: 'l1', a: 'a', b: 'b' }], { ortho: true });
+      ok(!same.l1.pts, '等高设备退化为直线（pts=null）');
+    }
+
+    console.log('== 回归：工程口令加解密（新功能） ==');
+    {
+      ok(U.isProjectCryptoAvailable() === true, 'Node webcrypto 可用（沙箱注入）');
+      const secret = JSON.stringify({ app: 'NetTopo', nodes: [{ id: 'n1', name: '机密拓扑' }] });
+      const env = await U.encryptProjectText(secret, '口令123');
+      const envObj = JSON.parse(env);
+      ok(envObj.app === 'NetTopo-Enc' && envObj.v === 1 && !!envObj.ct && !!envObj.salt && !!envObj.iv, '信封格式正确（NetTopo-Enc）');
+      ok(env.indexOf('机密拓扑') < 0, '密文中不含明文');
+      const back = await U.decryptProjectText(env, '口令123');
+      eq(back, secret, '正确口令解密还原');
+      let threw = false;
+      try { await U.decryptProjectText(env, '错口令'); } catch (e) { threw = true; }
+      ok(threw === true, '错误口令解密抛错');
+      threw = false;
+      try { await U.decryptProjectText('{"app":"NetTopo"}', 'x'); } catch (e) { threw = true; }
+      ok(threw === true, '非加密工程被拒绝');
+    }
+
+    console.log('== 回归：SNMP v2c 编解码（新功能） ==');
+    {
+      const { snmpGet, extractVersion, OID_SYSDESCR } = require(path.join(root, 'js', 'monitor.js'));
+      const dgram = require('dgram');
+      const agent = dgram.createSocket('udp4');
+      agent.on('message', (msg, rinfo) => {
+        const tlv = (tag, body) => Buffer.concat([Buffer.from([tag, body.length]), body]);
+        const val = Buffer.from('Huawei Versatile Routing Platform Software VRP (R) software V300R019 Version 8.180', 'utf8');
+        const vb = tlv(0x30, Buffer.concat([tlv(0x06, Buffer.from([43, 6, 1, 2, 1, 1, 1, 0])), tlv(0x04, val)]));
+        const pduBody = Buffer.concat([tlv(0x02, Buffer.from([0x12, 0x34])), tlv(0x02, Buffer.from([0])), tlv(0x02, Buffer.from([0])), tlv(0x30, vb)]);
+        const resp = tlv(0x30, Buffer.concat([tlv(0x02, Buffer.from([1])), tlv(0x04, Buffer.from('public')), tlv(0xa2, pduBody)]));
+        agent.send(resp, rinfo.port, rinfo.address);
+      });
+      await new Promise((res) => agent.bind(0, '127.0.0.1', res));
+      const r = await snmpGet('127.0.0.1', 'public', [OID_SYSDESCR], 2000, agent.address().port);
+      ok(r.ok === true, 'SNMP GET 收到 mock agent 响应');
+      const vb0 = (r.varbinds || [])[0] || {};
+      ok(vb0.oid === OID_SYSDESCR, '响应 OID 正确解码（' + vb0.oid + '）');
+      ok(String(vb0.value).indexOf('Huawei') === 0, 'OCTET STRING 值解码正确');
+      ok(extractVersion(String(vb0.value)) === '8.180', 'sysDescr 启发式提取版本（华为 Version 8.180）');
+      ok(extractVersion('Huawei Versatile Routing Platform Software VRP (R) software, Version 8.180 (S5735-H48UM V300R019C00SPC500)') === '8.180', '真实华为 sysDescr 格式提取');
+      ok(extractVersion('Cisco IOS Software, Version 15.2(4)M') === '15.2(4)M', '思科 IOS 版本提取');
+      const r2 = await snmpGet('127.0.0.1', 'public', [OID_SYSDESCR], 250, agent.address().port + 7);
+      ok(r2.ok === false, '无响应端口超时返回失败');
+      agent.close();
+    }
+
+    console.log('== 回归：备份自动合规巡检与 sysinfo（新功能） ==');
+    {
+      const os = require('os');
+      const { MonitorManager, compileComplianceRules, runCompliance } = require(path.join(root, 'js', 'monitor.js'));
+      const rules = compileComplianceRules([{ id: 'r1', name: '必须NTP', pattern: 'ntp', negate: false }, { id: 'r2', name: '禁Telnet', pattern: 'telnet server enable', negate: true }]);
+      ok(rules.length === 2 && typeof rules[0].re.test === 'function', '主进程侧规则编译可用');
+      const rep = runCompliance('ntp-service unicast-server 1.1.1.1\n#\ntelnet server enable', rules);
+      ok(rep.failed === 1 && rep.results[1].pass === false, '主进程侧检查口径与渲染层一致');
+      const tmpC = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-cmp-'));
+      const { EventEmitter } = require('events');
+      const stubShell = new EventEmitter();
+      stubShell.connect = (opts) => { stubShell.lastConnect = opts; return { ok: true, id: 'x9' }; };
+      stubShell.write = () => {}; stubShell.close = () => {}; stubShell.trustFingerprint = () => true;
+      const mm = new MonitorManager(stubShell, tmpC, path.join(tmpC, 't.json'));
+      const comps = [], sys = [];
+      mm.on('compliance', (info) => comps.push(info));
+      mm.on('sysinfo', (info) => sys.push(info));
+      const rs = mm.start({
+        key: 'd1@10.9.9.9', deviceId: 'd1', name: 'd1', protocol: 'ssh', host: '10.9.9.9', port: 22,
+        commands: ['display version'], password: 'p',
+        backup: { enabled: true, command: 'display current-configuration', compliance: { enabled: true, rules: [{ id: 'r1', name: '必须NTP', pattern: 'ntp', negate: false }, { id: 'r2', name: '禁Telnet', pattern: 'telnet server enable', negate: true }] } },
+        sysinfo: { enabled: true, community: 'pub1' }
+      });
+      ok(rs.ok === true, '任务接受合规/SNMP 参数');
+      const jobC = mm.jobs.get('d1@10.9.9.9');
+      mm._runCompliance(jobC, 1, 'telnet server enable\n#');
+      ok(comps.length === 1 && comps[0].ok === false && comps[0].failed === 2 && comps[0].total === 2,
+        '合规巡检违规触发事件（必须NTP 缺失 + 禁Telnet 命中，failed=2）');
+      ok(comps[0].items[0].name === '必须NTP' && comps[0].items[0].line === '未找到匹配行'
+        && comps[0].items[1].name === '禁Telnet' && comps[0].items[1].line === 'telnet server enable',
+        '违规项携带规则名与命中行/说明');
+      const it = mm.status()[0] || {};
+      ok(it.compliance && it.compliance.failed === 2 && it.compliance.total === 2, 'status() 携带合规概要（failed/total）');
+      mm._fetchSysInfo(jobC, jobC.gen);
+      await new Promise((res) => setTimeout(res, 300));
+      ok(sys.length === 0, '无 SNMP agent 时识别静默不广播（不抛错）');
+      mm.stopAll();
+      fs.rmSync(tmpC, { recursive: true, force: true });
+    }
+
+    // 配置合规基线引擎（新功能）
+    console.log('== 回归：配置合规基线引擎（新功能） ==');
+    {
+      const rules = U.cleanComplianceRules([
+        { id: 'r1', name: '必须NTP', pattern: 'ntp', negate: false },
+        { id: 'bad', name: '非法正则', pattern: '(', negate: false },
+        { id: 'r1', name: '重复id', pattern: 'x' },
+        { name: '缺id', pattern: 'x' },
+        { id: 'r2', name: '禁Telnet', pattern: 'telnet server enable', negate: true }
+      ]);
+      ok(rules.length === 2, '非法正则/重复id/缺id 规则被清洗（' + rules.length + ' 条）');
+      ok(rules.every(r => typeof (r.re && r.re.test) === 'function'), '规则编译为正则');
+      const rep = U.checkCompliance('ntp-service unicast-server 1.1.1.1\ntelnet server enable\n#', rules);
+      const byId = Object.fromEntries(rep.results.map(r => [r.id, r]));
+      ok(byId.r1.pass === true && byId.r1.lines[0].includes('ntp-service'), '必须类规则命中即通过并携带行');
+      ok(byId.r2.pass === false && byId.r2.lines[0].includes('telnet server enable'), '禁止类规则命中即违规并携带行');
+      const rep2 = U.checkCompliance('sysname SW1\n#', rules);
+      ok(rep2.results.find(r => r.id === 'r1').pass === false, '必须类规则缺失即违规');
+      ok(rep2.results.find(r => r.id === 'r2').pass === true, '禁止类规则无命中即通过');
+      const defs = U.loadComplianceRules();
+      ok(defs.length >= 5 && defs.every(r => r.re), '默认规则加载可用（' + defs.length + ' 条）');
+      U.saveComplianceRules(defs);
+      ok(U.complianceRules.length === defs.length, '规则保存后内存一致');
+      U.saveComplianceRules([{ id: 'x1', name: '启用', pattern: 'x', enabled: true }, { id: 'x2', name: '停用', pattern: 'y', enabled: false }]);
+      const rep3 = U.checkCompliance('x\ny\n', U.complianceRules);
+      ok(rep3.results.length === 1 && rep3.results[0].id === 'x1', '停用规则不参与检查');
+      U.saveComplianceRules(U.COMPLIANCE_DEFAULT_RULES); // 还原默认，避免污染后续用例
+    }
+
+    // Web Shell 会话审计日志（新功能）
+    console.log('== 回归：Web Shell 会话审计日志（新功能） ==');
+    {
+      const os = require('os');
+      const tmpL = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-shlog-'));
+      const socksL = [];
+      const srvL = net.createServer((s) => {
+        socksL.push(s);
+        s.on('error', () => {});
+        s.write('WELCOME-SHLOG\r\n');
+        s.on('data', (d) => { if (d.toString().includes('cmd1')) s.write('ECHO-CMD1\r\n'); });
+      });
+      await new Promise((res) => srvL.listen(0, '127.0.0.1', res));
+      const mgrL = new ShellManager({ logDir: tmpL });
+      const outsL = [];
+      mgrL.on('output', (id, d) => outsL.push(d));
+      const rL = mgrL.connect({ protocol: 'telnet', host: '127.0.0.1', port: srvL.address().port, timeout: 3000, username: 'op' });
+      ok(rL.ok === true, '带审计日志目录发起连接成功');
+      await waitFor(() => outsL.join('').includes('WELCOME-SHLOG'), 3000);
+      mgrL.write(rL.id, 'cmd1\r\n');
+      await waitFor(() => outsL.join('').includes('ECHO-CMD1'), 3000);
+      const endL = new Promise((res) => mgrL.on('end', () => res()));
+      mgrL.close(rL.id);
+      await endL;
+      await new Promise((res) => setTimeout(res, 300)); // 等待流 flush
+      const walkL = (d, out = []) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p2 = path.join(d, e.name); e.isDirectory() ? walkL(p2, out) : out.push(p2); } return out; };
+      const logs = walkL(tmpL);
+      ok(logs.length === 1 && /WebShell-127\.0\.0\.1/.test(logs[0]), '审计日志按 WebShell-<主机> 设备目录生成');
+      const logName = path.basename(logs[0]);
+      ok(/^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)(?:_\d{8}_\d{6}(?:_\d+)?)?\.log$/.test(logName),
+        '文件名兼容监控日志浏览器白名单（' + logName + '）');
+      const contentL = fs.readFileSync(logs[0], 'utf8');
+      ok(contentL.includes('会话开始') && contentL.includes('TELNET') && contentL.includes('用户名: op'),
+        '日志含开始头（协议/地址/用户名）');
+      ok(contentL.includes('WELCOME-SHLOG') && contentL.includes('ECHO-CMD1'), '设备输出（含命令回显）原样留痕');
+      ok(contentL.includes('会话结束'), '日志含结束尾');
+      // 不传 logDir 的旧行为不受影响
+      const mgrNoLog = new ShellManager();
+      ok(mgrNoLog.logDir === '', '未配置 logDir 时不启用审计日志（兼容旧行为）');
+      for (const s of socksL) s.destroy();
+      await new Promise((res) => srvL.close(res));
+      fs.rmSync(tmpL, { recursive: true, force: true });
+    }
+
+    // 群发结果对比（纯函数）+ 合规报告行构建
+    console.log('== 回归：群发结果对比与合规报告行（新功能） ==');
+    {
+      const { diffSessionOutputs } = require(path.join(root, 'js', 'shell-ui.js'));
+      const d = diffSessionOutputs([
+        { name: 'R1', lines: ['sysname R1', 'vlan 10', 'uptime 5d'] },
+        { name: 'R2', lines: ['sysname R2', 'vlan 10', 'uptime 99d'] }
+      ]);
+      ok(d.names.join('|') === 'R1|R2', '输出名称保留');
+      ok(d.perOut[0][1].diff === false && d.perOut[1][1].diff === false, '共有行（vlan 10）不标差异');
+      ok(d.perOut[0][0].diff === true && d.perOut[1][0].diff === true, '各自主机名行标差异');
+      ok(d.perOut[0][2].diff === true && d.perOut[0][2].text === 'uptime 5d', '不同值行标差异');
+      ok(diffSessionOutputs([]).perOut.length === 0, '空入参不抛错');
+      const rows = U.buildComplianceReportRows([
+        { device: 'SW1', host: '10.0.0.1', time: '20260828_1800', rep: { results: [
+          { name: '必须配置 NTP', negate: false, pass: false, lines: [] },
+          { name: '禁止 Telnet', negate: true, pass: true, lines: [] }
+        ] } }
+      ]);
+      eq(rows.length, 3, '报告行=表头+规则数');
+      ok(rows[1][4] === '违规' && rows[1][5].includes('未找到'), '必须类违规说明');
+      ok(rows[2][4] === '通过' && rows[2][2] === '禁止 Telnet', '禁止类通过行');
+    }
+
+    // 在线率采样库（UptimeStore）
+    console.log('== 回归：在线率采样库（新功能） ==');
+    {
+      const os = require('os');
+      const { UptimeStore } = require(path.join(root, 'js', 'monitor.js'));
+      const fU = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-up-')), 'up.json');
+      const us = new UptimeStore(fU, { bucketMs: 100, keepMs: 7 * 86400000, maxKeys: 3 });
+      const base = Math.floor(Date.now() / 100) * 100; // 对齐 100ms 桶，避免被 7 天保留期清掉
+      us.record('k1', true, base + 10);
+      us.record('k1', false, base + 60); // 同桶覆盖
+      us.record('k1', true, base + 150); // 新桶
+      const s1 = us.series('k1');
+      ok(s1.length === 2 && s1[0][1] === 0 && s1[1][1] === 1, '同桶覆盖保留最后一次、异桶追加（' + JSON.stringify(s1) + '）');
+      us.record('k2', true, base + 10); us.record('k3', true, base + 10); us.record('k4', true, base + 10);
+      ok(us.map.size <= 3, '键数超限淘汰最旧键（' + us.map.size + '）');
+      us.record('kX', true, base + 10);
+      ok(us.flush() === true, '有变更时落盘成功');
+      ok(us.flush() === false, '无变更时跳过写盘');
+      const us2 = new UptimeStore(fU, { bucketMs: 100 });
+      ok(us2.series('kX').length === 1 && us2.series('kX')[0][1] === 1, '重启后从文件恢复采样');
+      const empty = new UptimeStore('', { bucketMs: 100 });
+      empty.record('z', true);
+      ok(empty.series('z').length === 1 && empty.file === '', '无文件路径时仅内存可用');
+    }
+
+    // SSH 跳板机端到端：jump forwardOut 通道上完成目标握手
+    console.log('== 回归：SSH 跳板机端到端（新功能） ==');
+    {
+      const { Server } = require('ssh2');
+      const hostKey = fs.readFileSync(path.join(root, 'node_modules', 'ssh2', 'test', 'fixtures', 'ssh_host_rsa_key'));
+      const mkAuthSsh = (passwd, onReady) => new Server({ hostKeys: [hostKey] }, (client) => {
+        client.on('error', () => {});
+        client.on('authentication', (ctx) => { if (ctx.method === 'password' && ctx.password === passwd) ctx.accept(); else ctx.reject(); });
+        client.on('ready', () => onReady(client));
+      });
+      // 目标 SSH：shell 输出标志行
+      const target = mkAuthSsh('tpass', (client) => {
+        client.on('session', (accept) => {
+          const sess = accept();
+          sess.on('pty', (a) => a());
+          sess.on('shell', (acc) => {
+            const st = acc();
+            st.write('JUMP-TARGET-OK\r\n');
+            st.on('close', () => st.end());
+          });
+        });
+      });
+      // 跳板 SSH：direct-tcpip 请求转发到真实目标
+      const jump = mkAuthSsh('jpass', (client) => {
+        client.on('tcpip', (accept, reject, info) => {
+          const chan = accept();
+          const sock = net.connect(info.destPort, info.destIP, () => {});
+          chan.pipe(sock).pipe(chan);
+          const kill = () => { try { sock.destroy(); } catch (e) {} try { chan.end(); } catch (e) {} };
+          chan.on('close', kill); sock.on('close', kill); sock.on('error', kill);
+        });
+      });
+      const socksJ = [];
+      let tPort = 0, jPort = 0;
+      await new Promise((res) => target.listen(0, '127.0.0.1', (e) => { tPort = target.address().port; res(); }));
+      await new Promise((res) => jump.listen(0, '127.0.0.1', (e) => { jPort = jump.address().port; res(); }));
+      const mgr = new ShellManager();
+      const outs = [], statuses = [];
+      mgr.on('output', (id, d) => outs.push(d));
+      mgr.on('status', (id, info) => { statuses.push(info); if (info.state === 'fingerprint') mgr.trustFingerprint(info.host, true); });
+      const r = mgr.connect({ protocol: 'ssh', host: '127.0.0.1', port: tPort, username: 'ops', password: 'tpass', jump: { host: '127.0.0.1', port: jPort, username: 'ju', password: 'jpass' } });
+      ok(r.ok === true, '经跳板发起连接成功');
+      await waitFor(() => outs.join('').includes('JUMP-TARGET-OK'), 10000);
+      ok(outs.join('').includes('JUMP-TARGET-OK'), '经跳板 forwardOut 通道建立目标会话并收到输出');
+      ok(statuses.some(s => s.state === 'fingerprint' && s.host === '127.0.0.1'), '跳板/目标指纹确认按主机独立排队（同一主机多轮）');
+      mgr.close(r.id);
+      await new Promise((res) => target.close(res));
+      await new Promise((res) => jump.close(res));
+    }
+
+    // 监控任务跳板参数透传 + 指纹按事件主机放行
+    console.log('== 回归：监控跳板透传与指纹主机（新功能） ==');
+    {
+      const os = require('os');
+      const { EventEmitter } = require('events');
+      const tmpJ = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-jmp-'));
+      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+      const stubShell = new EventEmitter();
+      stubShell.connect = (opts) => { stubShell.lastConnect = opts; return { ok: true, id: 'x1' }; };
+      stubShell.write = () => {};
+      stubShell.close = () => {};
+      stubShell.trustFingerprint = (h, t) => { stubShell.trusted = [h, t]; return true; };
+      const mm = new MonitorManager(stubShell, tmpJ, path.join(tmpJ, 'trust.json'));
+      const rs = mm.start({
+        key: 'd1@10.9.9.9', deviceId: 'd1', name: 'd1',
+        protocol: 'ssh', host: '10.9.9.9', port: 22, commands: ['display version'], password: 'p1',
+        jump: { host: '10.0.0.1', port: '2222', username: 'ju', password: 'jp' }
+      });
+      ok(rs.ok === true, '监控任务接受跳板参数');
+      ok(stubShell.lastConnect && stubShell.lastConnect.jump && stubShell.lastConnect.jump.host === '10.0.0.1'
+        && stubShell.lastConnect.jump.port === 2222 && stubShell.lastConnect.jump.username === 'ju',
+        '跳板参数透传到连接（端口归一化为数字）');
+      mm._onStatus('x1', { state: 'fingerprint', host: '10.0.0.1', fp: 'SHA256:jumpfp' });
+      ok(Array.isArray(stubShell.trusted) && stubShell.trusted[0] === '10.0.0.1',
+        '指纹确认按事件携带的主机（跳板）放行');
+      ok(mm.trusted.get('10.0.0.1') === 'SHA256:jumpfp', '跳板指纹按归属主机记录');
+      mm.stopAll();
+      fs.rmSync(tmpJ, { recursive: true, force: true });
     }
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }

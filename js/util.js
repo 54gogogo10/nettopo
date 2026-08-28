@@ -271,7 +271,7 @@ U.pointSegDist = (px, py, x1, y1, x2, y2) => {
 
 // 平行链路偏移 + 两端标签定位。返回每个 link 的完整几何：
 // { x1,y1,x2,y2, labelA:{x,y,text}, labelB:{x,y,text}, mid:{x,y,text}, side }
-U.linkGeom = (nodes, links) => {
+U.linkGeom = (nodes, links, opts) => {
   const byId = {};
   for (const n of nodes) byId[n.id] = n;
   // 按无向设备对分组，同一对设备的多条链路做垂直偏移
@@ -303,8 +303,15 @@ U.linkGeom = (nodes, links) => {
       const labA = (l.aIf || '').trim(), labB = (l.bIf || '').trim();
       const ipA = (l.aIp || '').trim(), ipB = (l.bIp || '').trim();
       const t1 = 0.16, t2 = 0.84;
+      // 正交（直角）走线：经中转竖直段连接两锚点；平行链路的中转段随序号偏移。
+      // 两锚点近等高时退化为直线（pts=null）。x1/y1/x2/y2 始终为端点（消费方兼容）。
+      let pts = null;
+      if (opts && opts.ortho) {
+        const mx = (p1.x + p2.x) / 2 + px * off;
+        if (Math.abs(p1.y - p2.y) >= 2) pts = [[x1, y1], [mx, y1], [mx, y2], [x2, y2]];
+      }
       out[l.id] = {
-        x1, y1, x2, y2,
+        x1, y1, x2, y2, pts,
         labelA: {
           x: x1 + (x2 - x1) * t1 + px * 12,
           y: y1 + (y2 - y1) * t1 + py * 12,
@@ -451,6 +458,7 @@ U.sanitizeGraph = (nodes, links, texts) => {
       x: coord(n.x, 0), y: coord(n.y, 0),
       w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',
+      model: str(n.model).slice(0, 64), osver: str(n.osver).slice(0, 64), // 设备型号 / 软件版本（资产清单；SNMP 识别可自动回填版本）
       mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20).map(s => s.slice(0, 200)),
       // 三层 VLAN 接口（interface vlan）：[{id, ip}]，最多 32 个
       vlans: (Array.isArray(n.vlans) ? n.vlans : []).map(v => {
@@ -820,7 +828,7 @@ U.buildInventoryRows = (nodes, monStatus, backupInfo) => {
     const ct = (Array.isArray(U.customTypes) ? U.customTypes : []).find(x => x && x.key === t);
     return (ct && ct.label) || def.label || String(t || 'other');
   };
-  const rows = [['设备名', '类型', '管理地址', '备注', '监控状态', '最近配置备份', '备份份数']];
+  const rows = [['设备名', '类型', '管理地址', '设备型号', '软件版本', '备注', '监控状态', '最近配置备份', '备份份数']];
   for (const n of nodes) {
     if (!n) continue;
     const st = monStatus[n.id] || {};
@@ -830,6 +838,8 @@ U.buildInventoryRows = (nodes, monStatus, backupInfo) => {
       String(n.name || ''),
       label(n.type),
       (mgmts.length ? mgmts : [n.mgmt]).filter(Boolean).join(' / '),
+      String(n.model || ''),
+      String(n.osver || ''),
       String(n.note || ''),
       String(st.text || st.state || '未监控'),
       bi.lastAt ? U.fmtDate(new Date(bi.lastAt)) : '',
@@ -837,6 +847,121 @@ U.buildInventoryRows = (nodes, monStatus, backupInfo) => {
     ]);
   }
   return rows;
+};
+
+/* ---------- 配置合规基线检查（对备份库 running-config 的本地规则扫描；纯函数可测） ---------- */
+U.COMPLIANCE_DEFAULT_RULES = [
+  { id: 'ntp',    name: '必须配置 NTP',              pattern: 'ntp', negate: false, enabled: true, note: '存在 NTP 相关配置行' },
+  { id: 'aaa',    name: '必须启用 AAA',              pattern: 'aaa', negate: false, enabled: true, note: '存在 AAA 配置段' },
+  { id: 'gw',     name: '必须配置默认路由',          pattern: 'ip\\s+route(?:-static)?\\s+0\\.0\\.0\\.0', negate: false, enabled: true, note: '存在静态默认路由（华为 ip route-static 0.0.0.0 / 思科 ip route 0.0.0.0）' },
+  { id: 'telnet', name: '禁止启用 Telnet 服务',      pattern: 'telnet server enable|transport input (telnet|all)|protocol inbound telnet', negate: true, enabled: true, note: 'VTY/服务层不应放行 Telnet（仅 SSH）' },
+  { id: 'snmpv2', name: '禁止 SNMP v1/v2c community', pattern: 'snmp(-agent)? community|snmp-server community', negate: true, enabled: true, note: '应仅使用 SNMPv3（usm-user / snmp-server user）' }
+];
+const COMPLIANCE_KEY = 'nettopo.complianceRules';
+
+/** 规则白名单清洗：id/名称/可编译正则/长度与数量上限；返回带编译后 re 的规则数组 */
+U.cleanComplianceRules = (raw) => {
+  const out = [];
+  const seen = new Set();
+  for (const r of (Array.isArray(raw) ? raw : [])) {
+    if (!r || typeof r !== 'object' || out.length >= 32) break;
+    const id = (typeof r.id === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(r.id) && !seen.has(r.id)) ? r.id : '';
+    const name = typeof r.name === 'string' ? r.name.trim().slice(0, 64) : '';
+    const pattern = typeof r.pattern === 'string' ? r.pattern.trim().slice(0, 256) : '';
+    if (!id || !name || !pattern) continue;
+    let re = null;
+    try { re = new RegExp(pattern, 'i'); } catch (e) { continue; } // 非法正则整条丢弃
+    seen.add(id);
+    out.push({ id, name, pattern, negate: !!r.negate, enabled: r.enabled !== false, note: typeof r.note === 'string' ? r.note.slice(0, 128) : '', re });
+  }
+  return out;
+};
+U.loadComplianceRules = () => {
+  let rules = [];
+  try { rules = U.cleanComplianceRules(JSON.parse(localStorage.getItem(COMPLIANCE_KEY) || 'null')); }
+  catch (e) { rules = []; }
+  if (!rules.length) rules = U.cleanComplianceRules(U.COMPLIANCE_DEFAULT_RULES);
+  U.complianceRules = rules;
+  return rules;
+};
+U.saveComplianceRules = (rules) => {
+  U.complianceRules = U.cleanComplianceRules(rules);
+  try {
+    localStorage.setItem(COMPLIANCE_KEY, JSON.stringify(
+      U.complianceRules.map(r => ({ id: r.id, name: r.name, pattern: r.pattern, negate: r.negate, enabled: r.enabled, note: r.note }))
+    ));
+  } catch (e) { /* 存储超限忽略 */ }
+  return U.complianceRules;
+};
+/** 对一份配置文本执行检查：每条启用规则返回 {pass, lines}（禁止类为命中行，必须类为已匹配行） */
+U.checkCompliance = (text, rules) => {
+  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+  const results = [];
+  let passed = 0, failed = 0;
+  for (const r of (Array.isArray(rules) ? rules : [])) {
+    if (!r || !r.re || r.enabled === false) continue;
+    const hit = [];
+    for (const ln of lines) {
+      if (hit.length >= 20) break;
+      if (r.re.test(ln)) hit.push(ln.trim().slice(0, 200));
+    }
+    const pass = r.negate ? hit.length === 0 : hit.length > 0;
+    if (pass) passed++; else failed++;
+    results.push({ id: r.id, name: r.name, negate: !!r.negate, note: r.note || '', pass, lines: hit });
+  }
+  return { results, passed, failed };
+};
+
+/** 合规扫描结果 → 报告行（导出 Excel/CSV 用；scanRows: [{device, host, time, rep}]，time 已格式化） */
+U.buildComplianceReportRows = (scanRows) => {
+  const rows = [['设备', '管理地址', '规则', '类型', '结果', '命中行/说明', '备份时间']];
+  for (const r of (Array.isArray(scanRows) ? scanRows : [])) {
+    if (!r || !r.rep || !Array.isArray(r.rep.results)) continue;
+    for (const res of r.rep.results) {
+      rows.push([
+        String(r.device || ''), String(r.host || ''),
+        String(res.name || ''),
+        res.negate ? '禁止出现' : '必须存在',
+        res.pass ? '通过' : '违规',
+        res.lines && res.lines.length ? res.lines[0] : (res.negate ? '（无命中）' : '（未找到匹配行）'),
+        String(r.time || '')
+      ]);
+    }
+  }
+  return rows;
+};
+
+/* ---------- 工程文件口令加密（PBKDF2-SHA256 + AES-GCM，浏览器/Node 通用 WebCrypto） ---------- */
+const _subtle = () => ((typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.subtle) ? globalThis.crypto.subtle : null);
+U.isProjectCryptoAvailable = () => !!_subtle();
+const _b64enc = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const _b64dec = (s) => { const bin = atob(String(s || '')); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return u8; };
+/** 加密工程文本 → 信封 JSON（{"app":"NetTopo-Enc",salt,iv,ct}） */
+U.encryptProjectText = async (text, pass) => {
+  const subtle = _subtle();
+  if (!subtle) throw new Error('当前环境不支持 WebCrypto');
+  pass = String(pass == null ? '' : pass);
+  if (!pass) throw new Error('口令为空');
+  const te = new TextEncoder();
+  const salt = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const key = await subtle.importKey('raw', te.encode(pass), 'PBKDF2', false, ['deriveKey']);
+  const dk = await subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 120000, hash: 'SHA-256' }, key, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+  const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv }, dk, te.encode(String(text))));
+  return JSON.stringify({ app: 'NetTopo-Enc', v: 1, kdf: 'PBKDF2-SHA256-120000', salt: _b64enc(salt), iv: _b64enc(iv), ct: _b64enc(ct) });
+};
+/** 解密信封 JSON → 原文本；口令错误/损坏时抛错 */
+U.decryptProjectText = async (envText, pass) => {
+  const subtle = _subtle();
+  if (!subtle) throw new Error('当前环境不支持 WebCrypto');
+  let env;
+  try { env = JSON.parse(String(envText)); } catch (e) { throw new Error('信封格式损坏'); }
+  if (!env || env.app !== 'NetTopo-Enc' || !env.salt || !env.iv || !env.ct) throw new Error('不是加密工程文件');
+  const te = new TextEncoder();
+  const key = await subtle.importKey('raw', te.encode(String(pass == null ? '' : pass)), 'PBKDF2', false, ['deriveKey']);
+  const dk = await subtle.deriveKey({ name: 'PBKDF2', salt: _b64dec(env.salt), iterations: 120000, hash: 'SHA-256' }, key, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const pt = await subtle.decrypt({ name: 'AES-GCM', iv: _b64dec(env.iv) }, dk, _b64dec(env.ct));
+  return new TextDecoder().decode(pt);
 };
 
 /* ---------- 子网分组（按 /24 网段归类设备） ---------- */

@@ -33,12 +33,17 @@ function buildSvgImage(graph, opts) {
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
   parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff"/>`);
 
-  // 连线（平行偏移）——坐标必须与节点一样经过 minX/minY 归一化！
-  const geom = U.linkGeom(nodes, links);
+  // 连线（平行偏移；opts.ortho 时走直角折线）——坐标必须与节点一样经过 minX/minY 归一化！
+  const geom = U.linkGeom(nodes, links, { ortho: !!(opts && opts.ortho) });
   for (const l of links) {
     const g = geom[l.id];
     if (!g) continue;
-    parts.push(`<line x1="${X(g.x1).toFixed(1)}" y1="${Y(g.y1).toFixed(1)}" x2="${X(g.x2).toFixed(1)}" y2="${Y(g.y2).toFixed(1)}" stroke="${U.bwColor(l.bw)}" stroke-width="2"/>`);
+    if (g.pts) {
+      const ptsAttr = g.pts.map(p => X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1)).join(' ');
+      parts.push(`<polyline points="${ptsAttr}" fill="none" stroke="${U.bwColor(l.bw)}" stroke-width="2"/>`);
+    } else {
+      parts.push(`<line x1="${X(g.x1).toFixed(1)}" y1="${Y(g.y1).toFixed(1)}" x2="${X(g.x2).toFixed(1)}" y2="${Y(g.y2).toFixed(1)}" stroke="${U.bwColor(l.bw)}" stroke-width="2"/>`);
+    }
   }
 
   // 标注（三行，先算位置再防碰撞推开）

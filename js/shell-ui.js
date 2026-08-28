@@ -1,6 +1,20 @@
 /* NetTopo Web Shell 窗口 —— 多标签 SSH/Telnet 终端管理 */
 'use strict';
+/** 群发结果对比（纯函数，Node 测试可 require）：行在全部输出中都存在视为共有，否则标记差异 */
+function diffSessionOutputs(outputs) {
+  const arr = (Array.isArray(outputs) ? outputs : []).map(o => ({
+    name: String((o && o.name) || ''),
+    lines: (Array.isArray(o && o.lines) ? o.lines : []).map(s => String(s == null ? '' : s).replace(/\s+$/, ''))
+  }));
+  const sets = arr.map(o => new Set(o.lines));
+  const common = (t) => sets.length > 0 && sets.every(s => s.has(t));
+  return {
+    names: arr.map(o => o.name),
+    perOut: arr.map(o => o.lines.map(t => ({ text: t, diff: !common(t) })))
+  };
+}
 (function () {
+  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs }; return; } // Node 测试直取纯函数
   if (!window.topoShell) return; // 非 Electron 环境直接退出
   const $ = (s, r) => (r || document).querySelector(s);
   const escAttr = (s) => String(s == null ? '' : s)
@@ -193,7 +207,8 @@
 
   /* ---- 多标签命令广播（SecureCRT Chat Window 模式）：勾选标签，一条命令同时下发 ---- */
   const castBtnEl = $('#shCastBtn'), castEl = $('#shCast'), castInputEl = $('#shCastInput'),
-        castSendEl = $('#shCastSend'), castCountEl = $('#shCastCount'), castEnterEl = $('#shCastEnter');
+        castSendEl = $('#shCastSend'), castCountEl = $('#shCastCount'), castEnterEl = $('#shCastEnter'),
+        castDiffEl = $('#shCastDiff');
   let castMode = false;
   const castSel = new Set(); // 参与群发的 sid（结束的会话自动移出）
   const refreshCastCount = () => {
@@ -244,6 +259,50 @@
       })();
     }
     toast('已群发到 ' + targets.length + ' 个标签');
+  };
+  /* ---- 群发结果对比：汇总勾选标签的终端缓冲区，共有行之外标记差异 ---- */
+  const readTermLines = (s, maxLines) => {
+    try {
+      const buf = s.term.buffer.active;
+      const total = buf.length;
+      const lines = [];
+      for (let i = Math.max(0, total - maxLines); i < total; i++) {
+        const ln = buf.getLine(i);
+        if (ln) lines.push(ln.translateToString(true));
+      }
+      while (lines.length && !lines[lines.length - 1]) lines.pop();
+      return lines;
+    } catch (e) { return []; }
+  };
+  const openCastDiff = () => {
+    const targets = [...castSel].filter((id) => { const s = sessions.get(id); return s && !s.ended; });
+    if (targets.length < 2) { toast('请先勾选至少两个要对比的标签'); return; }
+    const outputs = targets.map((id) => {
+      const s = sessions.get(id);
+      return { name: (s.tabEl.querySelector('.tt') || {}).textContent || id, lines: readTermLines(s, 200) };
+    });
+    const d = diffSessionOutputs(outputs);
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal sh-dialog cast-diff-dialog" role="dialog" style="width:92vw;max-width:1400px;height:84vh;display:flex;flex-direction:column">
+        <h3>群发结果对比</h3>
+        <div class="m-sub">${d.names.length} 个标签的终端输出（各取最近 200 行）；<span class="cd-hl">高亮行</span>为未在全部标签中同时出现的差异行。</div>
+        <div class="cd-grid">${d.perOut.map((out, i) => `
+          <div class="cd-col">
+            <div class="cd-name">${escAttr(d.names[i])}</div>
+            <pre class="cd-body">${out.map(l => l.diff && l.text ? `<span class="cd-hl">${escAttr(l.text)}</span>` : escAttr(l.text)).join('\n')}</pre>
+          </div>`).join('')}
+        </div>
+        <div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.querySelector('[data-act=close]').onclick = close;
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   };
 
   /* ---- 复制 / 粘贴 ---- */
@@ -435,6 +494,13 @@
           <label>密码</label>
           <input id="wsPass" type="password" placeholder="SSH 密码；Telnet 通常可留空" autocomplete="new-password"/>
         </div>
+        <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="wsJumpOn" type="checkbox"/> 经跳板机连接（仅 SSH 目标生效）</label></div>
+        <div class="frow" id="wsJumpWrap" style="display:none"><div class="frow-inline">
+          <div class="frow"><label>跳板地址</label><input id="wsJumpHost" type="text" placeholder="堡垒机/跳板 IP" autocomplete="off"/></div>
+          <div class="frow"><label>跳板端口</label><input id="wsJumpPort" type="number" min="1" max="65535" placeholder="22"/></div>
+          <div class="frow"><label>跳板用户名</label><input id="wsJumpUser" type="text" placeholder="admin" autocomplete="off"/></div>
+          <div class="frow"><label>跳板密码</label><input id="wsJumpPass" type="password" autocomplete="new-password"/></div>
+        </div></div>
         <div class="m-actions">
           <button type="button" class="tb" data-act="cancel">取消</button>
           <button type="button" class="tb primary" data-act="connect">连接</button>
@@ -455,6 +521,8 @@
       if (!cur || cur === otherDefault) portEl.value = autoPort();
     });
     if (!portEl.value.trim()) portEl.value = autoPort();
+    const jumpOnEl = ov.querySelector('#wsJumpOn');
+    jumpOnEl.addEventListener('change', () => { ov.querySelector('#wsJumpWrap').style.display = jumpOnEl.checked ? '' : 'none'; });
     const doConnect = async () => {
       const cfg = {
         protocol: protoEl.value,
@@ -464,6 +532,14 @@
         password: ov.querySelector('#wsPass').value,
         title: ov.querySelector('#wsHost').value.trim() || '连接'
       };
+      if (cfg.protocol === 'ssh' && jumpOnEl.checked && ov.querySelector('#wsJumpHost').value.trim()) {
+        cfg.jump = {
+          host: ov.querySelector('#wsJumpHost').value.trim(),
+          port: ov.querySelector('#wsJumpPort').value.trim(),
+          username: ov.querySelector('#wsJumpUser').value.trim(),
+          password: ov.querySelector('#wsJumpPass').value
+        };
+      }
       try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
       try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username })); } catch (e) {}
@@ -518,6 +594,7 @@
     // 多标签命令广播
     if (castBtnEl) castBtnEl.onclick = () => setCastMode(!castMode);
     if (castSendEl) castSendEl.onclick = sendCast;
+    if (castDiffEl) castDiffEl.onclick = openCastDiff;
     if (castInputEl) castInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); sendCast(); }
     });

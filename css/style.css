@@ -849,3 +849,70 @@ html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
 .modal .frow label { margin-bottom: 5px; }
 .modal .frow input, .modal .frow select, .modal .frow textarea { height: 34px; }
 .modal .frow textarea { height: 64px; }
+/* ---- 配置合规基线检查 ---- */
+.comp-rules { border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; background: var(--panel2); }
+.comp-head, .comp-rule { display: grid; grid-template-columns: 34px 200px 96px 1fr 30px; gap: 6px; align-items: center; }
+.comp-head { font-size: 11px; color: var(--muted); padding: 2px 2px 6px; }
+.comp-rule { padding: 3px 0; border-top: 1px dashed var(--border); }
+.comp-head + .comp-rule, .comp-rule:first-of-type { border-top: none; }
+.comp-rule .cr-on { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+.comp-rule input[type="text"] { height: 26px; font-size: 12px; padding: 0 7px; }
+.comp-rule .cr-pat { font-family: Consolas, 'Courier New', monospace; }
+.comp-rule .cr-negate { height: 26px; font-size: 12px; padding: 0 5px; }
+.comp-rule .cr-del { width: 26px; height: 26px; padding: 0; }
+.comp-total { font-size: 12.5px; color: var(--text); padding: 2px 2px 10px; }
+.comp-dev { margin-bottom: 12px; }
+.comp-dev-h { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.comp-dev-h b { font-size: 13px; }
+.comp-host { font-size: 12px; color: var(--muted); font-family: Consolas, monospace; }
+.comp-sum { font-size: 11.5px; color: var(--muted); margin-left: auto; }
+.comp-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.comp-chip { font-size: 11.5px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comp-chip.pass { color: #16a34a; border-color: rgba(22, 163, 74, .45); background: rgba(22, 163, 74, .07); }
+.comp-chip.fail { color: var(--danger); border-color: rgba(220, 38, 38, .45); background: rgba(220, 38, 38, .07); font-weight: 600; }
+
+/* ---- 跳板机（监控行内折叠区） ---- */
+.mon-host-row .mh-jump-wrap {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  background: var(--panel2); border: 1px dashed var(--border); border-radius: 8px;
+  padding: 6px 9px; margin-top: 4px; font-size: 11.5px;
+}
+.mon-host-row .mh-jump-wrap input[type="text"], .mon-host-row .mh-jump-wrap input[type="number"], .mon-host-row .mh-jump-wrap input[type="password"] {
+  height: 24px; font-size: 11.5px; padding: 0 6px;
+}
+.mon-host-row .mh-jump-wrap .mh-jump-host { width: 170px; }
+.mon-host-row .mh-jump-wrap .mh-jump-port { width: 62px; }
+.mon-host-row .mh-jump-wrap .mh-jump-user { width: 110px; }
+.mon-host-row .mh-jump-wrap .mh-jump-pass { width: 130px; }
+.mon-host-row .mh-jump-btn.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+/* ---- 监控中心近 7 天在线率 ---- */
+.mc-uptime { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; margin: 0 0 8px; background: var(--panel2); }
+.up-title { font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }
+.up-empty { font-size: 12px; color: var(--muted); }
+.up-row { display: flex; align-items: center; gap: 10px; padding: 2px 0; }
+.up-dev { font-size: 12.5px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.up-days { display: flex; gap: 4px; flex: 1; }
+.up-day { flex: 1; text-align: center; font-size: 11px; padding: 2px 0; border-radius: 6px; border: 1px solid var(--border); color: var(--muted); min-width: 44px; }
+.up-day.good { color: #16a34a; border-color: rgba(22,163,74,.45); background: rgba(22,163,74,.08); }
+.up-day.warn { color: #d97706; border-color: rgba(217,119,6,.45); background: rgba(217,119,6,.08); }
+.up-day.bad { color: var(--danger); border-color: rgba(220,38,38,.45); background: rgba(220,38,38,.08); font-weight: 600; }
+.up-all { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+
+/* ---- 多图纸页签条 ---- */
+.sheet-bar { display: flex; align-items: center; gap: 6px; padding: 4px 10px 0; border-bottom: 1px solid var(--border); background: var(--panel); }
+.sheet-bar.hidden { display: none; }
+.sheet-tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
+.sheet-tab {
+  padding: 5px 14px; font-size: 12px; color: var(--muted); cursor: pointer;
+  border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0;
+  background: var(--panel2); white-space: nowrap; user-select: none;
+}
+.sheet-tab:hover { color: var(--text); border-color: var(--accent); }
+.sheet-tab.active { color: var(--text); font-weight: 600; background: var(--bg, var(--panel)); border-color: var(--accent); }
+.sheet-add {
+  flex: none; width: 24px; height: 24px; border-radius: 7px;
+  background: var(--panel2); border: 1px dashed var(--border);
+  font-size: 13px; color: var(--accent);
+}
+.sheet-add:hover { border-color: var(--accent); background: var(--accent-soft); }

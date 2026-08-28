@@ -297,8 +297,8 @@ class Renderer {
   /* ---------- 连线构建 ---------- */
   _buildLink(l) {
     const g = el('g', { class: 'link', 'data-id': l.id }, this.linkLayer);
-    el('line', { class: 'ln', x1: 0, y1: 0, x2: 0, y2: 0 }, g);
-    el('line', { class: 'hit', x1: 0, y1: 0, x2: 0, y2: 0 }, g);
+    el('path', { class: 'ln', d: 'M0 0' }, g);
+    el('path', { class: 'hit', d: 'M0 0' }, g);
     // 标注组：三行（A端接口IP / B端接口IP / 带宽），防碰撞后定位
     const lab = el('g', { class: 'lab' }, g);
     for (let i = 0; i < 3; i++) {
@@ -320,7 +320,7 @@ class Renderer {
       const g = this.textEls.get(t.id);
       if (g) g.setAttribute('transform', `translate(${t.x} ${t.y}) scale(${tz})`);
     }
-    const geom = U.linkGeom(this.nodes, this.links);
+    const geom = U.linkGeom(this.nodes, this.links, { ortho: !!this.orthoLinks });
     // 标注：三行合一，先收集位置与尺寸，防碰撞（标注互不重叠、不压节点）后渲染
     const SIZE = 11;
     const labelBoxes = [];
@@ -365,10 +365,12 @@ class Renderer {
       const ln = g.querySelector('.ln'), hit = g.querySelector('.hit');
       g.classList.toggle('down', this.downLinks.has(l.id));
       g.style.setProperty('--bw-c', U.bwColor(l.bw)); // 带宽颜色（图上不显示带宽文字）
-      ln.setAttribute('x1', q.x1); ln.setAttribute('y1', q.y1);
-      ln.setAttribute('x2', q.x2); ln.setAttribute('y2', q.y2);
-      hit.setAttribute('x1', q.x1); hit.setAttribute('y1', q.y1);
-      hit.setAttribute('x2', q.x2); hit.setAttribute('y2', q.y2);
+      // 直角模式走 pts 折线，直线模式退化为两段式 path（元素统一为 path，命中/样式不变）
+      const d = q.pts
+        ? 'M' + q.pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' L')
+        : 'M' + q.x1.toFixed(1) + ' ' + q.y1.toFixed(1) + ' L' + q.x2.toFixed(1) + ' ' + q.y2.toFixed(1);
+      ln.setAttribute('d', d);
+      hit.setAttribute('d', d);
       const box = labelBoxes[bi];
       const ld = labelData[bi];
       bi++;

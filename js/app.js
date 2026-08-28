@@ -25,12 +25,16 @@ const state = {
   blank: false,   // 用户主动新建空白画布（无表格也能直接画）
   showLabels: lsGet('nettopo.showLabels', '1') !== '0',   // 链路标注显示开关
   showSubnets: lsGet('nettopo.showSubnets', '0') === '1', // 子网分组显示开关
+  orthoLinks: lsGet('nettopo.orthoLinks', '0') === '1',   // 直角（正交）布线开关
   subnetNames: {},  // 子网 -> 自定义名称（子网分组命名）
   downLinks: new Set(),  // 故障链路 id 集合（模拟断链，路径分析绕行）
   autoBackup: { on: lsGet('nettopo.autoBackup', '0') === '1', minutes: Number(lsGet('nettopo.autoBackupMin', '10') || 10), keep: Math.min(200, Math.max(1, Number(lsGet('nettopo.autoBackupKeep', '30') || 30) || 30)) },
   texts: [],  // 画布文本框（自定义字体样式）
   monitorCfg: {},   // 设备后台监控配置：nodeId -> {hosts:[{host,protocol,port,username,password,commands,onConnect,readOnly,...}],intervalSec,cmdDelayMs,enabled}
-  monitorStatus: {} // 设备后台监控运行状态：nodeId -> {state,text,since}（运行时态，不持久化）
+  monitorStatus: {}, // 设备后台监控运行状态：nodeId -> {state,text,since}（运行时态，不持久化）
+  sheets: [],       // 多图纸：[{id,name,nodes,links,texts,pan,zoom}]；活动页数据即 state.nodes/links/texts 本体
+  sheetIdx: 0,      // 当前活动页索引
+  sheetSeq: 0       // 页 id 生成计数（跨保存持久，避免恢复后撞 id）
 };
 let layoutCancel = false;
 
@@ -128,12 +132,20 @@ function centerOn(kind, id) {
 function snapshot() {
   return {
     nodes: U.clone(state.nodes), links: U.clone(state.links), texts: U.clone(state.texts),
-    downLinks: [...state.downLinks], subnetNames: Object.assign({}, state.subnetNames)
+    downLinks: [...state.downLinks], subnetNames: Object.assign({}, state.subnetNames),
+    sheetIdx: state.sheetIdx
   };
 }
 function restore(s) {
   state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
   state.sel = { kind: null, id: null };
+  // 跨页撤销：先把当前页写回 sheets，再切到快照所属页并同步其数据
+  if (s.sheetIdx != null && s.sheetIdx !== state.sheetIdx && state.sheets[s.sheetIdx]) {
+    sheetStash();
+    state.sheetIdx = s.sheetIdx;
+    refreshSheets();
+  }
+  if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; }
   if (Array.isArray(s.downLinks)) { state.downLinks = new Set(s.downLinks); renderer.setDownLinks(state.downLinks); }
   if (s.subnetNames && typeof s.subnetNames === 'object') { state.subnetNames = s.subnetNames; renderer.subnetNames = s.subnetNames; }
   renderer.setSubnetView(state.showSubnets, state.subnetNames);
@@ -935,7 +947,8 @@ function openProjectDiff() {
     if (!f) return;
     try {
       const { buffer } = await U.readFile(f);
-      const data = JSON.parse(U.decodeBytes(buffer));
+      const data = await parseProjectText(U.decodeBytes(buffer), '对比的工程已加密，请输入口令');
+      if (!data) return;
       if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) { toast('对比文件不是有效的 .nettopo 工程'); return; }
       const d = U.diffProjects({ nodes: state.nodes, links: state.links }, { nodes: data.nodes, links: data.links || [] });
       showProjectDiff(d, f.name, `${data.nodes.length} 设备 / ${(data.links || []).length} 链路`);
@@ -1109,6 +1122,109 @@ function setupAutoBackup() {
   }, state.autoBackup.minutes * 60000);
 }
 
+/* ================= 多图纸（多页拓扑） ================= */
+/** 当前页数据写回 sheets（nodes/links/texts 为活动数据本体，直接引用；视图随存） */
+function sheetStash() {
+  const s = state.sheets[state.sheetIdx];
+  if (!s) return;
+  s.nodes = state.nodes; s.links = state.links; s.texts = state.texts;
+  s.pan = renderer.pan; s.zoom = renderer.zoom;
+}
+/** 全部页的节点合集（监控 reconcile 覆盖所有页，切页不打断后台任务） */
+function allSheetNodes() {
+  const arr = [...state.nodes];
+  for (let i = 0; i < state.sheets.length; i++) {
+    if (i === state.sheetIdx) continue;
+    for (const n of (state.sheets[i].nodes || [])) arr.push(n);
+  }
+  return arr;
+}
+function refreshSheets() {
+  const bar = $('#sheetBar'), tabs = $('#sheetTabs');
+  if (!bar || !tabs) return;
+  bar.classList.toggle('hidden', !state.sheets.length);
+  tabs.innerHTML = state.sheets.map((s, i) => `
+    <span class="sheet-tab${i === state.sheetIdx ? ' active' : ''}" data-idx="${i}" title="双击重命名 · 右键删除">${U.escHtml(s.name || ('页面 ' + (i + 1)))}</span>`).join('');
+}
+function switchSheet(idx, opts) {
+  opts = opts || {};
+  if (idx === state.sheetIdx || !state.sheets[idx]) return;
+  sheetStash();
+  const s = state.sheets[idx];
+  state.sheetIdx = idx;
+  state.nodes = s.nodes || []; state.links = s.links || []; state.texts = s.texts || [];
+  state.sel = { kind: null, id: null };
+  if (!opts.keepUndo) { state.undoStack = []; state.redoStack = []; }
+  renderer.orthoLinks = state.orthoLinks;
+  renderer.showLabels = state.showLabels; renderer.showSubnets = state.showSubnets; renderer.subnetNames = state.subnetNames;
+  renderer.setDownLinks(state.downLinks);
+  renderer.setData(state.nodes, state.links, state.texts);
+  if (s.pan && s.zoom) renderer.setView(s.pan, s.zoom); else renderer.fit();
+  updateUndoBtns();
+  refreshSheets();
+  refreshAll();
+  renderSelCard();
+  saveGraph();
+  reconcileMonitors();
+}
+function addSheet() {
+  if (!state.sheets.length) {
+    // 第一次加页：当前拓扑成为第 1 页
+    state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 1', nodes: state.nodes, links: state.links, texts: state.texts, pan: renderer.pan, zoom: renderer.zoom });
+    state.sheetIdx = 0;
+  } else {
+    sheetStash();
+  }
+  state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 ' + (state.sheets.length + 1), nodes: [], links: [], texts: [], pan: null, zoom: null });
+  switchSheet(state.sheets.length - 1);
+  toast('已新建图纸页（' + (state.sheets.length) + ' 页）');
+}
+function renameSheet(idx) {
+  const s = state.sheets[idx];
+  if (!s) return;
+  openModal({
+    title: '重命名图纸页',
+    sub: '为该图纸页设置名称（如：核心机房 / 分支机构）。',
+    fields: [{ name: 'name', label: '页面名称', value: s.name || '', ph: '例如：核心机房' }],
+    submit: '保存',
+    onSubmit: (v) => {
+      const name = String(v.name || '').trim();
+      if (name) s.name = name.slice(0, 64);
+      refreshSheets();
+      saveGraph();
+    }
+  });
+}
+async function removeSheet(idx) {
+  if (state.sheets.length <= 1) { toast('至少保留一个图纸页'); return; }
+  const s = state.sheets[idx];
+  if (!s) return;
+  const cnt = (s.nodes || []).length;
+  if (!(await confirmBox(`删除图纸页「${s.name || '页面 ' + (idx + 1)}」（${cnt} 台设备）？其监控配置将一并停止并删除，此操作不可撤销。`))) return;
+  // 停止并清理该页节点的监控配置与状态
+  for (const n of (s.nodes || [])) {
+    stopMonitorForNode(n.id);
+    delete state.monitorCfg[n.id];
+  }
+  saveMonitorCfg().catch(() => {});
+  state.sheets.splice(idx, 1);
+  if (state.sheetIdx > idx) state.sheetIdx--;
+  else if (state.sheetIdx === idx) {
+    state.sheetIdx = Math.min(state.sheetIdx, state.sheets.length - 1);
+    const t = state.sheets[state.sheetIdx];
+    state.nodes = t.nodes || []; state.links = t.links || []; state.texts = t.texts || [];
+    state.sel = { kind: null, id: null };
+    state.undoStack = []; state.redoStack = [];
+    renderer.setData(state.nodes, state.links, state.texts);
+    renderer.fit();
+    refreshAll();
+    reconcileMonitors();
+  }
+  refreshSheets();
+  saveGraph();
+  toast('已删除图纸页');
+}
+
 /* ================= 导出 ================= */
 function exportCSV() {
   const rows = M.graphToTableRows(state.nodes, state.links);
@@ -1164,7 +1280,7 @@ function exportVisio() {
 
 function exportPdf() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -1194,7 +1310,7 @@ function exportPdf() {
 
 /* ================= 导出图片（PNG / SVG / 剪贴板） ================= */
 function renderTopologyPng(cb) {
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -1217,7 +1333,7 @@ function renderTopologyPng(cb) {
 function exportImage(kind) {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   if (kind === 'svg') {
-    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
+    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels, ortho: state.orthoLinks });
     U.download(`网络拓扑图_${U.fmtDate()}.svg`, new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
     toast('已导出 SVG 矢量图');
     return;
@@ -1276,14 +1392,7 @@ async function monitorCfgSnapshot() {
     const hosts = (cfg[k] && Array.isArray(cfg[k].hosts)) ? cfg[k].hosts : [];
     for (const h of hosts) {
       if (!h || typeof h !== 'object') continue;
-      for (const f of MON_SECRET_FIELDS) {
-        if (!h[f]) { h[f] = ''; continue; }
-        if (String(h[f]).indexOf(SECRET_PREFIX) === 0) continue; // 已是密文（防御）
-        if (sec) {
-          try { const r = await sec.encryptSecret(h[f]); h[f] = (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : ''; }
-          catch (e) { h[f] = ''; } // 加密失败则机密不随工程保存
-        } else h[f] = ''; // 无加密能力（浏览器版）：不随工程保存
-      }
+      await transformHostSecrets(h, (v) => (v && String(v).indexOf(SECRET_PREFIX) === 0) ? v : encryptSecretValue(sec, v)); // 已是密文（防御）原样保留
     }
   }
   return cfg;
@@ -1307,10 +1416,18 @@ async function restoreMonitorCfgFromProject(raw) {
     if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
     const hosts = (normalizeMonitorHosts(v) || []).map(h => {
       const clean = Object.assign({}, h);
-      // 工程文件只接受密文/空：明文机密一律丢弃（与密码同语义）
+      // 工程文件只接受密文/空：明文机密一律丢弃（与密码同语义）；跳板字段白名单重建
       for (const f of MON_SECRET_FIELDS) {
         clean[f] = (typeof clean[f] === 'string' && (clean[f] === '' || clean[f].indexOf(SECRET_PREFIX) === 0)) ? clean[f] : '';
       }
+      if (clean.jump && typeof clean.jump === 'object' && String(clean.jump.host || '').trim()) {
+        clean.jump = {
+          host: String(clean.jump.host).trim().slice(0, 256),
+          port: clean.jump.port != null ? String(clean.jump.port) : '',
+          username: String(clean.jump.username || '').trim().slice(0, 128),
+          password: (typeof clean.jump.password === 'string' && (clean.jump.password === '' || clean.jump.password.indexOf(SECRET_PREFIX) === 0)) ? clean.jump.password : ''
+        };
+      } else clean.jump = null;
       return clean;
     });
     cleaned[k] = {
@@ -1337,23 +1454,44 @@ async function restoreMonitorCfgFromProject(raw) {
           }
         }
       }
+      const jp = (h.jump && typeof h.jump === 'object') ? h.jump : null;
+      if (jp && jp.password && jp.password.indexOf(SECRET_PREFIX) === 0) {
+        const cipher2 = jp.password;
+        jp.password = '';
+        if (sec) {
+          try {
+            const r2 = await sec.decryptSecret(cipher2.slice(SECRET_PREFIX.length));
+            if (r2 && r2.ok) { jp.password = r2.text; recovered = true; }
+          } catch (e) { /* 跨机/密钥变更：机密留空 */ }
+        }
+      }
     }
   }
   await saveMonitorCfg(); // 持久化（明文重新加密后写 localStorage）
   if (Object.keys(cleaned).length) toast(recovered ? '已恢复监控配置（密码本机解密；跨机器工程密码需重新输入）' : '已恢复监控配置（账号/命令/告警等；密码需重新输入）');
 }
 
+/** 当前合规规则快照（剥掉编译后的 re，主进程自行编译） */
+function currentComplianceRules() {
+  const rules = U.complianceRules || U.loadComplianceRules();
+  return rules.map(r => ({ id: r.id, name: r.name, pattern: r.pattern, negate: r.negate, enabled: r.enabled }));
+}
+
 /** 构建工程数据对象（保存工程 / 自动备份 / 立即备份共用） */
 async function buildProjectData() {
+  sheetStash(); // sheets 内保持最新
   return {
     app: 'NetTopo',
-    version: 2,
+    version: 3,
     savedAt: new Date().toISOString(),
     nodes: state.nodes,
     links: state.links,
     texts: state.texts,
     pan: renderer.pan,
     zoom: renderer.zoom,
+    sheets: U.clone(state.sheets),
+    sheetIdx: state.sheetIdx,
+    orthoLinks: !!state.orthoLinks,
     customTypes: U.customTypes,
     typeOverrides: U.typeOverrides,
     showLabels: state.showLabels,
@@ -1366,10 +1504,84 @@ async function buildProjectData() {
 }
 
 async function saveProject() {
-  const data = await buildProjectData();
-  U.download(`网络拓扑工程_${U.fmtDate()}.nettopo`,
-    new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }));
-  toast('已保存工程文件（.nettopo，含位置、自定义类型、监控配置与配置模板）');
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:460px">
+      <h3>保存工程文件</h3>
+      <div class="m-sub">可选设置口令加密（PBKDF2 + AES-GCM）：含监控配置的工程外发/交付时防止泄密。口令遗失无法恢复，请妥善保管。</div>
+      <div class="frow"><label>加密口令（留空则不加密）</label><input id="projPass" type="password" autocomplete="new-password"/></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  const doSave = async () => {
+    const pass = ov.querySelector('#projPass').value;
+    close();
+    const data = await buildProjectData();
+    let text = JSON.stringify(data, null, 2);
+    if (pass) {
+      if (!U.isProjectCryptoAvailable()) { toast('当前环境不支持加密（缺少 WebCrypto）'); return; }
+      try { text = await U.encryptProjectText(text, pass); }
+      catch (err) { toast('加密失败：' + (err && err.message || err)); return; }
+    }
+    U.download(`网络拓扑工程_${U.fmtDate()}.nettopo`,
+      new Blob([text], { type: 'application/json;charset=utf-8' }));
+    toast(pass ? '已保存加密工程文件（AES-GCM，含监控配置与配置模板）' : '已保存工程文件（.nettopo，含位置、自定义类型、监控配置与配置模板）');
+  };
+  ov.querySelector('[data-act=save]').onclick = doSave;
+  ov.querySelector('#projPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } });
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#projPass').focus(); }, 250);
+}
+
+/** 口令输入弹窗：返回输入值（取消返回 null）——打开/对比加密工程共用 */
+function askProjectPassword(title) {
+  return new Promise((resolve) => {
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal" role="dialog" style="width:420px">
+        <h3>${U.escHtml(title || '输入口令')}</h3>
+        <div class="frow"><label>口令</label><input id="askPass" type="password" autocomplete="off"/></div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="cancel">取消</button>
+          <button type="button" class="tb primary" data-act="ok">确定</button>
+        </div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const done = (v) => { ov.remove(); resolve(v); };
+    ov.querySelector('[data-act=cancel]').onclick = () => done(null);
+    ov.querySelector('[data-act=ok]').onclick = () => done(ov.querySelector('#askPass').value);
+    ov.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); done(null); }
+      if (e.key === 'Enter') { e.preventDefault(); done(ov.querySelector('#askPass').value); }
+    });
+    setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#askPass').focus(); }, 250);
+  });
+}
+
+/** 解析工程文件文本：若是加密信封则弹口令解密；返回数据对象或 null（已 toast） */
+async function parseProjectText(text, title) {
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) { data = null; }
+  if (data && data.app === 'NetTopo-Enc') {
+    if (!U.isProjectCryptoAvailable()) { toast('当前环境不支持解密（缺少 WebCrypto）'); return null; }
+    const pass = await askProjectPassword(title || '该工程已加密，请输入口令');
+    if (pass == null) return null;
+    try { data = JSON.parse(await U.decryptProjectText(text, pass)); }
+    catch (err) { toast('解密失败：口令错误或文件已损坏'); return null; }
+  }
+  return data;
 }
 
 /** 解析并应用工程数据（打开工程 / 恢复备份共用） */
@@ -1392,8 +1604,33 @@ async function applyProjectData(data) {
   state.redoStack = [];
   if (typeof data.showLabels === 'boolean') state.showLabels = data.showLabels;
   if (typeof data.showSubnets === 'boolean') state.showSubnets = data.showSubnets;
+  if (typeof data.orthoLinks === 'boolean') { state.orthoLinks = data.orthoLinks; try { localStorage.setItem('nettopo.orthoLinks', state.orthoLinks ? '1' : '0'); } catch (e) { /* ignore */ } }
+  renderer.orthoLinks = state.orthoLinks;
   if (data.subnetNames && typeof data.subnetNames === 'object') state.subnetNames = U.sanitizeSubnetNames(data.subnetNames);
   state.downLinks = new Set(Array.isArray(data.downLinks) ? data.downLinks : []);
+  // 多图纸（v3）：恢复全部页；各页分别 sanitize 并推进全局 id 计数器，避免跨页 id/监控配置冲突
+  state.sheets = []; state.sheetIdx = 0; state.sheetSeq = 0;
+  if (Array.isArray(data.sheets) && data.sheets.length) {
+    data.sheets.forEach((sp, i) => {
+      if (!sp || typeof sp !== 'object') return;
+      const c = U.sanitizeGraph(sp.nodes, sp.links, sp.texts);
+      const sheet = {
+        id: (typeof sp.id === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(sp.id)) ? sp.id : ('p' + (++state.sheetSeq)),
+        name: typeof sp.name === 'string' ? sp.name.trim().slice(0, 64) : ('页面 ' + (state.sheets.length + 1)),
+        nodes: c.nodes, links: c.links, texts: c.texts,
+        pan: (sp.pan && typeof sp.pan === 'object') ? { x: Number(sp.pan.x) || 0, y: Number(sp.pan.y) || 0 } : null,
+        zoom: Number(sp.zoom) || null
+      };
+      U.seedCounters(sheet.nodes, sheet.links, sheet.texts);
+      state.sheets.push(sheet);
+      const pid = /^p(\d+)$/.exec(sheet.id);
+      if (pid) state.sheetSeq = Math.max(state.sheetSeq, parseInt(pid[1], 10) || 0);
+    });
+    state.sheetIdx = Math.min(Math.max(0, parseInt(data.sheetIdx, 10) || 0), state.sheets.length - 1);
+    const act = state.sheets[state.sheetIdx];
+    act.nodes = state.nodes; act.links = state.links; act.texts = state.texts; // 顶层即当前页（避免二次 sanitize）
+    refreshSheets();
+  }
   renderer.showLabels = state.showLabels;
   renderer.showSubnets = state.showSubnets;
   renderer.subnetNames = state.subnetNames;
@@ -1418,12 +1655,8 @@ async function applyProjectData(data) {
 
 async function loadProject(file) {
   const { buffer } = await U.readFile(file);
-  let data;
-  try {
-    data = JSON.parse(U.decodeBytes(buffer));
-  } catch (e) {
-    toast('工程文件解析失败：不是有效的 .nettopo 文件'); return;
-  }
+  const data = await parseProjectText(U.decodeBytes(buffer), '该工程已加密，请输入口令打开');
+  if (!data) return;
   if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) {
     toast('工程文件格式不正确'); return;
   }
@@ -1796,6 +2029,8 @@ function editNode(id) {
       { name: 'icon', label: '设备图标', type: 'icon', value: n.icon || '' },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: U.nodeMgmts(n) },
       { name: 'web', label: '管理Web页URL', value: n.web || '', ph: '例如 http://10.255.0.1（可选）' },
+      { name: 'model', label: '设备型号', value: n.model || '', ph: '例如 S5735-L48P4X（可由 SNMP 识别辅助）' },
+      { name: 'osver', label: '软件版本', value: n.osver || '', ph: '例如 V200R019（开启监控 SNMP 识别可自动回填）' },
       { name: 'hasVlanIf', label: '三层 VLAN 接口', type: 'checkbox', value: !!(Array.isArray(n.vlans) && n.vlans.length), tip: '有 VLAN 接口（生成 interface vlan 及 IP 地址）', toggles: 'vlans' },
       { name: 'vlans', label: 'VLAN 接口列表（VLAN 编号 + IP 地址）', type: 'vlans', value: Array.isArray(n.vlans) ? n.vlans : [] },
       { name: 'note', label: '备注', type: 'textarea', value: n.note }
@@ -1816,6 +2051,8 @@ function editNode(id) {
       n.vendor = v.vendor || '';
       n.icon = v.icon || '';
       n.web = v.web.trim();
+      n.model = (v.model || '').trim();
+      n.osver = (v.osver || '').trim();
       n.note = v.note.trim();
       n.vlans = (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : [];
       renderer.setData(state.nodes, state.links, state.texts);
@@ -2813,12 +3050,17 @@ const GRAPH_KEY = 'nettopo.graph';
 
 function saveGraph() {
   try {
+    sheetStash(); // 多页数据保持最新
     localStorage.setItem(GRAPH_KEY, JSON.stringify({
       nodes: state.nodes,
       links: state.links,
       texts: state.texts,
       pan: renderer.pan,
       zoom: renderer.zoom,
+      sheets: state.sheets,
+      sheetIdx: state.sheetIdx,
+      sheetSeq: state.sheetSeq,
+      orthoLinks: state.orthoLinks,
       showLabels: state.showLabels,
       showSubnets: state.showSubnets,
       subnetNames: state.subnetNames,
@@ -2844,8 +3086,32 @@ function restoreGraph() {
     state.redoStack = [];
     if (typeof d.showLabels === 'boolean') state.showLabels = d.showLabels;
     if (typeof d.showSubnets === 'boolean') state.showSubnets = d.showSubnets;
+    if (typeof d.orthoLinks === 'boolean') state.orthoLinks = d.orthoLinks;
+    renderer.orthoLinks = state.orthoLinks;
     if (d.subnetNames && typeof d.subnetNames === 'object') state.subnetNames = U.sanitizeSubnetNames(d.subnetNames);
     state.downLinks = new Set(Array.isArray(d.downLinks) ? d.downLinks : []);
+    // 多图纸恢复：各页分别 sanitize 并推进 id 计数器；当前页使用顶层已 sanitize 数据
+    state.sheets = []; state.sheetIdx = 0; state.sheetSeq = 0;
+    if (Array.isArray(d.sheets) && d.sheets.length) {
+      d.sheets.forEach((sp, i) => {
+        if (!sp || typeof sp !== 'object') return;
+        const c = U.sanitizeGraph(sp.nodes, sp.links, sp.texts);
+        const sheet = {
+          id: (typeof sp.id === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(sp.id)) ? sp.id : ('p' + (++state.sheetSeq)),
+          name: typeof sp.name === 'string' ? sp.name.trim().slice(0, 64) : ('页面 ' + (state.sheets.length + 1)),
+          nodes: c.nodes, links: c.links, texts: c.texts,
+          pan: (sp.pan && typeof sp.pan === 'object') ? { x: Number(sp.pan.x) || 0, y: Number(sp.pan.y) || 0 } : null,
+          zoom: Number(sp.zoom) || null
+        };
+        U.seedCounters(sheet.nodes, sheet.links, sheet.texts);
+        state.sheets.push(sheet);
+        const pid = /^p(\d+)$/.exec(sheet.id);
+        if (pid) state.sheetSeq = Math.max(state.sheetSeq, parseInt(pid[1], 10) || 0);
+      });
+      state.sheetIdx = Math.min(Math.max(0, parseInt(d.sheetIdx, 10) || 0), state.sheets.length - 1);
+      const act = state.sheets[state.sheetIdx];
+      act.nodes = state.nodes; act.links = state.links; act.texts = state.texts;
+    }
     renderer.showLabels = state.showLabels;
     renderer.showSubnets = state.showSubnets;
     renderer.subnetNames = state.subnetNames;
@@ -3169,12 +3435,21 @@ function wire() {
     { ic: 'layout', label: '网格布局', act: () => applyLayoutPreset('grid') },
     { sep: true },
     { ic: 'fit', label: '适应视图 (F)', act: () => renderer.fit() },
+    { ic: 'git', label: '直角布线（正交走线）' + (state.orthoLinks ? ' ✓' : ''), act: () => {
+      state.orthoLinks = !state.orthoLinks;
+      try { localStorage.setItem('nettopo.orthoLinks', state.orthoLinks ? '1' : '0'); } catch (e) { /* ignore */ }
+      renderer.orthoLinks = state.orthoLinks;
+      renderer.update();
+      saveGraph();
+      toast(state.orthoLinks ? '已切换为直角布线（PDF/PNG 导出同步）' : '已切换为直线布线');
+    } },
     { ic: 'locate', label: '路径分析…', act: openPathAnalysis },
     { sep: true },
     { ic: 'shield', label: '拓扑校验', act: runValidation }
   ]);
   $('#btnDropMonitor').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'grid', label: '监控中心…', act: () => openMonitorCenter() },
+    { ic: 'archive', label: '配置合规检查…', act: () => openComplianceCheck() },
     { ic: 'pulse', label: '设备监控（静默采集）…', act: () => {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds && renderer.selIds.size ? [...renderer.selIds][0] : '');
       if (selId) openMonitorConfig(selId); else toast('请先选中一台设备，或右键设备进入');
@@ -3275,6 +3550,26 @@ function wire() {
   $('#hintBar').addEventListener('pointerdown', closeHint);
   $('#hintBar').addEventListener('mousedown', closeHint);
   $('#hintBar').addEventListener('click', closeHint);
+
+  // 多图纸页签：单击切换 · 双击重命名 · 右键删除 · ＋ 新建
+  const sheetTabs = $('#sheetTabs');
+  if (sheetTabs) {
+    sheetTabs.addEventListener('click', (e) => {
+      const t = e.target.closest('.sheet-tab');
+      if (t) switchSheet(parseInt(t.dataset.idx, 10));
+    });
+    sheetTabs.addEventListener('dblclick', (e) => {
+      const t = e.target.closest('.sheet-tab');
+      if (t) renameSheet(parseInt(t.dataset.idx, 10));
+    });
+    sheetTabs.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const t = e.target.closest('.sheet-tab');
+      if (t) removeSheet(parseInt(t.dataset.idx, 10));
+    });
+  }
+  const sheetAdd = $('#sheetAdd');
+  if (sheetAdd) sheetAdd.onclick = () => addSheet();
 
   // 全局兜底（pointerdown + mousedown 双兼容）
   const exitOnBlank = (e) => {
@@ -3391,6 +3686,21 @@ function wire() {
       refreshPanel();
       renderSelCard();
     });
+    // SNMP 识别结果自动回填设备「软件版本」（只读，不覆盖手填值——仅当原值为空或与上次识别不同）
+    if (window.topoMonitor.onSysinfo) {
+      window.topoMonitor.onSysinfo((info) => {
+        if (!info || !info.key) return;
+        const did = info.deviceId || deviceIdFromMonitorKey(info.key);
+        const n = state.nodes.find(x => x.id === did);
+        if (!n) return;
+        if (info.version && n.osver !== info.version) {
+          n.osver = info.version;
+          refreshPanel();
+          saveGraph();
+          toast('已识别「' + n.name + '」软件版本：' + info.version);
+        }
+      });
+    }
   }
 }
 
@@ -3422,6 +3732,35 @@ function secureBridge() {
 /** 监控配置中的机密字段（密码 / 私钥口令 / 私钥内容），落盘与工程快照统一走 enc: 密文 */
 const MON_SECRET_FIELDS = ['password', 'keyPass', 'privateKey'];
 
+/** 单个机密值加密（无桥/失败返回空串） */
+async function encryptSecretValue(sec, val) {
+  if (!val) return '';
+  if (sec) {
+    try {
+      const r = await sec.encryptSecret(val);
+      return (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : '';
+    } catch (e) { return ''; }
+  }
+  return ''; // 无加密能力（如浏览器版）：机密仅本次运行内存
+}
+/** 单个机密值解密（仅接受 enc: 密文；无桥/失败返回空串） */
+async function decryptSecretValue(sec, val) {
+  if (typeof val !== 'string' || val.indexOf(SECRET_PREFIX) !== 0) return '';
+  if (sec) {
+    try {
+      const r = await sec.decryptSecret(val.slice(SECRET_PREFIX.length));
+      return (r && r.ok) ? r.text : '';
+    } catch (e) { return ''; }
+  }
+  return '';
+}
+/** 一行监控配置的全部机密（行字段 + 跳板密码）统一变换 */
+async function transformHostSecrets(h, fn) {
+  if (!h || typeof h !== 'object') return;
+  for (const f of MON_SECRET_FIELDS) h[f] = await fn(h[f]);
+  if (h.jump && typeof h.jump === 'object') h.jump.password = await fn(h.jump.password);
+}
+
 async function saveMonitorCfg() {
   try {
     const sec = secureBridge();
@@ -3430,17 +3769,7 @@ async function saveMonitorCfg() {
       const hosts = (cfg[k] && Array.isArray(cfg[k].hosts)) ? cfg[k].hosts : [];
       for (const h of hosts) {
         if (!h || typeof h !== 'object') continue;
-        for (const f of MON_SECRET_FIELDS) {
-          if (!h[f]) { h[f] = ''; continue; }
-          if (sec) {
-            try {
-              const r = await sec.encryptSecret(h[f]);
-              h[f] = (r && r.ok && r.cipher) ? SECRET_PREFIX + r.cipher : ''; // 加密失败则机密不落盘
-            } catch (e) { h[f] = ''; }
-          } else {
-            h[f] = ''; // 无加密能力（如浏览器版）：机密仅本次运行内存
-          }
-        }
+        await transformHostSecrets(h, (v) => encryptSecretValue(sec, v));
       }
     }
     localStorage.setItem(MON_CFG_KEY, JSON.stringify(cfg));
@@ -3456,17 +3785,8 @@ async function loadMonitorCfg() {
       const hosts = (obj[k] && Array.isArray(obj[k].hosts)) ? obj[k].hosts : [];
       for (const h of hosts) {
         if (!h || typeof h !== 'object') continue;
-        for (const f of MON_SECRET_FIELDS) {
-          if (typeof h[f] === 'string' && h[f].indexOf(SECRET_PREFIX) === 0) {
-            if (sec) {
-              try {
-                const r = await sec.decryptSecret(h[f].slice(SECRET_PREFIX.length));
-                h[f] = (r && r.ok) ? r.text : '';
-              } catch (e) { h[f] = ''; }
-            } else h[f] = '';
-          }
-          // 旧版明文残留：下次保存时统一加密；本轮不落盘新明文
-        }
+        // 仅解密 enc: 密文；旧版明文残留保持原样（下次保存时统一加密；本轮不落盘新明文）
+        await transformHostSecrets(h, (v) => (typeof v === 'string' && v.indexOf(SECRET_PREFIX) === 0) ? decryptSecretValue(sec, v) : v);
       }
     }
     return obj;
@@ -3545,11 +3865,15 @@ function monitorRow(host, saved) {
     probePort: saved.probePort != null ? saved.probePort : '',
     alerts: Array.isArray(saved.alerts) ? saved.alerts.slice() : [],
     backupEnabled: !!saved.backupEnabled,
+    complianceEnabled: !!saved.complianceEnabled,
+    snmpEnabled: !!saved.snmpEnabled,
+    snmpCommunity: typeof saved.snmpCommunity === 'string' ? saved.snmpCommunity : 'public',
     backupCommand: normCmds(saved.backupCommand, ['display current-configuration']),
     backupMode: saved.backupMode === 'own' ? 'own' : 'session',
     backupSkipSame: !!saved.backupSkipSame,
     backupIntervalSec: saved.backupIntervalSec != null ? saved.backupIntervalSec : 3600,
-    backupWaitSec: saved.backupWaitSec != null ? saved.backupWaitSec : 1
+    backupWaitSec: saved.backupWaitSec != null ? saved.backupWaitSec : 1,
+    jump: null
   };
 }
 
@@ -3575,11 +3899,21 @@ function normalizeMonitorHosts(cfg) {
         probePort: h.probePort != null ? h.probePort : '',
         alerts: Array.isArray(h.alerts) ? h.alerts.slice() : [],
         backupEnabled: !!h.backupEnabled,
+        complianceEnabled: !!h.complianceEnabled,
+        snmpEnabled: !!h.snmpEnabled,
+        snmpCommunity: typeof h.snmpCommunity === 'string' ? h.snmpCommunity.slice(0, 64) : 'public',
         backupCommand: normCmds(h.backupCommand, ['display current-configuration']),
         backupMode: h.backupMode === 'own' ? 'own' : 'session',
         backupSkipSame: !!h.backupSkipSame,
         backupIntervalSec: h.backupIntervalSec != null ? h.backupIntervalSec : 3600,
         backupWaitSec: h.backupWaitSec != null ? h.backupWaitSec : 1,
+        // SSH 跳板机（可选）：经堡垒机转发连接该地址（仅 SSH 生效）
+        jump: (h.jump && typeof h.jump === 'object' && String(h.jump.host || '').trim()) ? {
+          host: String(h.jump.host).trim().slice(0, 256),
+          port: h.jump.port != null ? String(h.jump.port) : '',
+          username: String(h.jump.username || '').trim().slice(0, 128),
+          password: typeof h.jump.password === 'string' ? h.jump.password : ''
+        } : null,
         // 兼容旧配置：行内无 commands 时回退到设备级共享命令
         commands: Array.isArray(h.commands) ? h.commands.slice() : (Array.isArray(cfg.commands) ? cfg.commands.slice() : []),
         onConnect: normCmds(h.onConnect, cfg.onConnect ? normCmds(cfg.onConnect, []) : [])
@@ -3644,11 +3978,12 @@ async function applyMonitor(id, cfg, enabled) {
         } catch (e) { expectFp = ''; }
         const res = await bridge.start(Object.assign(
           { key: monitorKey(id, r.host), deviceId: id, name: node ? node.name : '', expectFp, host: r.host },
-          { protocol: r.protocol, port: r.port, username: r.username, password: r.password },
+          { protocol: r.protocol, port: r.port, username: r.username, password: r.password, privateKey: r.privateKey || '', keyPassphrase: r.keyPass || '', jump: r.jump || null },
           { commands: r.readOnly ? [] : r.commands, readOnly: !!r.readOnly, onConnect: r.onConnect || [], intervalSec: cleanCfg.intervalSec, cmdDelayMs: cleanCfg.cmdDelayMs },
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
-          { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000) } }
+          { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
+        { sysinfo: { enabled: !!r.snmpEnabled, community: r.snmpCommunity || 'public' } }
         ));
         if (!res || !res.ok) {
           perHost[r.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
@@ -3694,16 +4029,16 @@ async function reconcileMonitors() {
   if (reconcileMonitors._busy) return;
   reconcileMonitors._busy = true;
   try {
-  const validIds = new Set(state.nodes.map(n => n.id));
-  // 清理已不存在节点的配置
+  const validIds = new Set(allSheetNodes().map(n => n.id));
+  // 清理已不存在节点的配置（覆盖全部图纸页）
   let changed = false;
   for (const k of Object.keys(state.monitorCfg)) {
     if (!validIds.has(k)) { delete state.monitorCfg[k]; changed = true; }
   }
   if (changed) saveMonitorCfg().catch(() => {});
-  // 期望任务集合：hostKey -> {cfg, row, node}
+  // 期望任务集合：hostKey -> {cfg, row, node}（覆盖全部图纸页的启用任务）
   const desired = new Map();
-  for (const n of state.nodes) {
+  for (const n of allSheetNodes()) {
     const cfg = state.monitorCfg[n.id];
     if (!cfg || !cfg.enabled) continue;
     for (const r of normalizeMonitorHosts(cfg)) desired.set(monitorKey(n.id, r.host), { cfg, row: r, node: n });
@@ -3731,11 +4066,12 @@ async function reconcileMonitors() {
       try { const fp = localStorage.getItem('topoShellFp:' + row.host); if (fp && fp.indexOf('SHA256:') === 0) expectFp = fp; } catch (e) {}
       const res = await bridge.start(Object.assign(
         { key: hk, deviceId: node.id, name: node.name, expectFp, host: row.host },
-        { protocol: row.protocol, port: row.port, username: row.username, password: row.password, privateKey: row.privateKey || '', keyPassphrase: row.keyPass || '' },
+        { protocol: row.protocol, port: row.port, username: row.username, password: row.password, privateKey: row.privateKey || '', keyPassphrase: row.keyPass || '', jump: row.jump || null },
         { commands: row.readOnly ? [] : (Array.isArray(row.commands) ? row.commands : []), readOnly: !!row.readOnly, onConnect: row.onConnect || [], intervalSec: cfg.intervalSec, cmdDelayMs: cfg.cmdDelayMs },
         { probe: { enabled: row.probeEnabled, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
         { alerts: row.alerts },
-        { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000) } }
+        { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
+        { sysinfo: { enabled: !!row.snmpEnabled, community: row.snmpCommunity || 'public' } }
       ));
       if (!res || !res.ok) perDev[node.id][row.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
     } catch (err) {
@@ -3838,6 +4174,14 @@ function openMonitorConfig(id) {
         <label class="mh-onc" title="连接时执行命令：每次连接成功（含自动重连）仅执行一次，先于周期循环命令发出；每行一条，依次执行">连接时
           <textarea class="mh-onc-ta" rows="2" placeholder="命令（每行一条，连接成功时依次执行）">${U.escHtml(Array.isArray(r.onConnect) ? r.onConnect.join('\n') : (r.onConnect || ''))}</textarea>
         </label>
+        <button type="button" class="tb mh-jump-btn" title="经 SSH 跳板机（堡垒机）连接该地址，仅 SSH 目标生效">跳板${r.jump && r.jump.host ? '（已配）' : ''}</button>
+        <div class="mh-jump-wrap" hidden>
+          <input class="mh-jump-host" type="text" placeholder="跳板地址（留空=不使用）" value="${U.escHtml(r.jump && r.jump.host || '')}" autocomplete="off"/>
+          <input class="mh-jump-port" type="number" min="1" max="65535" placeholder="端口(22)" value="${U.escHtml(r.jump && r.jump.port || '')}"/>
+          <input class="mh-jump-user" type="text" placeholder="跳板用户名" value="${U.escHtml(r.jump && r.jump.username || '')}" autocomplete="off"/>
+          <input class="mh-jump-pass" type="password" placeholder="跳板密码" value="${U.escHtml(r.jump && r.jump.password || '')}" autocomplete="new-password"/>
+          <span class="mh-unit">跳板认证：密码；仅 SSH 目标生效</span>
+        </div>
         <label class="mh-auth" title="SSH 认证方式：密码，或公钥（粘贴/导入私钥，Telnet 不适用）">认证
           <select class="mh-auth-sel"><option value="password"${r.authMode !== 'key' ? ' selected' : ''}>密码</option><option value="key"${r.authMode === 'key' ? ' selected' : ''}>私钥</option></select>
         </label>
@@ -3854,6 +4198,9 @@ function openMonitorConfig(id) {
         <input class="mh-pr-port" type="number" min="1" max="65535" placeholder="端口(默认管理口)" title="探测目标端口，留空 = 管理端口" value="${U.escHtml(r.probePort)}"/>
         <button type="button" class="tb mh-alert-btn" title="输出匹配这些关键字时告警">告警${Array.isArray(r.alerts) && r.alerts.length ? '（' + r.alerts.length + '）' : ''}</button>
         <label class="mh-bk" title="定时抓取配置保存为备份，保留历史并可对比差异"><input type="checkbox" class="mh-bk-cb"${r.backupEnabled ? ' checked' : ''}/>自动备份</label>
+        <label class="mh-cmp" title="每次配置备份保存后自动按「配置合规检查」的规则扫描；违规写入事件时间线并弹系统通知"><input type="checkbox" class="mh-cmp-cb"${r.complianceEnabled ? ' checked' : ''}/>自动合规</label>
+        <label class="mh-si" title="每次会话建立后经 SNMP v2c 读取 sysDescr/sysObjectID，自动回填设备「软件版本」（只读操作）"><input type="checkbox" class="mh-si-cb"${r.snmpEnabled ? ' checked' : ''}/>SNMP 识别</label>
+        <input class="mh-si-comm" type="text" title="SNMP v2c 团体字" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
         <label class="mh-bk-skip" title="配置无变化时不新增备份文件，只有配置变化时才新增（开启后备份库只保留发生变化的版本）"><input type="checkbox" class="mh-bk-skip-cb"${r.backupSkipSame ? ' checked' : ''}/>无变化不新增</label>
         <select class="mh-bk-mode" title="备份连接方式：复用监控连接 = 在监控会话内执行备份命令；独立连接 = 每次备份单独建立连接，不干扰监控会话">
           <option value="session"${r.backupMode !== 'own' ? ' selected' : ''}>复用监控连接</option>
@@ -3901,6 +4248,15 @@ function openMonitorConfig(id) {
       if (hidden) alertsWrap.querySelector('textarea').focus();
     };
     rowEl.querySelector('.mh-del').onclick = () => rowEl.remove();
+    // 跳板机行内折叠区：填写地址即启用（清空即停用）
+    const jumpBtn = rowEl.querySelector('.mh-jump-btn');
+    const jumpWrap = rowEl.querySelector('.mh-jump-wrap');
+    jumpBtn.onclick = () => {
+      const hidden = jumpWrap.hasAttribute('hidden');
+      jumpWrap.toggleAttribute('hidden');
+      jumpBtn.classList.toggle('on', hidden);
+      if (hidden) jumpWrap.querySelector('.mh-jump-host').focus();
+    };
     // 认证方式切换：私钥模式展开私钥区（仅 SSH 生效；Telnet 仍走密码）
     const authSel = rowEl.querySelector('.mh-auth-sel');
     const keyWrap = rowEl.querySelector('.mh-key-wrap');
@@ -3978,11 +4334,24 @@ function openMonitorConfig(id) {
         probePort: parseInt(rowEl.querySelector('.mh-pr-port').value, 10) > 0 ? parseInt(rowEl.querySelector('.mh-pr-port').value, 10) : '',
         alerts,
         backupEnabled: rowEl.querySelector('.mh-bk-cb').checked,
+        complianceEnabled: rowEl.querySelector('.mh-cmp-cb').checked,
+        snmpEnabled: rowEl.querySelector('.mh-si-cb').checked,
+        snmpCommunity: rowEl.querySelector('.mh-si-comm').value.trim().slice(0, 64),
         backupCommand: (() => { const v = rowEl.querySelector('.mh-bk-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); return v.length ? v : ['display current-configuration']; })(),
         backupMode: rowEl.querySelector('.mh-bk-mode').value,
         backupSkipSame: rowEl.querySelector('.mh-bk-skip-cb').checked,
         backupIntervalSec: Math.max(1, Math.min(1440, parseInt(rowEl.querySelector('.mh-bk-int').value, 10) || 60)) * 60,
-        backupWaitSec: 1
+        backupWaitSec: 1,
+        jump: (() => {
+          const jh = rowEl.querySelector('.mh-jump-host').value.trim();
+          if (!jh) return null;
+          return {
+            host: jh,
+            port: rowEl.querySelector('.mh-jump-port').value.trim(),
+            username: rowEl.querySelector('.mh-jump-user').value.trim(),
+            password: rowEl.querySelector('.mh-jump-pass').value
+          };
+        })()
       };
     }).filter(r => r.host);
     if (!rows.length) { toast('请至少填写一个管理地址'); return; }
@@ -4016,6 +4385,126 @@ function openMonitorConfig(id) {
   setTimeout(() => { if (document.body.contains(ov)) { const f = listEl.querySelector('.mh-host'); if (f) f.focus(); } }, 250);
 }
 
+/* ================= 配置合规基线检查（本地规则扫描备份库） ================= */
+function openComplianceCheck() {
+  if (!window.topoConfigBackup) { toast('配置合规检查需要桌面版（Electron）环境'); return; }
+  if (!U.complianceRules) U.loadComplianceRules();
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:880px;height:82vh;display:flex;flex-direction:column">
+      <h3>配置合规基线检查</h3>
+      <div class="m-sub">对配置备份库中各地址的<b>最新备份</b>执行本地规则扫描（纯本机，不上传）。规则为逐行正则（不区分大小写）：「必须存在」无命中即违规，「禁止出现」命中即违规。</div>
+      <div class="comp-rules" id="compRules"></div>
+      <div class="m-actions" style="justify-content:flex-start;margin:8px 0">
+        <button type="button" class="tb" data-act="addrule">＋ 添加规则</button>
+        <button type="button" class="tb" data-act="reset">恢复默认规则</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="export" disabled title="将最近一次扫描结果导出为 Excel/CSV">导出报告</button>
+        <button type="button" class="tb primary" data-act="run">保存规则并扫描备份库</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+      <div id="compResults" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px"><div class="bk-empty">点击「保存规则并扫描备份库」开始检查。</div></div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+
+  const rulesEl = ov.querySelector('#compRules');
+  const resEl = ov.querySelector('#compResults');
+  const ruleRow = (r) => `
+    <div class="comp-rule">
+      <input type="checkbox" class="cr-on"${r.enabled !== false ? ' checked' : ''} title="启用该规则"/>
+      <input class="cr-name" type="text" value="${U.escHtml(r.name || '')}" placeholder="规则名称"/>
+      <select class="cr-negate" title="规则类型">
+        <option value="0"${!r.negate ? ' selected' : ''}>必须存在</option>
+        <option value="1"${r.negate ? ' selected' : ''}>禁止出现</option>
+      </select>
+      <input class="cr-pat" type="text" value="${U.escHtml(r.pattern || '')}" placeholder="逐行正则，如 ntp|telnet server enable" spellcheck="false"/>
+      <button type="button" class="tb icon cr-del" title="删除规则">✕</button>
+    </div>`;
+  const renderRules = () => {
+    rulesEl.innerHTML = '<div class="comp-head"><span>启用</span><span>名称</span><span>类型</span><span>逐行正则</span><span></span></div>' +
+      U.complianceRules.map(ruleRow).join('');
+    rulesEl.querySelectorAll('.comp-rule').forEach((el, i) => {
+      el.querySelector('.cr-del').onclick = () => { U.complianceRules.splice(i, 1); renderRules(); };
+    });
+  };
+  renderRules();
+  const collectRules = () => {
+    const rows = [...rulesEl.querySelectorAll('.comp-rule')].map((el, i) => ({
+      id: (U.complianceRules[i] && U.complianceRules[i].id) || ('cr' + (i + 1)),
+      name: el.querySelector('.cr-name').value.trim(),
+      pattern: el.querySelector('.cr-pat').value.trim(),
+      negate: el.querySelector('.cr-negate').value === '1',
+      enabled: el.querySelector('.cr-on').checked,
+      note: (U.complianceRules[i] && U.complianceRules[i].note) || ''
+    }));
+    return U.saveComplianceRules(rows);
+  };
+  ov.querySelector('[data-act=addrule]').onclick = () => {
+    U.complianceRules.push({ id: 'cr' + Date.now(), name: '', pattern: '', negate: false, enabled: true, note: '' });
+    renderRules();
+    const els = rulesEl.querySelectorAll('.comp-rule');
+    if (els.length) els[els.length - 1].querySelector('.cr-name').focus();
+  };
+  ov.querySelector('[data-act=reset]').onclick = () => {
+    U.saveComplianceRules(U.COMPLIANCE_DEFAULT_RULES);
+    renderRules();
+    toast('已恢复默认规则');
+  };
+  ov.querySelector('[data-act=close]').onclick = close;
+  const exportBtn = ov.querySelector('[data-act=export]');
+  let lastScan = null; // 最近一次扫描结果（[{device, host, time, rep}]），供导出
+  exportBtn.onclick = () => {
+    if (!lastScan || !lastScan.length) { toast('请先执行一次扫描'); return; }
+    const rows = U.buildComplianceReportRows(lastScan).map(r => r.map(U.sanitizeCell));
+    if (window.XLSX) {
+      const ws = window.XLSX.utils.aoa_to_sheet(rows);
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, ws, '合规检查');
+      const buf = window.XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+      U.download(`合规检查报告_${U.fmtDate()}.xlsx`, new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    } else {
+      U.download(`合规检查报告_${U.fmtDate()}.csv`, new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    }
+    toast('已导出合规检查报告');
+  };
+  ov.querySelector('[data-act=run]').onclick = async () => {
+    const rules = collectRules();
+    if (!rules.length) { toast('请至少配置一条启用的规则（名称与正则需填写，正则需合法）'); return; }
+    renderRules();
+    resEl.innerHTML = '<div class="bk-empty">正在扫描备份库…</div>';
+    let hosts = [];
+    try { const r = await window.topoConfigBackup.hosts(); hosts = (r && r.items) || []; } catch (e) { hosts = []; }
+    if (!hosts.length) { resEl.innerHTML = '<div class="bk-empty">备份库为空：先在「设备监控」中开启「自动备份」生成配置备份</div>'; return; }
+    const rows = [];
+    for (const h of hosts) {
+      let rep = null;
+      try {
+        const rd = await window.topoConfigBackup.read(h.device, h.host, h.last);
+        if (rd && rd.ok) rep = U.checkCompliance(rd.content, rules);
+      } catch (e) { rep = null; }
+      rows.push({ h, rep });
+    }
+    const bad = rows.filter(r => r.rep && r.rep.failed > 0).length;
+    lastScan = rows.map(({ h, rep }) => ({ device: h.device, host: h.host, time: h.lastAt ? U.fmtDateTime(new Date(h.lastAt)) : '', rep }));
+    exportBtn.disabled = false;
+    resEl.innerHTML = `<div class="comp-total">共 ${rows.length} 个地址，<b style="color:${bad ? 'var(--danger)' : 'var(--text)'}">${bad} 个存在违规项</b>（鼠标悬停规则可查看命中行）</div>` +
+      rows.map(({ h, rep }) => {
+        if (!rep) return `<div class="comp-dev"><div class="comp-dev-h"><b>${U.escHtml(h.device)}</b> <span class="comp-host">${U.escHtml(h.host)}</span><span class="comp-chip fail">读取备份失败</span></div></div>`;
+        const chips = rep.results.map(r => {
+          const tip = r.pass ? (r.lines[0] || r.note || '') : (r.negate ? ('违规行：' + (r.lines[0] || '')) : ('未找到匹配行。' + (r.note || '')));
+          return `<span class="comp-chip ${r.pass ? 'pass' : 'fail'}" title="${U.escHtml(tip)}">${r.pass ? '✓' : '✗'} ${U.escHtml(r.name)}</span>`;
+        }).join('');
+        return `<div class="comp-dev"><div class="comp-dev-h"><b>${U.escHtml(h.device)}</b> <span class="comp-host">${U.escHtml(h.host)}</span><span class="comp-sum">${rep.passed}/${rep.passed + rep.failed} 项通过 · ${U.fmtDateTime(new Date(h.lastAt))}</span></div><div class="comp-chips">${chips}</div></div>`;
+      }).join('');
+  };
+}
+
 /* ================= 监控中心总览（设备状态 + 告警历史 + 备份差异） ================= */
 function openMonitorCenter() {
   const bridge = monitorBridge();
@@ -4034,6 +4523,7 @@ function openMonitorCenter() {
         <div class="mc-stat s-alert"><b id="mcSAlert">0</b><span>告警中</span></div>
         <div class="mc-stat"><b id="mcSBak">0</b><span>备份设备</span></div>
       </div>
+      <div class="mc-uptime" id="mcUptime"></div>
       <div class="mc-main">
         <div class="mc-col">
           <div class="mc-h">设备监控状态</div>
@@ -4086,11 +4576,11 @@ function openMonitorCenter() {
   };
   const evIcon = (t) => ({
     offline: '🔴', recovery: '🟢', alert: '🟠', 'alert-clear': '⚪',
-    backup: '📦', 'backup-change': '📦', 'backup-error': '❌'
+    backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️'
   }[t] || '•');
   const evTypeLabel = {
     offline: '离线', recovery: '恢复', alert: '告警', 'alert-clear': '解除',
-    backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败'
+    backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规'
   };
   // 事件时间线筛选：null = 全部；curDev = 设备；curHost = 具体管理地址
   let curDev = null, curHost = null, curDevName = '';
@@ -4104,10 +4594,56 @@ function openMonitorCenter() {
   };
   filterEl.onclick = () => { curDev = null; curHost = null; curDevName = ''; filterEl.hidden = true; filterEl.textContent = ''; load(); };
 
+  /** 近 7 天在线率（探测采样 10 分钟桶聚合；任一管理口在线即视为该设备在线） */
+  function renderUptime() {
+    if (!bridge.uptime) return;
+    const upEl = ov.querySelector('#mcUptime');
+    bridge.uptime().then((ur) => {
+      if (!ur || !ur.ok || !ov.isConnected) return;
+      const series = ur.series || {};
+      const perDev = {}; // deviceId -> { bucketTs: 0|1 }
+      for (const [key, arr] of Object.entries(series)) {
+        const at = key.indexOf('@');
+        const did = at > 0 ? key.slice(0, at) : key;
+        const map = perDev[did] || (perDev[did] = {});
+        for (const e of (Array.isArray(arr) ? arr : [])) {
+          if (!Array.isArray(e) || !Number.isFinite(e[0])) continue;
+          if (e[1]) map[e[0]] = 1;
+          else if (map[e[0]] == null) map[e[0]] = 0;
+        }
+      }
+      const day0 = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime(); };
+      const today = day0(Date.now());
+      const rowsHtml = Object.entries(perDev).map(([did, map]) => {
+        const node = state.nodes.find(n => n.id === did);
+        const name = (node && node.name) || did;
+        const cells = [];
+        let okAll = 0, knownAll = 0;
+        for (let i = 6; i >= 0; i--) {
+          const dStart = today - i * 86400000;
+          let ok = 0, known = 0;
+          for (const [t, okv] of Object.entries(map)) {
+            const tt = Number(t);
+            if (tt >= dStart && tt < dStart + 86400000) { known++; if (okv) ok++; }
+          }
+          okAll += ok; knownAll += known;
+          const pct = known ? Math.round(ok / known * 100) : null;
+          const cls = pct == null ? 'nodata' : pct >= 99 ? 'good' : pct >= 90 ? 'warn' : 'bad';
+          cells.push(`<span class="up-day ${cls}" title="${new Date(dStart).toLocaleDateString()}：${pct == null ? '无数据' : '在线率 ' + pct + '%'}">${pct == null ? '—' : pct + '%'}</span>`);
+        }
+        const allPct = knownAll ? Math.round(okAll / knownAll * 100) : null;
+        return `<div class="up-row"><b class="up-dev" title="${U.escHtml(name)}">${U.escHtml(name)}</b><span class="up-days">${cells.join('')}</span><span class="up-all">${allPct == null ? '' : '合计 ' + allPct + '%'}</span></div>`;
+      }).join('');
+      upEl.innerHTML = '<div class="up-title">近 7 天在线率（探测采样，10 分钟粒度，悬停查看单日）</div>' +
+        (rowsHtml || '<div class="up-empty">暂无探测数据：为监控地址勾选「在线探测」后自动累积</div>');
+    }).catch(() => {});
+  }
+
   async function load() {
     try {
       const r = await bridge.overview();
       if (!r || !r.ok) { jobsEl.innerHTML = '<div class="mc-empty">加载失败</div>'; return; }
+      renderUptime(); // 在线率趋势（异步，不阻塞主视图）
       // 设备状态：按 job 展示（同一设备多地址合并为一行明细）
       const jobs = r.jobs || [];
       const byDev = new Map();
@@ -4127,6 +4663,7 @@ function openMonitorCenter() {
               if (h.probeOk && h.probeLatency != null) bits.push(h.probeLatency + 'ms');
               if (h.backup && h.backup.error) bits.push('<b class="t-off">备份失败</b>');
               else if (h.backup && h.backup.name) bits.push(h.backup.first ? '首次备份' : (h.backup.changed ? '<b class="t-alert">备份有变化</b>' : '备份一致'));
+              if (h.compliance && h.compliance.failed > 0) bits.push('<b class="t-alert">合规违规 ' + h.compliance.failed + '/' + h.compliance.total + '</b>');
               const selCls = (curDev === h.deviceId && curHost === h.host) ? ' sel' : '';
               return '<div class="mc-job' + selCls + '" data-dev="' + U.escHtml(h.deviceId) + '" data-name="' + U.escHtml(j.name || j.deviceId) + '" data-host="' + U.escHtml(h.host) + '" title="点击筛选该地址的事件">' + icon + ' <b>' + U.escHtml(h.host) + '</b> ' + (bits.length ? '<span class="mc-bits">' + bits.join(' · ') + '</span>' : '') + '</div>';
             }).join('');
@@ -4422,6 +4959,7 @@ function openConfigBackups(devicePreset) {
             <span id="bkDiffInfo" class="bk-diffinfo"></span>
             <button type="button" class="tb" id="bkDiff" disabled>对比选中（旧 → 新）</button>
             <button type="button" class="tb" id="bkDelete" disabled>删除选中</button>
+            <button type="button" class="tb" id="bkComp">合规检查…</button>
             <button type="button" class="tb" id="bkNow">立即备份当前地址</button>
             <button type="button" class="tb" data-act="openfolder">打开目录</button>
             <button type="button" class="tb primary" data-act="close">关闭</button>
@@ -4547,6 +5085,7 @@ function openConfigBackups(devicePreset) {
       contentEl.innerHTML = fmtDiff(d); // 行内容已逐行 escHtml；失败分支已改走 textContent
     } catch (e) { contentEl.textContent = '（对比失败）'; }
   };
+  ov.querySelector('#bkComp').onclick = () => { close(); openComplianceCheck(); };
   ov.querySelector('#bkNow').onclick = async () => {
     if (!cur.host) { toast('请先选择一个管理地址'); return; }
     if (!window.topoMonitor || !window.topoMonitor.runBackup) { toast('立即备份需要监控任务在运行'); return; }
@@ -4621,6 +5160,13 @@ function openWebShell(id) {
         <label>密码</label>
         <input id="wsPass" type="password" placeholder="SSH 密码；Telnet 通常可留空" autocomplete="new-password"/>
       </div>
+      <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="wsJumpOn" type="checkbox"/> 经跳板机连接（仅 SSH 目标生效）</label></div>
+      <div class="frow" id="wsJumpWrap" style="display:none"><div class="frow-inline">
+        <div class="frow"><label>跳板地址</label><input id="wsJumpHost" type="text" placeholder="堡垒机/跳板 IP" autocomplete="off"/></div>
+        <div class="frow"><label>跳板端口</label><input id="wsJumpPort" type="number" min="1" max="65535" placeholder="22"/></div>
+        <div class="frow"><label>跳板用户名</label><input id="wsJumpUser" type="text" placeholder="admin" autocomplete="off"/></div>
+        <div class="frow"><label>跳板密码</label><input id="wsJumpPass" type="password" autocomplete="new-password"/></div>
+      </div></div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="cancel">取消</button>
         <button type="button" class="tb primary" data-act="connect">连接</button>
@@ -4650,6 +5196,8 @@ function openWebShell(id) {
   };
   authEl.addEventListener('change', applyAuthUi);
   protoEl.addEventListener('change', applyAuthUi);
+  const jumpOnEl = ov.querySelector('#wsJumpOn');
+  jumpOnEl.addEventListener('change', () => { ov.querySelector('#wsJumpWrap').style.display = jumpOnEl.checked ? '' : 'none'; });
   ov.querySelector('#wsKeyFile').onclick = () => {
     const inp = document.createElement('input');
     inp.type = 'file'; inp.accept = '.pem,.key,.txt,.id_rsa,.ed25519,.ecdsa';
@@ -4675,6 +5223,14 @@ function openWebShell(id) {
       cfg.privateKey = ov.querySelector('#wsKey').value.trim().slice(0, 65536);
       cfg.keyPassphrase = ov.querySelector('#wsKeyPass').value.slice(0, 1024);
       if (!cfg.privateKey) { toast('请粘贴或导入私钥（或改回密码认证）'); return; }
+    }
+    if (cfg.protocol === 'ssh' && jumpOnEl.checked && ov.querySelector('#wsJumpHost').value.trim()) {
+      cfg.jump = {
+        host: ov.querySelector('#wsJumpHost').value.trim(),
+        port: ov.querySelector('#wsJumpPort').value.trim(),
+        username: ov.querySelector('#wsJumpUser').value.trim(),
+        password: ov.querySelector('#wsJumpPass').value
+      };
     }
     try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
     if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
@@ -4709,6 +5265,8 @@ $('#tooltip').classList.add('hidden');
 $('#hintBar').classList.add('hidden');
 applyTheme();
 wire();
+renderer.orthoLinks = state.orthoLinks;
+refreshSheets();
 updateUndoBtns();
 refreshAll();
 setMode('normal');
@@ -4723,6 +5281,7 @@ if (typeof globalThis !== 'undefined') {
       out[k] = Object.assign({}, v, { hosts: (Array.isArray(v.hosts) ? v.hosts : []).map(h => {
         const m = Object.assign({}, h);
         for (const f of MON_SECRET_FIELDS) m[f] = (h && h[f]) ? '***' : '';
+        if (m.jump && typeof m.jump === 'object') m.jump = Object.assign({}, m.jump, { password: h.jump && h.jump.password ? '***' : '' });
         return m;
       }) });
     }
@@ -4739,6 +5298,7 @@ if (typeof globalThis !== 'undefined') {
     newGraph,
     autoLayout,
     exportCSV,
+    openComplianceCheck,
     exportXlsx,
     exportVisio,
     exportPdf,

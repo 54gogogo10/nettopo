@@ -4,7 +4,7 @@ const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu }
 const path = require('path');
 const { ShellManager } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
-const { MonitorManager } = require('./js/monitor.js');
+const { MonitorManager, UptimeStore } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
@@ -34,11 +34,17 @@ const certQueue = [];              // 窗口未就绪时到达的证书告警
 let shellReady = false;            // Shell 窗口渲染层是否已就绪（did-finish-load）
 const pendingTabs = [];            // 等待新窗口加载完成的 newtab 消息
 const shellQueue = [];             // 窗口就绪前到达的会话事件（避免首屏输出丢失）
-const shell = new ShellManager();
+// 会话审计日志与监控日志同库（monitor-logs），日志浏览器/全局搜索天然覆盖 Web Shell 会话
+const shell = new ShellManager({ logDir: path.join(app.getPath('userData'), 'monitor-logs') });
 
 /* ---- 设备后台静默监控（复用 Web Shell 底层连接，独立监视任务） ---- */
 const configBackup = new ConfigBackupStore(path.join(app.getPath('userData'), 'config-backups'));
 const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup });
+
+/* ---- 在线率采样（监控中心 7 天趋势）：探测结果按 10 分钟桶落盘 ---- */
+const uptimeStore = new UptimeStore(path.join(app.getPath('userData'), 'monitor-uptime.json'));
+monitor.on('probe', (info) => { try { uptimeStore.record(info.key, info.ok === true); } catch (e) { /* ignore */ } });
+setInterval(() => uptimeStore.flush(), 5 * 60 * 1000).unref();
 
 /* ---- 应用设置持久化（备份目录等，存于用户数据目录 settings.json） ---- */
 let appSettings = null;
@@ -252,6 +258,15 @@ monitor.on('trust', (info) => {
     info.name + '（' + info.host + '）首次连接已自动信任指纹 ' + info.fp + '；后续指纹变化将拒绝连接');
 });
 const lastBackupChangeAt = new Map(); // key -> 上次变更通知时间（节流）
+monitor.on('compliance', (info) => {
+  sendMonitor('monitor:compliance', info);
+  const detail = info.ok
+    ? '合规巡检通过（' + info.total + ' 项）'
+    : '合规违规 ' + info.failed + '/' + info.total + '：' + (info.items || []).map(i => i.name).join('、');
+  recordMonitorEvent(info, 'compliance', detail);
+  if (!info.ok && notifyEnabled()) notifyUser('网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail);
+});
+monitor.on('sysinfo', (info) => sendMonitor('monitor:sysinfo', info));
 monitor.on('backup', (info) => {
   sendMonitor('monitor:backup', info);
   // 开启了「无变化不新增」且本次内容与上次一致（skipped）：不新增文件，时间线不刷“与上次一致”事件
@@ -557,6 +572,10 @@ ipcMain.handle('monitor:overview', (e) => {
     backups: (configBackup.hosts().items || []).slice(0, 100)
   };
 });
+// 在线率趋势（近 7 天，10 分钟桶；key → [[bucketTs, 0|1], ...]）
+ipcMain.handle('monitor:uptime', (e) => monitorGuard(e)
+  ? { ok: true, series: uptimeStore.snapshot() }
+  : { ok: false, error: 'forbidden' });
 // 测试钩子（仅冒烟测试环境）：模拟用户点击窗口关闭按钮
 if (process.env.NETTOPO_USERDATA) {
   ipcMain.handle('monitor:test-close', (e) => {
@@ -791,6 +810,7 @@ app.on('before-quit', () => { trayQuitting = true; });
 app.on('will-quit', () => {
   monitor.stopAll();
   shell.closeAll();
+  uptimeStore.flush();
   if (tray) { try { tray.destroy(); } catch (e) { /* ignore */ } tray = null; }
 });
 

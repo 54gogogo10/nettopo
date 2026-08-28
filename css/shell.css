@@ -148,3 +148,13 @@
 .sh-tab .cast:hover { border-color: var(--accent); }
 .sh-tab .cast.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .sh-tab .cast.on::after { content: "✓"; }
+
+/* ---- 群发结果对比 ---- */
+.sh-cast-diff { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
+.sh-cast-diff:hover { border-color: var(--accent); color: var(--accent); filter: none; }
+.cast-diff-dialog .cd-grid { flex: 1; overflow: auto; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(320px, 1fr); gap: 10px; }
+.cd-col { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.cd-name { padding: 7px 10px; font-size: 12.5px; font-weight: 600; background: var(--panel2); border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cd-body { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; font: 11.5px/1.6 Consolas, 'Courier New', monospace; color: var(--text); white-space: pre-wrap; word-break: break-all; background: var(--panel); }
+.cd-hl { color: var(--danger); font-weight: 600; }
+.m-sub .cd-hl { color: var(--danger); }

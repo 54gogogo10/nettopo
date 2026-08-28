@@ -129,9 +129,10 @@ async function connectCDP(target) {
   const appArgs = appExe.includes('portable') ? [] : ['.'];
   const profileDir = path.join(root, 'build', 'smoke_profile');
   try { require('fs').rmSync(profileDir, { recursive: true, force: true }); } catch (e) {}
+  const tmpUserData = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-smoke-shell-'));
   const proc = spawn(appExe,
     [...appArgs, '--remote-debugging-port=' + CDP_PORT, '--no-sandbox', '--user-data-dir=' + profileDir],
-    { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NETTOPO_SMOKE: '1' } });
+    { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NETTOPO_SMOKE: '1', NETTOPO_USERDATA: tmpUserData } });
   let appLog = '';
   proc.stdout.on('data', d => { appLog += d.toString(); });
   proc.stderr.on('data', d => { appLog += d.toString(); });
@@ -147,6 +148,29 @@ async function connectCDP(target) {
     await main.eval(`(() => { const b = document.querySelector('[data-act=yes]'); if (b) b.click(); return true; })()`);
     await sleep(800);
     ok(await main.eval('document.querySelectorAll(".node").length') > 0, '示例拓扑已载入');
+
+    // 直角布线：切换后连线渲染为多段正交 path
+    await main.eval(`document.getElementById('btnDropLayout').click(); true`);
+    await sleep(200);
+    await main.eval(`(() => { const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('直角布线')); b && b.click(); return !!b; })()`);
+    await sleep(300);
+    ok(await main.eval(`(() => { const ds = [...document.querySelectorAll('.link .ln')].map(x => x.getAttribute('d')); return ds.some(d => (d || '').split(' L').length >= 3); })()`), '直角布线：存在多段正交折线');
+    ok(await main.eval(`localStorage.getItem('nettopo.orthoLinks') === '1'`), '直角布线开关已记忆');
+    await main.eval(`document.getElementById('btnDropLayout').click(); true`);
+    await sleep(200);
+    await main.eval(`(() => { const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('直角布线')); b && b.click(); return !!b; })()`);
+    await sleep(300);
+    ok(await main.eval(`(() => { const ds = [...document.querySelectorAll('.link .ln')].map(x => x.getAttribute('d') || ''); return ds.every(d => d.split(' L').length <= 2); })()`), '切回直线布线恢复单段');
+
+    // 多图纸：新建第 2 页 → 空白画布 → 切回第 1 页设备恢复
+    await main.eval(`(() => { document.getElementById('sheetAdd').click(); return true; })()`);
+    await sleep(400);
+    ok(await main.eval(`document.querySelectorAll('.sheet-tab').length === 2`), '新建图纸页出现页签（2 页）');
+    ok(await main.eval(`__topo.state.nodes.length === 0`), '新页为空白画布');
+    await main.eval(`(() => { const t = document.querySelector('.sheet-tab[data-idx="0"]'); t && t.click(); return true; })()`);
+    await sleep(400);
+    ok(await main.eval(`document.querySelectorAll('.node').length > 0`), '切回第 1 页设备恢复');
+    ok(await main.eval(`__topo.state.nodes.length === document.querySelectorAll('.node').length`), '页数据与渲染一致');
 
     // 主窗口：右键设备 → Web Shell → 连接
     const openShellDlg = async () => {
@@ -208,6 +232,28 @@ async function connectCDP(target) {
     await shell.eval(`(() => { const ta = document.querySelector('.xterm-helper-textarea') || document.querySelector('.xterm-rows textarea'); if (!ta) return false; ta.value = 'show version\\r'; ta.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'show version\\r', inputType: 'insertText' })); return true; })()`);
     await sleep(1200);
     ok((await shell.eval(`(document.querySelector('.xterm-rows') || {}).textContent || ''`)).includes('v9.9.9 MOCK'), '收到命令回显');
+
+    // 会话审计日志（monitor-logs/WebShell-*，按天归档，与监控日志共用浏览/搜索）
+    const walkLogs = (d, out = []) => {
+      if (!fs.existsSync(d)) return out;
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) walkLogs(p, out); else if (p.endsWith('.log')) out.push(p);
+      }
+      return out;
+    };
+    const tLog = Date.now();
+    let shellLogs = [];
+    while (Date.now() - tLog < 5000) {
+      shellLogs = walkLogs(path.join(tmpUserData, 'monitor-logs')).filter(p => p.includes('WebShell-'));
+      if (shellLogs.length) break;
+      await sleep(200);
+    }
+    ok(shellLogs.length >= 1, 'Web Shell 会话审计日志已生成（monitor-logs/WebShell-*）');
+    const slogOk = shellLogs.length && (() => {
+      try { const t = fs.readFileSync(shellLogs[0], 'utf8'); return t.includes('会话开始') && t.includes('MOCK-TELNET-READY'); } catch (e) { return false; }
+    })();
+    ok(slogOk, '审计日志含会话开始头与设备输出');
 
     // 快捷按钮条（SecureCRT Button Bar 风格）
     await shell.eval(`(() => { const bar = document.getElementById('shBbar'); bar.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 300, clientY: 300 })); return true; })()`);
@@ -376,6 +422,18 @@ async function connectCDP(target) {
     while (Date.now() - tCast < 4000 && mockRecv.filter(x => x.txt.includes('cast-broadcast-OK')).length < 2) await sleep(100);
     ok(mockRecv.filter(x => x.txt.includes('cast-broadcast-OK')).length >= 2, '一条命令同时下发到勾选的 2 个 Telnet 标签（mock 各收到一份）');
     ok(await waitText(shell, `document.querySelector('.sh-term-wrap.active .xterm-rows')`, 'cast-broadcast-OK', 4000), '活动标签终端显示群发命令回显');
+    // 群发结果对比：先向活动标签单独注入标记行（另一标签必然没有 → 必为差异行）
+    await shell.eval(`(() => { const ta = document.querySelector('.sh-term-wrap.active .xterm-helper-textarea'); if (!ta) return false; ta.value = 'DIFF-MARKER-TAB2\\r'; ta.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'DIFF-MARKER-TAB2\\r', inputType: 'insertText' })); return true; })()`);
+    await sleep(800);
+    // 群发结果对比：两个勾选标签的输出汇总 + 差异行高亮
+    await shell.eval(`document.getElementById('shCastDiff').click()`);
+    await sleep(400);
+    ok(await shell.eval(`!!document.querySelector('.cast-diff-dialog')`), '群发对比弹窗打开');
+    ok(await shell.eval(`document.querySelectorAll('.cast-diff-dialog .cd-col').length === 2`), '对比弹窗按勾选标签分列（2 列）');
+    ok(await shell.eval(`[...document.querySelectorAll('.cast-diff-dialog .cd-hl')].some(x => x.textContent.includes('DIFF-MARKER-TAB2'))`), '仅单标签独有的标记行被高亮为差异');
+    await shell.eval(`document.querySelector('.cast-diff-dialog [data-act=close]').click()`);
+    await sleep(200);
+    ok(await shell.eval(`!document.querySelector('.cast-diff-dialog')`), '对比弹窗可关闭');
     await shell.eval(`document.getElementById('shCastBtn').click()`);
     ok(await shell.eval(`document.getElementById('shCast').classList.contains('hidden') && !document.getElementById('shTabs').classList.contains('cast-on')`), '关闭群发模式后群发栏与勾选点一并隐藏');
     await shell.eval(`[...document.querySelectorAll('.sh-tab')].filter(t => t.querySelector('.tt').textContent.startsWith('127.0.0.1 · ')).forEach(t => t.querySelector('.x').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })))`);
@@ -467,6 +525,7 @@ async function connectCDP(target) {
     httpsServer.close();
     sshServer.close();
     await sleep(500);
+    try { fs.rmSync(tmpUserData, { recursive: true, force: true }); } catch (e) {}
     console.log('');
     console.log(failed ? ('冒烟结果：失败 ' + failed) : '冒烟结果：全部通过');
     process.exit(failed ? 1 : 0);
