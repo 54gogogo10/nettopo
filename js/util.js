@@ -21,7 +21,7 @@ U.uid = (prefix) => {
 };
 
 /* 从已有图中恢复 ID 计数器（页面刷新后避免新 ID 与恢复节点冲突） */
-U.seedCounters = (nodes, links, texts) => {
+U.seedCounters = (nodes, links, texts, regions) => {
   const scan = (prefix, lists) => {
     let max = 0;
     for (const list of lists) {
@@ -38,6 +38,7 @@ U.seedCounters = (nodes, links, texts) => {
   scan('n', [nodes, links]);
   scan('l', [nodes, links]);
   scan('t', [texts]);
+  scan('r', [regions]);
 };
 
 /* ---------- 字符串 ---------- */
@@ -506,6 +507,30 @@ U.sanitizeGraph = (nodes, links, texts) => {
     };
   }).filter(Boolean);
   return { nodes: cleanNodes, links: cleanLinks, texts: cleanTexts };
+};
+
+/* 区域分组容器清洗（工程/备份回读）：id 白名单、名称限长、坐标钳制、颜色白名单。
+ * 区域为几何容器（设备是否属于某区域由设备中心点是否落在框内决定，不存成员表）。 */
+U.sanitizeRegions = (regions) => {
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+  const used = new Set();
+  return (Array.isArray(regions) ? regions : []).map(r => {
+    if (!r || typeof r !== 'object') return null;
+    const oldId = typeof r.id === 'string' ? r.id : '';
+    let id = SAFE_ID.test(oldId) && !used.has(oldId) ? oldId : null;
+    if (!id) { do { id = U.uid('r'); } while (used.has(id)); }
+    used.add(id);
+    return {
+      id,
+      name: String(r.name == null ? '' : r.name).trim().slice(0, 64) || '区域',
+      x: Math.max(-1e6, Math.min(1e6, num(r.x, 0))),
+      y: Math.max(-1e6, Math.min(1e6, num(r.y, 0))),
+      w: Math.min(Math.max(num(r.w, 480), 60), 1e6),
+      h: Math.min(Math.max(num(r.h, 320), 60), 1e6),
+      color: U.isValidColor(r.color) ? r.color : '#6366f1'
+    };
+  }).filter(Boolean);
 };
 
 /* 修改类型颜色（内置/自定义均可） */
@@ -1008,6 +1033,115 @@ U.maskBitsToCidr = (bits) => {
 U.cidrMask = (cidr) => {
   const m = /^\d{1,3}(?:\.\d{1,3}){3}\/(\d{1,2})$/.exec(String(cidr || '').trim());
   return m ? U.maskBitsToDotted(parseInt(m[1], 10)) : '255.255.255.0';
+};
+
+/* ---------- IP 子网计算器 ---------- */
+/* 掩码文本 → 掩码位：支持 '/24'、整数、点分掩码（255.255.255.192）、反掩码（0.0.0.63）。
+ * 按「连续 1 前缀」识别正掩码，按「连续 0 前缀」识别反掩码；混合型（如 0.1.0.0）非法返回 null。 */
+U.maskTextToBits = (v) => {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (/^\/?(\d{1,2})$/.test(s)) {
+    const b = parseInt(s.replace(/^\//, ''), 10);
+    return (b >= 0 && b <= 32) ? b : null;
+  }
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  if (parts.some(x => x > 255)) return null;
+  const n = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+  const ones = (c) => { let k = 0; while (c) { c &= c - 1; k++; } return k; };
+  const prefixMask = (bits) => (bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0);
+  const onesN = ones(n);
+  if ((((n & prefixMask(onesN)) >>> 0) === n) || onesN === 0) return onesN; // 正掩码（前缀连续 1；& 结果转回无符号再比较）
+  const wc = (~n) >>> 0;
+  const onesW = ones(wc);
+  if ((((wc & prefixMask(onesW)) >>> 0) === wc)) return onesW; // 反掩码（wc 为前缀连续 1，前缀位 = ones(wc)）
+  return null;
+};
+
+/* 「IP[/掩码| 空格 掩码]」输入解析 → {ip, bits}；bits 可能为 null（未给掩码），整体非法返回 null */
+U.parseIpMaskText = (text) => {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) return null;
+  const m = /^([0-9.]+)(?:[\s/]+(\S+))?$/.exec(s);
+  if (!m) return null;
+  if (U.ipv4ToInt(m[1]) == null) return null;
+  let bits = null;
+  if (m[2] != null && String(m[2]).trim()) {
+    bits = U.maskTextToBits(m[2]);
+    if (bits == null) return null;
+  }
+  return { ip: m[1], bits };
+};
+
+/* 子网计算：返回 {ip, bits, network, broadcast, mask, wildcard, first, last, total, usable, kind}；
+ * kind = 'network'|'broadcast'|'host'；/31 按 RFC 3021 两个可用地址；/32 视为单主机。非法返回 null。 */
+U.subnetCalc = (ip, bits) => {
+  let b = (typeof bits === 'string' || bits == null) ? U.maskTextToBits(bits == null ? '' : bits) : parseInt(bits, 10);
+  if (!Number.isFinite(b)) b = 24; // 缺省 /24
+  const n = U.ipv4ToInt(ip);
+  if (n == null || b < 0 || b > 32) return null;
+  const mask = b === 0 ? 0 : (~0 << (32 - b)) >>> 0;
+  const net = (n & mask) >>> 0;
+  const bc = (net | ((~mask) >>> 0)) >>> 0;
+  const total = b === 0 ? 4294967296 : Math.pow(2, 32 - b);
+  let first, last, usable;
+  if (b >= 32) { first = net; last = net; usable = 1; }
+  else if (b === 31) { first = net; last = bc; usable = 2; }
+  else { first = net + 1; last = bc - 1; usable = total - 2; }
+  return {
+    ip: U.intToIpv4(n), bits: b,
+    network: U.intToIpv4(net), broadcast: U.intToIpv4(bc),
+    mask: U.maskBitsToDotted(b), wildcard: U.maskBitsToWildcard(b),
+    first: U.intToIpv4(first), last: U.intToIpv4(last),
+    total, usable,
+    kind: b >= 31 ? 'host' : (n === net ? 'network' : (n === bc ? 'broadcast' : 'host'))
+  };
+};
+
+/* ---------- 拓扑快速搜索（Ctrl+F，画布定位） ----------
+ * 设备匹配：名称 / 类型标签 / 管理地址 / 备注 / 型号 / 软件版本 / VLAN 编号与 IP；
+ * 连线匹配：两端接口 / 两端 IP / 备注。名称命中优先，其次其他设备字段，最后连线。
+ * 返回 [{kind:'node'|'link', id, title, sub}]，最多 limit 条（默认 20）。 */
+U.searchTopology = (nodes, links, query, limit) => {
+  const q = String(query == null ? '' : query).trim().toLowerCase();
+  if (!q) return [];
+  limit = Math.max(1, Math.min(100, parseInt(limit, 10) || 20));
+  const has = (s) => String(s == null ? '' : s).toLowerCase().indexOf(q) >= 0;
+  const nameHits = [], nodeHits = [];
+  for (const n of nodes || []) {
+    if (!n) continue;
+    const t = U.getType(n.type);
+    if (has(n.name)) {
+      nameHits.push({ kind: 'node', id: n.id, title: n.name, sub: (t && t.label) || '' });
+      continue;
+    }
+    const mg = U.nodeMgmts(n).find(ip => has(ip));
+    const vlan = (n.vlans || []).find(v => has(v.id) || has(v.ip));
+    if (mg) nodeHits.push({ kind: 'node', id: n.id, title: n.name, sub: '管理地址 ' + mg });
+    else if (vlan) nodeHits.push({ kind: 'node', id: n.id, title: n.name, sub: 'VLAN ' + vlan.id + ' ' + vlan.ip });
+    else if (has(n.note)) nodeHits.push({ kind: 'node', id: n.id, title: n.name, sub: '备注' });
+    else if (has(n.model)) nodeHits.push({ kind: 'node', id: n.id, title: n.name, sub: '型号 ' + n.model });
+    else if (has(n.osver)) nodeHits.push({ kind: 'node', id: n.id, title: n.name, sub: '版本 ' + n.osver });
+    else if (t && has(t.label)) nodeHits.push({ kind: 'node', id: n.id, title: n.name, sub: '类型 ' + t.label });
+  }
+  const byId = new Map((nodes || []).map(n => [n.id, n]));
+  const linkHits = [];
+  for (const l of links || []) {
+    if (!l) continue;
+    const na = byId.get(l.a), nb = byId.get(l.b);
+    if (!na || !nb) continue;
+    let field = null;
+    if (has(l.aIf) || has(l.bIf)) field = '接口';
+    else if (has(l.aIp)) field = 'IP ' + l.aIp;
+    else if (has(l.bIp)) field = 'IP ' + l.bIp;
+    else if (has(l.note)) field = '备注';
+    if (!field) continue;
+    linkHits.push({ kind: 'link', id: l.id, title: na.name + ' ⇄ ' + nb.name, sub: field === '接口' ? ('接口 ' + (has(l.aIf) ? l.aIf : l.bIf)) : field });
+  }
+  return nameHits.concat(nodeHits).slice(0, limit).concat(linkHits).slice(0, limit);
 };
 
 /* 解析 VLAN 表达式为编号列表：支持单个（10）、逗号/分号（10,20;30）、

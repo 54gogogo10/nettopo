@@ -267,6 +267,18 @@ monitor.on('compliance', (info) => {
   if (!info.ok && notifyEnabled()) notifyUser('网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail);
 });
 monitor.on('sysinfo', (info) => sendMonitor('monitor:sysinfo', info));
+// SNMP 接口流量：实时采样推送主窗口；接口 up/down 跳变记入事件时间线并弹通知（接口离线才弹）
+monitor.on('iftraffic', (info) => sendMonitor('monitor:iftraffic', info));
+monitor.on('ifstatus', (info) => {
+  for (const ch of (info.changes || [])) {
+    if (!ch || (ch.to !== 'up' && ch.to !== 'down')) continue;
+    recordMonitorEvent(info, ch.to === 'down' ? 'if-down' : 'if-up',
+      '接口 ' + ch.name + ' ' + (ch.to === 'down' ? 'DOWN（离线）' : 'UP（恢复）'));
+    if (ch.to === 'down' && notifyEnabled()) {
+      notifyUser('网络拓扑管理软件 · 接口离线', info.name + '（' + info.host + '）接口 ' + ch.name + ' DOWN');
+    }
+  }
+});
 monitor.on('backup', (info) => {
   sendMonitor('monitor:backup', info);
   // 开启了「无变化不新增」且本次内容与上次一致（skipped）：不新增文件，时间线不刷“与上次一致”事件
@@ -575,6 +587,10 @@ ipcMain.handle('monitor:overview', (e) => {
 // 在线率趋势（近 7 天，10 分钟桶；key → [[bucketTs, 0|1], ...]）
 ipcMain.handle('monitor:uptime', (e) => monitorGuard(e)
   ? { ok: true, series: uptimeStore.snapshot() }
+  : { ok: false, error: 'forbidden' });
+// 接口流量历史（监控中心「接口流量」页按需拉取采样序列）
+ipcMain.handle('monitor:ifhistory', (e, key) => monitorGuard(e)
+  ? monitor.ifHistory(String((key && key.key) || key || ''))
   : { ok: false, error: 'forbidden' });
 // 测试钩子（仅冒烟测试环境）：模拟用户点击窗口关闭按钮
 if (process.env.NETTOPO_USERDATA) {

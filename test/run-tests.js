@@ -2057,6 +2057,245 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       mm.stopAll();
       fs.rmSync(tmpJ, { recursive: true, force: true });
     }
+
+    console.log('== 回归：IP 子网计算器与拓扑快速搜索（新功能） ==');
+    {
+      // 子网计算：/26 主机地址
+      let c = U.subnetCalc('192.168.1.130', 26);
+      eq(c.network, '192.168.1.128', '/26 网络地址');
+      eq(c.broadcast, '192.168.1.191', '/26 广播地址');
+      eq(c.mask, '255.255.255.192', '/26 点分掩码');
+      eq(c.wildcard, '0.0.0.63', '/26 反掩码');
+      eq(c.first, '192.168.1.129', '/26 可用起始');
+      eq(c.last, '192.168.1.190', '/26 可用结束');
+      eq(c.usable, 62, '/26 可用主机数');
+      eq(c.kind, 'host', '/26 地址类型');
+      // 掩码文本格式
+      eq(U.subnetCalc('10.0.0.5', '255.255.255.0').bits, 24, '点分掩码识别');
+      eq(U.subnetCalc('10.0.0.5', '0.0.0.255').bits, 24, '反掩码识别');
+      eq(U.subnetCalc('10.0.0.5').bits, 24, '缺省 /24');
+      // 边界位数
+      eq(U.subnetCalc('192.168.1.4', 31).usable, 2, '/31 RFC3021 两个可用');
+      eq(U.subnetCalc('192.168.1.4', 31).kind, 'host', '/31 两地址均为主机');
+      eq(U.subnetCalc('1.2.3.4', 32).usable, 1, '/32 单主机');
+      eq(U.subnetCalc('8.8.8.8', 0).total, 4294967296, '/0 全地址空间');
+      eq(U.subnetCalc('192.168.0.0', 24).kind, 'network', '网络地址识别');
+      eq(U.subnetCalc('192.168.0.255', 24).kind, 'broadcast', '广播地址识别');
+      eq(U.subnetCalc('abc', 24), null, '非法 IP 返回 null');
+      eq(U.subnetCalc('1.2.3.4', 33), null, '掩码位越界返回 null');
+      eq(U.maskTextToBits('0.1.0.0'), null, '混合型掩码非法');
+      eq(U.parseIpMaskText('192.168.1.5/24').bits, 24, 'IP/掩码 解析');
+      eq(U.parseIpMaskText('10.0.0.1 0.0.0.255').bits, 24, '空格+反掩码 解析');
+      eq(U.parseIpMaskText('10.0.0.1/33'), null, '非法掩码整体拒绝');
+      // 拓扑快速搜索
+      const sNodes = [
+        { id: 'n1', name: '核心R1', type: 'router', mgmts: ['10.0.0.1'], vlans: [], note: '出口' },
+        { id: 'n2', name: 'SW2', type: 'switch', mgmts: [], vlans: [{ id: '10', ip: '192.168.10.1' }] }
+      ];
+      const sLinks = [{ id: 'l1', a: 'n1', b: 'n2', aIf: 'GE0/0/1', aIp: '10.0.0.1', bIf: 'GE1/0/1', bIp: '10.0.0.2', note: '' }];
+      ok(U.searchTopology(sNodes, sLinks, '核心').length === 1
+        && U.searchTopology(sNodes, sLinks, '核心')[0].kind === 'node', '设备名命中');
+      ok(U.searchTopology(sNodes, sLinks, '10.0.0').some(x => x.kind === 'link'), '连线 IP 命中');
+      ok(U.searchTopology(sNodes, sLinks, '10.0.0').some(x => x.kind === 'node' && x.sub.indexOf('管理地址') >= 0), '管理地址命中');
+      eq(U.searchTopology(sNodes, sLinks, '10')[0].id, 'n1', '名称命中优先于其他字段');
+      ok(U.searchTopology(sNodes, sLinks, '192.168.10').some(x => x.id === 'n2' && x.sub.indexOf('VLAN') >= 0), 'VLAN 接口命中');
+      eq(U.searchTopology(sNodes, sLinks, '').length, 0, '空查询返回空');
+      eq(U.searchTopology(sNodes, sLinks, '查无此项xyz').length, 0, '无命中返回空');
+    }
+
+    console.log('== 回归：区域分组容器（清洗 + SVG/PDF 导出，新功能） ==');
+    {
+      const regs = U.sanitizeRegions([
+        { id: 'r1', name: '核心区', x: 0, y: 0, w: 480, h: 320, color: '#6366f1' },
+        { x: 5, y: 5, w: -10, color: 'javascript:alert(1)' },
+        null
+      ]);
+      eq(regs.length, 2, '区域清洗保留合法项');
+      eq(regs[0].name, '核心区', '名称保留');
+      eq(regs[1].w, 60, '过小宽钳制到 60');
+      eq(regs[1].color, '#6366f1', '非法颜色回退默认');
+      eq(U.sanitizeRegions().length, 0, '缺参返回空数组');
+      // SVG 导出（PDF/PNG 同链路）：区域在最底层、含名称与设备计数
+      const svg = sandbox.TopoPdf.buildSvgImage({
+        nodes: [{ id: 'n1', name: 'R1', type: 'router', x: 100, y: 100, w: 160, h: 56 }],
+        links: [],
+        texts: [],
+        regions: [{ id: 'r1', name: '核心区', x: 50, y: 50, w: 480, h: 320, color: '#6366f1' }]
+      }, {});
+      ok(svg.indexOf('核心区') > 0 && svg.indexOf('1 台') > 0, 'SVG 含区域名称与设备计数');
+      ok(svg.indexOf('fill-opacity="0.06"') > 0, 'SVG 区域浅色填充');
+      ok(svg.indexOf('stroke-dasharray="10 6"') > 0, 'SVG 区域虚线边框');
+      ok(svg.indexOf('>R1<') > 0, 'SVG 仍含设备（区域未遮挡）');
+      // 空区域数组不破坏导出
+      const svg2 = sandbox.TopoPdf.buildSvgImage({ nodes: [{ id: 'n1', name: 'R1', type: 'router', x: 0, y: 0, w: 160, h: 56 }], links: [] }, {});
+      ok(svg2.indexOf('</svg>') > 0, '无区域时导出不受影响');
+    }
+
+    console.log('== 回归：VSDX 含区域导出（新功能） ==');
+    {
+      const buf = sandbox.TopoVsdx.buildVSDX({
+        nodes: [{ id: 'n1', name: 'R1', type: 'router', x: 100, y: 100, w: 160, h: 56 }],
+        links: [],
+        texts: [],
+        regions: [{ id: 'r1', name: '核心区', x: 50, y: 50, w: 480, h: 320, color: '#6366f1' }]
+      }, {});
+      ok(buf instanceof Uint8Array && buf.length > 1000, 'VSDX 含区域可生成（ZIP 字节流）');
+      const buf2 = sandbox.TopoVsdx.buildVSDX({ nodes: [{ id: 'n1', name: 'R1', type: 'router', x: 0, y: 0, w: 160, h: 56 }], links: [] }, {});
+      ok(buf2 instanceof Uint8Array && buf2.length > 1000, 'VSDX 无区域仍可生成');
+    }
+
+    console.log('== 回归：SNMP ifTable 接口流量采集（新功能） ==');
+    {
+      const os = require('os');
+      const dgram = require('dgram');
+      const {
+        MonitorManager, snmpWalk, rateBps,
+        OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_HCIN, OID_IF_HCOUT
+      } = require(path.join(root, 'js', 'monitor.js'));
+      // 速率计算
+      eq(rateBps(12500000, 10000000, 10), 2000000, '速率 = Δ计数×8/Δ秒');
+      eq(rateBps(1000, 2000, 10), null, '计数器回绕（负差）返回 null');
+      eq(rateBps(1000, 1000, 0), null, 'dt=0 返回 null');
+      eq(rateBps(null, 1000, 10), null, '缺计数返回 null');
+      // mock SNMP agent：3 个接口的 ifTable 子树（GETNEXT 遍历）
+      const counters = { 1: 10000000, 2: 20000000, 3: 30000000 };
+      const outCounters = { 1: 5000000, 2: 8000000, 3: 9000000 };
+      let operMap = { 1: 1, 2: 2, 3: 1 }; // if2 初始 down，用于状态变化事件
+      const tree = {};
+      for (const i of [1, 2, 3]) {
+        tree[OID_IF_DESCR + '.' + i] = { tag: 0x04, val: Buffer.from('GE0/0/' + i, 'utf8') };
+        tree[OID_IF_SPEED + '.' + i] = { tag: 0x42, val: [0x3B, 0x9A, 0xCA, 0x00] }; // Gauge 1e9
+        tree[OID_IF_OPER + '.' + i] = { tag: 0x02, val: null }; // 运行时填充（可翻转）
+        tree[OID_IF_HCIN + '.' + i] = { tag: 0x46, val: null }; // Counter64（测试 64 位解析路径）
+        tree[OID_IF_HCOUT + '.' + i] = { tag: 0x46, val: null };
+      }
+      const fillDyn = () => {
+        for (const i of [1, 2, 3]) {
+          tree[OID_IF_OPER + '.' + i].val = [operMap[i]];
+          tree[OID_IF_HCIN + '.' + i].val = u64Bytes(counters[i]);
+          tree[OID_IF_HCOUT + '.' + i].val = u64Bytes(outCounters[i]);
+        }
+      };
+      function u64Bytes(n) {
+        const out = [];
+        let v = n;
+        do { out.unshift(v & 0xff); v = Math.floor(v / 256); } while (v);
+        return out.length ? out : [0];
+      }
+      const oidBytes = (s) => {
+        const p = String(s).split('.').map(Number);
+        const b = [p[0] * 40 + p[1]];
+        for (let k = 2; k < p.length; k++) {
+          let v = p[k];
+          const t = [v & 0x7f];
+          v = Math.floor(v / 128);
+          while (v) { t.unshift((v & 0x7f) | 0x80); v = Math.floor(v / 128); }
+          b.push(...t);
+        }
+        return Buffer.from(b);
+      };
+      const tlv = (tag, body) => Buffer.concat([Buffer.from([tag, body.length]), Buffer.from(body)]);
+      // 完整 TLV 解析请求首 varbind 的 OID（比 indexOf 稳健：rid/社区字里可能恰有 0x06 字节）
+      const parseReqOid = (msg) => {
+        const rdFrom = (buf, p) => {
+          const tag = buf[p];
+          let len = buf[p + 1];
+          let hs = 2;
+          if (len & 0x80) { const n = len & 0x7f; len = 0; for (let i = 0; i < n; i++) len = len * 256 + buf[p + 2 + i]; hs = 2 + n; }
+          return { tag, body: buf.subarray(p + hs, p + hs + len), next: p + hs + len };
+        };
+        const top = rdFrom(msg, 0);       // MSG-SEQ
+        const f1 = rdFrom(top.body, 0);   // version INT
+        const f2 = rdFrom(top.body, f1.next); // community
+        const pdu = rdFrom(top.body, f2.next); // GetNext PDU（0xa1）
+        const rid = rdFrom(pdu.body, 0);
+        const err = rdFrom(pdu.body, rid.next);
+        const ei = rdFrom(pdu.body, err.next);
+        const vbs = rdFrom(pdu.body, ei.next); // varbind SEQ
+        const vb = rdFrom(vbs.body, 0);
+        const oid = rdFrom(vb.body, 0);
+        const b = oid.body;
+        const arcs = [Math.floor(b[0] / 40), b[0] % 40];
+        let v = 0;
+        for (let k = 1; k < b.length; k++) {
+          v = (v << 7) | (b[k] & 0x7f);
+          if (!(b[k] & 0x80)) { arcs.push(v); v = 0; }
+        }
+        return arcs.join('.');
+      };
+      const agent = dgram.createSocket('udp4');
+      agent.on('message', (msg, rinfo) => {
+        const req = parseReqOid(msg);
+        fillDyn();
+        const keys = Object.keys(tree).sort();
+        const next = keys.find(k => k > req);
+        const pick = next || '1.3.6.1.2.1.1.1.0'; // 表结束：返回子树外 OID 让 walk 停止
+        const ent = next ? tree[pick] : { tag: 0x04, val: Buffer.from('x') };
+        const vb = tlv(0x30, Buffer.concat([tlv(0x06, oidBytes(pick)), tlv(ent.tag, ent.val)]));
+        const pduBody = Buffer.concat([tlv(0x02, [0, 1]), tlv(0x02, [0]), tlv(0x02, [0]), tlv(0x30, vb)]);
+        const resp = tlv(0x30, Buffer.concat([tlv(0x02, [1]), tlv(0x04, Buffer.from('c', 'utf8')), tlv(0xa2, pduBody)]));
+        agent.send(resp, rinfo.port, rinfo.address);
+      });
+      await new Promise((res) => agent.bind(0, '127.0.0.1', res));
+      const port = agent.address().port;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      // snmpWalk：子树内 3 条 + 离开子树停止
+      const w = await snmpWalk(OID_IF_DESCR, '127.0.0.1', 'c', 2000, port);
+      ok(w.ok === true && w.varbinds.length === 3, 'snmpWalk 遍历 ifDescr 子树 3 条');
+      eq(w.varbinds[0].oid, OID_IF_DESCR + '.1', 'walk 起点为子树首个实例');
+      eq(w.varbinds[2].value, 'GE0/0/3', 'OCTET STRING 值正确');
+      // MonitorManager 端到端：任务级采集 + 速率 + 状态事件
+      const tmpIf = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-if-'));
+      const { EventEmitter } = require('events');
+      const stubShell = new EventEmitter();
+      stubShell.connect = () => ({ ok: true, id: 'if1' });
+      stubShell.write = () => {}; stubShell.close = () => {}; stubShell.trustFingerprint = () => true;
+      const mm = new MonitorManager(stubShell, tmpIf, path.join(tmpIf, 't.json'));
+      // 校验：intervalSec 钳制
+      const vcfg = mm._validate({ key: 'dev1@127.0.0.1', host: '127.0.0.1', commands: ['display version'], sysinfo: { ifTable: true, intervalSec: 5 } });
+      eq(vcfg.cfg.sysinfo.intervalSec, 30, '采集间隔下限钳制 30 秒');
+      eq(vcfg.cfg.sysinfo.ifTable, true, 'ifTable 开关透传');
+      const traffics = [], statuses = [];
+      mm.on('iftraffic', (info) => traffics.push(info));
+      mm.on('ifstatus', (info) => statuses.push(info));
+      const rs = mm.start({
+        key: 'dev1@127.0.0.1', deviceId: 'dev1', name: '核心R1',
+        protocol: 'ssh', host: '127.0.0.1', port: 22,
+        commands: ['display version'], password: 'p1',
+        sysinfo: { ifTable: true, community: 'c', intervalSec: 30, snmpPort: port }
+      });
+      ok(rs.ok === true, '接口流量任务启动成功');
+      const job = mm.jobs.get('dev1@127.0.0.1');
+      // 首次采样：只有计数器基线，无速率、无状态事件
+      await mm._pollIfTable(job);
+      eq(job.ifHist.length, 1, '首采样入历史');
+      eq(traffics.length, 1, '首采样广播 iftraffic');
+      eq(traffics[0].ifs.length, 3, '采样含 3 个接口');
+      eq(traffics[0].ifs[0].oper, 'up', '接口 1 状态 up');
+      eq(traffics[0].ifs[1].oper, 'down', '接口 2 状态 down（首采样基线不报事件）');
+      eq(traffics[0].ifs[0].in, null, '首采样无速率');
+      eq(statuses.length, 0, '首采样不发状态事件');
+      // 第二次采样：计数器增长 → 速率；接口 2 恢复 → 状态事件
+      await sleep(1100);
+      counters[1] += 12500000; outCounters[1] += 1250000;
+      counters[2] += 625000; outCounters[2] += 625000;
+      counters[3] += 0; outCounters[3] += 0;
+      operMap[2] = 1;
+      await mm._pollIfTable(job);
+      eq(job.ifHist.length, 2, '第二采样入历史');
+      const if1 = traffics[1].ifs.find(x => x.i === 1);
+      ok(Number.isFinite(if1.in) && if1.in > 0, '计数器差值算出正速率（' + if1.in + ' bps）');
+      const if3 = traffics[1].ifs.find(x => x.i === 3);
+      eq(if3.in, 0, '计数器无增长速率为 0');
+      eq(statuses.length, 1, '接口恢复产生 ifstatus 事件');
+      eq(statuses[0].changes[0].name, 'GE0/0/2', '状态事件携带接口名');
+      eq(statuses[0].changes[0].from + '>' + statuses[0].changes[0].to, 'down>up', '状态变化方向 down→up');
+      ok(job.ifHist.length <= 120, '历史容量上限 120');
+      mm.stopAll(); // 清理 snmp 定时器
+      agent.close();
+      fs.rmSync(tmpIf, { recursive: true, force: true });
+    }
+
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 })().then(() => {

@@ -159,10 +159,15 @@ function buildVSDX(graph, opts) {
   const pageName = opts.pageName || '网络拓扑图';
   const nodes = graph.nodes || [];
   const links = graph.links || [];
+  const regions = graph.regions || [];
   const IN = (v) => Math.round(v * 1000) / 1000;
 
   /* ---- 页面尺寸 ---- */
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of regions) {
+    minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h);
+  }
   for (const n of nodes) {
     minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
     maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h);
@@ -187,6 +192,47 @@ function buildVSDX(graph, opts) {
 
   /* ---- 形状 ---- */
   const shapes = [];
+
+  // 区域分组容器：背景矩形（浅色填充 + 虚线边框 + 顶部标签），先于设备/连线压栈保持底层
+  const hexRGB = (hex) => {
+    const v = parseInt(String(hex || '').replace('#', ''), 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  };
+  for (const r of regions) {
+    const [cr, cg, cb] = hexRGB(r.color || '#6366f1');
+    const light = '#' + [cr, cg, cb].map(v => Math.round(v + (255 - v) * 0.92).toString(16).padStart(2, '0')).join('');
+    const w = r.w * scale, h = r.h * scale;
+    const cx = (r.x + r.w / 2 - minX) * scale;
+    const cy = Y(r.y + r.h / 2);
+    const rid = sid++;
+    shapes.push(`    <Shape ID='${rid}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+      ${cell('PinX', IN(cx))}
+      ${cell('PinY', IN(cy))}
+      ${cell('Width', IN(w))}
+      ${cell('Height', IN(h))}
+      ${cell('LocPinX', IN(w / 2), "F='Width*0.5'")}
+      ${cell('LocPinY', IN(h / 2), "F='Height*0.5'")}
+      ${cell('Angle', 0)}
+      ${cell('ResizeMode', 0)}
+      ${cell('Para.HorzAlign', 0)}
+      ${cell('VerticalAlign', 0)}
+      ${cell('FillForegnd', light)}
+      ${cell('FillPattern', 1)}
+      ${cell('LineWeight', 0.0125)}
+      ${cell('LineColor', r.color || '#6366f1')}
+      ${cell('LinePattern', 2)}
+      ${cell('Rounding', 0.1)}
+      <Section N='Character'>
+        <Row IX='0'>
+          ${cell('Font', 1)}
+          ${cell('Color', r.color || '#6366f1')}
+          ${cell('Size', 0.1528)}
+          ${cell('Style', 1)}
+        </Row>
+      </Section>
+      <Text><cp IX='0'/><pp IX='0'/>${XRAW(r.name)}\r\n</Text>
+    </Shape>`);
+  }
 
   // 设备
   const imageParts = new Map(); // dataURL -> {rId, idx, ext, bytes}

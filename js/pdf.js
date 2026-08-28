@@ -13,9 +13,14 @@ function buildSvgImage(graph, opts) {
   opts = opts || {};
   const nodes = graph.nodes || [];
   const links = graph.links || [];
+  const regions = graph.regions || [];
   const M = 60; // 边距 px
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of regions) {
+    minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h);
+  }
   for (const n of nodes) {
     minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
     maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h);
@@ -32,6 +37,17 @@ function buildSvgImage(graph, opts) {
   const parts = [];
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
   parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff"/>`);
+
+  // 区域分组容器（设备底层背景框：浅色填充 + 虚线边 + 左上角标题）
+  for (const r of regions) {
+    const color = r.color || '#6366f1';
+    const inside = nodes.filter(n =>
+      n.x + n.w / 2 > r.x && n.x + n.w / 2 < r.x + r.w &&
+      n.y + n.h / 2 > r.y && n.y + n.h / 2 < r.y + r.h).length;
+    parts.push(`<rect x="${X(r.x)}" y="${Y(r.y)}" width="${r.w}" height="${r.h}" rx="14" fill="${color}" fill-opacity="0.06"/>`);
+    parts.push(`<rect x="${X(r.x) + 0.5}" y="${Y(r.y) + 0.5}" width="${r.w - 1}" height="${r.h - 1}" rx="14" fill="none" stroke="${color}" stroke-width="1.6" stroke-dasharray="10 6"/>`);
+    parts.push(`<text x="${X(r.x) + 14}" y="${Y(r.y) + 30}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="13" font-weight="bold" fill="${color}" stroke="rgba(255,255,255,.55)" stroke-width="3" paint-order="stroke">${esc(r.name)}${inside ? ' · ' + inside + ' 台' : ''}</text>`);
+  }
 
   // 连线（平行偏移；opts.ortho 时走直角折线）——坐标必须与节点一样经过 minX/minY 归一化！
   const geom = U.linkGeom(nodes, links, { ortho: !!(opts && opts.ortho) });

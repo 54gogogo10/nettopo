@@ -127,6 +127,17 @@ async function connectCDP(target) {
     await sleep(300);
     ok(!(await cdp.eval("!!document.querySelector('.mc-dialog')")), '监控中心可关闭');
 
+    // ---- 接口流量页签（新功能：无采集设备时显示空态引导） ----
+    await cdp.eval('__topo.openMonitorCenter(); true');
+    await sleep(600);
+    await cdp.eval("(() => { const t = [...document.querySelectorAll('.mc-tab')].find(x => x.dataset.pane === 'ifaces'); t && t.click(); return true; })()");
+    await sleep(300);
+    const ifPane = await cdp.eval("(document.querySelector('.mc-pane[data-pane=ifaces]') || {}).textContent || ''");
+    ok(ifPane.indexOf('接口流量') >= 0 && (ifPane.indexOf('暂无接口流量采集') >= 0 || ifPane.indexOf('正在等待') >= 0),
+      '接口流量页签可切换并渲染空态引导');
+    await cdp.eval("document.querySelector('.mc-dialog [data-act=close]').click(); true");
+    await sleep(300);
+
     // ---- 配置合规检查 UI（默认规则 + 扫描备份库） ----
     await cdp.eval('__topo.openComplianceCheck(); true');
     await sleep(400);

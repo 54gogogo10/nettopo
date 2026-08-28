@@ -82,6 +82,23 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 /* ---------------- SNMP v2c 最小客户端（仅 GET，零依赖 dgram + 手写 BER） ---------------- */
 const OID_SYSDESCR = '1.3.6.1.2.1.1.1.0';
 const OID_SYSOBJECT = '1.3.6.1.2.1.1.2.0';
+/* ifTable（MIB-2 interfaces）：接口名/速率/状态/收发字节计数（64 位优先，32 位兜底） */
+const OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2';
+const OID_IF_SPEED = '1.3.6.1.2.1.2.2.1.7';
+const OID_IF_OPER = '1.3.6.1.2.1.2.2.1.8';
+const OID_IF_IN32 = '1.3.6.1.2.1.2.2.1.10';
+const OID_IF_OUT32 = '1.3.6.1.2.1.2.2.1.16';
+const OID_IF_HCIN = '1.3.6.1.2.1.31.1.1.1.6';
+const OID_IF_HCOUT = '1.3.6.1.2.1.31.1.1.1.7';
+/* 接口流量历史容量（每次采样一条；默认 60s 间隔约覆盖 2 小时） */
+const IF_HIST_MAX = 120;
+/** 计算速率（bps）：计数器差值 × 8 / 秒；计数器回绕/重置（负差）返回 null */
+function rateBps(curC, prevC, dtSec) {
+  if (!Number.isFinite(curC) || !Number.isFinite(prevC) || !(dtSec > 0)) return null;
+  const delta = curC - prevC;
+  if (delta < 0) return null; // 32 位计数器回绕或设备重启
+  return Math.round(delta * 8 / dtSec);
+}
 function berLen(n) {
   if (n < 128) return Buffer.from([n]);
   if (n < 256) return Buffer.from([0x81, n]);
@@ -159,7 +176,12 @@ function parseSnmpResponse(buf) {
     let value = null;
     if (valT && valT.tag === 0x04) value = valT.body.toString('utf8');
     else if (valT && valT.tag === 0x06) value = decodeOidBody(valT.body);
-    else if (valT && valT.tag === 0x02 && valT.body.length) value = valT.body.readUIntBE(0, valT.body.length);
+    // 数值类型：Integer / Counter / Gauge / TimeTicks / Counter64（ifTable 64 位计数器）
+    else if (valT && [0x02, 0x41, 0x42, 0x43, 0x46].includes(valT.tag) && valT.body.length) {
+      value = valT.body.length <= 6
+        ? valT.body.readUIntBE(0, valT.body.length)
+        : [...valT.body].reduce((a, b) => a * 256 + b, 0); // Counter64 最多 8 字节，reduce 到 2^53 内精确
+    }
     out.push({ oid, value });
   }
   return out;
@@ -180,13 +202,13 @@ function tlvWalk(buf, start) {
   return { tag, body: buf.subarray(start + hs, start + hs + len), next: start + hs + len };
 }
 /** SNMP v2c GET：返回 {ok, varbinds:[{oid,value}]} 或 {ok:false, error}；port 供测试注入 mock agent（默认 161） */
-function snmpGet(host, community, oids, timeoutMs, port) {
+function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
   return new Promise((resolve) => {
     try {
       let rid = (snmpGet._rid = (snmpGet._rid || 0) + 1);
       const varb = oids.map(oid => berTlv(0x30, Buffer.concat([berOid(oid), Buffer.from([0x05, 0x00])])));
       const pdu = Buffer.concat([berInt(rid), berInt(0), berInt(0), berTlv(0x30, Buffer.concat(varb))]);
-      const msg = berTlv(0x30, Buffer.concat([berInt(1) /* v2c */, berTlv(0x04, Buffer.from(String(community || 'public'), 'utf8')), berTlv(0xa0, pdu)]));
+      const msg = berTlv(0x30, Buffer.concat([berInt(1) /* v2c */, berTlv(0x04, Buffer.from(String(community || 'public'), 'utf8')), berTlv(pduTag, pdu)]));
       const sock = dgram.createSocket('udp4');
       const done = (res) => { clearTimeout(t); try { sock.close(); } catch (e) { /* ignore */ } resolve(res); };
       const t = setTimeout(() => done({ ok: false, error: 'SNMP 响应超时' }), timeoutMs || 3000);
@@ -198,6 +220,26 @@ function snmpGet(host, community, oids, timeoutMs, port) {
       sock.send(msg, port || 161, host, (err) => { if (err) done({ ok: false, error: 'SNMP 发送失败' }); });
     } catch (e) { resolve({ ok: false, error: 'SNMP 构造失败' }); }
   });
+}
+function snmpGet(host, community, oids, timeoutMs, port) { return snmpRequest(0xa0, host, community, oids, timeoutMs, port); }
+function snmpGetNext(host, community, oid, timeoutMs, port) { return snmpRequest(0xa1, host, community, [oid], timeoutMs, port); }
+
+/** SNMP GETNEXT 子树遍历（GETNEXT 逐个推进，零依赖实现 ifTable 采集）：
+ *  返回 {ok, varbinds:[{oid,value}]}；离开 rootOid 子树（表结束）即停止；maxRows 防御超大表。 */
+async function snmpWalk(rootOid, host, community, timeoutMs, port, maxRows) {
+  maxRows = maxRows || 2048;
+  const out = [];
+  const prefix = rootOid + '.';
+  let next = rootOid;
+  while (out.length < maxRows) {
+    const r = await snmpGetNext(host, community, next, timeoutMs, port);
+    if (!r.ok) return { ok: false, error: r.error, varbinds: out };
+    const vb = (r.varbinds || [])[0];
+    if (!vb || !vb.oid || (vb.oid !== rootOid && !vb.oid.startsWith(prefix))) break; // 下一跳已离开子树
+    out.push(vb);
+    next = vb.oid;
+  }
+  return { ok: true, varbinds: out };
 }
 /** 从 sysDescr 启发式提取软件版本（华为 VRP / 思科 IOS / 通用 version 串） */
 function extractVersion(descr) {
@@ -515,8 +557,15 @@ class MonitorManager extends EventEmitter {
     const cOpt = bOpt.compliance && typeof bOpt.compliance === 'object' ? bOpt.compliance : {};
     backup.compliance = { enabled: !!cOpt.enabled, rules: compileComplianceRules(cOpt.rules) };
     // ---- SNMP 自动识别（v2c GET sysDescr/sysObjectID，可选；每次会话建立后执行一次） ----
+    // ---- SNMP 接口流量采集（ifTable walk，可选；独立于连接的 UDP 定时轮询） ----
     const sOpt = opts.sysinfo && typeof opts.sysinfo === 'object' ? opts.sysinfo : {};
-    const sysinfo = { enabled: !!sOpt.enabled, community: (String(sOpt.community || 'public').trim().slice(0, 64)) || 'public' };
+    const sysinfo = { enabled: !!sOpt.enabled, community: (String(sOpt.community || 'public').trim().slice(0, 64)) || 'public', ifTable: !!sOpt.ifTable };
+    let snmpIntervalSec = parseFloat(sOpt.intervalSec);
+    if (!Number.isFinite(snmpIntervalSec)) snmpIntervalSec = 60;
+    sysinfo.intervalSec = Math.max(30, Math.min(3600, snmpIntervalSec));
+    // SNMP UDP 端口（默认 161；测试可注入 mock agent 端口）
+    let snmpPort = parseInt(sOpt.snmpPort, 10);
+    sysinfo.snmpPort = (snmpPort > 0 && snmpPort <= 65535) ? snmpPort : 161;
     return {
       ok: true,
       cfg: { key, deviceId, name, protocol, host, port, username, password, privateKey, keyPassphrase, jump, expectFp, commands, onConnect: onConnectCmds, readOnly, intervalSec, cmdDelayMs, retrySec, initDelayMs, probe, alerts, backup, sysinfo }
@@ -539,7 +588,11 @@ class MonitorManager extends EventEmitter {
       probe: Object.assign({ enabled: false, type: 'tcp', intervalSec: 30 }, cfg.probe || {}),
       alerts: (cfg.alerts || []).map(a => ({ pattern: a.pattern, note: a.note, re: a.re })),
       backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 1000 }, cfg.backup || {}),
-      sysinfo: Object.assign({ enabled: false, community: 'public' }, cfg.sysinfo || {}),
+      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60 }, cfg.sysinfo || {}),
+      ifHist: [],       // 接口流量采样历史（[{ts, ifs:[{i,n,oper,in,out,speed}]}]，容量 IF_HIST_MAX）
+      ifPrev: null,     // 上次采样的计数器（算速率用）{ts, map: ifIndex -> {inC, outC}}
+      ifOperPrev: {},   // 上次采样的接口状态（ifIndex -> up/down/other），状态变化时发事件
+      snmpTimer: null, _snmpBusy: false,
       probeOk: null, probeLatency: null, probeFailSince: null, probeTimer: null, _probeBusy: false,
       alerting: false, alertInfo: null, _cycleActive: false, _alertPending: [],
       backupTimer: null, backupRunning: false, backupLast: null, _backupCap: null,
@@ -562,6 +615,8 @@ class MonitorManager extends EventEmitter {
     const job = this._newJob(cfg);
     this.jobs.set(cfg.key, job);
     this._emit(job);
+    // SNMP 接口流量采集：独立于 SSH/Telnet 连接的 UDP 定时轮询（任务级，重连不重启）
+    if (cfg.sysinfo && cfg.sysinfo.ifTable) this._startIfPoll(job);
     this._startConnect(job);
     return { ok: true, id: cfg.key };
   }
@@ -596,7 +651,8 @@ class MonitorManager extends EventEmitter {
         alert: job.alertInfo ? job.alertInfo.pattern : null,
         backup: job.backupLast ? { name: job.backupLast.name, at: job.backupLast.at, changed: !!job.backupLast.changed, first: !!job.backupLast.first, error: job.backupLast.error || null } : null,
         backupEnabled: !!job.backup.enabled, backupMode: job.backup.mode,
-        compliance: job.complianceLast ? { failed: job.complianceLast.failed, total: job.complianceLast.total, at: job.complianceLast.at } : null
+        compliance: job.complianceLast ? { failed: job.complianceLast.failed, total: job.complianceLast.total, at: job.complianceLast.at } : null,
+        ifTable: !!(job.sysinfo && job.sysinfo.ifTable)
       });
     }
     return out;
@@ -650,6 +706,7 @@ class MonitorManager extends EventEmitter {
     if (job.probeTimer) { clearTimeout(job.probeTimer); job.probeTimer = null; }
     if (job.backupTimer) { clearTimeout(job.backupTimer); job.backupTimer = null; }
     if (job._alertTimer) { clearTimeout(job._alertTimer); job._alertTimer = null; }
+    if (job.snmpTimer) { clearTimeout(job.snmpTimer); job.snmpTimer = null; }
     job._backupCap = null;
     job._cycleActive = false;
     job._alertPending = [];
@@ -729,6 +786,13 @@ class MonitorManager extends EventEmitter {
     job.logPath = path.join(dir, fname);
     try { job.logStream = fs.createWriteStream(job.logPath, { flags: 'a', encoding: 'utf8' }); }
     catch (e) { job.logStream = null; }
+    if (job.logStream) {
+      // 打开/写入异步失败（目录被清理、磁盘满、权限等）静默降级：日志尽力而为，不影响监控主流程
+      job.logStream.on('error', () => {
+        if (job.logStream) { try { job.logStream.destroy(); } catch (e2) { /* ignore */ } }
+        job.logStream = null;
+      });
+    }
   }
   _closeLog(job) {
     if (job.logStream) { try { job.logStream.end(); } catch (e) { /* ignore */ } job.logStream = null; }
@@ -822,6 +886,108 @@ class MonitorManager extends EventEmitter {
         descr: descr.slice(0, 300), objectId, version: extractVersion(descr)
       });
     }).catch(() => { /* 识别失败静默：不影响监控 */ });
+  }
+
+  /* ---------------- SNMP 接口流量采集（ifTable，独立于连接的 UDP 轮询） ---------------- */
+  _startIfPoll(job) {
+    clearTimeout(job.snmpTimer);
+    job.snmpTimer = setTimeout(() => this._pollIfTable(job), 3000);
+  }
+
+  async _pollIfTable(job) {
+    if (!job.enabled || job.stopping || !job.sysinfo || !job.sysinfo.ifTable) return;
+    if (!job._snmpBusy) {
+      job._snmpBusy = true;
+      try { await this._collectIfTable(job); }
+      catch (e) { /* 采集失败静默：不影响监控主流程 */ }
+      job._snmpBusy = false;
+    }
+    if (!job.enabled || job.stopping) return;
+    clearTimeout(job.snmpTimer);
+    job.snmpTimer = setTimeout(() => this._pollIfTable(job), (job.sysinfo.intervalSec || 60) * 1000);
+  }
+
+  async _collectIfTable(job) {
+    const host = job.host, community = job.sysinfo.community;
+    const port = job.sysinfo.snmpPort || 161;
+    // 1. 接口名表（ifDescr walk 拿到全部 ifIndex）
+    const descr = await snmpWalk(OID_IF_DESCR, host, community, 3000, port);
+    if (!descr.ok || !descr.varbinds.length) return;
+    const ifs = new Map(); // ifIndex -> {i, n, oper, speed, inC, outC}
+    for (const vb of descr.varbinds) {
+      const idx = vb.oid.slice(OID_IF_DESCR.length + 1);
+      if (!/^\d+$/.test(idx)) continue;
+      ifs.set(idx, { i: parseInt(idx, 10), n: String(vb.value == null ? '' : vb.value).slice(0, 64) });
+    }
+    if (!ifs.size) return;
+    // 2. 状态 / 速率 / 计数器（各列独立 walk，ifIndex 不在_descr 表的行忽略）
+    const merge = async (root, fn) => {
+      const w = await snmpWalk(root, host, community, 3000, port);
+      if (!w.ok) return;
+      for (const vb of w.varbinds) {
+        const idx = vb.oid.slice(root.length + 1);
+        const o = ifs.get(idx);
+        if (o) fn(o, vb.value);
+      }
+    };
+    await merge(OID_IF_OPER, (o, v) => { o.oper = v === 1 ? 'up' : (v === 2 ? 'down' : 'other'); });
+    await merge(OID_IF_SPEED, (o, v) => { o.speed = Number(v) || 0; });
+    // 64 位计数器优先（ifHCIn/OutOctets），设备不支持（走完无数据）时回退 32 位
+    let inCol = await snmpWalk(OID_IF_HCIN, host, community, 3000, port);
+    let inRoot = OID_IF_HCIN;
+    if (!inCol.ok || !inCol.varbinds.length) { inCol = await snmpWalk(OID_IF_IN32, host, community, 3000, port); inRoot = OID_IF_IN32; }
+    if (inCol.ok) for (const vb of inCol.varbinds) { const o = ifs.get(vb.oid.slice(inRoot.length + 1)); if (o) o.inC = Number(vb.value); }
+    let outCol = await snmpWalk(OID_IF_HCOUT, host, community, 3000, port);
+    let outRoot = OID_IF_HCOUT;
+    if (!outCol.ok || !outCol.varbinds.length) { outCol = await snmpWalk(OID_IF_OUT32, host, community, 3000, port); outRoot = OID_IF_OUT32; }
+    if (outCol.ok) for (const vb of outCol.varbinds) { const o = ifs.get(vb.oid.slice(outRoot.length + 1)); if (o) o.outC = Number(vb.value); }
+
+    // 3. 组装采样并计算速率（与上次计数器差值）
+    const now = Date.now();
+    const sample = { ts: now, ifs: [] };
+    for (const o of ifs.values()) {
+      if (!o.n) continue; // 无接口名的行（如内部索引）不进采样
+      const s = { i: o.i, n: o.n, oper: o.oper || 'other', speed: o.speed || 0, in: null, out: null };
+      if (job.ifPrev) {
+        const p = job.ifPrev.map.get(o.i);
+        if (p) {
+          const dt = (now - job.ifPrev.ts) / 1000;
+          s.in = rateBps(o.inC, p.inC, dt);
+          s.out = rateBps(o.outC, p.outC, dt);
+        }
+      }
+      sample.ifs.push(s);
+    }
+    sample.ifs.sort((a, b) => a.i - b.i);
+    job.ifPrev = {
+      ts: now,
+      map: new Map([...ifs.values()].filter(o => o.inC != null || o.outC != null).map(o => [o.i, { inC: o.inC, outC: o.outC }]))
+    };
+    job.ifHist.push(sample);
+    if (job.ifHist.length > IF_HIST_MAX) job.ifHist.shift();
+    // 4. 接口状态变化事件（up/down 跳变；首次采样只记录基线不报事件）
+    const changes = [];
+    for (const s of sample.ifs) {
+      if (s.oper !== 'up' && s.oper !== 'down') continue;
+      const po = job.ifOperPrev[s.i];
+      if (po && po !== s.oper) changes.push({ name: s.n, from: po, to: s.oper });
+      job.ifOperPrev[s.i] = s.oper;
+    }
+    this._logLine(job, 'SNMP 接口采集：' + sample.ifs.length + ' 个接口' + (changes.length ? '，状态变化 ' + changes.length + ' 个' : ''));
+    this.emit('iftraffic', {
+      key: job.key, deviceId: job.deviceId, name: job.name, host: job.host,
+      ts: sample.ts, ifs: sample.ifs.slice(0, 512)
+    });
+    if (changes.length) {
+      this.emit('ifstatus', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, changes });
+    }
+  }
+
+  /** 接口流量历史（渲染层监控中心按需拉取）：{ok, hist, intervalSec} 或 {ok:false} */
+  ifHistory(key) {
+    const job = this.jobs.get(String(key || '').trim());
+    if (!job) return { ok: false, error: '任务不存在或已停止' };
+    return { ok: true, hist: job.ifHist, intervalSec: job.sysinfo.intervalSec, ifTable: !!job.sysinfo.ifTable };
   }
 
   /** 等待会话就绪（收到设备命令提示符行）。设备登录/初始化未完成时下发的命令会被吞；
@@ -1309,5 +1475,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, parseSnmpResponse, extractVersion, OID_SYSDESCR, OID_SYSOBJECT };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpWalk, parseSnmpResponse, extractVersion, rateBps, OID_SYSDESCR, OID_SYSOBJECT, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
 

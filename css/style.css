@@ -916,3 +916,67 @@ html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
   font-size: 13px; color: var(--accent);
 }
 .sheet-add:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+/* ============ 画布快速搜索（Ctrl+F） ============ */
+.quick-search {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 90;
+  width: min(560px, 92%); background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; animation: rise .18s ease;
+}
+.quick-search .qs-row { display: flex; align-items: center; gap: 8px; padding: 9px 12px; }
+.quick-search .qs-row .ic { flex: none; width: 15px; height: 15px; color: var(--muted); }
+.quick-search input {
+  flex: 1; border: none; outline: none; background: transparent;
+  font-size: 13px; color: var(--text); font-family: inherit;
+}
+.quick-search .qs-count { flex: none; font-size: 11px; color: var(--muted); }
+.quick-search .qs-close {
+  flex: none; width: 22px; height: 22px; border-radius: 6px; border: none;
+  background: var(--panel2); color: var(--muted); font-size: 14px; line-height: 1;
+}
+.quick-search .qs-close:hover { color: var(--text); background: var(--accent-soft); }
+.quick-search .qs-list { max-height: 250px; overflow: auto; border-top: 1px solid var(--border); }
+.quick-search .qs-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px; cursor: pointer;
+  font-size: 12.5px; color: var(--text); border-bottom: 1px solid var(--panel2);
+}
+.quick-search .qs-item:last-child { border-bottom: none; }
+.quick-search .qs-item:hover, .quick-search .qs-item.active { background: var(--accent-soft); }
+.quick-search .qs-item .qs-kind {
+  flex: none; font-size: 10px; padding: 1px 7px; border-radius: 20px;
+  background: var(--panel2); color: var(--muted);
+}
+.quick-search .qs-item .qs-t { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.quick-search .qs-item .qs-s { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11.5px; }
+.quick-search .qs-empty { padding: 12px; font-size: 12px; color: var(--muted); text-align: center; }
+
+/* ============ 区域分组容器 ============ */
+#svg .region { cursor: move; }
+#svg .region-title { font-size: 13px; font-weight: 700; paint-order: stroke; stroke: rgba(255,255,255,.55); stroke-width: 3px; user-select: none; }
+html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
+
+/* ============ 监控中心 · 接口流量页 ============ */
+.mc-ifaces { height: 100%; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+.mc-if-devs { display: flex; flex-wrap: wrap; gap: 6px; }
+.mc-ifdev {
+  padding: 3px 12px; border-radius: 16px; border: 1px solid var(--border);
+  background: var(--panel2); color: var(--muted); font-size: 11.5px; cursor: pointer; user-select: none;
+}
+.mc-ifdev:hover { border-color: var(--accent); color: var(--text); }
+.mc-ifdev.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
+.mc-if-sub { font-size: 11px; color: var(--muted); }
+.mc-if-head, .mc-if-row {
+  display: flex; align-items: center; gap: 10px; padding: 5px 8px;
+  font-size: 12px; border-bottom: 1px solid var(--panel2);
+}
+.mc-if-head { color: var(--muted); font-size: 11px; font-weight: 600; border-bottom: 1px solid var(--border); }
+.mc-if-head span:nth-child(1), .mc-if-nm { flex: 1.6; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-if-head span:nth-child(2), .mc-if-op { flex: 0.6; }
+.mc-if-head span:nth-child(3), .mc-if-head span:nth-child(4), .mc-if-rate { flex: 1; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mc-if-head span:nth-child(5), .mc-if-spd { flex: 0.8; white-space: nowrap; color: var(--muted); }
+.mc-if-head span:nth-child(6), .mc-if-spark { flex: 2; display: flex; gap: 4px; justify-content: flex-end; }
+.mc-if-op .t-ok { color: #16a34a; font-weight: 600; }
+.mc-if-op .t-off { color: #ef4444; font-weight: 600; }
+.mc-if-op .t-mut { color: var(--muted); }
+.mc-if-body { overflow: auto; flex: 1; }
+.mc-spark { background: var(--panel2); border-radius: 4px; }

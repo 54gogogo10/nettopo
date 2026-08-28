@@ -22,9 +22,11 @@ class Renderer {
     this.nodes = [];
     this.links = [];
     this.texts = [];            // 画布文本框（自定义字体样式）
+    this.regions = [];          // 区域分组容器（几何包含：设备中心点落在框内即属于该区域）
     this.nodeEls = new Map();
     this.linkEls = new Map();
     this.textEls = new Map();
+    this.regionEls = new Map();
     this.sel = { kind: null, id: null };
     this.selIds = new Set(); // 多选（仅节点）
     this.selLinkIds = new Set(); // 多选（连线）
@@ -42,6 +44,7 @@ class Renderer {
     const grid = el('g', { id: 'gridLayer' }, this.world);
     el('rect', { x: -100000, y: -100000, width: 200000, height: 200000, fill: 'url(#gridP)' }, grid);
 
+    this.regionLayer = el('g', { id: 'regionLayer' }, this.world);
     this.groupLayer = el('g', { id: 'groupLayer' }, this.world);
     this.linkLayer = el('g', { id: 'linkLayer' }, this.world);
     this.nodeLayer = el('g', { id: 'nodeLayer' }, this.world);
@@ -106,12 +109,18 @@ class Renderer {
   }
 
   bbox() {
-    if (!this.nodes.length) return null;
+    // 区域容器纳入外框（适应视图 / 导出取景都包含区域）
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of this.nodes) {
       x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y);
       x1 = Math.max(x1, n.x + n.w); y1 = Math.max(y1, n.y + n.h);
     }
+    for (const r of this.regions || []) {
+      x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y);
+      x1 = Math.max(x1, r.x + r.w); y1 = Math.max(y1, r.y + r.h);
+    }
+    if (!this.nodes.length && !this.regions.length) return null;
+    if (x0 === Infinity) return null;
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
@@ -132,16 +141,19 @@ class Renderer {
     el('circle', { cx: 1.4, cy: 1.4, r: 1.25, class: 'grid-dot' }, p);
   }
 
-  setData(nodes, links, texts) {
+  setData(nodes, links, texts, regions) {
     this.nodes = nodes;
     this.links = links;
     this.texts = texts || [];
+    if (regions !== undefined) this.regions = regions || [];
     this.nodeEls.clear();
     this.linkEls.clear();
     this.textEls.clear();
+    this.regionEls.clear();
     this.nodeLayer.innerHTML = '';
     this.linkLayer.innerHTML = '';
     this.textLayer.innerHTML = '';
+    this.regionLayer.innerHTML = '';
     this.sel = { kind: null, id: null };
     this.selIds = new Set();
     this.selLinkIds = new Set();
@@ -218,6 +230,33 @@ class Renderer {
         e.stopPropagation();
         if (this.cb.onGroupRename) this.cb.onGroupRename(g.key, g.name);
       });
+    }
+  }
+
+  /* ---------- 区域分组容器 ---------- */
+  /* 区域为用户手画的几何容器（区别于按网段自动归组的 subnetGroups）：
+   * 仅渲染框与标题；设备是否属于区域由「中心点是否在框内」实时决定，不存成员表。 */
+  _buildRegions() {
+    this.regionLayer.innerHTML = '';
+    this.regionEls.clear();
+    for (const r of this.regions || []) {
+      const inside = this.nodes.filter(n =>
+        n.x + n.w / 2 > r.x && n.x + n.w / 2 < r.x + r.w &&
+        n.y + n.h / 2 > r.y && n.y + n.h / 2 < r.y + r.h).length;
+      const g = el('g', { class: 'region', 'data-id': r.id, transform: `translate(${r.x} ${r.y})` }, this.regionLayer);
+      el('rect', { class: 'region-fill', x: 0, y: 0, width: r.w, height: r.h, rx: 14, fill: r.color || '#6366f1' }, g).style.opacity = '0.06';
+      el('rect', {
+        class: 'region-frame', x: 0.5, y: 0.5, width: r.w - 1, height: r.h - 1, rx: 14,
+        fill: 'none', stroke: r.color || '#6366f1', 'stroke-width': 1.6 / this.zoom,
+        'stroke-dasharray': `${10 / this.zoom} ${6 / this.zoom}`
+      }, g);
+      // 标题按屏幕等效尺寸绘制（除以 zoom），缩放时保持可读
+      const ttG = el('g', { transform: `translate(14 ${24 / this.zoom + 8}) scale(${1 / this.zoom})` }, g);
+      const tt = el('text', { class: 'region-title', x: 0, y: 0 }, ttG);
+      tt.textContent = r.name + (inside ? ` · ${inside} 台` : '');
+      tt.style.fill = r.color || '#6366f1';
+      el('title', {}, g).textContent = r.name + '（区域分组：双击编辑，右键更多操作，拖动整体移动）';
+      this.regionEls.set(r.id, g);
     }
   }
 
@@ -310,6 +349,7 @@ class Renderer {
 
   /* ---------- 全量位置更新 ---------- */
   update() {
+    this._buildRegions();
     this._buildGroups();
     for (const n of this.nodes) {
       const g = this.nodeEls.get(n.id);
@@ -502,15 +542,19 @@ class Renderer {
     svg.addEventListener('pointerdown', (e) => {
       if (this.cb.onBgDown) this.cb.onBgDown(); // 点击画布时先隐藏悬停提示
       if (e.button === 1) { e.preventDefault(); this._startPan(e); return; }
-      const target = e.target.closest ? e.target.closest('.node, .link, .ann') : null;
+      const target = e.target.closest ? e.target.closest('.node, .link, .ann, .region') : null;
       if (target) {
-        const kind = target.classList.contains('node') ? 'node' : (target.classList.contains('ann') ? 'text' : 'link');
+        const kind = target.classList.contains('node') ? 'node'
+          : (target.classList.contains('ann') ? 'text'
+            : (target.classList.contains('region') ? 'region' : 'link'));
         const id = target.getAttribute('data-id');
         if (this.cb.onDown && this.cb.onDown(e, kind, id) === false) return;
         if (kind === 'node' && this.allowDrag) {
           this._startDrag(e, id);
         } else if (kind === 'text' && this.allowDrag) {
           this._startTextDrag(e, id);
+        } else if (kind === 'region' && this.allowDrag) {
+          this._startRegionDrag(e, id);
         } else if (kind === 'link') {
           // 连线仅选中，不拖拽不平移
         } else {
@@ -524,16 +568,22 @@ class Renderer {
     });
 
     svg.addEventListener('dblclick', (e) => {
-      const target = e.target.closest ? e.target.closest('.node, .link, .ann') : null;
+      const target = e.target.closest ? e.target.closest('.node, .link, .ann, .region') : null;
       if (!target) return;
-      const kind = target.classList.contains('node') ? 'node' : (target.classList.contains('ann') ? 'text' : 'link');
+      const kind = target.classList.contains('node') ? 'node'
+        : (target.classList.contains('ann') ? 'text'
+          : (target.classList.contains('region') ? 'region' : 'link'));
       this.cb.onDbl && this.cb.onDbl(kind, target.getAttribute('data-id'));
     });
 
     svg.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      const target = e.target.closest ? e.target.closest('.node, .link, .ann') : null;
-      const kind = target ? (target.classList.contains('node') ? 'node' : (target.classList.contains('ann') ? 'text' : 'link')) : 'bg';
+      const target = e.target.closest ? e.target.closest('.node, .link, .ann, .region') : null;
+      const kind = target
+        ? (target.classList.contains('node') ? 'node'
+          : (target.classList.contains('ann') ? 'text'
+            : (target.classList.contains('region') ? 'region' : 'link')))
+        : 'bg';
       const id = target ? target.getAttribute('data-id') : null;
       this.cb.onCtx && this.cb.onCtx(e, kind, id);
     });
@@ -618,6 +668,44 @@ class Renderer {
       const d = this._drag;
       this._drag = null;
       if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+    };
+    svgElAdd(this.svg, 'pointermove', move);
+    svgElAdd(this.svg, 'pointerup', up);
+  }
+
+  /* ---------- 区域整体拖动（含框内设备/文本框，几何包含按拖拽开始时判定） ---------- */
+  _startRegionDrag(e, id) {
+    const r = this.regions.find(x => x.id === id);
+    if (!r) return;
+    const w0 = this.toWorld(e.clientX, e.clientY);
+    const insideN = this.nodes
+      .filter(n => n.x + n.w / 2 > r.x && n.x + n.w / 2 < r.x + r.w && n.y + n.h / 2 > r.y && n.y + n.h / 2 < r.y + r.h)
+      .map(n => ({ n, dx: n.x - r.x, dy: n.y - r.y }));
+    const insideT = (this.texts || [])
+      .filter(t => t.x > r.x && t.x < r.x + r.w && t.y > r.y && t.y < r.y + r.h)
+      .map(t => ({ t, dx: t.x - r.x, dy: t.y - r.y }));
+    const dx0 = w0.x - r.x, dy0 = w0.y - r.y;
+    let moved = false;
+    try { this.svg.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件无活动指针时忽略 */ }
+    const move = (ev) => {
+      const w2 = this.toWorld(ev.clientX, ev.clientY);
+      const nx = w2.x - dx0, ny = w2.y - dy0;
+      if (!moved && (Math.abs(nx - r.x) > 2 || Math.abs(ny - r.y) > 2)) moved = true;
+      r.x = nx; r.y = ny;
+      for (const it of insideN) { it.n.x = nx + it.dx; it.n.y = ny + it.dy; }
+      for (const it of insideT) { it.t.x = nx + it.dx; it.t.y = ny + it.dy; }
+      this.update();
+      this.cb.onDrag && this.cb.onDrag(id, r.x, r.y);
+    };
+    const up = (ev) => {
+      svgElRemove(this.svg, 'pointermove', move);
+      svgElRemove(this.svg, 'pointerup', up);
+      if (moved) {
+        this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+      } else {
+        // 单击区域（未拖动）：等同点击空白，取消选中
+        this.cb.onBgClick && this.cb.onBgClick(this.toWorld(ev.clientX, ev.clientY), ev);
+      }
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);

@@ -30,6 +30,7 @@ const state = {
   downLinks: new Set(),  // 故障链路 id 集合（模拟断链，路径分析绕行）
   autoBackup: { on: lsGet('nettopo.autoBackup', '0') === '1', minutes: Number(lsGet('nettopo.autoBackupMin', '10') || 10), keep: Math.min(200, Math.max(1, Number(lsGet('nettopo.autoBackupKeep', '30') || 30) || 30)) },
   texts: [],  // 画布文本框（自定义字体样式）
+  regions: [], // 区域分组容器（几何包含，双击编辑/拖动整体移动；随图纸保存）
   monitorCfg: {},   // 设备后台监控配置：nodeId -> {hosts:[{host,protocol,port,username,password,commands,onConnect,readOnly,...}],intervalSec,cmdDelayMs,enabled}
   monitorStatus: {}, // 设备后台监控运行状态：nodeId -> {state,text,since}（运行时态，不持久化）
   sheets: [],       // 多图纸：[{id,name,nodes,links,texts,pan,zoom}]；活动页数据即 state.nodes/links/texts 本体
@@ -49,6 +50,11 @@ const renderer = new TopoRender($('#svg'), {
       handleModeClick(e, kind, id);
       return false;
     }
+    if (kind === 'region') {
+      // 区域不参与选中模型：只记录拖拽前快照（拖动结束若移动则入撤销栈）
+      state._dragPre = snapshot();
+      return true;
+    }
     if (kind !== 'bg') select(kind, id, { center: false, multi: e.ctrlKey || e.metaKey, extend: e.shiftKey });
     // 记录拖拽前的状态，拖动结束时用于撤销（避免撤销栈记录“当前态”）
     state._dragPre = kind === 'node' ? snapshot() : null;
@@ -60,7 +66,7 @@ const renderer = new TopoRender($('#svg'), {
     renderSelCard();
     refreshPanel();
   },
-  onDbl(kind, id) { kind === 'node' ? editNode(id) : editLink(id); },
+  onDbl(kind, id) { kind === 'node' ? editNode(id) : (kind === 'region' ? editRegion(id) : editLink(id)); },
   onCtx(e, kind, id) { openCtx(e, kind, id); },
   onDrag() {},
   onDragEnd(id, moved) {
@@ -128,16 +134,60 @@ function centerOn(kind, id) {
   renderer.flash(kind, id);
 }
 
+/* ================= 画布快速搜索（Ctrl+F） ================= */
+let qsMatches = [];   // 当前匹配结果 [{kind, id, title, sub}]
+let qsIdx = -1;       // 当前定位序号（Enter 循环下一个）
+function openQuickSearch() {
+  $('#quickSearch').classList.remove('hidden');
+  const inp = $('#qsInput');
+  inp.value = '';
+  qsMatches = []; qsIdx = -1;
+  $('#qsCount').textContent = '';
+  $('#qsList').innerHTML = '';
+  inp.focus();
+}
+function closeQuickSearch() { $('#quickSearch').classList.add('hidden'); }
+function renderQsList() {
+  const list = $('#qsList');
+  if (!qsMatches.length) {
+    list.innerHTML = $('#qsInput').value.trim() ? '<div class="qs-empty">没有匹配的设备或连线</div>' : '';
+    $('#qsCount').textContent = '';
+    return;
+  }
+  $('#qsCount').textContent = qsMatches.length + ' 个匹配';
+  list.innerHTML = qsMatches.map((m, i) => `
+    <div class="qs-item${i === qsIdx ? ' active' : ''}" data-i="${i}">
+      <span class="qs-kind">${m.kind === 'node' ? '设备' : '连线'}</span>
+      <span class="qs-t">${U.escHtml(m.title || '')}</span>
+      <span class="qs-s">${U.escHtml(m.sub || '')}</span>
+    </div>`).join('');
+}
+function qsJump(i) {
+  if (i < 0 || i >= qsMatches.length) return;
+  qsIdx = i;
+  const m = qsMatches[i];
+  select(m.kind, m.id, { center: true }); // 选中 + 视图居中 + 金色脉冲
+  renderQsList();
+  const act = $('#qsList').querySelector('.qs-item.active');
+  if (act) act.scrollIntoView({ block: 'nearest' });
+}
+function quickSearchNext(dir) {
+  if (!qsMatches.length) return;
+  qsJump(((qsIdx < 0 ? (dir > 0 ? -1 : 0) : qsIdx) + dir + qsMatches.length) % qsMatches.length);
+}
+
 /* ================= 撤销 / 重做 ================= */
 function snapshot() {
   return {
     nodes: U.clone(state.nodes), links: U.clone(state.links), texts: U.clone(state.texts),
+    regions: U.clone(state.regions),
     downLinks: [...state.downLinks], subnetNames: Object.assign({}, state.subnetNames),
     sheetIdx: state.sheetIdx
   };
 }
 function restore(s) {
   state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
+  state.regions = s.regions || [];
   state.sel = { kind: null, id: null };
   // 跨页撤销：先把当前页写回 sheets，再切到快照所属页并同步其数据
   if (s.sheetIdx != null && s.sheetIdx !== state.sheetIdx && state.sheets[s.sheetIdx]) {
@@ -145,11 +195,11 @@ function restore(s) {
     state.sheetIdx = s.sheetIdx;
     refreshSheets();
   }
-  if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; }
+  if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; state.sheets[state.sheetIdx].regions = state.regions; }
   if (Array.isArray(s.downLinks)) { state.downLinks = new Set(s.downLinks); renderer.setDownLinks(state.downLinks); }
   if (s.subnetNames && typeof s.subnetNames === 'object') { state.subnetNames = s.subnetNames; renderer.subnetNames = s.subnetNames; }
   renderer.setSubnetView(state.showSubnets, state.subnetNames);
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   updateLegend();
   renderSelCard(); // 隐藏可能残留的选中卡
@@ -215,12 +265,13 @@ async function loadGraph(graph, msg) {
   state.nodes = cleaned.nodes;
   state.links = cleaned.links;
   state.texts = cleaned.texts;
+  state.regions = []; // 导入的表格无区域数据
   state.sel = { kind: null, id: null };
   state.undoStack = []; // 初始状态无需撤销
   state.redoStack = [];
   state.blank = false; // 已导入/载入内容，回到常规模式
   updateUndoBtns();
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   if (msg) toast(msg);
   saveGraph();
@@ -270,7 +321,7 @@ function applyLayoutPreset(kind) {
   else if (kind === 'layer') Layout.layerLayout(state.nodes, { cx: c.x, cy: c.y });
   else if (kind === 'tier') Layout.tierLayout(state.nodes, { cx: c.x, cy: c.y });
   else if (kind === 'topo') Layout.layerTopoLayout(state.nodes, state.links, { cx: c.x, cy: c.y });
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   renderer.fit();
   saveGraph();
@@ -386,7 +437,7 @@ function addTemplateDevice(t) {
   node.h = U.nodeHeightFor(node);
   node.y = c.y - node.h / 2;
   state.nodes.push(node);
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   saveGraph();
   select('node', node.id, { center: true });
@@ -853,7 +904,7 @@ function openIpRenumber() {
       }
     }
     close();
-    renderer.setData(state.nodes, state.links, state.texts);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll();
     saveGraph();
     toast(changed ? `已改段：${oldC} → ${newC}，共更新 ${changed} 个 IP` : '没有 IP 位于该网段，未做修改');
@@ -861,7 +912,82 @@ function openIpRenumber() {
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
 }
 
-/* ================= 拓扑设计报告导出 ================= */
+/* ================= IP 子网计算器 ================= */
+function openSubnetCalc() {
+  // 收集拓扑中的网段供快速填充（接口 IP + 管理 IP，按出现次数排序）
+  const subCnt = new Map();
+  const count = (ip) => { const s = U.subnetOf(ip); if (s) subCnt.set(s, (subCnt.get(s) || 0) + 1); };
+  for (const l of state.links) { if (l.aIp) count(l.aIp); if (l.bIp) count(l.bIp); }
+  for (const n of state.nodes) { for (const m of U.nodeMgmts(n)) count(m); }
+  const subOptions = [...subCnt.keys()].sort((a, b) => (subCnt.get(b) - subCnt.get(a)) || a.localeCompare(b, 'zh'));
+  const KIND_TEXT = { network: '网络地址', broadcast: '广播地址', host: '主机地址' };
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:560px">
+      <h3>IP 子网计算器</h3>
+      <div class="m-sub">掩码支持 CIDR（/26）、点分掩码（255.255.255.192）与反掩码（0.0.0.63），留空默认 /24</div>
+      <div class="m-row">
+        <label>IP 地址</label>
+        <input id="scIp" type="text" placeholder="例如 192.168.1.130/26" style="width:230px"/>
+        <label style="margin-left:10px">掩码</label>
+        <input id="scMask" type="text" placeholder="/26 或 255.255.255.192" style="width:170px"/>
+      </div>
+      ${subOptions.length ? `<div class="m-row"><label>拓扑网段</label><select id="scPreset"><option value="">— 从拓扑中选择网段 —</option>${subOptions.map(s => `<option value="${U.escHtml(s)}">${U.escHtml(s)}（${subCnt.get(s)} 个 IP）</option>`).join('')}</select></div>` : ''}
+      <div id="scResult" class="m-sub" style="font-family:Consolas,monospace;line-height:1.9;white-space:pre-wrap"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="copy">复制结果</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="cancel">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  const calc = () => {
+    const parsed = U.parseIpMaskText(ov.querySelector('#scIp').value);
+    const maskTxt = ov.querySelector('#scMask').value.trim();
+    const box = ov.querySelector('#scResult');
+    if (!parsed) { box.textContent = ov.querySelector('#scIp').value.trim() ? 'IP 或掩码格式无效（示例：192.168.1.130/26）' : '请输入 IP 地址'; return null; }
+    const bits = (maskTxt ? U.maskTextToBits(maskTxt) : null);
+    if (maskTxt && bits == null) { box.textContent = '掩码格式无效（支持 /26、255.255.255.192、0.0.0.63）'; return null; }
+    const r = U.subnetCalc(parsed.ip, bits == null ? parsed.bits : bits);
+    if (!r) { box.textContent = '无法计算：请检查 IP 与掩码'; return null; }
+    box.textContent =
+      `网络地址  ${r.network}/${r.bits}    掩码  ${r.mask}    反掩码  ${r.wildcard}\n` +
+      `广播地址  ${r.broadcast}\n` +
+      `可用范围  ${r.first} ~ ${r.last}    可用主机  ${r.usable} 个（共 ${r.total} 个地址）\n` +
+      `当前地址  ${r.ip}（${KIND_TEXT[r.kind] || '主机地址'}）`;
+    return r;
+  };
+  ov.querySelector('#scIp').addEventListener('input', calc);
+  ov.querySelector('#scMask').addEventListener('input', calc);
+  const preset = ov.querySelector('#scPreset');
+  if (preset) preset.addEventListener('change', () => {
+    const cidr = preset.value;
+    if (!cidr) return;
+    const i = cidr.lastIndexOf('/');
+    ov.querySelector('#scIp').value = cidr.slice(0, i);
+    ov.querySelector('#scMask').value = cidr.slice(i);
+    calc();
+  });
+  ov.querySelector('[data-act=copy]').onclick = async () => {
+    const txt = ov.querySelector('#scResult').textContent;
+    if (!txt) { toast('暂无可复制的结果'); return; }
+    try { await navigator.clipboard.writeText(txt); toast('已复制计算结果'); }
+    catch (e) { toast('复制失败：' + (e && e.message || e)); }
+  };
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  // 默认带入选中设备的管理地址（画布有选中时打开即算）
+  const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds.size ? [...renderer.selIds][0] : null);
+  const selNode = selId ? state.nodes.find(n => n.id === selId) : null;
+  const mgmt0 = selNode ? U.nodeMgmts(selNode)[0] : null;
+  if (mgmt0) { ov.querySelector('#scIp').value = mgmt0; }
+  calc();
+}
 function exportReport() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   const html = U.buildReportHtml(state.nodes, state.links);
@@ -900,7 +1026,7 @@ function openAlign() {
       const nodes = state.nodes.filter(n => ids.has(n.id));
       pushUndo();
       U.alignNodes(nodes, btn.dataset.k);
-      renderer.setData(state.nodes, state.links, state.texts);
+      renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll(); saveGraph();
       toast('已执行「' + btn.textContent + '」');
       close();
@@ -1024,7 +1150,7 @@ function openRename() {
       if (dw) { n.w = nw; n.x -= dw / 2; }
     }
     close();
-    renderer.setData(state.nodes, state.links, state.texts);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll(); saveGraph();
     toast('已重命名 ' + nodes.length + ' 台设备');
   };
@@ -1128,6 +1254,7 @@ function sheetStash() {
   const s = state.sheets[state.sheetIdx];
   if (!s) return;
   s.nodes = state.nodes; s.links = state.links; s.texts = state.texts;
+  s.regions = state.regions || [];
   s.pan = renderer.pan; s.zoom = renderer.zoom;
 }
 /** 全部页的节点合集（监控 reconcile 覆盖所有页，切页不打断后台任务） */
@@ -1153,12 +1280,13 @@ function switchSheet(idx, opts) {
   const s = state.sheets[idx];
   state.sheetIdx = idx;
   state.nodes = s.nodes || []; state.links = s.links || []; state.texts = s.texts || [];
+  state.regions = s.regions || [];
   state.sel = { kind: null, id: null };
   if (!opts.keepUndo) { state.undoStack = []; state.redoStack = []; }
   renderer.orthoLinks = state.orthoLinks;
   renderer.showLabels = state.showLabels; renderer.showSubnets = state.showSubnets; renderer.subnetNames = state.subnetNames;
   renderer.setDownLinks(state.downLinks);
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   if (s.pan && s.zoom) renderer.setView(s.pan, s.zoom); else renderer.fit();
   updateUndoBtns();
   refreshSheets();
@@ -1170,12 +1298,12 @@ function switchSheet(idx, opts) {
 function addSheet() {
   if (!state.sheets.length) {
     // 第一次加页：当前拓扑成为第 1 页
-    state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 1', nodes: state.nodes, links: state.links, texts: state.texts, pan: renderer.pan, zoom: renderer.zoom });
+    state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 1', nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions || [], pan: renderer.pan, zoom: renderer.zoom });
     state.sheetIdx = 0;
   } else {
     sheetStash();
   }
-  state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 ' + (state.sheets.length + 1), nodes: [], links: [], texts: [], pan: null, zoom: null });
+  state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 ' + (state.sheets.length + 1), nodes: [], links: [], texts: [], regions: [], pan: null, zoom: null });
   switchSheet(state.sheets.length - 1);
   toast('已新建图纸页（' + (state.sheets.length) + ' 页）');
 }
@@ -1215,7 +1343,7 @@ async function removeSheet(idx) {
     state.nodes = t.nodes || []; state.links = t.links || []; state.texts = t.texts || [];
     state.sel = { kind: null, id: null };
     state.undoStack = []; state.redoStack = [];
-    renderer.setData(state.nodes, state.links, state.texts);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
     renderer.fit();
     refreshAll();
     reconcileMonitors();
@@ -1272,7 +1400,7 @@ async function exportInventory() {
 
 function exportVisio() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels });
+  const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels });
   U.download(`网络拓扑图_${U.fmtDate()}.vsdx`,
     new Blob([buf], { type: 'application/vnd.ms-visio' }));
   toast('已导出 Visio 文件（.vsdx，Visio 2013+ 可直接打开编辑）');
@@ -1280,7 +1408,7 @@ function exportVisio() {
 
 function exportPdf() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -1310,7 +1438,7 @@ function exportPdf() {
 
 /* ================= 导出图片（PNG / SVG / 剪贴板） ================= */
 function renderTopologyPng(cb) {
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -1333,7 +1461,7 @@ function renderTopologyPng(cb) {
 function exportImage(kind) {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   if (kind === 'svg') {
-    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
     U.download(`网络拓扑图_${U.fmtDate()}.svg`, new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
     toast('已导出 SVG 矢量图');
     return;
@@ -1487,6 +1615,7 @@ async function buildProjectData() {
     nodes: state.nodes,
     links: state.links,
     texts: state.texts,
+    regions: state.regions,
     pan: renderer.pan,
     zoom: renderer.zoom,
     sheets: U.clone(state.sheets),
@@ -1599,6 +1728,7 @@ async function applyProjectData(data) {
   state.nodes = cleaned.nodes;
   state.links = cleaned.links;
   state.texts = cleaned.texts;
+  state.regions = U.sanitizeRegions(data.regions);
   state.sel = { kind: null, id: null };
   state.undoStack = [];
   state.redoStack = [];
@@ -1618,10 +1748,11 @@ async function applyProjectData(data) {
         id: (typeof sp.id === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(sp.id)) ? sp.id : ('p' + (++state.sheetSeq)),
         name: typeof sp.name === 'string' ? sp.name.trim().slice(0, 64) : ('页面 ' + (state.sheets.length + 1)),
         nodes: c.nodes, links: c.links, texts: c.texts,
+        regions: U.sanitizeRegions(sp.regions),
         pan: (sp.pan && typeof sp.pan === 'object') ? { x: Number(sp.pan.x) || 0, y: Number(sp.pan.y) || 0 } : null,
         zoom: Number(sp.zoom) || null
       };
-      U.seedCounters(sheet.nodes, sheet.links, sheet.texts);
+      U.seedCounters(sheet.nodes, sheet.links, sheet.texts, sheet.regions);
       state.sheets.push(sheet);
       const pid = /^p(\d+)$/.exec(sheet.id);
       if (pid) state.sheetSeq = Math.max(state.sheetSeq, parseInt(pid[1], 10) || 0);
@@ -1629,6 +1760,7 @@ async function applyProjectData(data) {
     state.sheetIdx = Math.min(Math.max(0, parseInt(data.sheetIdx, 10) || 0), state.sheets.length - 1);
     const act = state.sheets[state.sheetIdx];
     act.nodes = state.nodes; act.links = state.links; act.texts = state.texts; // 顶层即当前页（避免二次 sanitize）
+    act.regions = state.regions;
     refreshSheets();
   }
   renderer.showLabels = state.showLabels;
@@ -1644,7 +1776,7 @@ async function applyProjectData(data) {
   // 恢复监控配置（A）：结构清洗 + 密码密文校验 + 解密 + 持久化（在 reconcileMonitors 之前完成）
   if (data.monitorCfg) await restoreMonitorCfgFromProject(data.monitorCfg);
   updateUndoBtns();
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   if (data.pan && data.zoom) renderer.setView(data.pan, data.zoom);
   else renderer.fit();
   refreshAll();
@@ -1883,12 +2015,13 @@ async function newGraph() {
   state.nodes = [];
   state.links = [];
   state.texts = []; // 空白画布不保留旧文本框
+  state.regions = []; // 空白画布不保留旧区域
   state.sel = { kind: null, id: null };
   state.undoStack = [];
   state.redoStack = [];
   state.blank = true; // 空白画布：无表格也可直接添加设备/连线
   updateUndoBtns();
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   saveGraph();
   toast('已新建空白画布：点击「添加设备」或右键画布添加设备');
@@ -1926,7 +2059,7 @@ function addNodeAt(wx, wy) {
       node.h = U.nodeHeightFor(node);
       node.y = wy - node.h / 2;
       state.nodes.push(node);
-      renderer.setData(state.nodes, state.links, state.texts);
+      renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll();
       select('node', node.id, { center: true });
     }
@@ -1947,7 +2080,7 @@ function addTextAt(wx, wy) {
   };
   pushUndo();
   state.texts.push(t);
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll(); saveGraph();
   select('text', t.id);
   editText(t.id);
@@ -2000,7 +2133,7 @@ function editText(id) {
     t.w = Math.max(120, U.measureText(maxLine, t.size) + 24);
     t.h = Math.max(40, lines.length * t.size * 1.25 + 16);
     close();
-    renderer.setData(state.nodes, state.links, state.texts);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll(); saveGraph();
     select('text', t.id);
   };
@@ -2011,10 +2144,104 @@ function deleteText(id) {
   if (!t) return;
   pushUndo();
   state.texts = state.texts.filter(x => x.id !== id);
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll(); saveGraph();
   select(null, null);
   toast('已删除文本框');
+}
+
+/* ================= 区域分组容器 ================= */
+/* 区域是画在设备「底层」的几何容器：设备是否属于某区域由中心点是否在框内决定，
+ * 拖动区域时框内设备/文本框整体跟随；随工程/图纸/自动备份持久化。 */
+const REGION_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316'];
+function addRegionAt(wx, wy, preset) {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const color = preset || REGION_COLORS[state.regions.length % REGION_COLORS.length];
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:440px">
+      <h3>添加区域</h3>
+      <div class="m-sub">区域为背景分组框（如核心区 / DMZ / 机房 A）：设备拖入框内即归入该区域，拖动区域时框内设备整体移动</div>
+      <div class="m-row"><label>名称</label><input id="rgName" type="text" value="新区域" maxlength="64"/></div>
+      <div class="m-row"><label>颜色</label><input id="rgColor" type="color" value="${color}"/>
+        <label style="margin-left:16px">宽 × 高</label>
+        <input id="rgW" type="number" min="60" max="100000" value="480" style="width:80px"/> ×
+        <input id="rgH" type="number" min="60" max="100000" value="320" style="width:80px"/></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">添加</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=save]').onclick = () => {
+    const name = ov.querySelector('#rgName').value.trim() || '区域';
+    const w = Math.max(60, parseInt(ov.querySelector('#rgW').value, 10) || 480);
+    const h = Math.max(60, parseInt(ov.querySelector('#rgH').value, 10) || 320);
+    const c = ov.querySelector('#rgColor').value;
+    pushUndo();
+    const r = { id: U.uid('r'), name, x: Math.round(wx - w / 2), y: Math.round(wy - h / 2), w, h, color: c };
+    state.regions.push(r);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    refreshAll(); saveGraph();
+    close();
+    toast('已添加区域「' + name + '」：双击区域可编辑，拖动区域整体移动');
+  };
+  setTimeout(() => { if (document.body.contains(ov)) { ov.querySelector('#rgName').focus(); ov.querySelector('#rgName').select(); } }, 250);
+}
+
+function editRegion(id) {
+  const r = state.regions.find(x => x.id === id);
+  if (!r) return;
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:440px">
+      <h3>编辑区域</h3>
+      <div class="m-row"><label>名称</label><input id="rgName" type="text" value="${U.escHtml(r.name)}" maxlength="64"/></div>
+      <div class="m-row"><label>颜色</label><input id="rgColor" type="color" value="${r.color || '#6366f1'}"/>
+        <label style="margin-left:16px">宽 × 高</label>
+        <input id="rgW" type="number" min="60" max="100000" value="${Math.round(r.w)}" style="width:80px"/> ×
+        <input id="rgH" type="number" min="60" max="100000" value="${Math.round(r.h)}" style="width:80px"/></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb danger" data-act="del">删除区域</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=del]').onclick = () => {
+    pushUndo();
+    state.regions = state.regions.filter(x => x.id !== id);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    refreshAll(); saveGraph();
+    close();
+    toast('已删除区域「' + r.name + '」（框内设备保留在画布）');
+  };
+  ov.querySelector('[data-act=save]').onclick = () => {
+    const name = ov.querySelector('#rgName').value.trim() || '区域';
+    const w = Math.max(60, parseInt(ov.querySelector('#rgW').value, 10) || r.w);
+    const h = Math.max(60, parseInt(ov.querySelector('#rgH').value, 10) || r.h);
+    pushUndo();
+    r.name = name;
+    r.color = ov.querySelector('#rgColor').value;
+    // 宽高以区域左上角为锚调整（拖拽手柄语义）
+    r.w = w; r.h = h;
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    refreshAll(); saveGraph();
+    close();
+  };
 }
 
 function editNode(id) {
@@ -2055,7 +2282,7 @@ function editNode(id) {
       n.osver = (v.osver || '').trim();
       n.note = v.note.trim();
       n.vlans = (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : [];
-      renderer.setData(state.nodes, state.links, state.texts);
+      renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll();
       select('node', n.id);
     }
@@ -2071,7 +2298,7 @@ function deleteNode(id) {
   const removed = state.links.filter(l => l.a === id || l.b === id);
   state.links = state.links.filter(l => l.a !== id && l.b !== id);
   state.nodes = state.nodes.filter(x => x.id !== id);
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
   toast(`已删除 ${n.name} 及其 ${removed.length} 条连线`);
@@ -2196,7 +2423,7 @@ function openLinkDialog(a, b, l) {
       state.links.push(Object.assign({ id, a: a.id, b: b.id }, base));
     }
     close();
-    renderer.setData(state.nodes, state.links, state.texts);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll();
     select('link', id);
   };
@@ -2210,7 +2437,7 @@ function deleteLink(id) {
   if (!l) return;
   pushUndo(); // 变更前快照
   state.links = state.links.filter(x => x.id !== id);
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
 }
@@ -2238,7 +2465,7 @@ function deleteNodes(ids) {
   pushUndo();
   state.links = state.links.filter(l => !set.has(l.a) && !set.has(l.b));
   state.nodes = state.nodes.filter(n => !set.has(n.id));
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
   toast(`已删除 ${names.length} 台设备及 ${removedLinks} 条连线`);
@@ -2270,7 +2497,7 @@ function batchEditNodes() {
         const nh = U.nodeHeightFor(n);
         if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
       }
-      renderer.setData(state.nodes, state.links, state.texts);
+      renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll();
       // 保留多选，便于继续操作
       renderer.selIds = new Set(ids);
@@ -2288,7 +2515,7 @@ function deleteLinks(ids) {
   const removed = state.links.filter(l => set.has(l.id));
   pushUndo();
   state.links = state.links.filter(l => !set.has(l.id));
-  renderer.setData(state.nodes, state.links, state.texts);
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
   toast(`已删除 ${removed.length} 条连线`);
@@ -2313,7 +2540,7 @@ function batchEditLinks() {
         if (String(v.bw).trim()) l.bw = U.normalizeBw(v.bw);
         if (String(v.note).trim()) l.note = String(v.note).trim();
       }
-      renderer.setData(state.nodes, state.links, state.texts);
+      renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll();
       // 保留多选
       renderer.selLinkIds = new Set(ids);
@@ -2753,10 +2980,28 @@ function openCtx(e, kind, id) {
       { ic: 'trash', label: '删除文本框', danger: true, act: () => deleteText(id) }
     ];
     if (t) items.unshift({ head: (t.text || '').split('\n')[0].slice(0, 20) || '文本框' });
+  } else if (kind === 'region') {
+    const r = state.regions.find(x => x.id === id);
+    const w = renderer.toWorld(e.clientX, e.clientY);
+    items = [
+      { ic: 'node', label: '在此添加设备', act: () => { setMode('normal'); addNodeAt(w.x, w.y); } },
+      { ic: 'edit', label: '在此添加文本框', act: () => { setMode('normal'); addTextAt(w.x, w.y); } },
+      { sep: true },
+      { ic: 'edit', label: '编辑区域…', act: () => editRegion(id) },
+      { ic: 'trash', label: '删除区域（框内设备保留）', danger: true, act: () => {
+        pushUndo();
+        state.regions = state.regions.filter(x => x.id !== id);
+        renderer.setData(state.nodes, state.links, state.texts, state.regions);
+        refreshAll(); saveGraph();
+        toast('已删除区域「' + (r ? r.name : '') + '」（框内设备保留在画布）');
+      } }
+    ];
+    if (r) items.unshift({ head: `区域：${r.name}` });
   } else {
     items = [
       { ic: 'node', label: '在此添加设备', act: () => { const w = renderer.toWorld(e.clientX, e.clientY); setMode('normal'); addNodeAt(w.x, w.y); } },
       { ic: 'edit', label: '在此添加文本框', act: () => { const w = renderer.toWorld(e.clientX, e.clientY); setMode('normal'); addTextAt(w.x, w.y); } },
+      { ic: 'layers', label: '在此添加区域…', act: () => { const w = renderer.toWorld(e.clientX, e.clientY); setMode('normal'); addRegionAt(w.x, w.y); } },
       { ic: 'link', label: '添加连线…', act: () => setMode('link') },
       { sep: true },
       { ic: 'layout', label: '自动布局', act: () => autoLayout() },
@@ -3055,6 +3300,7 @@ function saveGraph() {
       nodes: state.nodes,
       links: state.links,
       texts: state.texts,
+      regions: state.regions,
       pan: renderer.pan,
       zoom: renderer.zoom,
       sheets: state.sheets,
@@ -3080,7 +3326,8 @@ function restoreGraph() {
     state.nodes = cleaned.nodes;
     state.links = cleaned.links;
     state.texts = cleaned.texts;
-    U.seedCounters(state.nodes, state.links, state.texts); // 避免新 ID 与恢复节点/文本框冲突
+    state.regions = U.sanitizeRegions(d.regions);
+    U.seedCounters(state.nodes, state.links, state.texts, state.regions); // 避免新 ID 与恢复节点/文本框冲突
     state.sel = { kind: null, id: null };
     state.undoStack = []; // 初始状态无需撤销
     state.redoStack = [];
@@ -3100,10 +3347,11 @@ function restoreGraph() {
           id: (typeof sp.id === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(sp.id)) ? sp.id : ('p' + (++state.sheetSeq)),
           name: typeof sp.name === 'string' ? sp.name.trim().slice(0, 64) : ('页面 ' + (state.sheets.length + 1)),
           nodes: c.nodes, links: c.links, texts: c.texts,
+          regions: U.sanitizeRegions(sp.regions),
           pan: (sp.pan && typeof sp.pan === 'object') ? { x: Number(sp.pan.x) || 0, y: Number(sp.pan.y) || 0 } : null,
           zoom: Number(sp.zoom) || null
         };
-        U.seedCounters(sheet.nodes, sheet.links, sheet.texts);
+        U.seedCounters(sheet.nodes, sheet.links, sheet.texts, sheet.regions);
         state.sheets.push(sheet);
         const pid = /^p(\d+)$/.exec(sheet.id);
         if (pid) state.sheetSeq = Math.max(state.sheetSeq, parseInt(pid[1], 10) || 0);
@@ -3111,12 +3359,13 @@ function restoreGraph() {
       state.sheetIdx = Math.min(Math.max(0, parseInt(d.sheetIdx, 10) || 0), state.sheets.length - 1);
       const act = state.sheets[state.sheetIdx];
       act.nodes = state.nodes; act.links = state.links; act.texts = state.texts;
+      act.regions = state.regions;
     }
     renderer.showLabels = state.showLabels;
     renderer.showSubnets = state.showSubnets;
     renderer.subnetNames = state.subnetNames;
     renderer.setDownLinks(state.downLinks);
-    renderer.setData(state.nodes, state.links, state.texts);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
     if (d.pan && d.zoom) renderer.setView(d.pan, d.zoom);
     else renderer.fit();
     updateUndoBtns();
@@ -3189,7 +3438,7 @@ function openTypeManager() {
   let rowFileKey = null;
 
   const afterChange = () => {
-    renderer.setData(state.nodes, state.links, state.texts);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll();
     render();
   };
@@ -3313,7 +3562,7 @@ function openHelp() {
     <p>滚轮缩放（以光标为中心）、拖拽空白或中键平移；<b>Ctrl 点选</b>多选、<b>Shift 拖拽框选</b>；<kbd>Delete</kbd> 删除选中；多选后可整体拖动、批量编辑、对齐/分布。</p>
     <h4>④ 工具栏菜单</h4>
     <p><b>文件</b>：新建 / 导入表格 / 示例 / 保存工程(.nettopo) / 打开工程 / 对比工程 / 自动备份 / 备份管理。</p>
-    <p><b>编辑</b>：添加设备 / 连线 / 文本框、从模板添加设备、对齐分布、批量重命名、IP 批量改段、类型管理、删除选中。</p>
+    <p><b>编辑</b>：添加设备 / 连线 / 文本框 / 区域、从模板添加设备、对齐分布、批量重命名、IP 批量改段、IP 子网计算器、类型管理、删除选中。区域为背景分组框：设备拖入框内即归入区域，拖动区域整体移动，双击区域编辑名称/颜色/尺寸。</p>
     <p><b>布局</b>：力导向 / 环形 / 分层（按类型）/ 三层架构 / 拓扑分层（最少交叉）/ 网格布局、适应视图、路径分析、拓扑校验。</p>
     <p><b>显示</b>：链路标注、子网分组、清除故障标记、清除路径高亮。</p>
     <p><b>导出</b>：CSV / Excel / PDF / 图片(PNG/SVG) / 复制图片 / Visio / 设计报告 / 生成设备配置 / IP 规划清单。</p>
@@ -3340,6 +3589,7 @@ function openHelp() {
       <tr><td>+ / -</td><td>放大 / 缩小</td></tr>
       <tr><td>Ctrl+S</td><td>保存工程</td></tr>
       <tr><td>Ctrl+K</td><td>聚焦搜索</td></tr>
+      <tr><td>Ctrl+F</td><td>画布快速搜索（Enter 定位下一个）</td></tr>
       <tr><td>Ctrl+E</td><td>打开导出菜单</td></tr>
       <tr><td>Ctrl+Shift+L</td><td>切换链路标注</td></tr>
     </table>
@@ -3417,11 +3667,13 @@ function wire() {
     { ic: 'node', label: '添加设备', active: state.mode === 'place', act: togglePlace },
     { ic: 'link', label: '添加连线', active: state.mode === 'link', act: toggleLink },
     { ic: 'edit', label: '添加文本框', act: () => { const c = viewCenter(); addTextAt(c.x, c.y); } },
+    { ic: 'layers', label: '添加区域…', act: () => { const c = viewCenter(); addRegionAt(c.x, c.y); } },
     { ic: 'fileplus', label: '从模板添加设备…', act: openTemplatePicker },
     { sep: true },
     { ic: 'edit', label: '对齐 / 分布选中…', act: openAlign },
     { ic: 'edit', label: '批量重命名…', act: openRename },
     { ic: 'edit', label: 'IP 批量改段…', act: openIpRenumber },
+    { ic: 'wand', label: 'IP 子网计算器…', act: openSubnetCalc },
     { sep: true },
     { ic: 'tag', label: '类型管理…', act: openTypeManager },
     { ic: 'trash', label: '删除选中', danger: true, act: () => deleteSelection() }
@@ -3534,6 +3786,25 @@ function wire() {
     refreshPanel();
   });
 
+  // 画布快速搜索（Ctrl+F 呼出）：输入即搜，Enter/↑/↓ 循环定位，点击结果直接跳转
+  $('#qsInput').addEventListener('input', () => {
+    qsMatches = U.searchTopology(state.nodes, state.links, $('#qsInput').value, 20);
+    qsIdx = -1;
+    renderQsList();
+  });
+  $('#qsInput').addEventListener('keydown', (e) => {
+    e.stopPropagation(); // 输入框内按键不触发全局快捷键
+    if (e.key === 'Enter') { e.preventDefault(); quickSearchNext(e.shiftKey ? -1 : 1); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); quickSearchNext(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); quickSearchNext(-1); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeQuickSearch(); }
+  });
+  $('#qsClose').onclick = closeQuickSearch;
+  $('#qsList').addEventListener('click', (e) => {
+    const it = e.target.closest('.qs-item');
+    if (it) qsJump(parseInt(it.dataset.i, 10));
+  });
+
   document.addEventListener('pointerdown', (e) => {
     if (!$('#ctx').classList.contains('hidden') && !e.target.closest('#ctx')) closeCtx();
     const drop = $('#drop');
@@ -3583,6 +3854,8 @@ function wire() {
   document.addEventListener('mousedown', exitOnBlank, true);
 
   document.addEventListener('keydown', (e) => {
+    // Ctrl+F 画布快速搜索：即便焦点在输入框（面板搜索等）也优先呼出
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); openQuickSearch(); return; }
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
     if (state.mode !== 'normal') {
@@ -3868,6 +4141,7 @@ function monitorRow(host, saved) {
     complianceEnabled: !!saved.complianceEnabled,
     snmpEnabled: !!saved.snmpEnabled,
     snmpCommunity: typeof saved.snmpCommunity === 'string' ? saved.snmpCommunity : 'public',
+    snmpIfTable: !!saved.snmpIfTable,
     backupCommand: normCmds(saved.backupCommand, ['display current-configuration']),
     backupMode: saved.backupMode === 'own' ? 'own' : 'session',
     backupSkipSame: !!saved.backupSkipSame,
@@ -3902,6 +4176,7 @@ function normalizeMonitorHosts(cfg) {
         complianceEnabled: !!h.complianceEnabled,
         snmpEnabled: !!h.snmpEnabled,
         snmpCommunity: typeof h.snmpCommunity === 'string' ? h.snmpCommunity.slice(0, 64) : 'public',
+        snmpIfTable: !!h.snmpIfTable,
         backupCommand: normCmds(h.backupCommand, ['display current-configuration']),
         backupMode: h.backupMode === 'own' ? 'own' : 'session',
         backupSkipSame: !!h.backupSkipSame,
@@ -3983,7 +4258,7 @@ async function applyMonitor(id, cfg, enabled) {
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
           { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!r.snmpEnabled, community: r.snmpCommunity || 'public' } }
+        { sysinfo: { enabled: !!r.snmpEnabled, community: r.snmpCommunity || 'public', ifTable: !!r.snmpIfTable } }
         ));
         if (!res || !res.ok) {
           perHost[r.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
@@ -4071,7 +4346,7 @@ async function reconcileMonitors() {
         { probe: { enabled: row.probeEnabled, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
         { alerts: row.alerts },
         { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!row.snmpEnabled, community: row.snmpCommunity || 'public' } }
+        { sysinfo: { enabled: !!row.snmpEnabled, community: row.snmpCommunity || 'public', ifTable: !!row.snmpIfTable } }
       ));
       if (!res || !res.ok) perDev[node.id][row.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
     } catch (err) {
@@ -4200,7 +4475,8 @@ function openMonitorConfig(id) {
         <label class="mh-bk" title="定时抓取配置保存为备份，保留历史并可对比差异"><input type="checkbox" class="mh-bk-cb"${r.backupEnabled ? ' checked' : ''}/>自动备份</label>
         <label class="mh-cmp" title="每次配置备份保存后自动按「配置合规检查」的规则扫描；违规写入事件时间线并弹系统通知"><input type="checkbox" class="mh-cmp-cb"${r.complianceEnabled ? ' checked' : ''}/>自动合规</label>
         <label class="mh-si" title="每次会话建立后经 SNMP v2c 读取 sysDescr/sysObjectID，自动回填设备「软件版本」（只读操作）"><input type="checkbox" class="mh-si-cb"${r.snmpEnabled ? ' checked' : ''}/>SNMP 识别</label>
-        <input class="mh-si-comm" type="text" title="SNMP v2c 团体字" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
+        <label class="mh-si" title="按间隔经 SNMP v2c 采集接口状态与收发流量（ifTable，独立于连接的 UDP 轮询）：监控中心「接口流量」页查看趋势，接口 DOWN 记入事件时间线并弹通知"><input type="checkbox" class="mh-sift-cb"${r.snmpIfTable ? ' checked' : ''}/>接口流量</label>
+        <input class="mh-si-comm" type="text" title="SNMP v2c 团体字（SNMP 识别 / 接口流量共用）" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
         <label class="mh-bk-skip" title="配置无变化时不新增备份文件，只有配置变化时才新增（开启后备份库只保留发生变化的版本）"><input type="checkbox" class="mh-bk-skip-cb"${r.backupSkipSame ? ' checked' : ''}/>无变化不新增</label>
         <select class="mh-bk-mode" title="备份连接方式：复用监控连接 = 在监控会话内执行备份命令；独立连接 = 每次备份单独建立连接，不干扰监控会话">
           <option value="session"${r.backupMode !== 'own' ? ' selected' : ''}>复用监控连接</option>
@@ -4336,6 +4612,7 @@ function openMonitorConfig(id) {
         backupEnabled: rowEl.querySelector('.mh-bk-cb').checked,
         complianceEnabled: rowEl.querySelector('.mh-cmp-cb').checked,
         snmpEnabled: rowEl.querySelector('.mh-si-cb').checked,
+        snmpIfTable: rowEl.querySelector('.mh-sift-cb').checked,
         snmpCommunity: rowEl.querySelector('.mh-si-comm').value.trim().slice(0, 64),
         backupCommand: (() => { const v = rowEl.querySelector('.mh-bk-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); return v.length ? v : ['display current-configuration']; })(),
         backupMode: rowEl.querySelector('.mh-bk-mode').value,
@@ -4533,6 +4810,7 @@ function openMonitorCenter() {
           <div class="mc-tabs">
             <button type="button" class="mc-tab on" data-pane="events">事件时间线</button>
             <button type="button" class="mc-tab" data-pane="baks">配置备份</button>
+            <button type="button" class="mc-tab" data-pane="ifaces">接口流量</button>
             <span id="mcFilter" class="mc-filt" hidden></span>
           </div>
           <div class="mc-pane" data-pane="events">
@@ -4540,6 +4818,9 @@ function openMonitorCenter() {
           </div>
           <div class="mc-pane" data-pane="baks" hidden>
             <div class="mc-baks" id="mcBaks"></div>
+          </div>
+          <div class="mc-pane" data-pane="ifaces" hidden>
+            <div class="mc-ifaces" id="mcIfaces"></div>
           </div>
         </div>
       </div>
@@ -4576,11 +4857,13 @@ function openMonitorCenter() {
   };
   const evIcon = (t) => ({
     offline: '🔴', recovery: '🟢', alert: '🟠', 'alert-clear': '⚪',
-    backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️'
+    backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️',
+    'if-down': '🔻', 'if-up': '🔺'
   }[t] || '•');
   const evTypeLabel = {
     offline: '离线', recovery: '恢复', alert: '告警', 'alert-clear': '解除',
-    backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规'
+    backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规',
+    'if-down': '接口离线', 'if-up': '接口恢复'
   };
   // 事件时间线筛选：null = 全部；curDev = 设备；curHost = 具体管理地址
   let curDev = null, curHost = null, curDevName = '';
@@ -4639,6 +4922,110 @@ function openMonitorCenter() {
     }).catch(() => {});
   }
 
+  /* ---------- 接口流量页（SNMP ifTable 采集：最新采样表 + 采样历史趋势线） ---------- */
+  let curIfDev = null;                       // 当前查看的任务 key（deviceId@host）
+  const ifCache = new Map();                 // key -> 采样历史数组
+  const fmtBps = (v) => {
+    if (v == null) return '—';
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + ' Gbps';
+    if (v >= 1e6) return (v / 1e6).toFixed(1) + ' Mbps';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + ' Kbps';
+    return Math.round(v) + ' bps';
+  };
+  const fmtSpeed = (bps) => {
+    if (!bps) return '—';
+    if (bps >= 1e9) return (bps / 1e9) + ' G';
+    if (bps >= 1e6) return (bps / 1e6) + ' M';
+    if (bps >= 1e3) return (bps / 1e3) + ' K';
+    return String(bps);
+  };
+  const spark = (vals, color) => {
+    const w = 108, h = 20;
+    const max = Math.max(1, ...vals.filter(v => v != null));
+    const pts = vals.map((v, i) =>
+      ((i / Math.max(1, vals.length - 1)) * w).toFixed(1) + ',' +
+      (h - 1 - (v == null ? 0 : (v / max) * (h - 2))).toFixed(1)).join(' ');
+    return '<svg class="mc-spark" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '"><polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.4"/></svg>';
+  };
+  function renderIfaces(jobs) {
+    const el = ov.querySelector('#mcIfaces');
+    if (!el) return;
+    // 候选：勾选了「接口流量」的任务（按设备取第一个管理口）
+    const cands = [];
+    const seen = new Set();
+    for (const j of jobs) {
+      if (!j.ifTable || seen.has(j.deviceId)) continue;
+      seen.add(j.deviceId);
+      cands.push(j);
+    }
+    if (!cands.length) {
+      el.innerHTML = '<div class="mc-empty">暂无接口流量采集：在「设备监控（静默采集）」弹窗勾选「接口流量」并填写 SNMP 团体字</div>';
+      return;
+    }
+    if (!curIfDev || !cands.some(c => c.key === curIfDev)) curIfDev = cands[0].key;
+    const cur = cands.find(c => c.key === curIfDev) || cands[0];
+    const chips = cands.map(c =>
+      '<span class="mc-ifdev' + (c.key === cur.key ? ' on' : '') + '" data-key="' + U.escHtml(c.key) + '" title="' + U.escHtml(c.host) + '">' + U.escHtml(c.name || c.deviceId) + '</span>').join('');
+    const hist = ifCache.get(cur.key) || [];
+    const last = hist[hist.length - 1];
+    let rowsHtml = '';
+    if (!last || !last.ifs || !last.ifs.length) {
+      rowsHtml = '<div class="mc-empty">正在等待第一次采样（SNMP 轮询约每 60 秒一次）…</div>';
+    } else {
+      // 排序：down 接口置顶，其余按当前收发流量降序
+      const rows = last.ifs.map(s => {
+        const series = hist.map(sm => {
+          const f = (sm.ifs || []).find(x => x.i === s.i);
+          return f || null;
+        });
+        return { s, series };
+      }).sort((a, b) => {
+        const ad = a.s.oper === 'down' ? 0 : 1, bd = b.s.oper === 'down' ? 0 : 1;
+        if (ad !== bd) return ad - bd;
+        const at = (a.s.out || 0) + (a.s.in || 0), bt = (b.s.out || 0) + (b.s.in || 0);
+        return bt - at;
+      });
+      rowsHtml = rows.map(({ s, series }) => {
+        const oper = s.oper === 'up'
+          ? '<b class="t-ok">UP</b>'
+          : (s.oper === 'down' ? '<b class="t-off">DOWN</b>' : '<span class="t-mut">其他</span>');
+        const util = s.speed && s.out != null ? ' (' + Math.min(100, Math.round(s.out / s.speed * 100)) + '%)' : '';
+        return '<div class="mc-if-row">'
+          + '<span class="mc-if-nm" title="' + U.escHtml(s.n) + '">' + U.escHtml(s.n) + '</span>'
+          + '<span class="mc-if-op">' + oper + '</span>'
+          + '<span class="mc-if-rate">↓ ' + fmtBps(s.in) + '</span>'
+          + '<span class="mc-if-rate">↑ ' + fmtBps(s.out) + '</span>'
+          + '<span class="mc-if-spd">' + fmtSpeed(s.speed) + util + '</span>'
+          + '<span class="mc-if-spark">' + spark(series.map(f => f && f.in), '#0ea5e9') + spark(series.map(f => f && f.out), '#f59e0b') + '</span>'
+          + '</div>';
+      }).join('');
+      rowsHtml = '<div class="mc-if-head"><span>接口</span><span>状态</span><span>入流量</span><span>出流量</span><span>带宽</span><span>近 ' + hist.length + ' 次采样</span></div>' + rowsHtml;
+    }
+    el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
+      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · 采样间隔约 60 秒 · ↓入 ↑出（设备视角），接口 DOWN 记入事件时间线</div>'
+      + '<div class="mc-if-body">' + rowsHtml + '</div>';
+    el.querySelectorAll('.mc-ifdev').forEach(ch => {
+      ch.onclick = () => { curIfDev = ch.dataset.key; ifCache.delete(curIfDev); load(); };
+    });
+  }
+
+  /** 先按需拉取各采集设备的历史（IPC，缓存后复用），再渲染接口流量页 */
+  let lastJobs = [];
+  async function renderIfacesAsync(jobs) {
+    lastJobs = jobs || [];
+    const seen = new Set();
+    for (const j of (jobs || [])) {
+      if (!j.ifTable || seen.has(j.deviceId)) continue;
+      seen.add(j.deviceId);
+      if (ifCache.has(j.key)) continue;
+      try {
+        const r = await bridge.ifHistory(j.key);
+        ifCache.set(j.key, (r && r.ok) ? (r.hist || []) : []);
+      } catch (e) { ifCache.set(j.key, []); }
+    }
+    if (document.body.contains(ov)) renderIfaces(lastJobs);
+  }
+
   async function load() {
     try {
       const r = await bridge.overview();
@@ -4646,6 +5033,7 @@ function openMonitorCenter() {
       renderUptime(); // 在线率趋势（异步，不阻塞主视图）
       // 设备状态：按 job 展示（同一设备多地址合并为一行明细）
       const jobs = r.jobs || [];
+      renderIfacesAsync(jobs); // 接口流量页（异步，不阻塞主视图）
       const byDev = new Map();
       for (const j of jobs) {
         if (!byDev.has(j.deviceId)) byDev.set(j.deviceId, []);
@@ -4706,6 +5094,17 @@ function openMonitorCenter() {
   const refreshOn = () => {
     if (document.body.contains(ov)) load();
   };
+  // 接口流量实时推送：只更新缓存与当前设备详情，不整页刷新（避免其他页签闪烁）
+  if (window.topoMonitor && window.topoMonitor.onIfTraffic) {
+    window.topoMonitor.onIfTraffic((info) => {
+      if (!info || !info.key || !document.body.contains(ov)) return;
+      const hist = ifCache.get(info.key) || [];
+      hist.push({ ts: info.ts, ifs: info.ifs });
+      while (hist.length > 120) hist.shift();
+      ifCache.set(info.key, hist);
+      if (curIfDev === info.key) renderIfaces(lastJobs);
+    });
+  }
   if (window.topoMonitor) {
     const subs = [];
     for (const ch of ['onStatus', 'onProbe', 'onAlert', 'onBackup']) {
