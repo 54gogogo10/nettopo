@@ -347,6 +347,41 @@ async function connectCDP(target) {
     await sleep(400);
     ok(await shell.eval(`document.querySelectorAll('.sh-tab').length === 1`), '关闭第二个 SSH 标签后剩余 1 个');
 
+    // 多标签命令广播（SecureCRT Chat Window 模式）：三标签勾选两个 Telnet，一条命令同时下发
+    const newTelnetTab = async () => {
+      await shell.eval(`document.getElementById('shNew').click()`);
+      await sleep(300);
+      await shell.eval(`(() => {
+        const setVal = (el, v) => { const s = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set; s.call(el, v); el.dispatchEvent(new Event('change', { bubbles: true })); };
+        setVal(document.getElementById('wsProto'), 'telnet');
+        document.getElementById('wsHost').value = '127.0.0.1';
+        document.getElementById('wsPort').value = '2323';
+        document.querySelector('[data-act=connect]').click();
+        return true;
+      })()`);
+      await sleep(2500);
+    };
+    await newTelnetTab();
+    await newTelnetTab();
+    ok(await shell.eval(`document.querySelectorAll('.sh-tab').length === 3`), '广播用例：共 3 个标签（1 SSH + 2 Telnet）');
+    await shell.eval(`document.getElementById('shCastBtn').click()`);
+    await sleep(200);
+    ok(await shell.eval(`!document.getElementById('shCast').classList.contains('hidden')`), '群发模式开启后显示群发栏');
+    ok((await shell.eval(`document.getElementById('shCastCount').textContent`)) === '已选 3 / 3', '开启群发默认勾选全部活动标签（已选 3 / 3）');
+    await shell.eval(`document.querySelectorAll('.sh-tab')[0].querySelector('.cast').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`);
+    ok((await shell.eval(`document.getElementById('shCastCount').textContent`)) === '已选 2 / 3', '点标签勾选圆点可取消 SSH 标签（已选 2 / 3）');
+    mockRecv.length = 0;
+    await shell.eval(`(() => { const i = document.getElementById('shCastInput'); i.value = 'cast-broadcast-OK'; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); return true; })()`);
+    const tCast = Date.now();
+    while (Date.now() - tCast < 4000 && mockRecv.filter(x => x.txt.includes('cast-broadcast-OK')).length < 2) await sleep(100);
+    ok(mockRecv.filter(x => x.txt.includes('cast-broadcast-OK')).length >= 2, '一条命令同时下发到勾选的 2 个 Telnet 标签（mock 各收到一份）');
+    ok(await waitText(shell, `document.querySelector('.sh-term-wrap.active .xterm-rows')`, 'cast-broadcast-OK', 4000), '活动标签终端显示群发命令回显');
+    await shell.eval(`document.getElementById('shCastBtn').click()`);
+    ok(await shell.eval(`document.getElementById('shCast').classList.contains('hidden') && !document.getElementById('shTabs').classList.contains('cast-on')`), '关闭群发模式后群发栏与勾选点一并隐藏');
+    await shell.eval(`[...document.querySelectorAll('.sh-tab')].filter(t => t.querySelector('.tt').textContent.startsWith('127.0.0.1 · ')).forEach(t => t.querySelector('.x').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })))`);
+    await sleep(400);
+    ok(await shell.eval(`document.querySelectorAll('.sh-tab').length === 1`), '广播用例收尾：恢复 1 个标签');
+
     // 设备管理 Web 页：独立窗口 + 多标签 + 不锁定主界面
     await main.eval(`(() => { const n = __topo.state.nodes.find(x => document.querySelector('.node[data-id]').getAttribute('data-id') === x.id); n.web = 'http://127.0.0.1:2324/'; return true; })()`);
     await main.eval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100 })); return true; })()`);

@@ -5,9 +5,9 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none';"/>
 <title>网络拓扑管理软件 · Web Shell</title>
-<link rel="stylesheet" href="css/style.css?v=20260828b"/>
-<link rel="stylesheet" href="css/shell.css?v=20260828b"/>
-<link rel="stylesheet" href="lib/xterm.css?v=20260828b"/>
+<link rel="stylesheet" href="css/style.css?v=20260828c"/>
+<link rel="stylesheet" href="css/shell.css?v=20260828c"/>
+<link rel="stylesheet" href="lib/xterm.css?v=20260828c"/>
 </head>
 <body class="shell-body">
 
@@ -19,10 +19,19 @@
     <span id="shFontVal" class="sh-font-val">13</span>
     <button id="shFontInc" class="sh-font-btn" title="增大字号 (Ctrl+=)">A+</button>
   </div>
+  <button id="shCastBtn" class="sh-cast-btn" title="多标签命令广播（SecureCRT Chat Window 模式）：勾选标签后，一条命令同时下发">⇉ 群发</button>
   <button id="shNew" class="sh-new" title="新建连接（SSH / Telnet）">＋ 新建连接</button>
 </header>
 
 <main id="shTerms" class="sh-terms"></main>
+
+<div id="shCast" class="sh-cast hidden" title="多标签命令广播：勾选标签后，这里输入的命令同时发送到全部勾选的标签">
+  <span class="sh-cast-tag">群发</span>
+  <span id="shCastCount" class="sh-cast-count">已选 0 / 0</span>
+  <input id="shCastInput" type="text" placeholder="输入命令，回车同时发送到勾选的标签（支持 \n 回车、\t 制表、\p 暂停 1 秒）" autocomplete="off" spellcheck="false"/>
+  <label class="sh-cast-enter" title="发送后在命令末尾追加回车"><input id="shCastEnter" type="checkbox" checked/>回车</label>
+  <button id="shCastSend" class="sh-cast-send" title="发送到勾选的标签（Enter）">发送</button>
+</div>
 
 <div id="shBbar" class="sh-bbar" title="右键管理快捷按钮">
   <div id="shBBtnWrap" class="sh-bbar-btns"></div>
@@ -39,8 +48,8 @@
 <div id="modalRoot"></div>
 <div id="shCtx" class="sh-ctx hidden"></div>
 
-<script src="lib/xterm.js?v=20260828b"></script>
-<script src="lib/xterm-addon-fit.js?v=20260828b"></script>
-<script src="js/shell-ui.js?v=20260828b"></script>
+<script src="lib/xterm.js?v=20260828c"></script>
+<script src="lib/xterm-addon-fit.js?v=20260828c"></script>
+<script src="js/shell-ui.js?v=20260828c"></script>
 </body>
 </html>

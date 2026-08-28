@@ -105,3 +105,46 @@
   font-size: 14px; color: var(--accent); transition: all .15s;
 }
 .sh-bbar-add:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+/* ---- 多标签命令广播（SecureCRT Chat Window 模式） ---- */
+.sh-cast-btn {
+  flex: none; height: 26px; padding: 0 11px; margin-right: 2px; border-radius: 7px;
+  background: var(--panel2); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text); transition: all .15s;
+}
+.sh-cast-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.sh-cast-btn.on { border-color: var(--accent); color: #fff; background: var(--accent); font-weight: 600; }
+.sh-cast {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  background: var(--panel2); border-top: 1px solid var(--border);
+}
+.sh-cast.hidden { display: none; }
+.sh-cast-tag {
+  flex: none; font-size: 11px; font-weight: 700; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 99px; padding: 1px 8px;
+}
+.sh-cast-count { flex: none; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.sh-cast input[type="text"] {
+  flex: 1; min-width: 0; height: 28px; padding: 0 9px;
+  font: 12.5px/1.4 Consolas, "Courier New", monospace; color: var(--text);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 7px; outline: none;
+}
+.sh-cast input[type="text"]:focus { border-color: var(--accent); }
+.sh-cast-enter { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--muted); }
+.sh-cast-enter input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+.sh-cast-send {
+  flex: none; height: 28px; padding: 0 15px; border-radius: 7px;
+  background: var(--accent); border: 1px solid var(--accent); color: #fff;
+  font-size: 12px; font-weight: 600;
+}
+.sh-cast-send:hover { filter: brightness(1.08); }
+.sh-tab .cast {
+  display: none; flex: none; width: 15px; height: 15px; margin-left: 1px;
+  border: 1.5px solid var(--border); border-radius: 4.5px;
+  align-items: center; justify-content: center; font-size: 10px; line-height: 1;
+  color: transparent; cursor: pointer; transition: all .12s;
+}
+.sh-tabs.cast-on .sh-tab .cast { display: flex; }
+.sh-tab .cast:hover { border-color: var(--accent); }
+.sh-tab .cast.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sh-tab .cast.on::after { content: "✓"; }

@@ -80,7 +80,10 @@
     s.dotEl.className = 'dot err';
     s.tabEl.title = reason || '连接已关闭';
     if (s.term) s.term.write('\r\n\x1b[33m[会话已结束] ' + (reason || '连接已关闭') + '\x1b[0m\r\n');
+    castSel.delete(sid0(s));
+    refreshCastCount();
   }
+  const sid0 = (s) => { for (const [id, v] of sessions) if (v === s) return id; return null; };
   function bindListeners() {
     window.topoShell.onOutput((sid, data) => {
       const s = sessions.get(sid);
@@ -107,7 +110,7 @@
     emptyEl.classList.add('hidden');
     const tabEl = document.createElement('div');
     tabEl.className = 'sh-tab';
-    tabEl.innerHTML = '<span class="dot"></span><span class="tt"></span><span class="x" title="关闭连接">×</span>';
+    tabEl.innerHTML = '<span class="dot"></span><span class="tt"></span><span class="cast" title="勾选参与群发（多标签命令广播）"></span><span class="x" title="关闭连接">×</span>';
     tabEl.querySelector('.tt').textContent = info.title || sid;
     tabEl.title = info.title || sid;
     const wrapEl = document.createElement('div');
@@ -125,7 +128,7 @@
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(termEl);
-    const rec = { tabEl, wrapEl, term, fit, dotEl: tabEl.querySelector('.dot'), ended: false, buf: [] };
+    const rec = { tabEl, wrapEl, term, fit, dotEl: tabEl.querySelector('.dot'), castEl: tabEl.querySelector('.cast'), ended: false, buf: [] };
     sessions.set(sid, rec);
     term.write('\x1b[33m正在连接 ' + (info.title || sid) + ' …\r\n\x1b[0m');
     for (const item of rec.buf.splice(0)) {
@@ -148,9 +151,12 @@
     tabEl.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
       if (e.target.classList.contains('x')) { closeTab(sid); return; }
+      if (e.target.classList.contains('cast')) { if (castMode) toggleCastSel(sid); return; }
       activate(sid);
     });
     activate(sid);
+    if (castMode && !rec.ended) castSel.add(sid); // 群发模式下新建的标签默认参与
+    refreshCastCount();
     requestAnimationFrame(fitResize);
     return rec;
   }
@@ -179,9 +185,66 @@
     try { if (s.fit && s.fit.dispose) s.fit.dispose(); } catch (e) { /* ignore */ }
     try { s.term && s.term.dispose(); } catch (e) { /* ignore */ }
     sessions.delete(sid);
-    if (sessions.size === 0) emptyEl.classList.remove('hidden');
+    castSel.delete(sid);
+    refreshCastCount();
+    if (sessions.size === 0) { if (castMode) setCastMode(false); emptyEl.classList.remove('hidden'); }
     else activate([...sessions.keys()][0]);
   }
+
+  /* ---- 多标签命令广播（SecureCRT Chat Window 模式）：勾选标签，一条命令同时下发 ---- */
+  const castBtnEl = $('#shCastBtn'), castEl = $('#shCast'), castInputEl = $('#shCastInput'),
+        castSendEl = $('#shCastSend'), castCountEl = $('#shCastCount'), castEnterEl = $('#shCastEnter');
+  let castMode = false;
+  const castSel = new Set(); // 参与群发的 sid（结束的会话自动移出）
+  const refreshCastCount = () => {
+    if (!castCountEl) return;
+    const live = liveCount();
+    let n = 0;
+    for (const id of castSel) { const s = sessions.get(id); if (s && !s.ended) n++; }
+    castCountEl.textContent = '已选 ' + n + ' / ' + live;
+    for (const [id, s] of sessions) {
+      if (s.castEl) s.castEl.classList.toggle('on', castSel.has(id) && !s.ended);
+    }
+  };
+  const liveCount = () => { let n = 0; for (const [, s] of sessions) if (!s.ended) n++; return n; };
+  const setCastMode = (on) => {
+    castMode = on;
+    if (castBtnEl) castBtnEl.classList.toggle('on', on);
+    if (castEl) castEl.classList.toggle('hidden', !on);
+    if (tabsEl) tabsEl.classList.toggle('cast-on', on);
+    if (on) {
+      if (![...castSel].some((id) => { const s = sessions.get(id); return s && !s.ended; })) {
+        for (const [id, s] of sessions) if (!s.ended) castSel.add(id);
+      }
+      refreshCastCount();
+      if (castInputEl) castInputEl.focus();
+    }
+  };
+  const toggleCastSel = (sid) => {
+    const s = sessions.get(sid);
+    if (!s || s.ended) { toast('该会话已结束，不能参与群发'); return; }
+    if (castSel.has(sid)) castSel.delete(sid); else castSel.add(sid);
+    refreshCastCount();
+  };
+  const sendCast = () => {
+    const targets = [...castSel].filter((id) => { const s = sessions.get(id); return s && !s.ended; });
+    if (!targets.length) { toast('请先勾选要群发的标签'); return; }
+    const text = castInputEl ? castInputEl.value : '';
+    if (!text.trim()) { toast('请输入要群发的内容'); return; }
+    const parts = parseSendText(text);
+    if (castEnterEl && castEnterEl.checked) parts.push({ type: 'text', data: '\r' });
+    for (const id of targets) {
+      (async () => {
+        for (const p of parts) {
+          const s = sessions.get(id);
+          if (!s || s.ended) return;
+          if (p.type === 'pause') await new Promise((r) => setTimeout(r, p.ms));
+          else window.topoShell.sendData(id, p.data);
+        }
+      })();
+    }
+    toast('已群发到 ' + targets.length + ' 个标签');
+  };
 
   /* ---- 复制 / 粘贴 ---- */
   const copySelection = (s) => {
@@ -450,6 +513,13 @@
     if (bbarEl) bbarEl.addEventListener('contextmenu', (e) => {
       const btn = e.target.closest('.sh-bbtn');
       openBarCtx(e, btn ? [...btnWrapEl.querySelectorAll('.sh-bbtn')].indexOf(btn) : -1);
+    });
+
+    // 多标签命令广播
+    if (castBtnEl) castBtnEl.onclick = () => setCastMode(!castMode);
+    if (castSendEl) castSendEl.onclick = sendCast;
+    if (castInputEl) castInputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); sendCast(); }
     });
 
     // 终端区域右键菜单（不拦截弹窗内输入）
