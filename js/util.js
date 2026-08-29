@@ -483,6 +483,8 @@ U.sanitizeGraph = (nodes, links, texts) => {
     const vlanModeOf = (v) => (v === 'access' || v === 'trunk' || v === 'hybrid') ? v : '';
     return {
       id, a, b, aIf: str(l.aIf), aIp: str(l.aIp), bIf: str(l.bIf), bIp: str(l.bIp), bw: str(l.bw), note: str(l.note),
+      // 链路聚合组（同名 = 同一聚合组，如 Eth-Trunk1；空 = 普通链路）
+      agg: str(l.agg).trim().slice(0, 32),
       // 二层接口 / VLAN 配置 / 掩码位（生成配置时使用）
       aL2: !!l.aL2, bL2: !!l.bL2,
       aVlan: str(l.aVlan).trim().slice(0, 16), bVlan: str(l.bVlan).trim().slice(0, 16),
@@ -829,11 +831,17 @@ U.bwColor = (v) => {
   return '#94a3b8';
 };
 
-/* 标注两行文本（接口IP / 对端接口IP）；带宽用线色+图例标识，不再显示文字 */
-U.labelLines = (l) => [
-  [l.aIf, l.aIp].filter(Boolean).join('  '),
-  [l.bIf, l.bIp].filter(Boolean).join('  ')
-].filter(Boolean);
+/* 标注两行文本（接口IP / 对端接口IP）；带宽用线色+图例标识，不再显示文字。
+ * 链路聚合组（l.agg 非空）追加第三行「聚合: 组名」，画布/PDF/VSDX 导出同步携带。 */
+U.labelLines = (l) => {
+  const out = [
+    [l.aIf, l.aIp].filter(Boolean).join('  '),
+    [l.bIf, l.bIp].filter(Boolean).join('  ')
+  ].filter(Boolean);
+  const agg = String((l && l.agg) || '').trim();
+  if (agg) out.push('聚合: ' + U.truncate(agg, 20));
+  return out;
+};
 
 /* 链路标注两行按设备在画布上的上下方位排序（交互画布显示用）：
  * 下方设备的行排在下、上方设备的行排在上。lines 约定 [a端行, b端行]（渲染时 index0 在下、index1 在上）。
@@ -1940,17 +1948,36 @@ U.shortestPath = (nodes, links, fromId, toId) => {
   return { nodeIds, linkIds };
 };
 
-/* ---------- 最宽路径（Dijkstra 最大瓶颈带宽） ---------- */
+/* ---------- 最宽路径（Dijkstra 最大瓶颈带宽） ----------
+ * 链路聚合：同一对设备间「同名聚合组」（l.agg 非空且相同）的多条链路合并为一条逻辑链路，
+ * 容量 = 成员带宽之和；成员被标记故障时不计入容量（全部成员故障则该聚合链路不可用）。
+ * 未标记聚合的平行链路仍按独立链路参与计算（旧行为不变）。 */
 U.bestPath = (nodes, links, fromId, toId, opts) => {
   opts = opts || {};
   const exclude = opts.exclude || null; // 故障链路 id 集合（Set）
+  const edges = [];
+  const edgeOf = new Map(); // pair|agg 组 -> {cap, lids}
+  for (const l of links) {
+    if (exclude && exclude.has(l.id)) continue; // 故障链路（或聚合故障成员）不参与
+    const agg = String(l.agg || '').trim();
+    const cap = U.normalizeBw(l.bw) || 1; // 未设置带宽视为最低
+    if (agg) {
+      const pk = l.a < l.b ? l.a + '|' + l.b : l.b + '|' + l.a;
+      const ek = pk + '#' + agg;
+      let e = edgeOf.get(ek);
+      if (!e) { e = { a: l.a, b: l.b, cap: 0, lids: [] }; edgeOf.set(ek, e); }
+      e.cap += cap;
+      e.lids.push(l.id);
+    } else {
+      edges.push({ a: l.a, b: l.b, cap, lids: [l.id] });
+    }
+  }
+  for (const e of edgeOf.values()) edges.push(e);
   const adj = new Map();
   for (const n of nodes) adj.set(n.id, []);
-  for (const l of links) {
-    if (exclude && exclude.has(l.id)) continue; // 故障链路不参与路径
-    const cap = U.normalizeBw(l.bw) || 1; // 未设置带宽视为最低
-    adj.get(l.a).push({ to: l.b, cap, lid: l.id });
-    adj.get(l.b).push({ to: l.a, cap, lid: l.id });
+  for (const e of edges) {
+    adj.get(e.a).push({ to: e.b, cap: e.cap, lids: e.lids });
+    adj.get(e.b).push({ to: e.a, cap: e.cap, lids: e.lids });
   }
   if (!adj.has(fromId) || !adj.has(toId)) return null;
   if (fromId === toId) return { nodeIds: [fromId], linkIds: [], bottleneck: Infinity };
@@ -1968,7 +1995,7 @@ U.bestPath = (nodes, links, fromId, toId, opts) => {
       const nb = Math.min(ub, e.cap);
       if (nb > (best.get(e.to) || 0)) {
         best.set(e.to, nb);
-        prev.set(e.to, { node: u, link: e.lid });
+        prev.set(e.to, { node: u, lids: e.lids });
       }
     }
   }
@@ -1979,7 +2006,7 @@ U.bestPath = (nodes, links, fromId, toId, opts) => {
   while (cur !== fromId) {
     nodeIds.unshift(cur);
     const p = prev.get(cur);
-    linkIds.unshift(p.link);
+    linkIds.unshift(...p.lids);
     cur = p.node;
   }
   nodeIds.unshift(fromId);

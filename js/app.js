@@ -2352,8 +2352,9 @@ function openLinkDialog(a, b, l) {
       ${sideHtml(a.name, 'a')}
       ${sideHtml(b.name, 'b')}
       <div class="frow" style="margin-top:12px"><div class="frow-inline" style="display:flex;gap:8px">
-        <div class="frow" style="flex:1;margin-bottom:0"><label>带宽 (Mbps)</label><input class="lk-bw" type="text" placeholder="例如 1000" value="${U.escHtml(l ? U.normalizeBw(l.bw) : '')}"/></div>
-        <div class="frow" style="flex:2;margin-bottom:0"><label>备注</label><input class="lk-note" type="text" value="${U.escHtml(l ? l.note : '')}"/></div>
+        <div class="frow" style="flex:0.8;margin-bottom:0"><label>带宽 (Mbps)</label><input class="lk-bw" type="text" placeholder="例如 1000" value="${U.escHtml(l ? U.normalizeBw(l.bw) : '')}"/></div>
+        <div class="frow" style="flex:1.2;margin-bottom:0"><label>链路聚合组</label><input class="lk-agg" type="text" placeholder="如 Eth-Trunk1；同名=同一聚合组" value="${U.escHtml(l ? l.agg || '' : '')}" title="同一对设备之间填写相同聚合组名的平行链路视为链路聚合（Eth-Trunk / Port-Channel），路径分析按成员带宽之和计算；留空 = 普通链路"/></div>
+        <div class="frow" style="flex:1.6;margin-bottom:0"><label>备注</label><input class="lk-note" type="text" value="${U.escHtml(l ? l.note : '')}"/></div>
       </div></div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="cancel">取消</button>
@@ -2412,6 +2413,7 @@ function openLinkDialog(a, b, l) {
       aIf: sa.ifn, aIp: sa.ip, aL2: sa.l2, aVlan: sa.vlan, aVlanMode: sa.vlanMode, aMask: sa.mask,
       bIf: sb.ifn, bIp: sb.ip, bL2: sb.l2, bVlan: sb.vlan, bVlanMode: sb.vlanMode, bMask: sb.mask,
       bw: U.normalizeBw(ov.querySelector('.lk-bw').value),
+      agg: ov.querySelector('.lk-agg').value.trim().slice(0, 32),
       note: ov.querySelector('.lk-note').value.trim()
     };
     let id;
@@ -2549,6 +2551,31 @@ function batchEditLinks() {
       state.sel = { kind: 'link', id: ids[ids.length - 1] };
       renderSelCard();
       toast(`已批量更新 ${ids.length} 条连线`);
+    }
+  });
+}
+
+/** 批量设置/取消连线聚合组：同名聚合组（如 Eth-Trunk1）的平行链路视为一条逻辑链路，
+ *  路径分析按成员带宽之和计算容量，拓扑校验不再提示平行链路；名称留空 = 取消聚合标记。 */
+function batchLinkAgg(ids) {
+  const links = ids.map(id2 => state.links.find(x => x.id === id2)).filter(Boolean);
+  if (!links.length) return;
+  const allAgg = links.every(l => l.agg);
+  openModal({
+    title: allAgg ? `取消聚合标记（${links.length} 条连线）` : `设为链路聚合组（${links.length} 条连线）`,
+    sub: '同一对设备之间同名聚合组的平行链路会合并计算带宽（路径分析），拓扑校验不再提示平行链路',
+    fields: allAgg
+      ? [{ name: 'confirm', label: '确认取消', type: 'select', options: [['1', '取消这些连线的聚合标记（保留其他字段）']] }]
+      : [{ name: 'agg', label: '聚合组名称', ph: '如 Eth-Trunk1 / Port-Channel1（同一对设备间同名 = 同一组）' }],
+    submit: allAgg ? '取消聚合' : '应用',
+    onSubmit: (v) => {
+      pushUndo();
+      const name = allAgg ? '' : String(v.agg || '').trim().slice(0, 32);
+      for (const l of links) l.agg = name;
+      renderer.setData(state.nodes, state.links, state.texts, state.regions);
+      refreshAll();
+      saveGraph();
+      toast(name ? `已把 ${links.length} 条连线加入聚合组「${name}」` : `已取消 ${links.length} 条连线的聚合标记`);
     }
   });
 }
@@ -2968,6 +2995,12 @@ function openCtx(e, kind, id) {
     items = [
       { ic: 'edit', label: '编辑连线…', act: () => editLink(id) },
       { ic: isDown ? 'undo' : 'shield', label: isDown ? '恢复链路（解除故障）' : '标记链路故障（模拟断链）', act: () => toggleLinkDown(id) },
+      { ic: 'link', label: l && l.agg ? '取消聚合标记' : '与平行链路组成聚合组…', act: () => {
+        if (l && l.agg) { batchLinkAgg([id]); return; }
+        const keyOf = (x) => x.a < x.b ? x.a + '|' + x.b : x.b + '|' + x.a;
+        const peers = state.links.filter(x => keyOf(x) === keyOf(l));
+        batchLinkAgg(peers.map(x => x.id));
+      } },
       { sep: true },
       { ic: 'trash', label: '删除连线', danger: true, act: () => deleteLink(id) }
     ];
@@ -3054,6 +3087,7 @@ function showTooltip(e, kind, id) {
     const row = (ifn, ip) => `<div class="tt-r">${U.escHtml(ifn || '—')} ${U.escHtml(ip || '')}</div>`;
     const html = `<div class="tt-t">${U.escHtml(na ? na.name : '?')} ⇄ ${U.escHtml(nb ? nb.name : '?')}</div>
       ${row(l.aIf, l.aIp)}${row(l.bIf, l.bIp)}
+      ${l.agg ? `<div class="tt-r">链路聚合：${U.escHtml(l.agg)}</div>` : ''}
       ${l.bw ? `<div class="tt-r">带宽：${U.escHtml(U.formatBw(l.bw))}</div>` : ''}
       ${l.note ? `<div class="tt-r">备注：${U.escHtml(l.note)}</div>` : ''}
       ${state.downLinks.has(l.id) ? '<div class="tt-r" style="color:var(--danger)">故障：已标记断链（路径分析将绕行）</div>' : ''}`;
@@ -3105,10 +3139,12 @@ function renderSelCard() {
       <div class="sc-actions">
         <button class="tb" data-act="batch">批量编辑</button>
         <button class="tb" data-act="fault">${ids.every(id2 => state.downLinks.has(id2)) ? '批量恢复' : '批量标记故障'}</button>
+        <button class="tb" data-act="agg">${ids.every(id2 => { const l = state.links.find(x => x.id === id2); return l && l.agg; }) ? '取消聚合' : '设为聚合组'}</button>
         <button class="tb danger" data-act="del">删除</button>
         <button class="tb" data-act="clear">取消选择</button>
       </div>`;
     card.querySelector('[data-act=batch]').onclick = () => batchEditLinks();
+    card.querySelector('[data-act=agg]').onclick = () => batchLinkAgg(ids);
     card.querySelector('[data-act=fault]').onclick = () => {
       const down = !ids.every(id2 => state.downLinks.has(id2));
       pushUndo(); // 批量故障标记参与撤销
@@ -3169,16 +3205,28 @@ function renderSelCard() {
       <span class="sc-title">${U.escHtml(na ? na.name : '?')} ⇄ ${U.escHtml(nb ? nb.name : '?')}</span></div>
       ${row(na ? na.name : '', l.aIf, l.aIp)}
       ${row(nb ? nb.name : '', l.bIf, l.bIp)}
+      ${l.agg ? `<div class="sc-row">链路聚合：<b>${U.escHtml(l.agg)}</b></div>` : ''}
       ${l.bw ? `<div class="sc-row">带宽：<b>${U.escHtml(U.formatBw(l.bw))}</b></div>` : ''}
       ${l.note ? `<div class="sc-row">备注：<b>${U.escHtml(l.note)}</b></div>` : ''}
       <div class="sc-actions">
         <button class="tb" data-act="edit">编辑</button>
+        <button class="tb" data-act="agg">${l.agg ? '取消聚合' : '与平行链路聚合'}</button>
         <button class="tb danger" data-act="del">删除</button>
       </div>`;
   }
   card.innerHTML = html;
   card.classList.remove('hidden');
   card.querySelector('[data-act=edit]').onclick = () => kind === 'node' ? editNode(id) : editLink(id);
+  const aggBtn = card.querySelector('[data-act=agg]');
+  if (aggBtn) aggBtn.onclick = () => {
+    const l = state.links.find(x => x.id === id);
+    if (!l) return;
+    if (l.agg) { batchLinkAgg([id]); return; }
+    // 与同对设备的其他平行链路一键成组：预填全部平行链路，弹窗输入聚合组名
+    const keyOf = (x) => x.a < x.b ? x.a + '|' + x.b : x.b + '|' + x.a;
+    const peers = state.links.filter(x => keyOf(x) === keyOf(l));
+    batchLinkAgg(peers.map(x => x.id));
+  };
   const loc = card.querySelector('[data-act=locate]');
   if (loc) loc.onclick = () => centerOn('node', id);
   card.querySelector('[data-act=del]').onclick = () => deleteSelection();

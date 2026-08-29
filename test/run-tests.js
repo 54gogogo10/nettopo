@@ -463,6 +463,70 @@ console.log('== 带宽数值化 / 最宽路径 ==');
   ok(U.bestPath([{ id: 'x', name: 'X', x: 0, y: 0, w: 160, h: 56 }], [], 'x', 'y') === null, '最宽路径：不可达');
 }
 
+console.log('== 链路聚合标记 ==');
+{
+  // 标注第三行携带聚合组名（画布/PDF/VSDX 共用 labelLines）
+  const aggLines = U.labelLines({ aIf: 'G0', aIp: '10.0.0.1', bIf: 'G1', bIp: '10.0.0.2', agg: 'Eth-Trunk1' });
+  eq(aggLines.length, 3, '聚合链路标注 3 行');
+  ok(aggLines[2].includes('Eth-Trunk1'), '标注第三行为聚合组名');
+  eq(U.labelLines({}).length, 0, '无接口无聚合不产生标注行');
+  eq(U.labelLines({ aIf: 'G0', bIf: 'G1' }).length, 2, '仅有接口时标注 2 行');
+  // 工程清洗保留聚合组（限长 32）
+  const sg = U.sanitizeGraph(
+    [{ id: 'n1', name: 'A', x: 0, y: 0, w: 160, h: 56 }, { id: 'n2', name: 'B', x: 0, y: 0, w: 160, h: 56 }],
+    [{ id: 'l1', a: 'n1', b: 'n2', agg: '  Eth-Trunk1  ' },
+     { id: 'l2', a: 'n1', b: 'n2', agg: 'x'.repeat(40) }]);
+  eq(sg.links[0].agg, 'Eth-Trunk1', 'sanitizeGraph 保留聚合组名');
+  eq(sg.links[1].agg.length, 32, '聚合组名限长 32');
+  // CSV 回环：聚合组列导出后可再导入
+  const rt = M.textToGraph(U.buildCSV(M.graphToTableRows(
+    [{ id: 'n1', name: 'A', x: 0, y: 0, w: 160, h: 56 }, { id: 'n2', name: 'B', x: 0, y: 0, w: 160, h: 56 }],
+    [{ id: 'l1', a: 'n1', b: 'n2', aIf: 'G0', bIf: 'G1', agg: 'Eth-Trunk1', bw: 1000 }])));
+  eq(rt.links.length, 1, '聚合回环：链路数不变');
+  eq(rt.links[0].agg, 'Eth-Trunk1', '聚合组经 CSV 导出再导入不丢失');
+  // 表头映射：聚合组列
+  eq(M.mapHeader('聚合组'), 'agg', '表头映射：聚合组');
+  eq(M.mapHeader('Eth-Trunk'), 'agg', '表头映射：Eth-Trunk');
+  // 校验：同名聚合组的平行链路不再提示；部分标记仍提示
+  const vNodes = [
+    { id: 'n1', name: 'A', x: 0, y: 0, w: 160, h: 56 },
+    { id: 'n2', name: 'B', x: 0, y: 0, w: 160, h: 56 }
+  ];
+  const mkL = (id, agg) => ({ id, a: 'n1', b: 'n2', aIf: 'G' + id, bIf: 'H' + id, agg });
+  const okAgg = M.validateTopology(vNodes, [mkL('l1', 'Eth-Trunk1'), mkL('l2', 'Eth-Trunk1')]);
+  ok(!okAgg.some(i => i.kind === 'multi'), '同名聚合组平行链路不提示');
+  const partAgg = M.validateTopology(vNodes, [mkL('l1', 'Eth-Trunk1'), mkL('l2', '')]);
+  ok(partAgg.some(i => i.kind === 'multi') && partAgg.find(i => i.kind === 'multi').msg.includes('统一聚合组名'), '部分标记聚合仍提示（附提示语）');
+  const diffAgg = M.validateTopology(vNodes, [mkL('l1', 'Eth-Trunk1'), mkL('l2', 'Eth-Trunk2')]);
+  ok(diffAgg.some(i => i.kind === 'multi'), '不同聚合组名的平行链路仍提示');
+  // 最宽路径：聚合成员带宽相加
+  const pNodes = [
+    { id: 'n1', name: 'A', x: 0, y: 0, w: 160, h: 56 },
+    { id: 'n2', name: 'B', x: 0, y: 0, w: 160, h: 56 },
+    { id: 'n3', name: 'C', x: 0, y: 0, w: 160, h: 56 }
+  ];
+  const aggLs = [
+    { id: 'l1', a: 'n1', b: 'n2', bw: 1000, agg: 'AGG1' },
+    { id: 'l2', a: 'n1', b: 'n2', bw: 1000, agg: 'AGG1' },
+    { id: 'l3', a: 'n1', b: 'n2', bw: 10000 },            // 未标记聚合：独立参与
+    { id: 'l4', a: 'n2', b: 'n3', bw: 2000, agg: 'AGG2' },
+    { id: 'l5', a: 'n2', b: 'n3', bw: 2000, agg: 'AGG2' }
+  ];
+  const bp1 = U.bestPath(pNodes, aggLs, 'n1', 'n3');
+  ok(bp1 && bp1.bottleneck === 4000, '聚合带宽相加（2×2G=4G 瓶颈）');
+  ok(bp1 && bp1.linkIds.sort().join(',') === 'l3,l4,l5', '路径高亮含独立链路与全部聚合成员');
+  // 成员标记故障：聚合容量减去故障成员（AGG2 是 n2→n3 唯一路径）
+  const bp2 = U.bestPath(pNodes, aggLs, 'n2', 'n3');
+  ok(bp2 && bp2.bottleneck === 4000, '聚合两条成员时瓶颈 4G');
+  const bp3 = U.bestPath(pNodes, aggLs, 'n2', 'n3', { exclude: new Set(['l4']) });
+  ok(bp3 && bp3.bottleneck === 2000 && bp3.linkIds.join(',') === 'l5', '聚合成员故障后容量降为剩余成员（2G）');
+  const bp4 = U.bestPath(pNodes, aggLs, 'n2', 'n3', { exclude: new Set(['l4', 'l5']) });
+  ok(bp4 === null, '聚合成员全部故障则该链路不可用');
+  // 未标记聚合的平行链路不合并（旧行为）：n1→n2 直连瓶颈 = max(AGG1 2G, 独立 10G)
+  const bp5 = U.bestPath(pNodes, aggLs, 'n1', 'n2');
+  ok(bp5 && bp5.bottleneck === 10000, '平行独立链路不与聚合组合并（取最大瓶颈）');
+}
+
 console.log('== 布局预设 ==');
 {
   const ns = [

@@ -44,7 +44,9 @@ const ROLE_SETS = {
   amask:['源掩码', '源掩码位', '源掩码长度', 'a端掩码',
         'srcmask', 'a_mask', 'amask', 'srcnetmask'],
   bmask:['目标掩码', '目标掩码位', '目标掩码长度', 'b端掩码',
-        'dstmask', 'b_mask', 'bmask', 'dstnetmask']
+        'dstmask', 'b_mask', 'bmask', 'dstnetmask'],
+  agg: ['聚合组', '链路聚合', '聚合', '聚合名称', '链路聚合组',
+        'agg', 'aggregate', 'lag', 'ethtrunk', 'eth_trunk', 'eth-trunk', 'portchannel', 'port-channel', 'trunkgroup']
 };
 
 const RE_ROLES = [
@@ -106,7 +108,7 @@ function parseRows(rows) {
   const records = [];
   data.forEach((cells, ri) => {
     if (!cells || !cells.some(c => String(c).trim() !== '')) return;
-    const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '', vlans: '', sax: '', say: '', sbx: '', sby: '', a2l: '', avlan: '', avm: '', b2l: '', bvlan: '', bvm: '', amask: '', bmask: '' };
+    const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '', vlans: '', sax: '', say: '', sbx: '', sby: '', a2l: '', avlan: '', avm: '', b2l: '', bvlan: '', bvm: '', amask: '', bmask: '', agg: '' };
     cells.forEach((c, ci) => {
       const role = roles[ci];
       if (role && rec[role] !== undefined) rec[role] = String(c).trim();
@@ -160,6 +162,7 @@ function recordsToGraph(records) {
       aIf: r.si, aIp: r.sip,
       bIf: r.sii, bIp: r.sib,
       bw: U.normalizeBw(r.bw), note: r.note,
+      agg: String(r.agg || '').trim().slice(0, 32),
       aL2: /^(是|y|yes|1|true|二层)$/i.test(r.a2l), bL2: /^(是|y|yes|1|true|二层)$/i.test(r.b2l),
       aVlan: r.avlan, aVlanMode: (r.avm === 'trunk' || r.avm === 'hybrid') ? r.avm : (r.avlan ? 'access' : ''),
       bVlan: r.bvlan, bVlanMode: (r.bvm === 'trunk' || r.bvm === 'hybrid') ? r.bvm : (r.bvlan ? 'access' : ''),
@@ -193,8 +196,8 @@ function recordsToGraph(records) {
 }
 
 /* ---------- 图 → 表格行 ---------- */
-const EXPORT_HEAD = ['源设备', '源接口', '源IP', '源掩码', '目标设备', '目标接口', '目标IP', '目标掩码', '带宽', '管理地址', 'VLAN接口', '备注', '源二层', '源VLAN', '源VLAN模式', '目标二层', '目标VLAN', '目标VLAN模式', '源设备X', '源设备Y', '目标设备X', '目标设备Y'];
-const EXPORT_KEYS = ['sa', 'si', 'sip', 'amask', 'sb', 'sii', 'sib', 'bmask', 'bw', 'mgmt', 'vlans', 'note', 'a2l', 'avlan', 'avm', 'b2l', 'bvlan', 'bvm', 'sax', 'say', 'sbx', 'sby'];
+const EXPORT_HEAD = ['源设备', '源接口', '源IP', '源掩码', '目标设备', '目标接口', '目标IP', '目标掩码', '带宽', '聚合组', '管理地址', 'VLAN接口', '备注', '源二层', '源VLAN', '源VLAN模式', '目标二层', '目标VLAN', '目标VLAN模式', '源设备X', '源设备Y', '目标设备X', '目标设备Y'];
+const EXPORT_KEYS = ['sa', 'si', 'sip', 'amask', 'sb', 'sii', 'sib', 'bmask', 'bw', 'agg', 'mgmt', 'vlans', 'note', 'a2l', 'avlan', 'avm', 'b2l', 'bvlan', 'bvm', 'sax', 'say', 'sbx', 'sby'];
 
 function graphToRecords(nodes, links) {
   const byId = {};
@@ -212,6 +215,7 @@ function graphToRecords(nodes, links) {
       sa: a ? a.name : '', si: l.aIf, sip: l.aIp,
       sb: b ? b.name : '', sii: l.bIf, sib: l.bIp,
       bw: l.bw,
+      agg: l.agg || '',
       mgmt,
       vlans,
       note: l.note,
@@ -376,19 +380,26 @@ function validateTopology(nodes, links) {
     msg: '检测到环路（可能存在冗余链路，允许但请注意）'
   });
 
-  // 7. 平行链路
+  // 7. 平行链路（同一对设备间同名聚合组的链路属正常链路聚合组网，不再提示）
   const pairCount = new Map();
+  const pairLinks = new Map();
   for (const l of links) {
     const k = l.a < l.b ? l.a + '|' + l.b : l.b + '|' + l.a;
     pairCount.set(k, (pairCount.get(k) || 0) + 1);
+    if (!pairLinks.has(k)) pairLinks.set(k, []);
+    pairLinks.get(k).push(l);
   }
   for (const [k, c] of pairCount) {
     if (c > 1) {
+      const members = pairLinks.get(k) || [];
+      const aggs = members.map(l => String(l.agg || '').trim());
+      if (aggs.every(a => a) && new Set(aggs).size === 1) continue; // 全部成员同名聚合组：链路聚合
       const sep = k.indexOf('|');
       const a = k.slice(0, sep), b = k.slice(sep + 1);
       issues.push({
         level: 'info', kind: 'multi', nodeIds: [a, b],
         msg: `「${nameOf(a)}」与「${nameOf(b)}」之间有 ${c} 条平行链路`
+          + (aggs.some(a => a) ? '（部分标记了聚合组，若为链路聚合请统一聚合组名）' : '')
       });
     }
   }
