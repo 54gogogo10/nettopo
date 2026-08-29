@@ -1,7 +1,7 @@
 {
   "name": "nettopo",
   "productName": "网络拓扑管理软件",
-  "version": "1.0.0-20260829f",
+  "version": "1.0.0-20260829g",
   "description": "网络拓扑设计与后台监控管理软件",
   "main": "electron-main.js",
   "author": "NetTopo",
