@@ -39,11 +39,10 @@ const puppeteer = require('puppeteer-core');
   const stats = await page.evaluate(() => ({
     nodes: document.querySelectorAll('.node').length,
     links: document.querySelectorAll('.link').length,
-    // 回归：连线必须真实落位（非 (0,0) 剩余）；渲染层 update() 若中途抛错，连线会全部停在原点不可见
-    visibleLinks: [...document.querySelectorAll('g.link line.ln')].filter(li => {
-      const x1 = li.getAttribute('x1'), y1 = li.getAttribute('y1'), x2 = li.getAttribute('x2'), y2 = li.getAttribute('y2');
-      return x1 !== null && y1 !== null && x2 !== null && y2 !== null
-        && (Math.abs(Number(x2) - Number(x1)) + Math.abs(Number(y2) - Number(y1))) > 0.01;
+    // 回归：连线必须真实落位（非 (0,0) 剩余）；渲染层 update() 若中途抛错，连线会全部停在原点不可见。
+    // 直角布线改版后连线元素统一为 SVGGeometryElement（path/line 兼容），用 getTotalLength 判定
+    visibleLinks: [...document.querySelectorAll('g.link .ln')].filter(li => {
+      try { return li.getTotalLength() > 0.01; } catch (e) { return false; }
     }).length,
     labels: [...document.querySelectorAll('.link .lb')].filter(t => t.textContent.trim()).length,
     statGraph: document.querySelector('#statGraph').textContent,
