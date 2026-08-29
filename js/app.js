@@ -4446,10 +4446,14 @@ function openMonitorConfig(id) {
       <button type="button" class="tb icon mh-del" title="删除该管理地址">✕</button>
       <div class="mh-cmds-wrap" hidden><textarea class="mh-cmds" rows="3" placeholder="该地址的执行命令（每行一条）：&#10;display version&#10;display current-configuration">${U.escHtml(Array.isArray(r.commands) ? r.commands.join('\n') : '')}</textarea></div>
       <div class="mh-ext">
+        <div class="mh-sep">连接与认证</div>
         <label class="mh-onc" title="连接时执行命令：每次连接成功（含自动重连）仅执行一次，先于周期循环命令发出；每行一条，依次执行">连接时
           <textarea class="mh-onc-ta" rows="2" placeholder="命令（每行一条，连接成功时依次执行）">${U.escHtml(Array.isArray(r.onConnect) ? r.onConnect.join('\n') : (r.onConnect || ''))}</textarea>
         </label>
         <button type="button" class="tb mh-jump-btn" title="经 SSH 跳板机（堡垒机）连接该地址，仅 SSH 目标生效">跳板${r.jump && r.jump.host ? '（已配）' : ''}</button>
+        <label class="mh-auth" title="SSH 认证方式：密码，或公钥（粘贴/导入私钥，Telnet 不适用）">认证
+          <select class="mh-auth-sel"><option value="password"${r.authMode !== 'key' ? ' selected' : ''}>密码</option><option value="key"${r.authMode === 'key' ? ' selected' : ''}>私钥</option></select>
+        </label>
         <div class="mh-jump-wrap" hidden>
           <input class="mh-jump-host" type="text" placeholder="跳板地址（留空=不使用）" value="${U.escHtml(r.jump && r.jump.host || '')}" autocomplete="off"/>
           <input class="mh-jump-port" type="number" min="1" max="65535" placeholder="端口(22)" value="${U.escHtml(r.jump && r.jump.port || '')}"/>
@@ -4457,9 +4461,6 @@ function openMonitorConfig(id) {
           <input class="mh-jump-pass" type="password" placeholder="跳板密码" value="${U.escHtml(r.jump && r.jump.password || '')}" autocomplete="new-password"/>
           <span class="mh-unit">跳板认证：密码；仅 SSH 目标生效</span>
         </div>
-        <label class="mh-auth" title="SSH 认证方式：密码，或公钥（粘贴/导入私钥，Telnet 不适用）">认证
-          <select class="mh-auth-sel"><option value="password"${r.authMode !== 'key' ? ' selected' : ''}>密码</option><option value="key"${r.authMode === 'key' ? ' selected' : ''}>私钥</option></select>
-        </label>
         <div class="mh-key-wrap" style="display:none;width:100%">
           <textarea class="mh-key" rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;粘贴 OpenSSH / PEM / PKCS#8 私钥，或点「导入私钥文件」">${U.escHtml(typeof r.privateKey === 'string' ? r.privateKey : '')}</textarea>
           <div style="display:flex;gap:8px;margin-top:4px;align-items:center">
@@ -4467,16 +4468,17 @@ function openMonitorConfig(id) {
             <button type="button" class="tb mh-keyfile">导入私钥文件…</button>
           </div>
         </div>
+        <div class="mh-sep">在线探测</div>
         <label class="mh-pr" title="按间隔探测该地址连通性，失败时侧栏变红并弹通知（仅读取模式同样适用）"><input type="checkbox" class="mh-pr-cb"${r.probeEnabled ? ' checked' : ''}/>在线探测</label>
         <select class="mh-pr-type" title="探测方式"><option value="tcp"${r.probeType !== 'icmp' ? ' selected' : ''}>TCP</option><option value="icmp"${r.probeType === 'icmp' ? ' selected' : ''}>ICMP</option></select>
         <input class="mh-pr-int" type="number" min="5" max="3600" title="探测间隔（秒）" value="${U.escHtml(r.probeIntervalSec)}"/><span class="mh-unit">秒</span>
         <input class="mh-pr-port" type="number" min="1" max="65535" placeholder="端口(默认管理口)" title="探测目标端口，留空 = 管理端口" value="${U.escHtml(r.probePort)}"/>
+        <div class="mh-sep">输出关键字告警</div>
         <button type="button" class="tb mh-alert-btn" title="输出匹配这些关键字时告警">告警${Array.isArray(r.alerts) && r.alerts.length ? '（' + r.alerts.length + '）' : ''}</button>
+        <div class="mh-alerts-wrap" hidden><textarea class="mh-alerts" rows="2" placeholder="每行一个正则表达式，输出匹配即告警；可写：error|down # 接口异常">${U.escHtml(Array.isArray(r.alerts) ? r.alerts.map(a => (a && typeof a === 'object' ? (a.pattern || '') + (a.note && a.note !== (a.pattern || '') ? ' # ' + a.note : '') : String(a))) .join('\n') : '')}</textarea></div>
+        <div class="mh-sep">配置自动备份</div>
         <label class="mh-bk" title="定时抓取配置保存为备份，保留历史并可对比差异"><input type="checkbox" class="mh-bk-cb"${r.backupEnabled ? ' checked' : ''}/>自动备份</label>
         <label class="mh-cmp" title="每次配置备份保存后自动按「配置合规检查」的规则扫描；违规写入事件时间线并弹系统通知"><input type="checkbox" class="mh-cmp-cb"${r.complianceEnabled ? ' checked' : ''}/>自动合规</label>
-        <label class="mh-si" title="每次会话建立后经 SNMP v2c 读取 sysDescr/sysObjectID，自动回填设备「软件版本」（只读操作）"><input type="checkbox" class="mh-si-cb"${r.snmpEnabled ? ' checked' : ''}/>SNMP 识别</label>
-        <label class="mh-si" title="按间隔经 SNMP v2c 采集接口状态与收发流量（ifTable，独立于连接的 UDP 轮询）：监控中心「接口流量」页查看趋势，接口 DOWN 记入事件时间线并弹通知"><input type="checkbox" class="mh-sift-cb"${r.snmpIfTable ? ' checked' : ''}/>接口流量</label>
-        <input class="mh-si-comm" type="text" title="SNMP v2c 团体字（SNMP 识别 / 接口流量共用）" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
         <label class="mh-bk-skip" title="配置无变化时不新增备份文件，只有配置变化时才新增（开启后备份库只保留发生变化的版本）"><input type="checkbox" class="mh-bk-skip-cb"${r.backupSkipSame ? ' checked' : ''}/>无变化不新增</label>
         <select class="mh-bk-mode" title="备份连接方式：复用监控连接 = 在监控会话内执行备份命令；独立连接 = 每次备份单独建立连接，不干扰监控会话">
           <option value="session"${r.backupMode !== 'own' ? ' selected' : ''}>复用监控连接</option>
@@ -4484,7 +4486,10 @@ function openMonitorConfig(id) {
         </select>
         <textarea class="mh-bk-ta" rows="2" placeholder="备份命令（每行一条，依次执行并合并保存）" title="抓取配置的命令，可多条">${U.escHtml(Array.isArray(r.backupCommand) ? r.backupCommand.join('\n') : (r.backupCommand || ''))}</textarea>
         <input class="mh-bk-int" type="number" min="1" max="1440" title="备份间隔（分钟）" value="${U.escHtml(Math.round((r.backupIntervalSec || 3600) / 60))}"/><span class="mh-unit">分钟</span>
-        <div class="mh-alerts-wrap" hidden><textarea class="mh-alerts" rows="2" placeholder="每行一个正则表达式，输出匹配即告警；可写：error|down # 接口异常">${U.escHtml(Array.isArray(r.alerts) ? r.alerts.map(a => (a && typeof a === 'object' ? (a.pattern || '') + (a.note && a.note !== (a.pattern || '') ? ' # ' + a.note : '') : String(a))) .join('\n') : '')}</textarea></div>
+        <div class="mh-sep">SNMP 采集</div>
+        <label class="mh-si" title="每次会话建立后经 SNMP v2c 读取 sysDescr/sysObjectID，自动回填设备「软件版本」（只读操作）"><input type="checkbox" class="mh-si-cb"${r.snmpEnabled ? ' checked' : ''}/>SNMP 识别</label>
+        <label class="mh-si" title="按间隔经 SNMP v2c 采集接口状态与收发流量（ifTable，独立于连接的 UDP 轮询）：监控中心「接口流量」页查看趋势，接口 DOWN 记入事件时间线并弹通知"><input type="checkbox" class="mh-sift-cb"${r.snmpIfTable ? ' checked' : ''}/>接口流量</label>
+        <input class="mh-si-comm" type="text" title="SNMP v2c 团体字（SNMP 识别 / 接口流量共用）" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
       </div>
     </div>`;
   const autoPort = (proto) => proto === 'telnet' ? '23' : '22';

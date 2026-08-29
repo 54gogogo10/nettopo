@@ -980,3 +980,25 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .mc-if-op .t-mut { color: var(--muted); }
 .mc-if-body { overflow: auto; flex: 1; }
 .mc-spark { background: var(--panel2); border-radius: 4px; }
+
+/* ============ 监控配置弹窗 · 分组分割线 ============ */
+.mon-host-row .mh-sep {
+  flex-basis: 100%;
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 4px; padding-top: 7px;
+  font-size: 10.5px; font-weight: 600; color: var(--muted);
+  letter-spacing: .5px; user-select: none;
+  border-top: 1px dashed var(--border);
+}
+.mon-host-row .mh-sep:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+.mon-host-row .mh-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); opacity: .6; }
+/* 分组行内控件恢复自然宽度（覆盖 .frow input/select 的 width:100%，仅弹窗内小组件；
+ * :where 保证零特异度，不压过下方 .mh-pr-port 等定宽规则） */
+.mon-host-row .mh-ext :where(select, input[type=number], input[type=text]) { width: auto; }
+.mon-host-row .mh-ext .mh-si-comm { width: 150px; }
+.mon-host-row .mh-ext .mh-bk-mode { width: auto; }
+/* 跳板展开区默认隐藏（display:flex 会覆盖 hidden 属性，需显式兜底） */
+.mon-host-row .mh-jump-wrap[hidden] { display: none; }
+.mon-host-row .mh-cmds-wrap[hidden] { display: none; }
+.mon-host-row .mh-ext .mh-alerts-wrap[hidden] { display: none; }
+.mon-host-row .mh-ext .mh-pr-port { width: 150px; }
