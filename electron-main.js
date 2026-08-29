@@ -4,7 +4,7 @@ const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu }
 const path = require('path');
 const { ShellManager } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
-const { MonitorManager, UptimeStore } = require('./js/monitor.js');
+const { MonitorManager, UptimeStore, fmtUptimeTicks } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
@@ -267,6 +267,15 @@ monitor.on('compliance', (info) => {
   if (!info.ok && notifyEnabled()) notifyUser('网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail);
 });
 monitor.on('sysinfo', (info) => sendMonitor('monitor:sysinfo', info));
+// SNMP 性能采样（CPU/内存/sysUpTime）：实时推送监控中心「性能」页
+monitor.on('perf', (info) => sendMonitor('monitor:perf', info));
+// 设备重启检测（sysUpTime 骤减）：记入事件时间线并弹系统通知
+monitor.on('reboot', (info) => {
+  sendMonitor('monitor:reboot', info);
+  const detail = '设备可能已重启（sysUpTime ' + fmtUptimeTicks(info.prev) + ' → ' + fmtUptimeTicks(info.cur) + '）';
+  recordMonitorEvent(info, 'reboot', detail);
+  if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 设备重启', info.name + '（' + info.host + '）' + detail);
+});
 // SNMP 接口流量：实时采样推送主窗口；接口 up/down 跳变记入事件时间线并弹通知（接口离线才弹）
 monitor.on('iftraffic', (info) => sendMonitor('monitor:iftraffic', info));
 monitor.on('ifstatus', (info) => {
@@ -591,6 +600,10 @@ ipcMain.handle('monitor:uptime', (e) => monitorGuard(e)
 // 接口流量历史（监控中心「接口流量」页按需拉取采样序列）
 ipcMain.handle('monitor:ifhistory', (e, key) => monitorGuard(e)
   ? monitor.ifHistory(String((key && key.key) || key || ''))
+  : { ok: false, error: 'forbidden' });
+// CPU/内存/sysUpTime 采样历史（监控中心「性能」页按需拉取）
+ipcMain.handle('monitor:perfhistory', (e, key) => monitorGuard(e)
+  ? monitor.perfHistory(String((key && key.key) || key || ''))
   : { ok: false, error: 'forbidden' });
 // 测试钩子（仅冒烟测试环境）：模拟用户点击窗口关闭按钮
 if (process.env.NETTOPO_USERDATA) {

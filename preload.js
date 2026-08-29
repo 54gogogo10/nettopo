@@ -58,7 +58,10 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   onBackup: (cb) => ipcRenderer.on('monitor:backup', (_e, info) => cb(info)),
   onSysinfo: (cb) => ipcRenderer.on('monitor:sysinfo', (_e, info) => cb(info)),
   ifHistory: (key) => ipcRenderer.invoke('monitor:ifhistory', { key }),
-  onIfTraffic: (cb) => ipcRenderer.on('monitor:iftraffic', (_e, info) => cb(info))
+  onIfTraffic: (cb) => ipcRenderer.on('monitor:iftraffic', (_e, info) => cb(info)),
+  perfHistory: (key) => ipcRenderer.invoke('monitor:perfhistory', { key }),
+  onPerf: (cb) => ipcRenderer.on('monitor:perf', (_e, info) => cb(info)),
+  onReboot: (cb) => ipcRenderer.on('monitor:reboot', (_e, info) => cb(info))
 });
 
 contextBridge.exposeInMainWorld('topoConfigBackup', {

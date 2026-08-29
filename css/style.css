@@ -970,6 +970,7 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 
 /* ============ 监控中心 · 接口流量页 ============ */
 .mc-ifaces { height: 100%; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+.mc-perfs { height: 100%; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
 .mc-if-devs { display: flex; flex-wrap: wrap; gap: 6px; }
 .mc-ifdev {
   padding: 3px 12px; border-radius: 16px; border: 1px solid var(--border);

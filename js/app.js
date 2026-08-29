@@ -4387,6 +4387,11 @@ function monitorRow(host, saved) {
     snmpEnabled: !!saved.snmpEnabled,
     snmpCommunity: typeof saved.snmpCommunity === 'string' ? saved.snmpCommunity : 'public',
     snmpIfTable: !!saved.snmpIfTable,
+    snmpUpTime: !!saved.snmpUpTime,
+    snmpPerf: !!saved.snmpPerf,
+    snmpCpuOid: typeof saved.snmpCpuOid === 'string' ? saved.snmpCpuOid : '',
+    snmpMemUsedOid: typeof saved.snmpMemUsedOid === 'string' ? saved.snmpMemUsedOid : '',
+    snmpMemFreeOid: typeof saved.snmpMemFreeOid === 'string' ? saved.snmpMemFreeOid : '',
     backupCommand: normCmds(saved.backupCommand, ['display current-configuration']),
     backupMode: saved.backupMode === 'own' ? 'own' : 'session',
     backupSkipSame: !!saved.backupSkipSame,
@@ -4422,6 +4427,11 @@ function normalizeMonitorHosts(cfg) {
         snmpEnabled: !!h.snmpEnabled,
         snmpCommunity: typeof h.snmpCommunity === 'string' ? h.snmpCommunity.slice(0, 64) : 'public',
         snmpIfTable: !!h.snmpIfTable,
+        snmpUpTime: !!h.snmpUpTime,
+        snmpPerf: !!h.snmpPerf,
+        snmpCpuOid: typeof h.snmpCpuOid === 'string' ? h.snmpCpuOid.trim().slice(0, 64) : '',
+        snmpMemUsedOid: typeof h.snmpMemUsedOid === 'string' ? h.snmpMemUsedOid.trim().slice(0, 64) : '',
+        snmpMemFreeOid: typeof h.snmpMemFreeOid === 'string' ? h.snmpMemFreeOid.trim().slice(0, 64) : '',
         backupCommand: normCmds(h.backupCommand, ['display current-configuration']),
         backupMode: h.backupMode === 'own' ? 'own' : 'session',
         backupSkipSame: !!h.backupSkipSame,
@@ -4503,7 +4513,7 @@ async function applyMonitor(id, cfg, enabled) {
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
           { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!r.snmpEnabled, community: r.snmpCommunity || 'public', ifTable: !!r.snmpIfTable } }
+        { sysinfo: { enabled: !!r.snmpEnabled, community: r.snmpCommunity || 'public', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '' } } }
         ));
         if (!res || !res.ok) {
           perHost[r.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
@@ -4734,7 +4744,19 @@ function openMonitorConfig(id) {
         <div class="mh-sep">SNMP 采集</div>
         <label class="mh-si" title="每次会话建立后经 SNMP v2c 读取 sysDescr/sysObjectID，自动回填设备「软件版本」（只读操作）"><input type="checkbox" class="mh-si-cb"${r.snmpEnabled ? ' checked' : ''}/>SNMP 识别</label>
         <label class="mh-si" title="按间隔经 SNMP v2c 采集接口状态与收发流量（ifTable，独立于连接的 UDP 轮询）：监控中心「接口流量」页查看趋势，接口 DOWN 记入事件时间线并弹通知"><input type="checkbox" class="mh-sift-cb"${r.snmpIfTable ? ' checked' : ''}/>接口流量</label>
-        <input class="mh-si-comm" type="text" title="SNMP v2c 团体字（SNMP 识别 / 接口流量共用）" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
+        <label class="mh-si" title="按间隔 GET sysUpTime（TimeTicks），数值骤减判定为设备重启：记入事件时间线并弹通知（独立于 SSH/Telnet 连接）"><input type="checkbox" class="mh-si-up-cb"${r.snmpUpTime ? ' checked' : ''}/>重启检测</label>
+        <label class="mh-si" title="按间隔 GET CPU/内存 OID（百分比型或字节型均可），监控中心「性能」页查看趋势"><input type="checkbox" class="mh-si-pf-cb"${r.snmpPerf ? ' checked' : ''}/>CPU/内存</label>
+        <input class="mh-si-comm" type="text" title="SNMP v2c 团体字（SNMP 识别 / 接口流量 / 重启检测 / CPU·内存共用）" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
+        <div class="mh-perf-wrap" hidden>
+          <select class="mh-si-preset" title="按厂家预填常用 OID（可手动修改；不同型号可能不同，建议先用 snmpwalk 验证）">
+            <option value="">OID 预设（选厂家自动填充）…</option>
+            <option value="hw">华为/华三（百分比型）</option>
+            <option value="cisco">思科（字节型 used/free）</option>
+          </select>
+          <input class="mh-si-cpu" type="text" placeholder="CPU 利用率 OID" title="GET 失败自动 GETNEXT 取该子树首个实例，表型 OID 填基础前缀即可" value="${U.escHtml(r.snmpCpuOid || '')}" autocomplete="off" spellcheck="false"/>
+          <input class="mh-si-mused" type="text" placeholder="内存占用 OID（% 或已用字节）" title="内存占用：若下方「内存空闲 OID」留空，此处值直接视为百分比（华为/华三 entity-ext）；填写空闲 OID 则按 已用/(已用+空闲) 换算（思科字节型）" value="${U.escHtml(r.snmpMemUsedOid || '')}" autocomplete="off" spellcheck="false"/>
+          <input class="mh-si-mfree" type="text" placeholder="内存空闲 OID（可选，思科字节型填此）" value="${U.escHtml(r.snmpMemFreeOid || '')}" autocomplete="off" spellcheck="false"/>
+        </div>
       </div>
     </div>`;
   const autoPort = (proto) => proto === 'telnet' ? '23' : '22';
@@ -4801,6 +4823,23 @@ function openMonitorConfig(id) {
       };
       inp.click();
     };
+    // CPU/内存 OID 折叠区：勾选「CPU/内存」展开；厂家预设一键填充
+    const pfCb = rowEl.querySelector('.mh-si-pf-cb');
+    const pfWrap = rowEl.querySelector('.mh-perf-wrap');
+    const applyPfUi = () => { pfWrap.hidden = !pfCb.checked; };
+    pfCb.addEventListener('change', applyPfUi);
+    applyPfUi();
+    const OID_PRESETS = {
+      hw:   { cpu: '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5', used: '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7', free: '' },
+      cisco:{ cpu: '1.3.6.1.4.1.9.2.1.58.0', used: '1.3.6.1.4.1.9.9.48.1.1.1.5.1', free: '1.3.6.1.4.1.9.9.48.1.1.1.6.1' }
+    };
+    rowEl.querySelector('.mh-si-preset').addEventListener('change', (e) => {
+      const p = OID_PRESETS[e.target.value];
+      if (!p) return;
+      rowEl.querySelector('.mh-si-cpu').value = p.cpu;
+      rowEl.querySelector('.mh-si-mused').value = p.used;
+      rowEl.querySelector('.mh-si-mfree').value = p.free;
+    });
     for (const inp of rowEl.querySelectorAll('input, select')) {
       inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } });
     }
@@ -4863,6 +4902,11 @@ function openMonitorConfig(id) {
         complianceEnabled: rowEl.querySelector('.mh-cmp-cb').checked,
         snmpEnabled: rowEl.querySelector('.mh-si-cb').checked,
         snmpIfTable: rowEl.querySelector('.mh-sift-cb').checked,
+        snmpUpTime: rowEl.querySelector('.mh-si-up-cb').checked,
+        snmpPerf: rowEl.querySelector('.mh-si-pf-cb').checked,
+        snmpCpuOid: rowEl.querySelector('.mh-si-cpu').value.trim().slice(0, 64),
+        snmpMemUsedOid: rowEl.querySelector('.mh-si-mused').value.trim().slice(0, 64),
+        snmpMemFreeOid: rowEl.querySelector('.mh-si-mfree').value.trim().slice(0, 64),
         snmpCommunity: rowEl.querySelector('.mh-si-comm').value.trim().slice(0, 64),
         backupCommand: (() => { const v = rowEl.querySelector('.mh-bk-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); return v.length ? v : ['display current-configuration']; })(),
         backupMode: rowEl.querySelector('.mh-bk-mode').value,
@@ -5070,6 +5114,7 @@ function openMonitorCenter() {
             <button type="button" class="mc-tab on" data-pane="events">事件时间线</button>
             <button type="button" class="mc-tab" data-pane="baks">配置备份</button>
             <button type="button" class="mc-tab" data-pane="ifaces">接口流量</button>
+            <button type="button" class="mc-tab" data-pane="perf">性能</button>
             <span id="mcFilter" class="mc-filt" hidden></span>
           </div>
           <div class="mc-pane" data-pane="events">
@@ -5080,6 +5125,9 @@ function openMonitorCenter() {
           </div>
           <div class="mc-pane" data-pane="ifaces" hidden>
             <div class="mc-ifaces" id="mcIfaces"></div>
+          </div>
+          <div class="mc-pane" data-pane="perf" hidden>
+            <div class="mc-perfs" id="mcPerfs"></div>
           </div>
         </div>
       </div>
@@ -5117,12 +5165,12 @@ function openMonitorCenter() {
   const evIcon = (t) => ({
     offline: '🔴', recovery: '🟢', alert: '🟠', 'alert-clear': '⚪',
     backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️',
-    'if-down': '🔻', 'if-up': '🔺'
+    'if-down': '🔻', 'if-up': '🔺', reboot: '🔄'
   }[t] || '•');
   const evTypeLabel = {
     offline: '离线', recovery: '恢复', alert: '告警', 'alert-clear': '解除',
     backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规',
-    'if-down': '接口离线', 'if-up': '接口恢复'
+    'if-down': '接口离线', 'if-up': '接口恢复', reboot: '设备重启'
   };
   // 事件时间线筛选：null = 全部；curDev = 设备；curHost = 具体管理地址
   let curDev = null, curHost = null, curDevName = '';
@@ -5285,6 +5333,92 @@ function openMonitorCenter() {
     if (document.body.contains(ov)) renderIfaces(lastJobs);
   }
 
+  /* ---------- 性能页（SNMP CPU/内存/sysUpTime 采集：当前值 + 采样趋势线） ---------- */
+  let curPerfDev = null;
+  const perfCache = new Map();               // key -> 采样历史 [{ts, up, cpu, mem}]
+  const fmtUpTicks = (ticks) => {
+    const s = Math.floor(Number(ticks) / 100);
+    if (!Number.isFinite(s) || s < 0) return '—';
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    if (d > 0) return d + '天' + h + '小时';
+    if (h > 0) return h + '小时' + m + '分';
+    return m + '分' + (s % 60) + '秒';
+  };
+  const gauge = (v) => {
+    if (v == null || !Number.isFinite(Number(v))) return '<span class="t-mut">—</span>';
+    const n = Number(v);
+    const cls = n >= 90 ? 't-off' : n >= 75 ? 't-alert' : 't-ok';
+    return '<b class="' + cls + '">' + n + '%</b>';
+  };
+  function renderPerf(jobs) {
+    const el = ov.querySelector('#mcPerfs');
+    if (!el) return;
+    const cands = [];
+    const seen = new Set();
+    for (const j of (jobs || [])) {
+      if ((!j.perf && !j.upCheck) || seen.has(j.deviceId)) continue;
+      seen.add(j.deviceId);
+      cands.push(j);
+    }
+    if (!cands.length) {
+      el.innerHTML = '<div class="mc-empty">暂无性能采集：在「设备监控（静默采集）」弹窗勾选「CPU/内存」或「重启检测」并填写 SNMP 团体字（可用「OID 预设」一键填充厂家 OID）</div>';
+      return;
+    }
+    if (!curPerfDev || !cands.some(c => c.key === curPerfDev)) curPerfDev = cands[0].key;
+    const cur = cands.find(c => c.key === curPerfDev) || cands[0];
+    const chips = cands.map(c =>
+      '<span class="mc-ifdev' + (c.key === cur.key ? ' on' : '') + '" data-pkey="' + U.escHtml(c.key) + '" title="' + U.escHtml(c.host) + '">' + U.escHtml(c.name || c.deviceId) + '</span>').join('');
+    const hist = perfCache.get(cur.key) || [];
+    const lastJob = (jobs || []).find(j => j.key === cur.key) || {};
+    const last = hist[hist.length - 1] || (lastJob.lastPerf ? { cpu: lastJob.lastPerf.cpu, mem: lastJob.lastPerf.mem, up: lastJob.lastPerf.up } : null);
+    let rowsHtml = '';
+    if (!hist.length && !last) {
+      rowsHtml = '<div class="mc-empty">正在等待第一次采样（SNMP 轮询间隔约 ' + (lastJob.lastPerf ? '' : '60') + ' 秒）…</div>';
+    } else {
+      const showCpuMem = !!(lastJob.perf || (last && (last.cpu != null || last.mem != null)));
+      const showUp = !!(lastJob.upCheck || (last && last.up != null));
+      if (showCpuMem) {
+        rowsHtml += '<div class="mc-if-row">'
+          + '<span class="mc-if-nm">CPU 利用率</span>'
+          + '<span class="mc-if-rate">' + gauge(last ? last.cpu : null) + '</span>'
+          + '<span class="mc-if-spark">' + spark(hist.map(s => s.cpu), '#ef4444') + '</span>'
+          + '</div>'
+          + '<div class="mc-if-row">'
+          + '<span class="mc-if-nm">内存占用</span>'
+          + '<span class="mc-if-rate">' + gauge(last ? last.mem : null) + '</span>'
+          + '<span class="mc-if-spark">' + spark(hist.map(s => s.mem), '#0ea5e9') + '</span>'
+          + '</div>';
+      }
+      if (showUp) {
+        rowsHtml += '<div class="mc-if-row">'
+          + '<span class="mc-if-nm">本次开机时长</span>'
+          + '<span class="mc-if-rate"><b class="t-ok">' + U.escHtml(fmtUpTicks(last ? last.up : null)) + '</b></span>'
+          + '<span class="mc-if-spark"></span>'
+          + '</div>';
+      }
+      rowsHtml = '<div class="mc-if-head"><span>指标</span><span>当前值</span><span>近 ' + hist.length + ' 次采样</span></div>' + rowsHtml;
+    }
+    el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
+      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · CPU/内存为设备视角（≥75% 橙 / ≥90% 红），sysUpTime 骤减判定为设备重启并记入事件时间线</div>'
+      + '<div class="mc-if-body">' + rowsHtml + '</div>';
+    el.querySelectorAll('.mc-ifdev').forEach(ch => {
+      ch.onclick = () => { curPerfDev = ch.dataset.pkey; perfCache.delete(curPerfDev); load(); };
+    });
+  }
+  async function renderPerfAsync(jobs) {
+    const seen = new Set();
+    for (const j of (jobs || [])) {
+      if ((!j.perf && !j.upCheck) || seen.has(j.deviceId)) continue;
+      seen.add(j.deviceId);
+      if (perfCache.has(j.key)) continue;
+      try {
+        const r = await bridge.perfHistory(j.key);
+        perfCache.set(j.key, (r && r.ok) ? (r.hist || []) : []);
+      } catch (e) { perfCache.set(j.key, []); }
+    }
+    if (document.body.contains(ov)) renderPerf(lastJobs);
+  }
+
   async function load() {
     try {
       const r = await bridge.overview();
@@ -5293,6 +5427,7 @@ function openMonitorCenter() {
       // 设备状态：按 job 展示（同一设备多地址合并为一行明细）
       const jobs = r.jobs || [];
       renderIfacesAsync(jobs); // 接口流量页（异步，不阻塞主视图）
+      renderPerfAsync(jobs);   // 性能页（异步，不阻塞主视图）
       const byDev = new Map();
       for (const j of jobs) {
         if (!byDev.has(j.deviceId)) byDev.set(j.deviceId, []);
@@ -5381,9 +5516,20 @@ function openMonitorCenter() {
       if (curIfDev === info.key) renderIfaces(lastJobs);
     });
   }
+  // 性能采样实时推送（同接口流量：只更新缓存与当前设备）
+  if (window.topoMonitor && window.topoMonitor.onPerf) {
+    window.topoMonitor.onPerf((info) => {
+      if (!info || !info.key || !document.body.contains(ov)) return;
+      const hist = perfCache.get(info.key) || [];
+      hist.push({ ts: info.ts, cpu: info.cpu, mem: info.mem, up: info.up });
+      while (hist.length > 120) hist.shift();
+      perfCache.set(info.key, hist);
+      if (curPerfDev === info.key) renderPerf(lastJobs);
+    });
+  }
   if (window.topoMonitor) {
     const subs = [];
-    for (const ch of ['onStatus', 'onProbe', 'onAlert', 'onBackup']) {
+    for (const ch of ['onStatus', 'onProbe', 'onAlert', 'onBackup', 'onReboot']) {
       if (typeof window.topoMonitor[ch] === 'function') {
         const fn = window.topoMonitor[ch];
         const cb = () => refreshOn();

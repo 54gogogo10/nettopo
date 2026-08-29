@@ -2496,7 +2496,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(rs.ok === true, '接口流量任务启动成功');
       const job = mm.jobs.get('dev1@127.0.0.1');
       // 首次采样：只有计数器基线，无速率、无状态事件
-      await mm._pollIfTable(job);
+      await mm._pollSnmp(job);
       eq(job.ifHist.length, 1, '首采样入历史');
       eq(traffics.length, 1, '首采样广播 iftraffic');
       eq(traffics[0].ifs.length, 3, '采样含 3 个接口');
@@ -2510,7 +2510,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       counters[2] += 625000; outCounters[2] += 625000;
       counters[3] += 0; outCounters[3] += 0;
       operMap[2] = 1;
-      await mm._pollIfTable(job);
+      await mm._pollSnmp(job);
       eq(job.ifHist.length, 2, '第二采样入历史');
       const if1 = traffics[1].ifs.find(x => x.i === 1);
       ok(Number.isFinite(if1.in) && if1.in > 0, '计数器差值算出正速率（' + if1.in + ' bps）');
@@ -2523,6 +2523,149 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       mm.stopAll(); // 清理 snmp 定时器
       agent.close();
       fs.rmSync(tmpIf, { recursive: true, force: true });
+    }
+
+    console.log('== 回归：SNMP 重启检测与 CPU/内存采集（新功能） ==');
+    {
+      const os = require('os');
+      const dgram = require('dgram');
+      const {
+        MonitorManager, snmpGetValue, fmtUptimeTicks, OID_SYSUPTIME
+      } = require(path.join(root, 'js', 'monitor.js'));
+      // TimeTicks → 运行时长
+      eq(fmtUptimeTicks(100 * 86400 * 12 + 100 * 3600 * 3 + 100 * 60 * 5), '12天3小时', 'TimeTicks → 天小时');
+      eq(fmtUptimeTicks(100 * 3600 * 5 + 100 * 60 * 20), '5小时20分', 'TimeTicks → 小时分');
+      eq(fmtUptimeTicks(100 * 60 * 2 + 100 * 30), '2分30秒', 'TimeTicks → 分秒');
+      eq(fmtUptimeTicks('abc'), '', '非数值返回空串');
+      // mock agent：sysUpTime（TimeTicks）+ 华为百分比型 CPU/MEM 表型 OID（GET 未命中 → GETNEXT 取首个实例）
+      const CPU_BASE = '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5';
+      const MEM_BASE = '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7';
+      const CISCO_USED = '1.3.6.1.4.1.9.9.48.1.1.1.5.1';
+      const CISCO_FREE = '1.3.6.1.4.1.9.9.48.1.1.1.6.1';
+      let upTicks = 100 * 86400 * 30; // 30 天
+      const perfTree = {
+        [OID_SYSUPTIME]: { tag: 0x43, val: null },       // TimeTicks（运行时填充）
+        [CPU_BASE + '.1']: { tag: 0x02, val: [23] },     // CPU 23%
+        [MEM_BASE + '.1']: { tag: 0x02, val: [46] },     // 内存 46%
+        [CISCO_USED]: { tag: 0x42, val: null },          // 思科内存池已用（Gauge，运行时填充）
+        [CISCO_FREE]: { tag: 0x42, val: null }
+      };
+      const u32Bytes = (n) => { const o = []; let v = n; do { o.unshift(v & 0xff); v = Math.floor(v / 256); } while (v); return o; };
+      const fillPerf = () => {
+        perfTree[OID_SYSUPTIME].val = u32Bytes(upTicks);
+        perfTree[CISCO_USED].val = u32Bytes(629145600);  // 600MB
+        perfTree[CISCO_FREE].val = u32Bytes(400000000);  // 400MB → 占用约 61.2%
+      };
+      const oidBytes2 = (s) => {
+        const p = String(s).split('.').map(Number);
+        const b = [p[0] * 40 + p[1]];
+        for (let k = 2; k < p.length; k++) {
+          let v = p[k];
+          const t = [v & 0x7f];
+          v = Math.floor(v / 128);
+          while (v) { t.unshift((v & 0x7f) | 0x80); v = Math.floor(v / 128); }
+          b.push(...t);
+        }
+        return Buffer.from(b);
+      };
+      const tlv2 = (tag, body) => Buffer.concat([Buffer.from([tag, body.length]), Buffer.from(body)]);
+      // 解析请求 PDU：tag（0xa0 GET / 0xa1 GETNEXT）+ 首 varbind OID
+      const parsePdu2 = (msg) => {
+        const rd = (buf, p) => {
+          const tag = buf[p]; let len = buf[p + 1]; let hs = 2;
+          if (len & 0x80) { const n = len & 0x7f; len = 0; for (let i = 0; i < n; i++) len = len * 256 + buf[p + 2 + i]; hs = 2 + n; }
+          return { tag, body: buf.subarray(p + hs, p + hs + len), next: p + hs + len };
+        };
+        const top = rd(msg, 0);
+        rd(top.body, 0);                    // version INT（跳过）
+        const f2 = rd(top.body, rd(top.body, 0).next); // community
+        const pdu = rd(top.body, f2.next);
+        const f1 = rd(pdu.body, 0);         // rid
+        const f2b = rd(pdu.body, f1.next);  // errStatus
+        const f3 = rd(pdu.body, f2b.next);  // errIndex
+        const vbs = rd(pdu.body, f3.next);  // varbind SEQ
+        const vb = rd(vbs.body, 0);
+        const oidT = rd(vb.body, 0);
+        const b = oidT.body;
+        const arcs = [Math.floor(b[0] / 40), b[0] % 40];
+        let v = 0;
+        for (let k = 1; k < b.length; k++) { v = (v << 7) | (b[k] & 0x7f); if (!(b[k] & 0x80)) { arcs.push(v); v = 0; } }
+        return { tag: pdu.tag, oid: arcs.join('.') };
+      };
+      const agent2 = dgram.createSocket('udp4');
+      agent2.on('message', (msg, rinfo) => {
+        fillPerf();
+        const { tag, oid: req } = parsePdu2(msg);
+        const keys = Object.keys(perfTree).sort();
+        let pick = (tag === 0xa0 && perfTree[req]) ? req : keys.find(k => k > req) || null;
+        if (!pick) pick = '1.3.6.1.2.1.1.99.0'; // 子树外空 OID
+        const ent = perfTree[pick] || { tag: 0x04, val: Buffer.from('x') };
+        const vb = tlv2(0x30, Buffer.concat([tlv2(0x06, oidBytes2(pick)), tlv2(ent.tag, ent.val)]));
+        const pduBody = Buffer.concat([tlv2(0x02, [0, 1]), tlv2(0x02, [0]), tlv2(0x02, [0]), tlv2(0x30, vb)]);
+        const resp = tlv2(0x30, Buffer.concat([tlv2(0x02, [1]), tlv2(0x04, Buffer.from('c', 'utf8')), tlv2(0xa2, pduBody)]));
+        agent2.send(resp, rinfo.port, rinfo.address);
+      });
+      await new Promise((res) => agent2.bind(0, '127.0.0.1', res));
+      const perfPort = agent2.address().port;
+      // snmpGetValue：GET 精确命中 / GETNEXT 兜底
+      const g1 = await snmpGetValue('127.0.0.1', 'c', OID_SYSUPTIME, 2000, perfPort);
+      ok(g1.ok && Number(g1.value) === 100 * 86400 * 30, 'GET 精确命中 sysUpTime');
+      const g2 = await snmpGetValue('127.0.0.1', 'c', CPU_BASE, 2000, perfPort);
+      ok(g2.ok && Number(g2.value) === 23, '表型 OID 回退 GETNEXT 取首个实例');
+      const g3 = await snmpGetValue('127.0.0.1', 'c', '1.3.6.1.99.99', 2000, perfPort);
+      ok(!g3.ok, '子树外 OID 返回失败');
+      // MonitorManager 端到端：性能采样 + 重启检测 + perfHistory
+      const tmpPf = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-pf-'));
+      const { EventEmitter } = require('events');
+      const stubShell2 = new EventEmitter();
+      stubShell2.connect = () => ({ ok: true, id: 'pf1' });
+      stubShell2.write = () => {}; stubShell2.close = () => {}; stubShell2.trustFingerprint = () => true;
+      const mm2 = new MonitorManager(stubShell2, tmpPf, null, {});
+      // OID 白名单清洗
+      const vcfg2 = mm2._validate({
+        key: 'dev9@127.0.0.1', host: '127.0.0.1', commands: ['display version'],
+        sysinfo: { sysUpTime: true, perf: { enabled: true, cpuOid: 'abc', memUsedOid: CPU_BASE, memFreeOid: '1.2..3' } }
+      });
+      eq(vcfg2.cfg.sysinfo.perf.cpuOid, '', '非法 OID 被清洗');
+      eq(vcfg2.cfg.sysinfo.perf.memUsedOid, CPU_BASE, '合法 OID 保留');
+      eq(vcfg2.cfg.sysinfo.perf.memFreeOid, '', '畸形 OID 被清洗');
+      eq(vcfg2.cfg.sysinfo.sysUpTime, true, '重启检测开关透传');
+      const perfs = [], reboots = [];
+      mm2.on('perf', (info) => perfs.push(info));
+      mm2.on('reboot', (info) => reboots.push(info));
+      const rs2 = mm2.start({
+        key: 'dev9@127.0.0.1', deviceId: 'dev9', name: '核心SW9',
+        protocol: 'ssh', host: '127.0.0.1', port: 22,
+        commands: ['display version'], password: 'p1',
+        sysinfo: { sysUpTime: true, community: 'c', intervalSec: 30, snmpPort: perfPort, perf: { enabled: true, cpuOid: CPU_BASE, memUsedOid: MEM_BASE } }
+      });
+      ok(rs2.ok === true, '性能采集任务启动成功');
+      const job2 = mm2.jobs.get('dev9@127.0.0.1');
+      await mm2._pollSnmp(job2);
+      eq(job2.perfHist.length, 1, '性能首采样入历史');
+      eq(job2.perfHist[0].cpu, 23, 'CPU 采样 23%');
+      eq(job2.perfHist[0].mem, 46, '内存采样 46%（百分比型）');
+      ok(job2.perfHist[0].up === 100 * 86400 * 30, 'sysUpTime 采样 30 天');
+      ok(perfs.length === 1 && perfs[0].cpu === 23, '性能采样广播 perf 事件');
+      eq(reboots.length, 0, '正常采样不触发重启事件');
+      // 重启检测：sysUpTime 骤降（30 天 → 1 分钟）
+      upTicks = 100 * 60;
+      await mm2._pollSnmp(job2);
+      eq(reboots.length, 1, 'sysUpTime 骤减触发 reboot 事件');
+      ok(reboots[0].prev === 100 * 86400 * 30 && reboots[0].cur === 100 * 60, '重启事件携带前后 sysUpTime');
+      // 思科字节型内存：used/(used+free)
+      job2.sysinfo.perf = { enabled: true, cpuOid: CPU_BASE, memUsedOid: CISCO_USED, memFreeOid: CISCO_FREE };
+      await mm2._pollSnmp(job2);
+      const last = job2.perfHist[job2.perfHist.length - 1];
+      ok(last.mem > 60 && last.mem < 62, '字节型内存换算百分比（' + last.mem + '%）');
+      // perfHistory / status
+      const ph = mm2.perfHistory('dev9@127.0.0.1');
+      ok(ph.ok && ph.hist.length === job2.perfHist.length && ph.perf === true && ph.sysUpTime === true, 'perfHistory 返回采样历史');
+      const st2 = mm2.status().find(s => s.key === 'dev9@127.0.0.1');
+      ok(st2.perf === true && st2.upCheck === true && st2.lastPerf && st2.lastPerf.cpu === 23, 'status 携带性能字段');
+      mm2.stopAll();
+      agent2.close();
+      fs.rmSync(tmpPf, { recursive: true, force: true });
     }
 
     fs.rmSync(tmpBase, { recursive: true, force: true });

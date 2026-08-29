@@ -82,6 +82,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 /* ---------------- SNMP v2c 最小客户端（仅 GET，零依赖 dgram + 手写 BER） ---------------- */
 const OID_SYSDESCR = '1.3.6.1.2.1.1.1.0';
 const OID_SYSOBJECT = '1.3.6.1.2.1.1.2.0';
+const OID_SYSUPTIME = '1.3.6.1.2.1.1.3.0'; // TimeTicks（1/100 秒），骤减即设备重启
 /* ifTable（MIB-2 interfaces）：接口名/速率/状态/收发字节计数（64 位优先，32 位兜底） */
 const OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2';
 const OID_IF_SPEED = '1.3.6.1.2.1.2.2.1.7';
@@ -223,6 +224,34 @@ function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
 }
 function snmpGet(host, community, oids, timeoutMs, port) { return snmpRequest(0xa0, host, community, oids, timeoutMs, port); }
 function snmpGetNext(host, community, oid, timeoutMs, port) { return snmpRequest(0xa1, host, community, [oid], timeoutMs, port); }
+
+/** SNMP 取单个 OID 的值：先 GET；未命中（表型 OID 无实例）回退 GETNEXT 取子树内第一个实例。
+ *  返回 {ok, value, oid} 或 {ok:false, error} */
+async function snmpGetValue(host, community, oid, timeoutMs, port) {
+  const r = await snmpGet(host, community, [oid], timeoutMs, port);
+  if (r.ok) {
+    const vb = (r.varbinds || [])[0];
+    if (vb && vb.oid === oid && vb.value != null) return { ok: true, value: vb.value, oid: vb.oid };
+  }
+  const n = await snmpGetNext(host, community, oid, timeoutMs, port);
+  if (n.ok) {
+    const vb = (n.varbinds || [])[0];
+    if (vb && vb.oid && (vb.oid === oid || vb.oid.startsWith(oid + '.')) && vb.value != null) {
+      return { ok: true, value: vb.value, oid: vb.oid };
+    }
+  }
+  return { ok: false, error: (r && r.error) || (n && n.error) || 'SNMP 无数据' };
+}
+
+/** TimeTicks（1/100 秒）→ 运行时长文本：如 12天3小时 / 5小时20分 */
+function fmtUptimeTicks(ticks) {
+  const s = Math.floor(Number(ticks) / 100);
+  if (!Number.isFinite(s) || s < 0) return '';
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + '天' + h + '小时';
+  if (h > 0) return h + '小时' + m + '分';
+  return m + '分' + (s % 60) + '秒';
+}
 
 /** SNMP GETNEXT 子树遍历（GETNEXT 逐个推进，零依赖实现 ifTable 采集）：
  *  返回 {ok, varbinds:[{oid,value}]}；离开 rootOid 子树（表结束）即停止；maxRows 防御超大表。 */
@@ -557,7 +586,7 @@ class MonitorManager extends EventEmitter {
     const cOpt = bOpt.compliance && typeof bOpt.compliance === 'object' ? bOpt.compliance : {};
     backup.compliance = { enabled: !!cOpt.enabled, rules: compileComplianceRules(cOpt.rules) };
     // ---- SNMP 自动识别（v2c GET sysDescr/sysObjectID，可选；每次会话建立后执行一次） ----
-    // ---- SNMP 接口流量采集（ifTable walk，可选；独立于连接的 UDP 定时轮询） ----
+    // ---- SNMP 接口流量采集（ifTable walk）/ 重启检测（sysUpTime 骤减）/ CPU·内存采集（可配置 OID），独立于连接的 UDP 定时轮询 ----
     const sOpt = opts.sysinfo && typeof opts.sysinfo === 'object' ? opts.sysinfo : {};
     const sysinfo = { enabled: !!sOpt.enabled, community: (String(sOpt.community || 'public').trim().slice(0, 64)) || 'public', ifTable: !!sOpt.ifTable };
     let snmpIntervalSec = parseFloat(sOpt.intervalSec);
@@ -566,6 +595,21 @@ class MonitorManager extends EventEmitter {
     // SNMP UDP 端口（默认 161；测试可注入 mock agent 端口）
     let snmpPort = parseInt(sOpt.snmpPort, 10);
     sysinfo.snmpPort = (snmpPort > 0 && snmpPort <= 65535) ? snmpPort : 161;
+    sysinfo.sysUpTime = !!sOpt.sysUpTime; // 重启检测：定时 GET sysUpTime，数值骤减 → reboot 事件
+    // CPU/内存采集 OID（点分十进制白名单；GET 失败自动 GETNEXT 兜底表型 OID）。
+    // memFreeOid 留空 = memUsedOid 的值直接是百分比（华为/华三 entity-ext）；填写 = 按 used/(used+free) 计算（思科字节型）。
+    const pfOpt = sOpt.perf && typeof sOpt.perf === 'object' ? sOpt.perf : {};
+    const cleanOid = (v) => {
+      // OID 白名单：点分十进制（最多 20 段——企业 MIB 常见 12~15 段），总长 64 上限
+      const s = String(v == null ? '' : v).trim();
+      return (/^\d{1,10}(?:\.\d{1,10}){1,19}$/.test(s) && s.length <= 64) ? s : '';
+    };
+    sysinfo.perf = {
+      enabled: !!pfOpt.enabled,
+      cpuOid: cleanOid(pfOpt.cpuOid),
+      memUsedOid: cleanOid(pfOpt.memUsedOid),
+      memFreeOid: cleanOid(pfOpt.memFreeOid)
+    };
     return {
       ok: true,
       cfg: { key, deviceId, name, protocol, host, port, username, password, privateKey, keyPassphrase, jump, expectFp, commands, onConnect: onConnectCmds, readOnly, intervalSec, cmdDelayMs, retrySec, initDelayMs, probe, alerts, backup, sysinfo }
@@ -588,10 +632,12 @@ class MonitorManager extends EventEmitter {
       probe: Object.assign({ enabled: false, type: 'tcp', intervalSec: 30 }, cfg.probe || {}),
       alerts: (cfg.alerts || []).map(a => ({ pattern: a.pattern, note: a.note, re: a.re })),
       backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 1000 }, cfg.backup || {}),
-      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60 }, cfg.sysinfo || {}),
+      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60, sysUpTime: false, perf: { enabled: false, cpuOid: '', memUsedOid: '', memFreeOid: '' } }, cfg.sysinfo || {}),
       ifHist: [],       // 接口流量采样历史（[{ts, ifs:[{i,n,oper,in,out,speed}]}]，容量 IF_HIST_MAX）
       ifPrev: null,     // 上次采样的计数器（算速率用）{ts, map: ifIndex -> {inC, outC}}
       ifOperPrev: {},   // 上次采样的接口状态（ifIndex -> up/down/other），状态变化时发事件
+      upPrev: null,     // 上次 sysUpTime 采样（TimeTicks，1/100 秒；骤减 → 重启事件）
+      perfHist: [],     // CPU/内存/sysUpTime 采样历史（[{ts, up, cpu, mem}]，容量 IF_HIST_MAX）
       snmpTimer: null, _snmpBusy: false,
       probeOk: null, probeLatency: null, probeFailSince: null, probeTimer: null, _probeBusy: false,
       alerting: false, alertInfo: null, _cycleActive: false, _alertPending: [],
@@ -615,8 +661,9 @@ class MonitorManager extends EventEmitter {
     const job = this._newJob(cfg);
     this.jobs.set(cfg.key, job);
     this._emit(job);
-    // SNMP 接口流量采集：独立于 SSH/Telnet 连接的 UDP 定时轮询（任务级，重连不重启）
-    if (cfg.sysinfo && cfg.sysinfo.ifTable) this._startIfPoll(job);
+    // SNMP 轮询（接口流量 / 重启检测 / CPU·内存）：独立于 SSH/Telnet 连接的 UDP 定时轮询（任务级，重连不重启）
+    const si = cfg.sysinfo || {};
+    if (si.ifTable || si.sysUpTime || (si.perf && si.perf.enabled)) this._startSnmpPoll(job);
     this._startConnect(job);
     return { ok: true, id: cfg.key };
   }
@@ -652,7 +699,10 @@ class MonitorManager extends EventEmitter {
         backup: job.backupLast ? { name: job.backupLast.name, at: job.backupLast.at, changed: !!job.backupLast.changed, first: !!job.backupLast.first, error: job.backupLast.error || null } : null,
         backupEnabled: !!job.backup.enabled, backupMode: job.backup.mode,
         compliance: job.complianceLast ? { failed: job.complianceLast.failed, total: job.complianceLast.total, at: job.complianceLast.at } : null,
-        ifTable: !!(job.sysinfo && job.sysinfo.ifTable)
+        ifTable: !!(job.sysinfo && job.sysinfo.ifTable),
+        perf: !!(job.sysinfo && job.sysinfo.perf && job.sysinfo.perf.enabled),
+        upCheck: !!(job.sysinfo && job.sysinfo.sysUpTime),
+        lastPerf: job.perfHist.length ? { ts: job.perfHist[job.perfHist.length - 1].ts, cpu: job.perfHist[job.perfHist.length - 1].cpu, mem: job.perfHist[job.perfHist.length - 1].mem, up: job.perfHist[job.perfHist.length - 1].up } : null
       });
     }
     return out;
@@ -888,23 +938,31 @@ class MonitorManager extends EventEmitter {
     }).catch(() => { /* 识别失败静默：不影响监控 */ });
   }
 
-  /* ---------------- SNMP 接口流量采集（ifTable，独立于连接的 UDP 轮询） ---------------- */
-  _startIfPoll(job) {
+  /* ---------------- SNMP 轮询（接口流量 ifTable / 重启检测 sysUpTime / CPU·内存，独立于连接的 UDP 采集） ---------------- */
+  _startSnmpPoll(job) {
     clearTimeout(job.snmpTimer);
-    job.snmpTimer = setTimeout(() => this._pollIfTable(job), 3000);
+    job.snmpTimer = setTimeout(() => this._pollSnmp(job), 3000);
   }
 
-  async _pollIfTable(job) {
-    if (!job.enabled || job.stopping || !job.sysinfo || !job.sysinfo.ifTable) return;
-    if (!job._snmpBusy) {
-      job._snmpBusy = true;
-      try { await this._collectIfTable(job); }
-      catch (e) { /* 采集失败静默：不影响监控主流程 */ }
-      job._snmpBusy = false;
+  async _pollSnmp(job) {
+    if (!job.enabled || job.stopping || !job.sysinfo) return;
+    const wantIf = !!job.sysinfo.ifTable;
+    const wantPerf = !!job.sysinfo.sysUpTime || !!(job.sysinfo.perf && job.sysinfo.perf.enabled);
+    if (wantIf || wantPerf) {
+      if (!job._snmpBusy) {
+        job._snmpBusy = true;
+        try {
+          if (wantIf) await this._collectIfTable(job);
+          if (wantPerf) await this._collectPerf(job);
+        } catch (e) { /* 采集失败静默：不影响监控主流程 */ }
+        job._snmpBusy = false;
+      }
+    } else {
+      return; // 未开启任何 SNMP 轮询项：停止调度
     }
     if (!job.enabled || job.stopping) return;
     clearTimeout(job.snmpTimer);
-    job.snmpTimer = setTimeout(() => this._pollIfTable(job), (job.sysinfo.intervalSec || 60) * 1000);
+    job.snmpTimer = setTimeout(() => this._pollSnmp(job), (job.sysinfo.intervalSec || 60) * 1000);
   }
 
   async _collectIfTable(job) {
@@ -988,6 +1046,71 @@ class MonitorManager extends EventEmitter {
     const job = this.jobs.get(String(key || '').trim());
     if (!job) return { ok: false, error: '任务不存在或已停止' };
     return { ok: true, hist: job.ifHist, intervalSec: job.sysinfo.intervalSec, ifTable: !!job.sysinfo.ifTable };
+  }
+
+  /** CPU/内存/sysUpTime 采样历史（监控中心「性能」页按需拉取） */
+  perfHistory(key) {
+    const job = this.jobs.get(String(key || '').trim());
+    if (!job) return { ok: false, error: '任务不存在或已停止' };
+    return {
+      ok: true, hist: job.perfHist, intervalSec: job.sysinfo.intervalSec,
+      perf: !!(job.sysinfo.perf && job.sysinfo.perf.enabled), sysUpTime: !!job.sysinfo.sysUpTime
+    };
+  }
+
+  /** SNMP 性能采集：sysUpTime（重启检测：数值骤减 5 分钟以上判为重启）+ CPU/内存（可配置 OID） */
+  async _collectPerf(job) {
+    const host = job.host, community = job.sysinfo.community, port = job.sysinfo.snmpPort || 161;
+    const perf = job.sysinfo.perf || {};
+    const now = Date.now();
+    const sample = { ts: now, up: null, cpu: null, mem: null };
+    // sysUpTime（TimeTicks，1/100 秒）：骤减超过 5 分钟刻度视为设备重启（容忍采样抖动）
+    if (job.sysinfo.sysUpTime) {
+      const r = await snmpGetValue(host, community, OID_SYSUPTIME, 3000, port);
+      if (r.ok && Number.isFinite(Number(r.value))) {
+        const up = Number(r.value);
+        sample.up = up;
+        const prev = job.upPrev;
+        if (prev != null && up < prev - 5 * 60 * 100) {
+          this._logLine(job, '【重启】sysUpTime 骤降：' + fmtUptimeTicks(prev) + ' → ' + fmtUptimeTicks(up) + '，设备可能已重启');
+          this.emit('reboot', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, prev, cur: up });
+        }
+        job.upPrev = up;
+      }
+    }
+    const clampPct = (v) => Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v * 10) / 10)) : null;
+    // CPU 利用率（%）
+    if (perf.enabled && perf.cpuOid) {
+      const r = await snmpGetValue(host, community, perf.cpuOid, 3000, port);
+      if (r.ok) sample.cpu = clampPct(Number(r.value));
+    }
+    // 内存占用：memFreeOid 已配置 → used/(used+free)（思科字节型）；未配置 → memUsedOid 值即百分比（华为/华三）
+    if (perf.enabled && perf.memUsedOid) {
+      const ru = await snmpGetValue(host, community, perf.memUsedOid, 3000, port);
+      if (ru.ok) {
+        const used = Number(ru.value);
+        if (Number.isFinite(used)) {
+          if (perf.memFreeOid) {
+            const rf = await snmpGetValue(host, community, perf.memFreeOid, 3000, port);
+            const free = rf.ok ? Number(rf.value) : NaN;
+            sample.mem = (Number.isFinite(free) && used + free > 0)
+              ? Math.round(used / (used + free) * 1000) / 10
+              : null;
+          } else {
+            sample.mem = clampPct(used);
+          }
+        }
+      }
+    }
+    if (sample.up == null && sample.cpu == null && sample.mem == null) return;
+    job.perfHist.push(sample);
+    if (job.perfHist.length > IF_HIST_MAX) job.perfHist.shift();
+    this._logLine(job, 'SNMP 性能采集：' + [
+      sample.cpu != null ? 'CPU ' + sample.cpu + '%' : '',
+      sample.mem != null ? '内存 ' + sample.mem + '%' : '',
+      sample.up != null ? '运行 ' + fmtUptimeTicks(sample.up) : ''
+    ].filter(Boolean).join('，'));
+    this.emit('perf', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ts: sample.ts, cpu: sample.cpu, mem: sample.mem, up: sample.up });
   }
 
   /** 等待会话就绪（收到设备命令提示符行）。设备登录/初始化未完成时下发的命令会被吞；
@@ -1475,5 +1598,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpWalk, parseSnmpResponse, extractVersion, rateBps, OID_SYSDESCR, OID_SYSOBJECT, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, extractVersion, rateBps, fmtUptimeTicks, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
 
