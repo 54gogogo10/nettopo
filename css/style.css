@@ -1002,3 +1002,12 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .mon-host-row .mh-cmds-wrap[hidden] { display: none; }
 .mon-host-row .mh-ext .mh-alerts-wrap[hidden] { display: none; }
 .mon-host-row .mh-ext .mh-pr-port { width: 150px; }
+
+/* ============ 监控中心 · 事件时间线日期分割线 ============ */
+.mc-day-sep {
+  display: flex; align-items: center; gap: 10px;
+  margin: 10px 2px 4px; color: var(--muted); font-size: 11px; font-weight: 600;
+  user-select: none; letter-spacing: .3px;
+}
+.mc-day-sep::before, .mc-day-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.mc-events .mc-day-sep:first-child { margin-top: 2px; }

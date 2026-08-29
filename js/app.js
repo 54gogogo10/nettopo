@@ -5067,14 +5067,31 @@ function openMonitorCenter() {
       jobsEl.querySelectorAll('[data-dev]').forEach(el => {
         el.onclick = () => setFilter(el.dataset.dev, el.dataset.host || null, el.dataset.name || '');
       });
-      // 事件时间线（按设备 / 地址筛选）
+      // 事件时间线（按设备 / 地址筛选；跨天处插入带日期标记的分割线）
       const evs = (r.events || []).filter(e => (!curDev || e.deviceId === curDev) && (!curHost || (e.host === curHost && e.deviceId === curDev)));
+      const dayKeyOf = (ts) => U.fmtDateTime(new Date(ts)).slice(0, 10);
+      const todayKey = dayKeyOf(Date.now());
+      const ystKey = dayKeyOf(Date.now() - 86400000);
+      const thisYear = new Date().getFullYear();
+      const evRows = [];
+      let lastDay = '';
+      for (const e of evs.slice(0, 120)) {
+        const day = dayKeyOf(e.ts);
+        if (day !== lastDay) {
+          lastDay = day;
+          const d = new Date(e.ts);
+          const y = d.getFullYear();
+          const md = (d.getMonth() + 1) + '月' + d.getDate() + '日';
+          const week = '周' + '日一二三四五六'[d.getDay()];
+          const label = (day === todayKey ? '今天 · ' : day === ystKey ? '昨天 · ' : (y !== thisYear ? y + '年' : '')) + md + ' ' + week;
+          evRows.push('<div class="mc-day-sep"><span>' + U.escHtml(label) + '</span></div>');
+        }
+        const devTag = '<span class="mc-tag dev" data-dev="' + U.escHtml(e.deviceId || '') + '" data-name="' + U.escHtml(e.name || e.deviceId || '') + '"' + (e.host ? ' data-host="' + U.escHtml(e.host) + '"' : '') + ' title="点击筛选该设备的事件">' + U.escHtml(e.name || e.deviceId || '?') + '</span>';
+        const typeTag = '<span class="mc-tag ' + U.escHtml(e.type || '') + '">' + U.escHtml(evTypeLabel[e.type] || e.type || '事件') + '</span>';
+        evRows.push('<div class="mc-ev"><span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span>' + devTag + typeTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + '</span></div>');
+      }
       evsEl.innerHTML = evs.length
-        ? evs.slice(0, 120).map(e => {
-            const devTag = '<span class="mc-tag dev" data-dev="' + U.escHtml(e.deviceId || '') + '" data-name="' + U.escHtml(e.name || e.deviceId || '') + '"' + (e.host ? ' data-host="' + U.escHtml(e.host) + '"' : '') + ' title="点击筛选该设备的事件">' + U.escHtml(e.name || e.deviceId || '?') + '</span>';
-            const typeTag = '<span class="mc-tag ' + U.escHtml(e.type || '') + '">' + U.escHtml(evTypeLabel[e.type] || e.type || '事件') + '</span>';
-            return '<div class="mc-ev"><span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span>' + devTag + typeTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + '</span></div>';
-          }).join('')
+        ? evRows.join('')
         : '<div class="mc-empty">' + (curDev ? '该设备暂无事件' : '暂无事件') + '</div>';
       evsEl.querySelectorAll('.mc-tag.dev').forEach(el => {
         el.onclick = () => setFilter(el.dataset.dev, el.dataset.host || null, el.dataset.name || '');
