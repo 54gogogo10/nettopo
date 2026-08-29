@@ -1885,6 +1885,30 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       U.saveComplianceRules(U.COMPLIANCE_DEFAULT_RULES); // 还原默认，避免污染后续用例
     }
 
+    // 合规默认规则包扩充（分组 + undo/no 误报排除）
+    console.log('== 回归：合规默认规则包扩充（分组 + undo/no 误报排除） ==');
+    {
+      const defs = U.cleanComplianceRules(U.COMPLIANCE_DEFAULT_RULES);
+      ok(defs.length >= 10, '默认规则扩充到 ≥10 条（' + defs.length + ' 条）');
+      ok(defs.every(r => typeof r.group === 'string' && r.group), '每条默认规则都带分组');
+      ok(new Set(defs.map(r => r.group)).size >= 4, '分组 ≥4 类（时间/日志/认证/服务/路由）');
+      ok(new Set(defs.map(r => r.id)).size === defs.length, '规则 id 无重复');
+      const telnet = defs.find(r => r.id === 'telnet');
+      ok(!!telnet && telnet.negate, 'Telnet 禁止规则存在且为禁止类');
+      ok(U.checkCompliance('undo telnet server enable\n#', [telnet]).results[0].pass === true, 'undo telnet server enable（已关闭）不误报');
+      ok(U.checkCompliance('telnet server enable\n#', [telnet]).results[0].pass === false, 'telnet server enable 仍判违规');
+      ok(U.checkCompliance('transport input none\n#', [telnet]).results[0].pass === true, 'transport input none（仅 SSH）不误报');
+      const http = defs.find(r => r.id === 'http');
+      ok(!!http && U.checkCompliance('interface GigabitEthernet0/0/1\n no ip http server\n#', [http]).results[0].pass === true, '缩进 no ip http server 不误报');
+      ok(U.checkCompliance(' ip http server\n#', [http]).results[0].pass === false, '缩进 ip http server 仍判违规');
+      ok(U.checkCompliance(' ip http secure-server\n#', [http]).results[0].pass === true, 'ip http secure-server（HTTPS）不误报');
+      const snmp = defs.find(r => r.id === 'snmpv2');
+      ok(!!snmp && U.checkCompliance('undo snmp-agent community read abc\n#', [snmp]).results[0].pass === true, 'undo snmp-agent community 不误报');
+      ok(U.checkCompliance('snmp-agent community read cipher %^%#abc\n#', [snmp]).results[0].pass === false, 'snmp-agent community 仍判违规');
+      const saved = U.saveComplianceRules(U.COMPLIANCE_DEFAULT_RULES);
+      ok(saved.every(r => r.group) && saved.find(r => r.id === 'ntp').group === '时间同步', '分组字段随规则保存保留');
+    }
+
     // Web Shell 会话审计日志（新功能）
     console.log('== 回归：Web Shell 会话审计日志（新功能） ==');
     {

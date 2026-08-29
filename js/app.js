@@ -4709,8 +4709,16 @@ function openComplianceCheck() {
       <button type="button" class="tb icon cr-del" title="删除规则">✕</button>
     </div>`;
   const renderRules = () => {
-    rulesEl.innerHTML = '<div class="comp-head"><span>启用</span><span>名称</span><span>类型</span><span>逐行正则</span><span></span></div>' +
-      U.complianceRules.map(ruleRow).join('');
+    // 规则按 group 顺序分组显示（相邻同名组只插一条分割线；无组名的规则不分组）
+    let lastGroup = null;
+    let html = '<div class="comp-head"><span>启用</span><span>名称</span><span>类型</span><span>逐行正则</span><span></span></div>';
+    for (const r of U.complianceRules) {
+      const g = (r && r.group) || '';
+      if (g && g !== lastGroup) html += `<div class="comp-grp">${U.escHtml(g)}</div>`;
+      lastGroup = g;
+      html += ruleRow(r);
+    }
+    rulesEl.innerHTML = html;
     rulesEl.querySelectorAll('.comp-rule').forEach((el, i) => {
       el.querySelector('.cr-del').onclick = () => { U.complianceRules.splice(i, 1); renderRules(); };
     });
@@ -4723,6 +4731,7 @@ function openComplianceCheck() {
       pattern: el.querySelector('.cr-pat').value.trim(),
       negate: el.querySelector('.cr-negate').value === '1',
       enabled: el.querySelector('.cr-on').checked,
+      group: (U.complianceRules[i] && U.complianceRules[i].group) || '',
       note: (U.complianceRules[i] && U.complianceRules[i].note) || ''
     }));
     return U.saveComplianceRules(rows);

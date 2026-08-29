@@ -874,13 +874,21 @@ U.buildInventoryRows = (nodes, monStatus, backupInfo) => {
   return rows;
 };
 
-/* ---------- 配置合规基线检查（对备份库 running-config 的本地规则扫描；纯函数可测） ---------- */
+/* ---------- 配置合规基线检查（对备份库 running-config 的本地规则扫描；纯函数可测） ----------
+ * 规则带 group 分组（界面按组显示分割线）；禁止类规则用 (?!undo\b|no\b) 负向前瞻排除
+ * 「undo telnet server enable / no ip http server」这类【已关闭】的好配置行，避免误报。 */
 U.COMPLIANCE_DEFAULT_RULES = [
-  { id: 'ntp',    name: '必须配置 NTP',              pattern: 'ntp', negate: false, enabled: true, note: '存在 NTP 相关配置行' },
-  { id: 'aaa',    name: '必须启用 AAA',              pattern: 'aaa', negate: false, enabled: true, note: '存在 AAA 配置段' },
-  { id: 'gw',     name: '必须配置默认路由',          pattern: 'ip\\s+route(?:-static)?\\s+0\\.0\\.0\\.0', negate: false, enabled: true, note: '存在静态默认路由（华为 ip route-static 0.0.0.0 / 思科 ip route 0.0.0.0）' },
-  { id: 'telnet', name: '禁止启用 Telnet 服务',      pattern: 'telnet server enable|transport input (telnet|all)|protocol inbound telnet', negate: true, enabled: true, note: 'VTY/服务层不应放行 Telnet（仅 SSH）' },
-  { id: 'snmpv2', name: '禁止 SNMP v1/v2c community', pattern: 'snmp(-agent)? community|snmp-server community', negate: true, enabled: true, note: '应仅使用 SNMPv3（usm-user / snmp-server user）' }
+  { id: 'ntp',      name: '必须配置 NTP',              group: '时间同步',    pattern: 'ntp', negate: false, enabled: true, note: '存在 NTP 相关配置行' },
+  { id: 'syslog',   name: '必须配置日志主机',          group: '日志审计',    pattern: 'info-center loghost|logging (?:host\\s+)?\\d', negate: false, enabled: true, note: '华为 info-center loghost / 思科 logging <主机>' },
+  { id: 'aaa',      name: '必须启用 AAA',              group: '认证与授权',  pattern: 'aaa', negate: false, enabled: true, note: '存在 AAA 配置段' },
+  { id: 'timeout',  name: '必须配置登录超时',          group: '认证与授权',  pattern: 'idle-timeout|exec-timeout', negate: false, enabled: true, note: 'VTY/Console 空闲超时（华为 idle-timeout / 思科 exec-timeout）' },
+  { id: 'pwdpolicy',name: '必须启用密码复杂度策略',    group: '认证与授权',  pattern: 'password policy|password-complexity|security passwords min-length', negate: false, enabled: true, note: '华为 password-policy / 思科 security passwords min-length' },
+  { id: 'vtyacl',   name: '必须配置 VTY 访问控制',     group: '认证与授权',  pattern: 'access-class|acl\\s+\\d+', negate: false, enabled: true, note: 'VTY 绑定 ACL（思科 access-class / 华为 user-interface 下 acl 编号）' },
+  { id: 'banner',   name: '必须配置登录警示 banner',   group: '认证与授权',  pattern: 'banner|header login|login block', negate: false, enabled: true, note: '存在登录提示/警示信息（华为 header login / 思科 banner）' },
+  { id: 'telnet',   name: '禁止启用 Telnet 服务',      group: '服务与协议',  pattern: '^(?!\\s*(?:undo|no)\\b).*(?:telnet server enable|transport input (?:telnet|all)|protocol inbound telnet)', negate: true, enabled: true, note: 'VTY/服务层不应放行 Telnet（仅 SSH）；undo/no 前缀的关闭命令不算违规' },
+  { id: 'http',     name: '禁止启用 HTTP 管理服务',    group: '服务与协议',  pattern: '^(?!\\s*(?:undo|no)\\b).*(?:http server enable|ip http server(?!\\s*secure))', negate: true, enabled: true, note: '明文 HTTP 管理面应关闭（HTTPS 的 ip http secure-server 不算）；undo/no 前缀不算违规' },
+  { id: 'snmpv2',   name: '禁止 SNMP v1/v2c community', group: '服务与协议', pattern: '^(?!\\s*(?:undo|no)\\b).*(?:snmp(?:-agent)? community|snmp-server community)', negate: true, enabled: true, note: '应仅使用 SNMPv3（usm-user / snmp-server user）；undo/no 前缀的删除命令不算违规' },
+  { id: 'gw',       name: '必须配置默认路由',          group: '路由与网关',  pattern: 'ip\\s+route(?:-static)?\\s+0\\.0\\.0\\.0', negate: false, enabled: true, note: '存在静态默认路由（华为 ip route-static 0.0.0.0 / 思科 ip route 0.0.0.0）' }
 ];
 const COMPLIANCE_KEY = 'nettopo.complianceRules';
 
@@ -897,7 +905,7 @@ U.cleanComplianceRules = (raw) => {
     let re = null;
     try { re = new RegExp(pattern, 'i'); } catch (e) { continue; } // 非法正则整条丢弃
     seen.add(id);
-    out.push({ id, name, pattern, negate: !!r.negate, enabled: r.enabled !== false, note: typeof r.note === 'string' ? r.note.slice(0, 128) : '', re });
+    out.push({ id, name, pattern, negate: !!r.negate, enabled: r.enabled !== false, group: typeof r.group === 'string' ? r.group.trim().slice(0, 24) : '', note: typeof r.note === 'string' ? r.note.slice(0, 128) : '', re });
   }
   return out;
 };
@@ -913,7 +921,7 @@ U.saveComplianceRules = (rules) => {
   U.complianceRules = U.cleanComplianceRules(rules);
   try {
     localStorage.setItem(COMPLIANCE_KEY, JSON.stringify(
-      U.complianceRules.map(r => ({ id: r.id, name: r.name, pattern: r.pattern, negate: r.negate, enabled: r.enabled, note: r.note }))
+      U.complianceRules.map(r => ({ id: r.id, name: r.name, pattern: r.pattern, negate: r.negate, enabled: r.enabled, group: r.group || '', note: r.note }))
     ));
   } catch (e) { /* 存储超限忽略 */ }
   return U.complianceRules;

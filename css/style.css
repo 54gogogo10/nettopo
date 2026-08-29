@@ -854,6 +854,8 @@ html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
 .comp-head, .comp-rule { display: grid; grid-template-columns: 34px 200px 96px 1fr 30px; gap: 6px; align-items: center; }
 .comp-head { font-size: 11px; color: var(--muted); padding: 2px 2px 6px; }
 .comp-rule { padding: 3px 0; border-top: 1px dashed var(--border); }
+.comp-grp { font-size: 10.5px; font-weight: 600; color: var(--accent); padding: 7px 2px 3px; letter-spacing: .5px; }
+.comp-grp + .comp-rule { border-top: none; }
 .comp-head + .comp-rule, .comp-rule:first-of-type { border-top: none; }
 .comp-rule .cr-on { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
 .comp-rule input[type="text"] { height: 26px; font-size: 12px; padding: 0 7px; }
