@@ -129,8 +129,8 @@ html[data-theme="dark"] .node .shape { stroke: rgba(0, 0, 0, .55); }
 .node .port-dot:hover { stroke: var(--accent); }
 
 .link { cursor: pointer; }
-.link .ln { stroke: var(--bw-c, var(--link-c)); stroke-width: 2; stroke-linecap: round; }
-.link .hit { stroke: transparent; stroke-width: 16; pointer-events: stroke; cursor: pointer; }
+.link .ln { fill: none; stroke: var(--bw-c, var(--link-c)); stroke-width: 2; stroke-linecap: round; }
+.link .hit { fill: none; stroke: transparent; stroke-width: 16; pointer-events: stroke; cursor: pointer; }
 .link:hover .ln { stroke: var(--muted); stroke-width: 2.6; }
 .link.selected .ln { stroke: var(--link-sel); stroke-width: 3; }
 .link.down .ln { stroke: #ef4444; stroke-width: 2.6; stroke-dasharray: 7 4; }

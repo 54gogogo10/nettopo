@@ -336,8 +336,9 @@ class Renderer {
   /* ---------- 连线构建 ---------- */
   _buildLink(l) {
     const g = el('g', { class: 'link', 'data-id': l.id }, this.linkLayer);
-    el('path', { class: 'ln', d: 'M0 0' }, g);
-    el('path', { class: 'hit', d: 'M0 0' }, g);
+    // fill none 显式落在属性上：直角折线（多点路径）不设 fill 会被 SVG 默认黑色填充封闭成楔形
+    el('path', { class: 'ln', d: 'M0 0', fill: 'none' }, g);
+    el('path', { class: 'hit', d: 'M0 0', fill: 'none' }, g);
     // 标注组：三行（A端接口IP / B端接口IP / 带宽），防碰撞后定位
     const lab = el('g', { class: 'lab' }, g);
     for (let i = 0; i < 3; i++) {
