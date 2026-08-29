@@ -854,7 +854,8 @@ html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
 /* ---- 合规模板条（内置模板 + 自定义模板） ---- */
 .comp-tpl { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; flex-wrap: wrap; }
 .comp-tpl-label { font-size: 12px; color: var(--muted); font-weight: 600; }
-.comp-tpl select { height: 30px; font-size: 12.5px; padding: 0 6px; min-width: 240px; }
+.comp-tpl select { height: 30px; font-size: 12.5px; padding: 0 6px; min-width: 240px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; outline: none; }
+.comp-tpl select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .comp-tpl .tb { height: 30px; font-size: 12px; padding: 0 10px; }
 .comp-head, .comp-rule { display: grid; grid-template-columns: 34px 200px 96px 1fr 30px; gap: 6px; align-items: center; }
 .comp-head { font-size: 11px; color: var(--muted); padding: 2px 2px 6px; }
@@ -863,9 +864,10 @@ html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
 .comp-grp + .comp-rule { border-top: none; }
 .comp-head + .comp-rule, .comp-rule:first-of-type { border-top: none; }
 .comp-rule .cr-on { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
-.comp-rule input[type="text"] { height: 26px; font-size: 12px; padding: 0 7px; }
+.comp-rule input[type="text"] { height: 26px; font-size: 12px; padding: 0 7px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; outline: none; }
+.comp-rule input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .comp-rule .cr-pat { font-family: Consolas, 'Courier New', monospace; }
-.comp-rule .cr-negate { height: 26px; font-size: 12px; padding: 0 5px; }
+.comp-rule .cr-negate { height: 26px; font-size: 12px; padding: 0 5px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; outline: none; }
 .comp-rule .cr-del { width: 26px; height: 26px; padding: 0; }
 .comp-total { font-size: 12.5px; color: var(--text); padding: 2px 2px 10px; }
 .comp-dev { margin-bottom: 12px; }
@@ -885,7 +887,11 @@ html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
 .ift-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .ift-table th, .ift-table td { border-bottom: 1px solid var(--border); padding: 3px 6px; text-align: left; white-space: nowrap; }
 .ift-table thead th { background: var(--panel2); color: var(--muted); font-weight: 600; position: sticky; top: 0; z-index: 1; }
-.ift-table td input[type="text"], .ift-table td input[type="number"] { height: 26px; font-size: 12px; padding: 0 6px; width: 100%; min-width: 80px; }
+.ift-table td input[type="text"], .ift-table td input[type="number"] {
+  height: 26px; font-size: 12px; padding: 0 6px; width: 100%; min-width: 80px;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; outline: none;
+}
+.ift-table td input[type="text"]:focus, .ift-table td input[type="number"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .ift-table td .ift-ro, .ift-table td.ift-ro { color: var(--muted); }
 .ift-table input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); }
 
