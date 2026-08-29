@@ -527,6 +527,126 @@ console.log('== 链路聚合标记 ==');
   ok(bp5 && bp5.bottleneck === 10000, '平行独立链路不与聚合组合并（取最大瓶颈）');
 }
 
+console.log('== LLDP/CDP 邻居表解析 ==');
+{
+  // 思科 CDP 表格（Local Intrfce 含单空格 "Gig 0/1"，靠 2+ 空格分列 + 数字 Holdtme 定位）
+  const cdp = [
+    'Capability Codes: R - Router, T - Trans Bridge, S - Switch, H - Host, I - IGMP,',
+    'r - Repeater, P - Phone, D - Remote Device, C - CVTA, M - Two-port Mac Relay',
+    '',
+    'Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID',
+    'SW2              Gig 0/1           167         S I       WS-C2960   Gig 0/24',
+    'R2.cisco.com     Gig 0/2           152          R S I    CISCO3925  Gig 0/0',
+    'AP1              Gig 0/3           140        T          AIR-AP     Gi 0',
+    ''
+  ].join('\n');
+  const rc = U.parseNeighbors(cdp);
+  ok(rc.ok && rc.format === 'cdp-table' && rc.entries.length === 3, 'CDP 表格识别 3 条（' + (rc.entries || []).length + '）');
+  eq(rc.entries[0].localIf, 'Gig0/1', 'CDP 本端接口（去空格）');
+  eq(rc.entries[0].peer, 'SW2', 'CDP 对端设备');
+  eq(rc.entries[0].peerIf, 'Gig0/24', 'CDP 对端接口');
+  eq(rc.entries[2].peerIf, 'Gi0', 'CDP 短接口名');
+  // 华为 LLDP 简表
+  const hw = [
+    '<SW1>display lldp neighbor brief',
+    'Local Intf     Neighbor Dev             Neighbor Intf     Exptime',
+    'GE0/0/1        core-sw2                 GE0/0/24          105',
+    'GE0/0/2        FW1                      GE0/0/3           96',
+    ''
+  ].join('\n');
+  const rh = U.parseNeighbors(hw);
+  ok(rh.ok && rh.entries.length === 2, '华为 LLDP 简表识别 2 条');
+  eq(rh.entries[0].peer, 'core-sw2', 'LLDP 简表对端设备');
+  eq(rh.entries[1].peerIf, 'GE0/0/3', 'LLDP 简表对端接口');
+  // 华为详细块（键值对）
+  const hwBlock = [
+    '<R1>display lldp neighbor',
+    '-----',
+    'Local Intf : GigabitEthernet0/0/0',
+    'Neighbor Chassis Id : 00e0-fc12-3456',
+    'Neighbor System Name : core-sw1',
+    'Neighbor Port Id : GigabitEthernet0/0/1',
+    'Neighbor Port VLAN ID : 100',
+    '-----',
+    'Local Intf : GigabitEthernet0/0/1',
+    'Neighbor System Name : FW-beijing',
+    'Neighbor Port Id : Ten-GigabitEthernet1/0/1',
+    ''
+  ].join('\n');
+  const rb = U.parseNeighbors(hwBlock);
+  ok(rb.ok && rb.entries.length === 2, '华为详细块识别 2 条');
+  eq(rb.entries[0].peer, 'core-sw1', '详细块对端 System Name');
+  eq(rb.entries[0].peerIf, 'GigabitEthernet0/0/1', '详细块对端 Port Id');
+  ok(rb.entries[0].peerIf !== '100', 'Port VLAN ID 不误当接口');
+  // 思科 CDP detail 块（Device ID 起始 + Interface 行）
+  const cdpDetail = [
+    'Total cdp entries displayed : 2',
+    'Device ID: SW2.example.com',
+    'Entry address(es):',
+    '  IP address: 10.0.0.2',
+    'Interface: GigabitEthernet0/1,  Address(es):',
+    'Port ID (outgoing port): GigabitEthernet0/24',
+    '-----',
+    'Device ID: R2.example.com',
+    'Interface: GigabitEthernet0/2',
+    'Port ID (outgoing port): Serial0/1/0',
+    ''
+  ].join('\n');
+  const rd = U.parseNeighbors(cdpDetail);
+  ok(rd.ok && rd.entries.length === 2, 'CDP detail 块识别 2 条');
+  eq(rd.entries[0].localIf, 'GigabitEthernet0/1', 'CDP detail 本端接口');
+  eq(rd.entries[1].peerIf, 'Serial0/1/0', 'CDP detail 对端接口');
+  // 华为/H3C verbose 段头形态（GE0/0/1 has 1 neighbor(s):）
+  const hasForm = [
+    '<SW1>display lldp neighbor',
+    'GigabitEthernet0/0/1 has 1 neighbor(s):',
+    '  Neighbor index : 1',
+    '  Chassis ID : 00e0-fc12-3456',
+    '  Port ID : GigabitEthernet0/0/24',
+    '  System Name : core-sw1',
+    'GigabitEthernet0/0/2 has 1 neighbor(s):',
+    '  Port ID : Ethernet0/0/3',
+    '  System Name : FW1',
+    ''
+  ].join('\n');
+  const rf = U.parseNeighbors(hasForm);
+  ok(rf.ok && rf.entries.length === 2, 'has-neighbor 段头识别 2 条');
+  eq(rf.entries[0].localIf, 'GigabitEthernet0/0/1', '段头本端接口');
+  eq(rf.entries[1].peer, 'FW1', '段头对端设备');
+  // 非邻居文本：解析失败并给提示
+  const rn = U.parseNeighbors('hello world\nnothing here\n');
+  ok(!rn.ok && rn.error, '无关文本解析失败并带提示');
+  // 合并进图：新建设备/连线、同名复用、重复导入幂等
+  const nodes = [{ id: 'n1', name: 'SW1', type: 'switch', x: 0, y: 0, w: 160, h: 56 }];
+  const links = [];
+  const ent = [
+    { localIf: 'GE0/0/1', peer: 'SW2', peerIf: 'GE0/0/24' },
+    { localIf: 'GE0/0/2', peer: 'FW1', peerIf: 'GE0/0/3' }
+  ];
+  const m1 = U.applyNeighbors(nodes, links, 'n1', ent, {});
+  ok(m1.ok && m1.addedNodes === 2 && m1.addedLinks === 2, '合并：新建 2 设备 2 连线');
+  ok(nodes.length === 3 && links.length === 2, '合并后图规模');
+  ok(nodes.find(n => n.name === 'FW1').type === 'firewall', '新建设备类型按名称推断');
+  ok(links[0].a === 'n1' && links[0].aIf === 'GE0/0/1' && links[0].bIf === 'GE0/0/24', '连线两端接口正确');
+  const m2 = U.applyNeighbors(nodes, links, 'n1', ent, {});
+  ok(m2.addedNodes === 0 && m2.addedLinks === 0 && m2.skipped === 2, '重复导入幂等（跳过 2 条）');
+  // 已有链路（接口一致但方向相反）不重复创建；空缺接口回填
+  const nodes2 = [
+    { id: 'a', name: 'A', type: 'switch', x: 0, y: 0, w: 160, h: 56 },
+    { id: 'b', name: 'B', type: 'switch', x: 0, y: 0, w: 160, h: 56 }
+  ];
+  const links2 = [{ id: 'l1', a: 'b', b: 'a', aIf: 'GE0/0/24', aIp: '', bIf: '', bIp: '', bw: '', note: '', agg: '' }];
+  const m3 = U.applyNeighbors(nodes2, links2, 'a', [{ localIf: 'GE0/0/1', peer: 'B', peerIf: 'GE0/0/24' }], {});
+  ok(m3.addedLinks === 0 && m3.updatedLinks === 1, '反向已有链路回填空缺接口（不新建）');
+  eq(links2[0].bIf, 'GE0/0/1', '回填 A 端（本端）接口');
+  // 自环/无效条目跳过
+  const m4 = U.applyNeighbors(nodes, links, 'n1', [
+    { localIf: 'GE0/0/9', peer: 'SW1', peerIf: 'GE0/0/8' },
+    { localIf: '', peer: 'X', peerIf: '' }
+  ], {});
+  ok(m4.skipped === 2 && !nodes.some(n => n.name === 'X'), '自环与无效条目跳过');
+}
+
 console.log('== 布局预设 ==');
 {
   const ns = [

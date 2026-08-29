@@ -282,6 +282,81 @@ async function loadGraph(graph, msg) {
   else autoLayout();
 }
 
+/* ================= 从邻居表导入（LLDP/CDP） =================
+ * 粘贴 display lldp neighbor / show cdp neighbors 等命令输出，
+ * 解析出「本端接口 ⇄ 对端设备 ⇄ 对端接口」并合并进当前拓扑（缺设备自动建、缺连线自动连）。 */
+function openNeighborImport() {
+  if (!state.nodes.length) { toast('当前画布为空：请先添加或导入本端设备'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const nodesSorted = [...state.nodes].sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
+  const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:720px;height:80vh;display:flex;flex-direction:column">
+      <h3>从邻居表导入拓扑（LLDP / CDP）</h3>
+      <div class="m-sub">在设备上执行 <b>display lldp neighbor</b>（华为/H3C）或 <b>show cdp neighbors</b>（思科），把输出原样粘贴到下方：软件解析出邻居关系后合并进当前拓扑（同名对端复用画布设备，新设备自动创建，可再按 L 自动布局）。纯本机解析，不上传。</div>
+      <div class="frow" style="display:flex;gap:10px;align-items:flex-end">
+        <div class="frow" style="flex:1;margin-bottom:0"><label>本端设备（粘贴的是该设备的邻居表）</label>
+          <select id="nbLocal">${nodesSorted.map(n => `<option value="${U.escHtml(n.id)}"${n.id === selId ? ' selected' : ''}>${U.escHtml(n.name)}</option>`).join('')}</select>
+        </div>
+        <label style="display:flex;align-items:center;gap:5px;margin:0 0 4px" title="解析结果中对端接口为空时也创建连线（对端接口留空，之后可手动补）"><input id="nbNewIf" type="checkbox" style="width:auto" checked/>对端接口未识别也创建连线</label>
+        <button type="button" class="tb" id="nbParse"><i class="ic" data-ic="search"></i>解析预览</button>
+      </div>
+      <div class="frow"><textarea id="nbText" rows="8" spellcheck="false" style="font-family:Consolas,monospace;font-size:12px" placeholder="<SW1>display lldp neighbor brief&#10;Local Intf     Neighbor Dev     Neighbor Intf&#10;GE0/0/1        SW2              GE0/0/24&#10;..."></textarea></div>
+      <div id="nbPrev" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:120px"><div class="bk-empty">粘贴输出后点「解析预览」。</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">关闭</button>
+        <button type="button" class="tb primary" id="nbGo" disabled>导入拓扑</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  let parsed = null;
+  const prevEl = ov.querySelector('#nbPrev');
+  const goBtn = ov.querySelector('#nbGo');
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('#nbParse').onclick = () => {
+    const r = U.parseNeighbors(ov.querySelector('#nbText').value);
+    parsed = r.ok ? r : null;
+    goBtn.disabled = !r.ok;
+    if (!r.ok) {
+      prevEl.innerHTML = '<div class="bk-empty">' + U.escHtml(r.error || '未识别到邻居表') + '</div>';
+      return;
+    }
+    const fmtName = { 'cdp-table': '思科 CDP 邻居表', 'lldp-table': 'LLDP 简表', 'key-value': 'LLDP/CDP 详细块' }[r.format] || r.format;
+    const rows = r.entries.slice(0, 200).map(e =>
+      `<tr><td>${U.escHtml(e.localIf)}</td><td>${U.escHtml(e.peer)}</td><td>${U.escHtml(e.peerIf || '（未识别）')}</td></tr>`).join('');
+    prevEl.innerHTML = `<div class="comp-total">识别为「${U.escHtml(fmtName)}」，共 <b>${r.entries.length}</b> 条邻居关系${r.entries.length > 200 ? '（预览前 200 条）' : ''}</div>
+      <table class="nb-table"><tr><th>本端接口</th><th>对端设备</th><th>对端接口</th></tr>${rows}</table>`;
+  };
+  goBtn.onclick = () => {
+    if (!parsed || !parsed.entries.length) { toast('请先解析预览邻居表'); return; }
+    const localId = ov.querySelector('#nbLocal').value;
+    const localNode = state.nodes.find(n => n.id === localId);
+    if (!localNode) { toast('本端设备不存在'); return; }
+    pushUndo();
+    const r = U.applyNeighbors(state.nodes, state.links, localId, parsed.entries, { allowMissingPeerIf: ov.querySelector('#nbNewIf').checked });
+    if (!r.ok) { toast(r.error || '导入失败'); return; }
+    // 统一过清洗（新建节点的字段口径与工程恢复一致）
+    const cleaned = U.sanitizeGraph(state.nodes, state.links, state.texts);
+    state.nodes = cleaned.nodes; state.links = cleaned.links; state.texts = cleaned.texts;
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    refreshAll();
+    saveGraph();
+    close();
+    const parts = [];
+    if (r.addedNodes) parts.push('新建 ' + r.addedNodes + ' 台设备');
+    if (r.addedLinks) parts.push('新增 ' + r.addedLinks + ' 条连线');
+    if (r.updatedLinks) parts.push('回填 ' + r.updatedLinks + ' 条连线的接口');
+    toast(`已从邻居表导入（${localNode.name}）：${parts.length ? parts.join('，') : '无变化'}` + (r.skipped ? `，跳过 ${r.skipped} 条重复/无效` : ''));
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#nbText').focus(); }, 250);
+}
+
 /* ================= 自动布局 ================= */
 function autoLayout() {
   if (!state.nodes.length) return;
@@ -3703,6 +3778,7 @@ function wire() {
   $('#btnDropFile').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'fileplus', label: '新建空白画布', act: newGraph },
     { ic: 'upload', label: '导入表格…', act: () => $('#fileInput').click() },
+    { ic: 'search', label: '从邻居表导入（LLDP/CDP）…', act: openNeighborImport },
     { ic: 'wand', label: '载入示例拓扑', act: loadSample },
     { sep: true },
     { ic: 'save', label: '保存工程…', act: saveProject },

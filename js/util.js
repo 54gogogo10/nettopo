@@ -1716,6 +1716,211 @@ U.diffProjects = (a, b) => {
   return { addedNodes, removedNodes, changedNodes, addedLinks, removedLinks };
 };
 
+/* ---------- LLDP/CDP 邻居表解析（纯函数，Node 测试可调用） ----------
+ * 支持：思科 show cdp neighbors 表格 / show cdp neighbors detail 块、
+ * 华为 display lldp neighbor(-brief) 与 H3C display lldp neighbor-information 等键值块、
+ * 以及中英文表头的 LLDP 简表。自动尝试三种格式并取命中最多者。
+ * 返回 { ok, format, entries:[{localIf, peer, peerIf}], lines } */
+const NB_IFACE_CLEAN = (s) => String(s || '').replace(/\s+/g, '');
+const nbIsIface = (s) => {
+  const t = NB_IFACE_CLEAN(s);
+  return /^[A-Za-z][A-Za-z0-9.\/:\-]{0,31}$/.test(t) && /\d/.test(t);
+};
+const nbFirstToken = (v) => String(v == null ? '' : v).trim().split(/[,\s，、（(]/)[0].slice(0, 64);
+const nbIsPeerName = (s) => {
+  const t = String(s || '').trim();
+  if (!t || t.length > 64) return false;
+  if (/^\d+$/.test(t)) return false;                      // 纯数字多为过期时间/序号列
+  if (/^[0-9a-fA-F]{2}([-:][0-9a-fA-F]{2}){5}$/.test(t)) return false; // 纯 MAC（ChassisId）
+  return /[A-Za-z]/.test(t) || /[\u4e00-\u9fff]/.test(t);
+};
+
+U.parseNeighbors = (text) => {
+  const clean = String(text == null ? '' : text)
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')            // 去 ANSI 转义
+    .replace(/\u001b[()][0-9A-B]/g, '')
+    .slice(0, 200 * 1024);                                  // 误粘贴超大文本兜底
+  const lines = clean.replace(/\r\n?/g, '\n').split('\n').slice(0, 5000);
+
+  const mk = (localIf, peer, peerIf) => ({ localIf: NB_IFACE_CLEAN(localIf), peer: String(peer || '').trim(), peerIf: peerIf ? NB_IFACE_CLEAN(peerIf) : '' });
+
+  /* A. 思科 CDP 表格：Device ID / Local Intrfce / Holdtme / Capability / Platform / Port ID */
+  const parseCdpTable = () => {
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (!/Device\s+ID\s+.*Local\s+Intrf/i.test(lines[i])) continue;
+      for (let j = i + 1; j < lines.length; j++) {
+        const ln = lines[j];
+        if (!ln.trim()) break;
+        if (/Device\s+ID\s+.*Local\s+Intrf/i.test(ln)) continue; // 换页重复表头
+        const cells = ln.trim().split(/\s{2,}/);
+        if (cells.length < 3) break;
+        const holdIdx = cells.findIndex((c, x) => x > 0 && /^\d+$/.test(c));
+        if (holdIdx < 2) break; // 列结构异常：本表结束
+        const peer = cells[0].trim();
+        const localIf = cells.slice(1, holdIdx).join(' ').trim();
+        const peerIf = cells[cells.length - 1].trim();
+        if (!nbIsPeerName(peer) || !nbIsIface(localIf) || !nbIsIface(peerIf)) continue;
+        out.push(mk(localIf, peer, peerIf));
+        if (out.length >= 2000) return out;
+      }
+      if (out.length) break;
+    }
+    return out;
+  };
+
+  /* B. LLDP 简表（含中英文表头）：按表头单元格定位 本地接口 / 对端设备 / 对端接口 列 */
+  const parseLldpTable = () => {
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+      const h = lines[i];
+      if (!/local/i.test(h) || !/(neighbor|对端|邻居)/i.test(h)) continue;
+      if (!/\s{2,}/.test(h)) continue;
+      const headCells = h.trim().split(/\s{2,}/);
+      const idxLocal = headCells.findIndex(c => /local|本地/i.test(c));
+      const idxPeer = headCells.findIndex(c => /(neighbor|对端|邻居)/i.test(c) && !/(intf|port|interface|接口|端口)/i.test(c));
+      const idxPeerIf = headCells.findIndex(c => /(intf|port|interface|接口|端口)/i.test(c) && !/local|本地/i.test(c));
+      if (idxLocal < 0 || idxPeer < 0) continue;
+      for (let j = i + 1; j < lines.length; j++) {
+        const ln = lines[j];
+        if (!ln.trim() || /Local\s*Intf|Device\s+ID/i.test(ln)) { if (out.length) break; continue; }
+        const cells = ln.trim().split(/\s{2,}/);
+        if (cells.length <= Math.max(idxPeer, idxPeerIf)) { if (out.length) break; continue; }
+        const peer = nbFirstToken(cells[idxPeer]);
+        if (!nbIsPeerName(peer)) { if (out.length) break; continue; }
+        const localIf = cells[idxLocal] || '';
+        const peerIf = idxPeerIf >= 0 ? cells[idxPeerIf] : '';
+        if (!nbIsIface(localIf)) { if (out.length) break; continue; }
+        out.push(mk(localIf, peer, peerIf));
+        if (out.length >= 2000) return out;
+      }
+      if (out.length) break;
+    }
+    return out;
+  };
+
+  /* C. 键值块（华为/H3C display lldp neighbor、思科 show cdp neighbors detail）
+   * 记录起始两种形态：Local Intf : GE0/0/1（或 Local Interface / 本地接口）、
+   * 「GigabitEthernet0/0/1 has 1 neighbor(s):」（华为/H3C verbose 段头） */
+  const parseBlocks = () => {
+    const out = [];
+    const REC_START = /^\s*(?:(?:Local\s*Intf(?:\s*ace)?|Local\s*Interface|本地接口)\s*[:：]|[A-Za-z][A-Za-z0-9.\-/]*\d[A-Za-z0-9.\-/]*\s+has\s+\d+\s+neighbors?\s*[(:：])/i;
+    const REC_HAS = /^\s*([A-Za-z][A-Za-z0-9.\-/]*\d[A-Za-z0-9.\-/]*)\s+has\s+\d+\s+neighbors?/i;
+    const DEV_START = /^\s*Device\s*ID\s*[:：]/i;
+    const KV = /^\s*([^:：]{1,48}?)\s*[:：]\s*(.+?)\s*$/;
+    let cur = null;
+    const flush = () => {
+      if (cur && cur.localIf && cur.peer && nbIsIface(cur.localIf) && nbIsPeerName(cur.peer) && out.length < 2000) {
+        out.push(mk(cur.localIf, cur.peer, cur.peerIf));
+      }
+      cur = null;
+    };
+    for (const ln of lines) {
+      if (REC_START.test(ln)) {
+        flush();
+        const hm = REC_HAS.exec(ln);
+        cur = hm ? { localIf: hm[1], peer: '', peerIf: '' }
+                 : { localIf: nbFirstToken(ln.replace(/^[^:：]*[:：]/, '')), peer: '', peerIf: '' };
+        continue;
+      }
+      if (DEV_START.test(ln)) {
+        const v = nbFirstToken(ln.replace(/^[^:：]*[:：]/, ''));
+        if (cur && cur.localIf && !cur.peer) { cur.peer = v; continue; } // 华为块内的对端 Device ID 行
+        flush(); cur = { localIf: '', peer: v, peerIf: '' };
+        continue;
+      }
+      if (!cur) continue;
+      const m = KV.exec(ln);
+      if (!m) continue;
+      const k = m[1].replace(/\s+/g, ' ').toLowerCase();
+      const v = m[2].trim();
+      if (!cur.peer && /^(?:neighbor\s*(?:device|system\s*name)|system\s*name|sysname|对端设备|邻居系统名)/.test(k)) cur.peer = nbFirstToken(v);
+      else if (!cur.peerIf && /^(?:neighbor\s*port\s*id|port\s*id(?:\s*\(outgoing\s*port\))?|neighbor\s*intf(?:\s*ace)?|outgoing\s*port|对端接口)/.test(k)) cur.peerIf = nbFirstToken(v);
+      else if (!cur.localIf && /^interface\s*[:：]?/.test(k)) cur.localIf = nbFirstToken(v); // CDP detail 的 Interface 行
+    }
+    flush();
+    return out;
+  };
+
+  const cdpT = parseCdpTable(), lldpT = parseLldpTable(), blocks = parseBlocks();
+  const cands = [
+    { format: 'cdp-table', entries: cdpT },
+    { format: 'lldp-table', entries: lldpT },
+    { format: 'key-value', entries: blocks }
+  ].sort((a, b) => b.entries.length - a.entries.length);
+  const best = cands[0];
+  if (!best.entries.length) {
+    return { ok: false, format: '', entries: [], lines: lines.length,
+      error: '未识别到邻居表：支持思科 show cdp neighbors、华为/H3C display lldp neighbor 等输出' };
+  }
+  // 同一本地接口多条记录（如聚合口/重复粘贴）按首条去重
+  const seen = new Set();
+  const entries = best.entries.filter(e => {
+    const k = e.localIf + '→' + e.peer;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { ok: true, format: best.format, entries, lines: lines.length };
+};
+
+/** 邻居表解析结果合并进图（原地修改 nodes/links；返回 {addedNodes, addedLinks, updatedLinks, skipped}）。
+ *  - 对端设备按名称匹配：已存在则复用，不存在则新建（类型按名称推断，位置摆在本端设备右侧）
+ *  - 已有链路（同设备对、任一端接口名匹配）回填空缺的接口名；两接口齐备但不匹配则跳过 */
+U.applyNeighbors = (nodes, links, localId, entries, opts) => {
+  opts = opts || {};
+  const local = (nodes || []).find(n => n.id === localId);
+  if (!local) return { ok: false, error: '本端设备不存在' };
+  const byName = new Map((nodes || []).map(n => [String(n.name || '').trim(), n]));
+  let addedNodes = 0, addedLinks = 0, updatedLinks = 0, skipped = 0;
+  for (const e of (Array.isArray(entries) ? entries : [])) {
+    if (!e || !e.localIf || !e.peer) { skipped++; continue; }
+    const peerName = String(e.peer).trim();
+    let peer = byName.get(peerName);
+    if (peer && peer.id === local.id) { skipped++; continue; } // 自环
+    if (!peer) {
+      const yOff = (addedNodes % 8) * 70 - 140;
+      peer = {
+        id: U.uid('n'), name: peerName, type: U.typeOf(peerName),
+        x: (Number(local.x) || 0) + 260, y: (Number(local.y) || 0) + yOff,
+        w: U.nodeWidthForName(peerName), h: U.NODE_H, note: '', mgmt: ''
+      };
+      nodes.push(peer);
+      byName.set(peerName, peer);
+      addedNodes++;
+    }
+    const la = (e.localIf || '').trim(), lb = (e.peerIf || '').trim();
+    // 匹配已有链路：同设备对，且（接口齐备并一致）或（对端接口未识别时按本端接口匹配）
+    const found = (links || []).find(l => {
+      const ab = l.a === local.id && l.b === peer.id;
+      const ba = l.a === peer.id && l.b === local.id;
+      if (!ab && !ba) return false;
+      const lIf = ab ? (l.aIf || '') : (l.bIf || '');
+      const pIf = ab ? (l.bIf || '') : (l.aIf || '');
+      if (!lb) return !lIf || lIf === la;
+      if (lIf && pIf) return lIf === la && pIf === lb;
+      return !lIf || lIf === la;
+    });
+    if (found) {
+      const ab = found.a === local.id && found.b === peer.id;
+      let changed = false;
+      const fill = (slot, val) => { if (!found[slot] && val) { found[slot] = val; changed = true; } };
+      if (ab) { fill('aIf', la); fill('bIf', lb); }
+      else { fill('bIf', la); fill('aIf', lb); }
+      if (changed) updatedLinks++; else skipped++;
+      continue;
+    }
+    if (!lb && !opts.allowMissingPeerIf) { skipped++; continue; }
+    links.push({
+      id: U.uid('l'), a: local.id, b: peer.id,
+      aIf: la, aIp: '', bIf: lb, bIp: '', bw: '',
+      note: String(opts.note || ''), agg: ''
+    });
+    addedLinks++;
+  }
+  return { ok: true, addedNodes, addedLinks, updatedLinks, skipped };
+};
+
 /* ---------- 设备批量重命名 ---------- */
 U.renameNodes = (nodes, opts) => {
   opts = opts || {};
