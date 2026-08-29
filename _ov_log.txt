@@ -1,0 +1,17 @@
+
+App threw an error during load
+D:\zcode\nettopo\test\_overlap_shot.js:99
+
+
+
+SyntaxError: Unexpected end of input
+    at wrapSafe (node:internal/modules/cjs/loader:1811:18)
+    at Module._compile (node:internal/modules/cjs/loader:1852:20)
+    at Object..js (node:internal/modules/cjs/loader:2012:10)
+    at Module.load (node:internal/modules/cjs/loader:1601:32)
+    at node:internal/modules/cjs/loader:1403:12
+    at Module._load (node:electron/js2c/node_init:2:18068)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:262:19)
+    at loadCJSModuleWithModuleLoad (node:internal/modules/esm/translators:378:15)
+    at ModuleWrap.<anonymous> (node:internal/modules/esm/translators:246:9)
+    at ModuleJob.run (node:internal/modules/esm/module_job:439:25)
