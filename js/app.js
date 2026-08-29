@@ -276,10 +276,12 @@ async function loadGraph(graph, msg) {
   if (msg) toast(msg);
   saveGraph();
   reconcileMonitors(); // 拓扑变更后对齐后台监控（停止已删除设备的监控、启动启用设备）
-  // 带坐标的表格/工程直接还原布局，不带坐标才自动布局
-  const hasPos = state.nodes.some(n => n.x || n.y);
-  if (hasPos) renderer.fit();
-  else autoLayout();
+  // 全部节点带坐标才直接还原布局；部分带坐标时其余节点默认 (0,0) 会全部叠在原点，整体自动布局
+  const hasPos = state.nodes.length > 0 && state.nodes.every(n => n.x || n.y);
+  if (hasPos) {
+    Layout.separateOverlaps(state.nodes); // 坐标本身有重叠（异常表格/老数据）时推开，不影响正常布局
+    renderer.fit();
+  } else autoLayout();
 }
 
 /* ================= 从邻居表导入（LLDP/CDP） =================
@@ -341,9 +343,10 @@ function openNeighborImport() {
     pushUndo();
     const r = U.applyNeighbors(state.nodes, state.links, localId, parsed.entries, { allowMissingPeerIf: ov.querySelector('#nbNewIf').checked });
     if (!r.ok) { toast(r.error || '导入失败'); return; }
-    // 统一过清洗（新建节点的字段口径与工程恢复一致）
+    // 统一过清洗（新建节点的字段口径与工程恢复一致），再推开与现有设备重叠的新节点
     const cleaned = U.sanitizeGraph(state.nodes, state.links, state.texts);
     state.nodes = cleaned.nodes; state.links = cleaned.links; state.texts = cleaned.texts;
+    Layout.separateOverlaps(state.nodes);
     renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll();
     saveGraph();
@@ -1481,6 +1484,7 @@ function switchSheet(idx, opts) {
   renderer.orthoLinks = state.orthoLinks;
   renderer.showLabels = state.showLabels; renderer.showSubnets = state.showSubnets; renderer.subnetNames = state.subnetNames;
   renderer.setDownLinks(state.downLinks);
+  Layout.separateOverlaps(state.nodes); // 页数据有节点重叠时推开（正常页为 no-op）
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   if (s.pan && s.zoom) renderer.setView(s.pan, s.zoom); else renderer.fit();
   updateUndoBtns();
@@ -1971,6 +1975,7 @@ async function applyProjectData(data) {
   // 恢复监控配置（A）：结构清洗 + 密码密文校验 + 解密 + 持久化（在 reconcileMonitors 之前完成）
   if (data.monitorCfg) await restoreMonitorCfgFromProject(data.monitorCfg);
   updateUndoBtns();
+  Layout.separateOverlaps(state.nodes); // 工程数据本身有节点重叠（异常/老版本工程）时推开，正常工程为 no-op
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   if (data.pan && data.zoom) renderer.setView(data.pan, data.zoom);
   else renderer.fit();
@@ -6189,6 +6194,7 @@ if (typeof globalThis !== 'undefined') {
     }),
     renderer,
     loadSample: () => loadGraph(M.textToGraph(M.SAMPLE_CSV), '示例'),
+    loadGraph: (graph, msg) => loadGraph(graph, msg),
     newGraph,
     autoLayout,
     exportCSV,

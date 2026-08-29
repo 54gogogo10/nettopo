@@ -668,6 +668,33 @@ console.log('== 接口总表行构建 ==');
   eq(U.buildIfTableRows([], []).length, 0, '空图无行');
 }
 
+console.log('== 加载防重合（separateOverlaps） ==');
+{
+  const overlap = (p, q) => p.x < q.x + q.w && q.x < p.x + p.w && p.y < q.y + q.h && q.y < p.y + p.h;
+  // 完全重合的多节点 → 推开后两两不重叠
+  const ns = [
+    { id: 'a', name: 'A', x: 100, y: 100, w: 160, h: 56 },
+    { id: 'b', name: 'B', x: 100, y: 100, w: 160, h: 56 },
+    { id: 'c', name: 'C', x: 100, y: 100, w: 160, h: 56 }
+  ];
+  Layout.separateOverlaps(ns);
+  ok(!overlap(ns[0], ns[1]) && !overlap(ns[0], ns[2]) && !overlap(ns[1], ns[2]), '重合节点被推开（两两不重叠）');
+  ok(Number.isFinite(ns[0].x) && Number.isFinite(ns[2].y), '分离后坐标有限');
+  // 已分离布局 no-op（坐标不变）
+  const sep = [
+    { id: 'a', name: 'A', x: 0, y: 0, w: 160, h: 56 },
+    { id: 'b', name: 'B', x: 400, y: 300, w: 160, h: 56 }
+  ];
+  const before = JSON.stringify(sep.map(n => [n.x, n.y]));
+  Layout.separateOverlaps(sep);
+  ok(JSON.stringify(sep.map(n => [n.x, n.y])) === before, '已分离布局不移动（no-op）');
+  // 空数组 / 单节点安全
+  eq(Layout.separateOverlaps([]).length, 0, '空数组安全');
+  const one = [{ id: 'a', name: 'A', x: 5, y: 5, w: 160, h: 56 }];
+  Layout.separateOverlaps(one);
+  ok(one[0].x === 5 && one[0].y === 5, '单节点不移动');
+}
+
 console.log('== 布局预设 ==');
 {
   const ns = [

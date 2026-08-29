@@ -124,7 +124,8 @@ function runLayout(nodes, links, onFrame, opts) {
   });
 }
 
-/* 矩形碰撞分离：沿最小穿透轴推开重叠的节点（迭代收敛） */
+/* 矩形碰撞分离：沿最小穿透轴推开重叠的节点（迭代收敛）。
+ * pos 为中心坐标数组（与节点一一对应），nodes 仅提供尺寸；结果写回 pos。 */
 function separateRects(pos, nodes) {
   const N = nodes.length;
   for (let pass = 0; pass < 3; pass++) {
@@ -344,5 +345,15 @@ function layerTopoLayout(nodes, links, opts) {
   nodes.forEach((nd, i) => { nd.x = pos[i].x - nd.w / 2; nd.y = pos[i].y - nd.h / 2; });
 }
 
-global.TopoLayout = { simulate, runLayout, layoutNow, ringLayout, gridLayout, layerLayout, tierLayout, layerTopoLayout };
+/* 仅推开重叠节点（不改整体布局）：工程 / 部分坐标表格 / 邻居表导入等加载路径的防重合兜底。
+ * 已分离的布局为 no-op（坐标不变）。原地修改 nodes 的 x/y，返回 nodes。 */
+function separateOverlaps(nodes) {
+  if (!Array.isArray(nodes) || nodes.length < 2) return nodes;
+  const pos = nodes.map(nd => ({ x: nd.x + nd.w / 2, y: nd.y + nd.h / 2 }));
+  separateRects(pos, nodes);
+  nodes.forEach((nd, i) => { nd.x = pos[i].x - nd.w / 2; nd.y = pos[i].y - nd.h / 2; });
+  return nodes;
+}
+
+global.TopoLayout = { simulate, runLayout, layoutNow, ringLayout, gridLayout, layerLayout, tierLayout, layerTopoLayout, separateRects, separateOverlaps };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
