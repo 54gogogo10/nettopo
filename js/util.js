@@ -1921,6 +1921,39 @@ U.applyNeighbors = (nodes, links, localId, entries, opts) => {
   return { ok: true, addedNodes, addedLinks, updatedLinks, skipped };
 };
 
+/* ---------- 接口总表（全部链路两端接口集中编辑用；纯函数，Node 测试可调用） ----------
+ * 每条链路的 a/b 两端各一行（接口名为空的行不生成），按设备名（中文序）+ 接口名排序。 */
+U.buildIfTableRows = (nodes, links) => {
+  const byId = new Map((Array.isArray(nodes) ? nodes : []).map(n => [n.id, n]));
+  const rows = [];
+  for (const l of (Array.isArray(links) ? links : [])) {
+    const na = byId.get(l.a), nb = byId.get(l.b);
+    for (const side of ['a', 'b']) {
+      const ifn = String(l[side + 'If'] || '').trim();
+      if (!ifn) continue;
+      const self = side === 'a' ? na : nb;
+      const peer = side === 'a' ? nb : na;
+      rows.push({
+        key: l.id + '|' + side,
+        linkId: l.id, side,
+        nodeId: self ? self.id : '', nodeName: self ? self.name : '?',
+        ifn,
+        ip: String(l[side + 'Ip'] || ''),
+        mask: parseInt(l[side + 'Mask'], 10) > 0 && parseInt(l[side + 'Mask'], 10) <= 32 ? parseInt(l[side + 'Mask'], 10) : 24,
+        l2: !!l[side + 'L2'],
+        vlan: String(l[side + 'Vlan'] || ''),
+        vlanMode: l[side + 'VlanMode'] || '',
+        agg: String(l.agg || ''),
+        peerName: peer ? peer.name : '?', peerIf: String(side === 'a' ? (l.bIf || '') : (l.aIf || '')).trim(),
+        note: String(l.note || ''),
+        bw: String(l.bw || '')
+      });
+    }
+  }
+  rows.sort((x, y) => x.nodeName.localeCompare(y.nodeName, 'zh') || x.ifn.localeCompare(y.ifn, 'zh', { numeric: true }));
+  return rows;
+};
+
 /* ---------- 设备批量重命名 ---------- */
 U.renameNodes = (nodes, opts) => {
   opts = opts || {};

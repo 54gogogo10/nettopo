@@ -876,6 +876,13 @@ html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
 .nb-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .nb-table th, .nb-table td { border: 1px solid var(--border); padding: 3px 8px; text-align: left; }
 .nb-table th { background: var(--panel2); color: var(--muted); font-weight: 600; position: sticky; top: -9px; }
+/* ---- 接口总表 ---- */
+.ift-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ift-table th, .ift-table td { border-bottom: 1px solid var(--border); padding: 3px 6px; text-align: left; white-space: nowrap; }
+.ift-table thead th { background: var(--panel2); color: var(--muted); font-weight: 600; position: sticky; top: 0; z-index: 1; }
+.ift-table td input[type="text"], .ift-table td input[type="number"] { height: 26px; font-size: 12px; padding: 0 6px; width: 100%; min-width: 80px; }
+.ift-table td .ift-ro, .ift-table td.ift-ro { color: var(--muted); }
+.ift-table input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); }
 
 /* ---- 跳板机（监控行内折叠区） ---- */
 .mon-host-row .mh-jump-wrap {

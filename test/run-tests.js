@@ -647,6 +647,27 @@ console.log('== LLDP/CDP 邻居表解析 ==');
   ok(m4.skipped === 2 && !nodes.some(n => n.name === 'X'), '自环与无效条目跳过');
 }
 
+console.log('== 接口总表行构建 ==');
+{
+  const nodes = [
+    { id: 'a', name: 'ASW', type: 'switch', x: 0, y: 0, w: 160, h: 56 },
+    { id: 'b', name: 'BSW', type: 'switch', x: 0, y: 0, w: 160, h: 56 },
+    { id: 'c', name: 'CR', type: 'router', x: 0, y: 0, w: 160, h: 56 }
+  ];
+  const links = [
+    { id: 'l1', a: 'a', b: 'b', aIf: 'GE1/0/24', aIp: '10.0.0.1', aMask: 24, aL2: false, aVlan: '', aVlanMode: '', bIf: 'GE0/0/24', bIp: '10.0.0.2', bMask: 24, bL2: true, bVlan: '10', bVlanMode: 'access', agg: 'Eth-Trunk1', note: '上联', bw: 1000 },
+    { id: 'l2', a: 'a', b: 'c', aIf: 'GE1/0/1', aIp: '10.0.1.1', aMask: 30, aL2: false, aVlan: '', aVlanMode: '', bIf: '', bIp: '', bMask: 24, bL2: false, bVlan: '', bVlanMode: '', agg: '', note: '' }
+  ];
+  const rows = U.buildIfTableRows(nodes, links);
+  eq(rows.length, 3, '接口总表行数（bIf 为空的一端不生成）');
+  eq(rows[0].nodeName, 'ASW', '按设备名排序');
+  ok(rows[0].ifn === 'GE1/0/1' && rows[1].ifn === 'GE1/0/24', '同设备行按接口名数值序');
+  ok(rows[2].side === 'b' && rows[2].l2 === true && rows[2].vlan === '10', 'b 端行携带二层/VLAN');
+  ok(rows[1].agg === 'Eth-Trunk1' && rows[1].peerName === 'BSW' && rows[1].peerIf === 'GE0/0/24', '行携带聚合组与对端信息');
+  eq(rows[1].key, 'l1|a', '行 key = 链路id|端');
+  eq(U.buildIfTableRows([], []).length, 0, '空图无行');
+}
+
 console.log('== 布局预设 ==');
 {
   const ns = [

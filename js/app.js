@@ -357,6 +357,126 @@ function openNeighborImport() {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#nbText').focus(); }, 250);
 }
 
+/* ================= 接口总表（全部链路两端接口集中编辑） =================
+ * 一张可筛选的表格集中查看/修改所有接口：接口名、IP、掩码位、VLAN、二层、聚合组；
+ * 修改在「应用修改」时一次性写入（单个撤销步骤），与画布标注/校验/导出实时一致。 */
+function openIfTable() {
+  const rows = U.buildIfTableRows(state.nodes, state.links);
+  if (!rows.length) { toast('当前没有已配置接口名的连线'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1040px;height:82vh;display:flex;flex-direction:column">
+      <h3>接口总表</h3>
+      <div class="m-sub">全部链路两端接口集中编辑（${rows.length} 行，按设备排序）：直接修改后点<b>应用修改</b>一次写入（一个撤销步骤）；同一连线在「接口总表」中的行与画布/校验/生成配置/导出实时一致。</div>
+      <div class="frow" style="display:flex;gap:10px;align-items:center;margin-bottom:6px">
+        <input id="iftFilter" type="text" placeholder="筛选：设备 / 接口 / IP / VLAN / 对端…" style="flex:1"/>
+        <span style="font-size:11.5px;color:var(--muted)">勾选「二层」将清空该接口 IP（与连线编辑弹窗口径一致）</span>
+      </div>
+      <div id="iftBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="csv">导出 CSV</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="cancel">关闭</button>
+        <button type="button" class="tb primary" data-act="apply">应用修改</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  const bodyEl = ov.querySelector('#iftBody');
+  // 未保存的修改：key -> {ifn/ip/mask/vlan/agg/l2}（筛选重渲染时回填，不丢编辑）
+  const edits = new Map();
+  const val = (r, f) => {
+    const e = edits.get(r.key);
+    return e && e[f] !== undefined ? e[f] : r[f];
+  };
+  const rowHtml = (r) => `
+    <tr data-key="${U.escHtml(r.key)}">
+      <td class="ift-ro" title="${U.escHtml(r.nodeName)}">${U.escHtml(U.truncate(r.nodeName, 14))}</td>
+      <td><input data-f="ifn" type="text" value="${U.escHtml(val(r, 'ifn'))}"/></td>
+      <td><input data-f="ip" type="text" value="${U.escHtml(val(r, 'ip'))}"/></td>
+      <td><input data-f="mask" type="number" min="0" max="32" style="width:56px" value="${U.escHtml(val(r, 'mask'))}"/></td>
+      <td><input data-f="vlan" type="text" style="width:86px" value="${U.escHtml(val(r, 'vlan'))}"/></td>
+      <td><input data-f="agg" type="text" style="width:110px" value="${U.escHtml(val(r, 'agg'))}" placeholder="如 Eth-Trunk1"/></td>
+      <td style="text-align:center"><input data-f="l2" type="checkbox"${val(r, 'l2') ? ' checked' : ''}/></td>
+      <td class="ift-ro">${U.escHtml(U.truncate(r.peerName, 14))}</td>
+      <td class="ift-ro">${U.escHtml(r.peerIf)}</td>
+      <td class="ift-ro">${U.escHtml(U.truncate(r.note, 20))}</td>
+    </tr>`;
+  const render = () => {
+    const q = ov.querySelector('#iftFilter').value.trim().toLowerCase();
+    const list = rows.filter(r => !q || [r.nodeName, r.ifn, r.ip, r.vlan, r.agg, r.peerName, r.peerIf]
+      .some(v => v && String(v).toLowerCase().includes(q)));
+    bodyEl.innerHTML = list.length
+      ? `<table class="ift-table"><thead><tr><th>设备</th><th>接口</th><th>IP</th><th>掩码</th><th>VLAN</th><th>聚合组</th><th>二层</th><th>对端设备</th><th>对端接口</th><th>备注</th></tr></thead><tbody>${list.map(rowHtml).join('')}</tbody></table>`
+      : '<div class="bk-empty">无匹配接口行</div>';
+    bodyEl.querySelectorAll('tr[data-key]').forEach(tr => {
+      const key = tr.dataset.key;
+      tr.querySelectorAll('input[data-f]').forEach(inp => {
+        const f = inp.dataset.f;
+        const handler = () => {
+          const e = Object.assign({}, edits.get(key) || {});
+          e[f] = f === 'l2' ? inp.checked : inp.value;
+          edits.set(key, e);
+        };
+        if (f === 'l2') inp.addEventListener('change', handler);
+        else inp.addEventListener('input', handler);
+      });
+    });
+  };
+  render();
+  ov.querySelector('#iftFilter').addEventListener('input', render);
+  ov.querySelector('[data-act=csv]').onclick = () => {
+    const data = [['设备', '接口', 'IP', '掩码位', 'VLAN', '二层', '聚合组', '对端设备', '对端接口', '备注']];
+    for (const r0 of rows) {
+      const r = { ifn: val(r0, 'ifn'), ip: val(r0, 'ip'), mask: val(r0, 'mask'), vlan: val(r0, 'vlan'), agg: val(r0, 'agg'), l2: val(r0, 'l2') };
+      data.push([r0.nodeName, r.ifn, r.ip, String(r.mask), r.vlan, r.l2 ? '是' : '', r.agg, r0.peerName, r0.peerIf, r0.note]);
+    }
+    U.download(`接口总表_${U.fmtDate()}.csv`, new Blob([U.buildCSV(data)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出接口总表 CSV');
+  };
+  ov.querySelector('[data-act=apply]').onclick = () => {
+    if (!edits.size) { toast('没有需要应用的修改'); return; }
+    pushUndo();
+    let applied = 0;
+    for (const [key, e] of edits) {
+      const sp = key.lastIndexOf('|');
+      const linkId = key.slice(0, sp), side = key.slice(sp + 1);
+      const l = state.links.find(x => x.id === linkId);
+      if (!l || (side !== 'a' && side !== 'b')) continue;
+      if (e.ifn !== undefined) l[side + 'If'] = String(e.ifn).trim();
+      if (e.mask !== undefined) {
+        const m = parseInt(e.mask, 10);
+        l[side + 'Mask'] = (m >= 0 && m <= 32) ? m : 24;
+      }
+      if (e.vlan !== undefined) {
+        const v = String(e.vlan).trim();
+        l[side + 'Vlan'] = v;
+        if (v) { if (!l[side + 'VlanMode']) l[side + 'VlanMode'] = 'access'; }
+        else l[side + 'VlanMode'] = '';
+      }
+      if (e.l2 !== undefined) {
+        l[side + 'L2'] = !!e.l2;
+        if (e.l2 && e.ip === undefined) l[side + 'Ip'] = ''; // 勾二层清空 IP（与连线弹窗一致）
+      }
+      if (e.ip !== undefined) l[side + 'Ip'] = String(e.ip).trim();
+      if (e.agg !== undefined) l.agg = String(e.agg).trim().slice(0, 32);
+      applied++;
+    }
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    refreshAll();
+    saveGraph();
+    close();
+    toast(`接口总表：已更新 ${applied} 个接口行（Ctrl+Z 可撤销）`);
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#iftFilter').focus(); }, 250);
+}
+
 /* ================= 自动布局 ================= */
 function autoLayout() {
   if (!state.nodes.length) return;
@@ -3798,6 +3918,7 @@ function wire() {
     { ic: 'edit', label: '批量重命名…', act: openRename },
     { ic: 'edit', label: 'IP 批量改段…', act: openIpRenumber },
     { ic: 'wand', label: 'IP 子网计算器…', act: openSubnetCalc },
+    { ic: 'list', label: '接口总表…', act: openIfTable },
     { sep: true },
     { ic: 'tag', label: '类型管理…', act: openTypeManager },
     { ic: 'trash', label: '删除选中', danger: true, act: () => deleteSelection() }
