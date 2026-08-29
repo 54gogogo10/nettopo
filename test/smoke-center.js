@@ -143,6 +143,15 @@ async function connectCDP(target) {
     await sleep(400);
     ok(await cdp.eval("!!document.querySelector('#compRules')"), '合规检查弹窗打开');
     ok(await cdp.eval("document.querySelectorAll('.comp-rule').length >= 5"), '默认规则已加载（≥5 条）');
+    // ---- 合规模板：内置下拉 + 按需加载 ----
+    ok(await cdp.eval("!!document.querySelector('.comp-tpl select')"), '合规模板下拉存在');
+    ok(await cdp.eval("document.querySelectorAll('#compTpl optgroup').length >= 1 && document.querySelectorAll('#compTpl option').length >= 5"), '模板下拉含内置模板分组（≥5 套）');
+    await cdp.eval("(() => { const s = document.querySelector('#compTpl'); s.value = 'builtin:minimal'; [...document.querySelectorAll('.modal [data-act=tplload]')].pop().click(); return true; })()");
+    await sleep(200);
+    ok(await cdp.eval("document.querySelectorAll('.comp-rule').length === 5"), '加载「最小基线」模板后规则为 5 条');
+    await cdp.eval("(() => { const s = document.querySelector('#compTpl'); s.value = 'builtin:default'; [...document.querySelectorAll('.modal [data-act=tplload]')].pop().click(); return true; })()");
+    await sleep(200);
+    ok(await cdp.eval("document.querySelectorAll('.comp-rule').length >= 10"), '切回「等保通用基线」模板恢复全量规则');
     await cdp.eval("(() => { const b = [...document.querySelectorAll('.modal [data-act=run]')].pop(); b && b.click(); return true; })()");
     let compTotal = '';
     const tComp = Date.now();

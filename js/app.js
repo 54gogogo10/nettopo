@@ -4966,7 +4966,14 @@ function openComplianceCheck() {
   ov.innerHTML = `
     <div class="modal" role="dialog" style="width:880px;height:82vh;display:flex;flex-direction:column">
       <h3>配置合规基线检查</h3>
-      <div class="m-sub">对配置备份库中各地址的<b>最新备份</b>执行本地规则扫描（纯本机，不上传）。规则为逐行正则（不区分大小写）：「必须存在」无命中即违规，「禁止出现」命中即违规。</div>
+      <div class="m-sub">对配置备份库中各地址的<b>最新备份</b>执行本地规则扫描（纯本机，不上传）。内置多套基线模板（等保通用 / 最小快速 / 华为 / 思科 / 接入层），也可把当前规则<b>另存为模板</b>，按需加载后扫描；监控「自动合规」同样使用下方当前规则集。规则为逐行正则（不区分大小写）：「必须存在」无命中即违规，「禁止出现」命中即违规。</div>
+      <div class="comp-tpl">
+        <span class="comp-tpl-label">模板</span>
+        <select id="compTpl"></select>
+        <button type="button" class="tb" data-act="tplload" title="把选中模板加载到下方规则编辑器（并设为当前规则集）">加载</button>
+        <button type="button" class="tb" data-act="tplsave" title="把下方当前规则保存为一套自定义模板（可保存多套，同名覆盖）">另存为模板…</button>
+        <button type="button" class="tb" data-act="tpldel" title="删除选中的自定义模板（内置模板不可删）">删除模板</button>
+      </div>
       <div class="comp-rules" id="compRules"></div>
       <div class="m-actions" style="justify-content:flex-start;margin:8px 0">
         <button type="button" class="tb" data-act="addrule">＋ 添加规则</button>
@@ -5024,6 +5031,65 @@ function openComplianceCheck() {
       note: (U.complianceRules[i] && U.complianceRules[i].note) || ''
     }));
     return U.saveComplianceRules(rows);
+  };
+  // ---- 模板：内置基线包 + 自定义模板（多套保存、按需加载；加载即设为当前规则集并持久化） ----
+  U.loadComplianceTemplates();
+  const tplSel = ov.querySelector('#compTpl');
+  const renderTplSel = () => {
+    const cur = tplSel.value;
+    const builtins = U.COMPLIANCE_PACKS.map(p =>
+      `<option value="builtin:${U.escHtml(p.key)}" title="${U.escHtml(p.desc || '')}">${U.escHtml(p.name)}（${p.rules.length} 条）</option>`).join('');
+    const users = U.complianceTemplates.map(t =>
+      `<option value="user:${U.escHtml(t.name)}">${U.escHtml(t.name)}（${t.rules.length} 条）</option>`).join('');
+    tplSel.innerHTML = (builtins ? `<optgroup label="内置模板">${builtins}</optgroup>` : '')
+      + (users ? `<optgroup label="我的模板">${users}</optgroup>` : '');
+    if (cur && [...tplSel.options].some(o => o.value === cur)) tplSel.value = cur;
+  };
+  renderTplSel();
+  ov.querySelector('[data-act=tplload]').onclick = () => {
+    const v = tplSel.value || '';
+    let rules = null, label = '';
+    if (v.startsWith('builtin:')) {
+      const p = U.COMPLIANCE_PACKS.find(x => x.key === v.slice(8));
+      if (!p) return;
+      rules = p.rules; label = p.name;
+    } else if (v.startsWith('user:')) {
+      const t = U.complianceTemplates.find(x => x.name === v.slice(5));
+      if (!t) return;
+      rules = t.rules; label = t.name;
+    }
+    if (!rules) return;
+    U.saveComplianceRules(rules); // 加载即设为当前规则集（自动合规与扫描共用）
+    renderRules();
+    toast('已加载模板「' + label + '」（' + U.complianceRules.length + ' 条规则），点「保存规则并扫描备份库」开始检查');
+  };
+  ov.querySelector('[data-act=tplsave]').onclick = () => {
+    const cur = collectRules();
+    if (!cur.length) { toast('当前规则为空，无法保存为模板'); return; }
+    openModal({
+      title: '把当前规则保存为模板',
+      sub: '同名模板会被覆盖；模板保存后不影响当前规则集，可随时在「模板」下拉中加载',
+      fields: [{ name: 'name', label: '模板名称', value: '', ph: '如：等保三级-2026 / 核心层基线' }],
+      submit: '保存模板',
+      onSubmit: (v2) => {
+        const name = String(v2.name || '').trim().slice(0, 32);
+        if (!name) { toast('模板名称不能为空'); return; }
+        U.saveComplianceTemplate(name, cur);
+        renderTplSel();
+        const v3 = 'user:' + name;
+        if ([...tplSel.options].some(o => o.value === v3)) tplSel.value = v3;
+        toast('已保存模板「' + name + '」（' + cur.length + ' 条规则）');
+      }
+    });
+  };
+  ov.querySelector('[data-act=tpldel]').onclick = async () => {
+    const v = tplSel.value || '';
+    if (!v.startsWith('user:')) { toast('请先在下拉中选择一套自定义模板（内置模板不可删除）'); return; }
+    const name = v.slice(5);
+    if (!(await confirmBox('删除自定义模板「' + name + '」？当前规则集不受影响。'))) return;
+    U.deleteComplianceTemplate(name);
+    renderTplSel();
+    toast('已删除模板「' + name + '」');
   };
   ov.querySelector('[data-act=addrule]').onclick = () => {
     U.complianceRules.push({ id: 'cr' + Date.now(), name: '', pattern: '', negate: false, enabled: true, note: '' });

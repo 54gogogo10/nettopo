@@ -2102,6 +2102,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!!telnet && telnet.negate, 'Telnet 禁止规则存在且为禁止类');
       ok(U.checkCompliance('undo telnet server enable\n#', [telnet]).results[0].pass === true, 'undo telnet server enable（已关闭）不误报');
       ok(U.checkCompliance('telnet server enable\n#', [telnet]).results[0].pass === false, 'telnet server enable 仍判违规');
+      ok(U.checkCompliance('stelnet server enable\n#', [telnet]).results[0].pass === true, 'stelnet server enable（SSH 开启）不误报');
       ok(U.checkCompliance('transport input none\n#', [telnet]).results[0].pass === true, 'transport input none（仅 SSH）不误报');
       const http = defs.find(r => r.id === 'http');
       ok(!!http && U.checkCompliance('interface GigabitEthernet0/0/1\n no ip http server\n#', [http]).results[0].pass === true, '缩进 no ip http server 不误报');
@@ -2112,6 +2113,88 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(U.checkCompliance('snmp-agent community read cipher %^%#abc\n#', [snmp]).results[0].pass === false, 'snmp-agent community 仍判违规');
       const saved = U.saveComplianceRules(U.COMPLIANCE_DEFAULT_RULES);
       ok(saved.every(r => r.group) && saved.find(r => r.id === 'ntp').group === '时间同步', '分组字段随规则保存保留');
+    }
+
+    // 合规模板包（内置多套）与自定义模板（多套保存、按需加载）
+    console.log('== 回归：合规模板包与自定义模板（新功能） ==');
+    {
+      // 内置模板包：数量 / 规则可编译 / id 无重复
+      ok(Array.isArray(U.COMPLIANCE_PACKS) && U.COMPLIANCE_PACKS.length >= 4, '内置模板 ≥4 套（' + (U.COMPLIANCE_PACKS || []).length + ' 套）');
+      for (const p of U.COMPLIANCE_PACKS) {
+        const cleaned = U.cleanComplianceRules(p.rules);
+        ok(cleaned.length >= 5 && cleaned.every(r => r.re), '模板「' + p.name + '」≥5 条且全部可编译（' + cleaned.length + ' 条）');
+        ok(new Set(cleaned.map(r => r.id)).size === cleaned.length, '模板「' + p.name + '」规则 id 无重复');
+      }
+      // 厂家模板按命令风格判定：华为配置过华为模板、思科配置过思科模板
+      const hwPack = U.COMPLIANCE_PACKS.find(p => p.key === 'huawei');
+      const hwCfg = [
+        'ntp-service unicast-server 1.1.1.1',
+        'info-center loghost 10.1.1.1',
+        'aaa',
+        ' password-policy',
+        'user-interface vty 0 4',
+        ' idle-timeout 5 0',
+        ' acl 2001 inbound',
+        'stelnet server enable',
+        'ip route-static 0.0.0.0 0.0.0.0 10.0.0.254',
+        '#'
+      ].join('\n');
+      const hwRep = U.checkCompliance(hwCfg, U.cleanComplianceRules(hwPack.rules));
+      eq(hwRep.failed, 0, '华为模板对合规华为配置 0 违规（' + hwRep.passed + ' 项通过）');
+      const badHw = U.checkCompliance('telnet server enable\nsnmp-agent community read public\n#', U.cleanComplianceRules(hwPack.rules));
+      ok(badHw.failed >= 2, '华为模板对 Telnet/SNMPv2c 开启判违规（' + badHw.failed + ' 项）');
+      const ciPack = U.COMPLIANCE_PACKS.find(p => p.key === 'cisco');
+      const ciCfg = [
+        'ntp server 1.1.1.1',
+        'logging 10.1.1.2',
+        'aaa new-model',
+        'security passwords min-length 8',
+        'banner motd #Authorized Only#',
+        'line vty 0 4',
+        ' exec-timeout 5 0',
+        ' access-class 99 in',
+        ' transport input ssh',
+        'ip route 0.0.0.0 0.0.0.0 10.0.0.254',
+        '#'
+      ].join('\n');
+      const ciRep = U.checkCompliance(ciCfg, U.cleanComplianceRules(ciPack.rules));
+      eq(ciRep.failed, 0, '思科模板对合规思科配置 0 违规（' + ciRep.passed + ' 项通过）');
+      const noTelnetCi = U.checkCompliance('line vty 0 4\n no transport input telnet\n#', U.cleanComplianceRules(ciPack.rules));
+      ok(noTelnetCi.results.find(r => r.id === 'ci-telnet').pass === true, '思科模板：no transport input telnet 不误报');
+      // 接入层模板：无默认路由/VTY ACL 的接入交换机不误报
+      const acPack = U.COMPLIANCE_PACKS.find(p => p.key === 'access');
+      const acCfg = 'ntp-service unicast-server 1.1.1.1\ninfo-center loghost 10.1.1.1\naaa\n idle-timeout 5 0\n password-policy\n#';
+      eq(U.checkCompliance(acCfg, U.cleanComplianceRules(acPack.rules)).failed, 0, '接入层模板不要求默认路由/VTY ACL');
+      // 默认模板与「恢复默认规则」同源
+      const defPack = U.COMPLIANCE_PACKS.find(p => p.key === 'default');
+      eq(U.cleanComplianceRules(defPack.rules).length, U.cleanComplianceRules(U.COMPLIANCE_DEFAULT_RULES).length, 'default 模板与默认规则同源');
+      // 自定义模板：多套保存 / 同名覆盖 / 存储 / 删除（vm 沙箱 localStorage 回环）
+      const savedLS = sandbox.localStorage;
+      sandbox.localStorage = {
+        store: {},
+        getItem(k) { return this.store[k] != null ? this.store[k] : null; },
+        setItem(k, v) { this.store[k] = String(v); }
+      };
+      U.complianceTemplates = [];
+      U.saveComplianceTemplate('等保-2026', U.COMPLIANCE_PACKS[0].rules);
+      U.saveComplianceTemplate('核心层基线', U.COMPLIANCE_PACKS[1].rules);
+      U.saveComplianceTemplate('等保-2026', U.COMPLIANCE_PACKS[2].rules); // 同名覆盖
+      let arr = U.loadComplianceTemplates();
+      eq(arr.length, 2, '同名覆盖 + 多套共存（' + arr.length + ' 套）');
+      const t1 = arr.find(t => t.name === '等保-2026');
+      eq(t1.rules.length, U.cleanComplianceRules(U.COMPLIANCE_PACKS[2].rules).length, '同名覆盖取最新规则');
+      ok(t1.rules.every(r => !r.re), '模板存储不含编译后 re');
+      // 空名 / 无有效规则不落模板
+      U.saveComplianceTemplate('   ', []);
+      U.saveComplianceTemplate('bad', [{ id: 'x', name: '坏正则', pattern: '(' }]);
+      eq(U.loadComplianceTemplates().length, 2, '空名/无有效规则的模板被拒');
+      // 超长名称截断到 32
+      U.saveComplianceTemplate('x'.repeat(50), U.COMPLIANCE_PACKS[1].rules);
+      ok(U.loadComplianceTemplates().every(t => t.name.length <= 32), '模板名称限长 32');
+      U.deleteComplianceTemplate('核心层基线');
+      U.deleteComplianceTemplate('等保-2026');
+      eq(U.loadComplianceTemplates().length, 1, '删除模板（剩超长名 1 套）');
+      sandbox.localStorage = savedLS; // 还原，避免影响后续用例
     }
 
     // Web Shell 会话审计日志（新功能）

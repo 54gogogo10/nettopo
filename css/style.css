@@ -851,6 +851,11 @@ html[data-theme="dark"] .mc-dialog .mc-ev:hover .mc-ev-d { color: #fff; }
 .modal .frow textarea { height: 64px; }
 /* ---- 配置合规基线检查 ---- */
 .comp-rules { border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; background: var(--panel2); }
+/* ---- 合规模板条（内置模板 + 自定义模板） ---- */
+.comp-tpl { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; flex-wrap: wrap; }
+.comp-tpl-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+.comp-tpl select { height: 30px; font-size: 12.5px; padding: 0 6px; min-width: 240px; }
+.comp-tpl .tb { height: 30px; font-size: 12px; padding: 0 10px; }
 .comp-head, .comp-rule { display: grid; grid-template-columns: 34px 200px 96px 1fr 30px; gap: 6px; align-items: center; }
 .comp-head { font-size: 11px; color: var(--muted); padding: 2px 2px 6px; }
 .comp-rule { padding: 3px 0; border-top: 1px dashed var(--border); }

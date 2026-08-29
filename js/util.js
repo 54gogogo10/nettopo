@@ -893,12 +893,138 @@ U.COMPLIANCE_DEFAULT_RULES = [
   { id: 'pwdpolicy',name: '必须启用密码复杂度策略',    group: '认证与授权',  pattern: 'password policy|password-complexity|security passwords min-length', negate: false, enabled: true, note: '华为 password-policy / 思科 security passwords min-length' },
   { id: 'vtyacl',   name: '必须配置 VTY 访问控制',     group: '认证与授权',  pattern: 'access-class|acl\\s+\\d+', negate: false, enabled: true, note: 'VTY 绑定 ACL（思科 access-class / 华为 user-interface 下 acl 编号）' },
   { id: 'banner',   name: '必须配置登录警示 banner',   group: '认证与授权',  pattern: 'banner|header login|login block', negate: false, enabled: true, note: '存在登录提示/警示信息（华为 header login / 思科 banner）' },
-  { id: 'telnet',   name: '禁止启用 Telnet 服务',      group: '服务与协议',  pattern: '^(?!\\s*(?:undo|no)\\b).*(?:telnet server enable|transport input (?:telnet|all)|protocol inbound telnet)', negate: true, enabled: true, note: 'VTY/服务层不应放行 Telnet（仅 SSH）；undo/no 前缀的关闭命令不算违规' },
+  { id: 'telnet',   name: '禁止启用 Telnet 服务',      group: '服务与协议',  pattern: '^(?!\\s*(?:undo|no)\\b).*(?:\\btelnet server enable|transport input (?:telnet|all)|protocol inbound telnet)', negate: true, enabled: true, note: 'VTY/服务层不应放行 Telnet（仅 SSH）；undo/no 前缀的关闭命令不算违规' },
   { id: 'http',     name: '禁止启用 HTTP 管理服务',    group: '服务与协议',  pattern: '^(?!\\s*(?:undo|no)\\b).*(?:http server enable|ip http server(?!\\s*secure))', negate: true, enabled: true, note: '明文 HTTP 管理面应关闭（HTTPS 的 ip http secure-server 不算）；undo/no 前缀不算违规' },
   { id: 'snmpv2',   name: '禁止 SNMP v1/v2c community', group: '服务与协议', pattern: '^(?!\\s*(?:undo|no)\\b).*(?:snmp(?:-agent)? community|snmp-server community)', negate: true, enabled: true, note: '应仅使用 SNMPv3（usm-user / snmp-server user）；undo/no 前缀的删除命令不算违规' },
   { id: 'gw',       name: '必须配置默认路由',          group: '路由与网关',  pattern: 'ip\\s+route(?:-static)?\\s+0\\.0\\.0\\.0', negate: false, enabled: true, note: '存在静态默认路由（华为 ip route-static 0.0.0.0 / 思科 ip route 0.0.0.0）' }
 ];
 const COMPLIANCE_KEY = 'nettopo.complianceRules';
+const COMPLIANCE_TPL_KEY = 'nettopo.complianceTemplates';
+
+/* ---------- 合规模板包 ----------
+ * 内置多套基线模板（U.COMPLIANCE_PACKS），用户也可把当前规则另存为多套自定义模板
+ * （localStorage nettopo.complianceTemplates），检查时按需选择加载。
+ * 内置模板按设备厂家 / 场景分化：pattern 采用对应厂家的命令风格，降低误报/漏报。 */
+U.COMPLIANCE_PACKS = [
+  {
+    key: 'default', name: '等保通用基线（推荐）', desc: '11 条全量基线，与「恢复默认规则」一致',
+    rules: U.COMPLIANCE_DEFAULT_RULES
+  },
+  {
+    key: 'minimal', name: '最小基线（快速检查）', desc: '5 条核心项：NTP/AAA/默认路由/禁 Telnet/禁 SNMP v1v2c',
+    rules: [
+      { id: 'ntp',    name: '必须配置 NTP',    group: '时间同步',   pattern: 'ntp', negate: false, enabled: true, note: '存在 NTP 相关配置行' },
+      { id: 'aaa',    name: '必须启用 AAA',    group: '认证与授权', pattern: 'aaa', negate: false, enabled: true, note: '存在 AAA 配置段' },
+      { id: 'gw',     name: '必须配置默认路由', group: '路由与网关', pattern: 'ip\\s+route(?:-static)?\\s+0\\.0\\.0\\.0', negate: false, enabled: true, note: '存在静态默认路由' },
+      { id: 'telnet', name: '禁止启用 Telnet 服务', group: '服务与协议', pattern: '^(?!\\s*(?:undo|no)\\b).*(?:\\btelnet server enable|transport input (?:telnet|all)|protocol inbound telnet)', negate: true, enabled: true, note: 'undo/no 前缀的关闭命令不算违规' },
+      { id: 'snmpv2', name: '禁止 SNMP v1/v2c community', group: '服务与协议', pattern: '^(?!\\s*(?:undo|no)\\b).*(?:snmp(?:-agent)? community|snmp-server community)', negate: true, enabled: true, note: 'undo/no 前缀的删除命令不算违规' }
+    ]
+  },
+  {
+    key: 'huawei', name: '华为 VRP 设备基线', desc: '按华为命令风格：stelnet/info-center/password-policy 等',
+    rules: [
+      { id: 'hw-ntp',    name: '必须配置 NTP',             group: '时间同步',   pattern: 'ntp', negate: false, enabled: true, note: '存在 ntp-service 配置' },
+      { id: 'hw-log',    name: '必须配置日志主机',         group: '日志审计',   pattern: 'info-center loghost', negate: false, enabled: true, note: 'info-center loghost <主机>' },
+      { id: 'hw-aaa',    name: '必须启用 AAA',             group: '认证与授权', pattern: 'aaa', negate: false, enabled: true, note: '存在 aaa 配置段' },
+      { id: 'hw-idle',   name: '必须配置登录超时',         group: '认证与授权', pattern: 'idle-timeout', negate: false, enabled: true, note: 'VTY/Console 下 idle-timeout' },
+      { id: 'hw-pwd',    name: '必须启用密码复杂度策略',   group: '认证与授权', pattern: 'password-policy|password-complexity', negate: false, enabled: true, note: 'aaa 下的 password-policy' },
+      { id: 'hw-vtyacl', name: '必须配置 VTY 访问控制',    group: '认证与授权', pattern: 'acl\\s+\\d+', negate: false, enabled: true, note: 'user-interface vty 下 acl 编号' },
+      { id: 'hw-ssh',    name: '必须启用 SSH（stelnet）',  group: '服务与协议', pattern: 'stelnet server enable|ssh server enable', negate: false, enabled: true, note: 'stelnet server enable' },
+      { id: 'hw-telnet', name: '禁止启用 Telnet 服务',     group: '服务与协议', pattern: '^(?!\\s*undo\\b).*\\btelnet server enable', negate: true, enabled: true, note: 'undo 前缀与 stelnet server enable（SSH）不算违规' },
+      { id: 'hw-http',   name: '禁止启用 HTTP 管理服务',   group: '服务与协议', pattern: '^(?!\\s*undo\\b).*http server enable', negate: true, enabled: true, note: 'undo http server enable 不算违规' },
+      { id: 'hw-snmpv2', name: '禁止 SNMP v1/v2c community', group: '服务与协议', pattern: '^(?!\\s*undo\\b).*snmp-agent community', negate: true, enabled: true, note: 'undo snmp-agent community 不算违规' },
+      { id: 'hw-gw',     name: '必须配置默认路由',         group: '路由与网关', pattern: 'ip route-static 0\\.0\\.0\\.0', negate: false, enabled: true, note: 'ip route-static 0.0.0.0' }
+    ]
+  },
+  {
+    key: 'cisco', name: '思科 IOS 设备基线', desc: '按思科命令风格：aaa new-model/exec-timeout/access-class 等',
+    rules: [
+      { id: 'ci-ntp',    name: '必须配置 NTP',             group: '时间同步',   pattern: 'ntp server', negate: false, enabled: true, note: 'ntp server <主机>' },
+      { id: 'ci-log',    name: '必须配置日志主机',         group: '日志审计',   pattern: 'logging (?:host\\s+)?\\d', negate: false, enabled: true, note: 'logging <主机>' },
+      { id: 'ci-aaa',    name: '必须启用 AAA',             group: '认证与授权', pattern: 'aaa new-model', negate: false, enabled: true, note: 'aaa new-model' },
+      { id: 'ci-exec',   name: '必须配置登录超时',         group: '认证与授权', pattern: 'exec-timeout', negate: false, enabled: true, note: 'line vty 下 exec-timeout' },
+      { id: 'ci-pwd',    name: '必须启用密码复杂度策略',   group: '认证与授权', pattern: 'security passwords min-length', negate: false, enabled: true, note: 'security passwords min-length' },
+      { id: 'ci-acl',    name: '必须配置 VTY 访问控制',    group: '认证与授权', pattern: 'access-class', negate: false, enabled: true, note: 'line vty 下 access-class' },
+      { id: 'ci-banner', name: '必须配置登录警示 banner',  group: '认证与授权', pattern: 'banner', negate: false, enabled: true, note: 'banner motd/login' },
+      { id: 'ci-ssh',    name: '必须启用 SSH（VTY 仅 SSH）', group: '服务与协议', pattern: 'transport input ssh', negate: false, enabled: true, note: 'transport input ssh' },
+      { id: 'ci-telnet', name: '禁止 VTY 放行 Telnet',     group: '服务与协议', pattern: '^(?!\\s*no\\b).*transport input (?:telnet|all)', negate: true, enabled: true, note: 'no 前缀的关闭命令不算违规' },
+      { id: 'ci-http',   name: '禁止启用 HTTP 管理服务',   group: '服务与协议', pattern: '^(?!\\s*no\\b).*ip http server(?!\\s*secure)', negate: true, enabled: true, note: 'ip http secure-server（HTTPS）不算违规' },
+      { id: 'ci-snmpv2', name: '禁止 SNMP v1/v2c community', group: '服务与协议', pattern: '^(?!\\s*no\\b).*snmp-server community', negate: true, enabled: true, note: 'no 前缀的删除命令不算违规' },
+      { id: 'ci-gw',     name: '必须配置默认路由',         group: '路由与网关', pattern: 'ip route 0\\.0\\.0\\.0', negate: false, enabled: true, note: 'ip route 0.0.0.0' }
+    ]
+  },
+  {
+    key: 'access', name: '接入层交换机基线', desc: '无默认路由/VTY ACL 要求（接入层常缺省），保留安全底线',
+    rules: [
+      { id: 'ac-ntp',    name: '必须配置 NTP',             group: '时间同步',   pattern: 'ntp', negate: false, enabled: true, note: '存在 NTP 相关配置行' },
+      { id: 'ac-log',    name: '必须配置日志主机',         group: '日志审计',   pattern: 'info-center loghost|logging (?:host\\s+)?\\d', negate: false, enabled: true, note: '华为 info-center loghost / 思科 logging <主机>' },
+      { id: 'ac-aaa',    name: '必须启用 AAA',             group: '认证与授权', pattern: 'aaa', negate: false, enabled: true, note: '存在 AAA 配置段' },
+      { id: 'ac-idle',   name: '必须配置登录超时',         group: '认证与授权', pattern: 'idle-timeout|exec-timeout', negate: false, enabled: true, note: 'VTY/Console 空闲超时' },
+      { id: 'ac-pwd',    name: '必须启用密码复杂度策略',   group: '认证与授权', pattern: 'password policy|password-policy|password-complexity|security passwords min-length', negate: false, enabled: true, note: '密码复杂度/最小长度策略' },
+      { id: 'ac-telnet', name: '禁止启用 Telnet 服务',     group: '服务与协议', pattern: '^(?!\\s*(?:undo|no)\\b).*(?:\\btelnet server enable|transport input (?:telnet|all)|protocol inbound telnet)', negate: true, enabled: true, note: 'undo/no 前缀的关闭命令不算违规' },
+      { id: 'ac-http',   name: '禁止启用 HTTP 管理服务',   group: '服务与协议', pattern: '^(?!\\s*(?:undo|no)\\b).*(?:http server enable|ip http server(?!\\s*secure))', negate: true, enabled: true, note: 'undo/no 前缀不算违规；HTTPS 不算' },
+      { id: 'ac-snmpv2', name: '禁止 SNMP v1/v2c community', group: '服务与协议', pattern: '^(?!\\s*(?:undo|no)\\b).*(?:snmp(?:-agent)? community|snmp-server community)', negate: true, enabled: true, note: 'undo/no 前缀不算违规' }
+    ]
+  }
+];
+
+/* 规则对象 → 可持久化字段（剔除编译后的 re） */
+const complianceStorableRule = (r) => ({
+  id: r.id, name: r.name, pattern: r.pattern, negate: !!r.negate,
+  enabled: r.enabled !== false, group: typeof r.group === 'string' ? r.group.slice(0, 24) : '',
+  note: typeof r.note === 'string' ? r.note.slice(0, 128) : ''
+});
+
+/* ---------- 自定义合规模板（多套保存、按需加载；localStorage 持久化） ---------- */
+U.complianceTemplates = []; // [{name, rules:[{id,name,pattern,negate,enabled,group,note}]}]
+
+U.loadComplianceTemplates = () => {
+  let arr = [];
+  try {
+    const raw = JSON.parse(localStorage.getItem(COMPLIANCE_TPL_KEY) || 'null');
+    if (Array.isArray(raw)) arr = raw;
+  } catch (e) { arr = []; }
+  const seen = new Set();
+  U.complianceTemplates = (Array.isArray(arr) ? arr : []).map(t => {
+    if (!t || typeof t !== 'object') return null;
+    const name = typeof t.name === 'string' ? t.name.trim().slice(0, 32) : '';
+    if (!name || seen.has(name)) return null;
+    seen.add(name);
+    const rules = U.cleanComplianceRules(t.rules).map(complianceStorableRule);
+    return { name, rules };
+  }).filter(Boolean);
+  return U.complianceTemplates;
+};
+
+U.saveComplianceTemplates = () => {
+  try {
+    localStorage.setItem(COMPLIANCE_TPL_KEY, JSON.stringify(
+      U.complianceTemplates.map(t => ({ name: t.name, rules: t.rules.map(complianceStorableRule) }))
+    ));
+  } catch (e) { /* 存储超限忽略 */ }
+};
+
+/** 保存（或覆盖同名）一套自定义模板；规则经白名单清洗（最多 32 条），清洗后为空则不保存；返回模板数组 */
+U.saveComplianceTemplate = (name, rules) => {
+  name = String(name == null ? '' : name).trim().slice(0, 32);
+  if (!name) return U.complianceTemplates;
+  const clean = U.cleanComplianceRules(rules).map(complianceStorableRule);
+  if (!clean.length) return U.complianceTemplates; // 无有效规则（如正则全部非法）不落模板
+  U.loadComplianceTemplates();
+  const exist = U.complianceTemplates.find(t => t.name === name);
+  if (exist) exist.rules = clean;
+  else U.complianceTemplates.push({ name, rules: clean });
+  U.saveComplianceTemplates();
+  return U.complianceTemplates;
+};
+
+U.deleteComplianceTemplate = (name) => {
+  name = String(name == null ? '' : name).trim().slice(0, 32);
+  U.loadComplianceTemplates();
+  U.complianceTemplates = U.complianceTemplates.filter(t => t.name !== name);
+  U.saveComplianceTemplates();
+  return U.complianceTemplates;
+};
 
 /** 规则白名单清洗：id/名称/可编译正则/长度与数量上限；返回带编译后 re 的规则数组 */
 U.cleanComplianceRules = (raw) => {
