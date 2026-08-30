@@ -533,6 +533,92 @@ console.log('== 单点故障 / 故障影响分析 ==');
   eq(U.failureImpact(chainN, chainL, 'link', 'zz').redundant, null, '链路影响：不存在链路冗余为 null');
 }
 
+console.log('== 网段分析 ==');
+{
+  const mkN = (ids) => ids.map(i => ({ id: i, name: i.toUpperCase(), x: 0, y: 0, w: 160, h: 56 }));
+  // 基本：一条 /30 链路 → 1 个网段、2 台设备、1 条链路、无异常
+  const st1 = U.buildSubnetTable(
+    mkN(['r1', 'net']),
+    [{ id: 'l1', a: 'r1', b: 'net', aIf: 'GE0/0/0', aIp: '203.0.113.1', aMask: 30, bIf: 'eth0', bIp: '203.0.113.2', bMask: 30 }]
+  );
+  eq(st1.rows.length, 1, '网段分组：/30 链路归入一个网段');
+  const r1 = st1.rows[0];
+  eq(r1.cidr, '203.0.113.0/30', '网段 CIDR（按两端掩码位）');
+  eq(r1.mask, '255.255.255.252', '网段点分掩码');
+  eq(r1.used, 2, '已用 IP 数（去重）');
+  eq(r1.usable, 2, '/30 可用容量');
+  eq(r1.nodeIds.length, 2, '成员设备数');
+  eq(r1.linkIds.length, 1, '成员链路数');
+  eq(r1.srcIf, 2, '来源：接口地址 2 条');
+  eq(r1.flags.length, 0, '/30 满配不误报异常');
+
+  // 掩码缺省 /24；两端掩码不同 → 不同网段且区间相交（overlap）
+  const st2 = U.buildSubnetTable(
+    mkN(['a', 'b', 'c']),
+    [
+      { id: 'l1', a: 'a', b: 'b', aIp: '10.0.0.1', bIp: '10.0.0.2' },
+      { id: 'l2', a: 'b', b: 'c', aIp: '10.0.0.9', aMask: 30, bIp: '10.0.0.10', bMask: 30 }
+    ]
+  );
+  eq(st2.rows.length, 2, '不同掩码拆分不同网段');
+  const c124 = st2.rows.find(r => r.cidr === '10.0.0.0/24');
+  const c130 = st2.rows.find(r => r.cidr === '10.0.0.8/30');
+  ok(!!c124 && !!c130, '缺省掩码 /24 与 /30 分别成组');
+  ok(c124.flags.includes('overlap') && c130.flags.includes('overlap'), '子网区间相交 → 重叠异常');
+  ok(c124.overlaps.includes('10.0.0.8/30') && c130.overlaps.includes('10.0.0.0/24'), '重叠网段互相列出');
+
+  // SVI（VLAN 接口）来源与 VLAN 归属；SVI 掩码位生效
+  const nSvi = mkN(['sw']);
+  nSvi[0].vlans = [{ id: '10', ip: '192.168.10.1' }, { id: '20', ip: '10.10.0.1', mask: 16 }];
+  const st3 = U.buildSubnetTable(nSvi, []);
+  eq(st3.rows.length, 2, 'VLAN 接口各自成段');
+  const sv1 = st3.rows.find(r => r.cidr === '192.168.10.0/24');
+  const sv2 = st3.rows.find(r => r.cidr === '10.10.0.0/16');
+  ok(!!sv1 && sv1.srcSvi === 1 && sv1.vlanIds.includes(10), 'SVI 归组并携带 VLAN 编号');
+  ok(!!sv2 && sv2.bits === 16, 'SVI 掩码位生效（/16）');
+
+  // 管理地址按 /24 归组（无掩码信息）
+  const nMg = mkN(['r']);
+  nMg[0].mgmt = '10.255.0.1';
+  nMg[0].mgmts = ['10.255.1.1'];
+  const st4 = U.buildSubnetTable(nMg, []);
+  eq(st4.rows.length, 2, '多个管理地址分别归段');
+  ok(st4.rows.every(r => r.srcMgmt === 1 && r.srcIf === 0), '来源标记：管理');
+
+  // 接口 VLAN 表达式（10,20）计入网段 VLAN；非法 IP 忽略；空输入安全
+  const st5 = U.buildSubnetTable(
+    mkN(['a', 'b']),
+    [
+      { id: 'l1', a: 'a', b: 'b', aIp: '192.168.1.1', aVlan: '10,20', bIp: '192.168.1.2' },
+      { id: 'l2', a: 'a', b: 'b', aIp: '不是IP', bIp: '' }
+    ]
+  );
+  eq(st5.rows.length, 1, '非法/空 IP 不产生网段');
+  ok(st5.rows[0].vlanIds.join(',') === '10,20', '接口 VLAN 表达式计入网段 VLAN');
+
+  // 网段/广播地址误用（/30 内用 .0）与超容量
+  const st6 = U.buildSubnetTable(
+    mkN(['a', 'b', 'c']),
+    [
+      { id: 'l1', a: 'a', b: 'b', aIp: '192.168.0.1', bIp: '192.168.0.2', aMask: 30, bMask: 30 },
+      { id: 'l2', a: 'b', b: 'c', aIp: '192.168.0.3', bIp: '', aMask: 30 }
+    ]
+  );
+  ok(st6.rows[0].flags.includes('netbc'), '误用广播地址 → netbc');
+  ok(st6.rows[0].flags.includes('overcap'), '/30 用 3 个 IP → 超容量');
+  eq(st6.rows[0].used, 3, '超容量时已用计数正确');
+
+  // 排序：按网段地址数值升序（10.0.2.0 应排在 10.0.10.0 前，字符串序会排错）
+  const ips = ['10.0.10.1', '10.0.2.1', '10.0.1.1'];
+  const ls = ips.map((ip, i) => ({ id: 'l' + i, a: 'x' + i, b: 'y' + i, aIp: ip, bIp: '' }));
+  const st7 = U.buildSubnetTable(mkN(['x0', 'y0', 'x1', 'y1', 'x2', 'y2']), ls);
+  eq(st7.rows.map(r => r.cidr).join('|'), '10.0.1.0/24|10.0.2.0/24|10.0.10.0/24', '网段按数值序排列');
+
+  // stats 汇总
+  ok(st2.stats.subnetCount === 2 && st2.stats.ipCount === 4 && st2.stats.overlap === 2, 'stats 汇总计数');
+  eq(U.buildSubnetTable([], []).rows.length, 0, '空输入安全');
+}
+
 console.log('== 链路聚合标记 ==');
 {
   // 标注第三行携带聚合组名（画布/PDF/VSDX 共用 labelLines）

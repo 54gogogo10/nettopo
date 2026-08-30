@@ -480,6 +480,124 @@ function openIfTable() {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#iftFilter').focus(); }, 250);
 }
 
+/* ================= 网段分析（网段视角的 IP 总览与异常检测） =================
+ * 全部接口 IP / VLAN 接口 / 管理地址按 CIDR 归段：成员设备与链路、已用/可用与利用率、VLAN、来源；
+ * 检测网段重叠、网段/广播地址误用、超容量；点击行定位并金色高亮该网段全部成员。 */
+function focusNodeIds(ids) {
+  const set = new Set(ids || []);
+  const ns = state.nodes.filter(n => set.has(n.id));
+  if (!ns.length) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const n of ns) {
+    x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y);
+    x1 = Math.max(x1, n.x + n.w); y1 = Math.max(y1, n.y + n.h);
+  }
+  const r = $('#svg').getBoundingClientRect();
+  const w = Math.max(x1 - x0 + 180, 240), h = Math.max(y1 - y0 + 180, 240);
+  const z = U.clamp(Math.min(r.width / w, r.height / h), 0.12, 1.4);
+  renderer.setView({ x: r.width / 2 - (x0 + x1) / 2 * z, y: r.height / 2 - (y0 + y1) / 2 * z }, z);
+}
+
+function openSubnetAnalysis() {
+  const { rows, stats } = U.buildSubnetTable(state.nodes, state.links);
+  if (!rows.length) { toast('当前拓扑没有可分析的 IP 地址（先为连线接口或设备配置 IP）'); return; }
+  const nameOf = (id) => { const n = state.nodes.find(x => x.id === id); return n ? n.name : '?'; };
+  const flagText = (r) => {
+    const t = [];
+    if (r.flags.includes('overlap')) t.push(`与网段重叠：${r.overlaps.join('、')}（掩码规划冲突，请复核）`);
+    if (r.flags.includes('netbc')) t.push('有接口 IP 误用网段地址或广播地址');
+    if (r.flags.includes('overcap')) t.push(`已用 IP 数超过可用容量（${r.used}/${r.usable}）`);
+    return t.join('；');
+  };
+  const badCount = stats.overlap + stats.netbc + stats.overcap;
+  const sumHtml = badCount
+    ? `<span style="color:var(--danger)">发现异常：${stats.overlap ? `网段重叠 ${stats.overlap} ` : ''}${stats.netbc ? `地址误用 ${stats.netbc} ` : ''}${stats.overcap ? `超容量 ${stats.overcap}` : ''}（状态列悬停查看详情）</span>`
+    : '<span style="color:#10b981">未发现网段异常（重叠 / 地址误用 / 超容量）</span>';
+  const srcText = (r) => [
+    r.srcIf ? `接口 ${r.srcIf}` : '', r.srcSvi ? `VLAN接口 ${r.srcSvi}` : '', r.srcMgmt ? `管理 ${r.srcMgmt}` : ''
+  ].filter(Boolean).join(' · ');
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1020px;height:82vh;display:flex;flex-direction:column">
+      <h3>网段分析</h3>
+      <div class="m-sub">${stats.subnetCount} 个网段 · ${stats.ipCount} 个地址（接口 / VLAN 接口 / 管理地址，管理地址无掩码信息按 /24 归组）；${sumHtml}；<b>点击行定位并金色高亮该网段全部成员</b></div>
+      <div class="frow" style="display:flex;gap:10px;align-items:center;margin-bottom:6px">
+        <input id="sntFilter" type="text" placeholder="筛选：网段 / VLAN / 设备名 / 来源…" style="flex:1"/>
+        <span style="font-size:11.5px;color:var(--muted)">高亮可用「显示 ▾ 清除路径高亮」或下方按钮清除</span>
+      </div>
+      <div id="sntBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="csv">导出 CSV</button>
+        <button type="button" class="tb" data-act="clear">清除高亮</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => { ov.remove(); renderer.clearPath(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.querySelector('[data-act=clear]').onclick = () => renderer.clearPath();
+  const bodyEl = ov.querySelector('#sntBody');
+  const locate = (r) => {
+    renderer.highlightPath(r.nodeIds, r.linkIds);
+    focusNodeIds(r.nodeIds);
+  };
+  const rowHtml = (r, i) => {
+    const bad = r.flags.length > 0;
+    const utilPct = Math.round(r.util * 100);
+    const flagLines = [
+      r.overlaps.length ? `重叠 ${U.escHtml(r.overlaps.join('、'))}` : '',
+      r.flags.includes('netbc') ? '误用网段/广播地址' : '',
+      r.flags.includes('overcap') ? `超容量 ${r.used}/${r.usable}` : ''
+    ].filter(Boolean);
+    return `
+    <tr data-i="${i}" style="cursor:pointer" title="${U.escHtml(flagText(r) || '点击定位并高亮该网段成员')}">
+      <td style="text-align:center;color:${bad ? 'var(--danger)' : 'var(--muted)'}">${bad ? '!' : '·'}</td>
+      <td><b>${U.escHtml(r.cidr)}</b>${flagLines.length ? `<div style="font-size:11px;color:var(--danger)">${flagLines.join('<br/>')}</div>` : ''}</td>
+      <td>${U.escHtml(r.mask)}</td>
+      <td>${U.escHtml(r.vlanIds.join(', ')) || '—'}</td>
+      <td style="text-align:center">${r.nodeIds.length}</td>
+      <td style="text-align:center">${r.linkIds.length}</td>
+      <td style="text-align:center">${r.used}/${r.usable}</td>
+      <td style="text-align:center;${utilPct > 100 ? 'color:var(--danger)' : utilPct >= 80 ? 'color:#f59e0b' : ''}">${utilPct}%</td>
+      <td>${U.escHtml(srcText(r))}</td>
+    </tr>`;
+  };
+  const render = () => {
+    const q = ov.querySelector('#sntFilter').value.trim().toLowerCase();
+    const list = rows.map((r, i) => ({ r, i })).filter(({ r }) => !q
+      || [r.cidr, r.vlanIds.join(' '), srcText(r), r.nodeIds.map(nameOf).join(' ')]
+        .some(v => v && String(v).toLowerCase().includes(q)));
+    bodyEl.innerHTML = list.length
+      ? `<table class="ift-table"><thead><tr><th>状态</th><th>网段</th><th>掩码</th><th>VLAN</th><th>设备</th><th>链路</th><th>已用/可用</th><th>利用率</th><th>来源</th></tr></thead><tbody>${list.map(({ r, i }) => rowHtml(r, i)).join('')}</tbody></table>`
+      : '<div class="bk-empty">无匹配网段</div>';
+    bodyEl.querySelectorAll('tr[data-i]').forEach(tr => {
+      tr.addEventListener('click', () => locate(rows[+tr.dataset.i]));
+    });
+  };
+  render();
+  ov.querySelector('#sntFilter').addEventListener('input', render);
+  ov.querySelector('[data-act=csv]').onclick = () => {
+    const data = [['网段', '掩码', 'VLAN', '设备数', '链路数', '已用IP', '可用地址', '利用率%', '接口地址', 'VLAN接口', '管理地址', '异常', '重叠网段', '成员设备']];
+    for (const r of rows) {
+      data.push([
+        r.cidr, r.mask, r.vlanIds.join(' '), String(r.nodeIds.length), String(r.linkIds.length),
+        String(r.used), String(r.usable), String(Math.round(r.util * 100)),
+        String(r.srcIf), String(r.srcSvi), String(r.srcMgmt),
+        flagText(r) || '', r.overlaps.join('、'), r.nodeIds.map(nameOf).join('、')
+      ]);
+    }
+    U.download(`网段分析_${U.fmtDate()}.csv`, new Blob([U.buildCSV(data)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出网段分析 CSV');
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#sntFilter').focus(); }, 250);
+}
+
 /* ================= 自动布局 ================= */
 function autoLayout() {
   if (!state.nodes.length) return;
@@ -3984,7 +4102,7 @@ function openHelp() {
     <h4>④ 工具栏菜单</h4>
     <p><b>文件</b>：新建 / 导入表格 / 从邻居表导入（LLDP/CDP）/ 示例 / 保存工程(.nettopo) / 打开工程 / 对比工程 / 自动备份 / 备份管理。</p>
     <p><b>编辑</b>：添加设备 / 连线 / 文本框 / 区域、从模板添加设备、对齐分布、批量重命名、IP 批量改段、IP 子网计算器、<b>接口总表</b>、类型管理、删除选中。区域为背景分组框：设备拖入框内即归入区域，拖动区域整体移动，双击区域编辑名称/颜色/尺寸。</p>
-    <p><b>布局</b>：力导向 / 环形 / 分层（按类型）/ 三层架构 / 拓扑分层（最少交叉）/ 网格布局、适应视图、路径分析、拓扑校验。</p>
+    <p><b>布局</b>：力导向 / 环形 / 分层（按类型）/ 三层架构 / 拓扑分层（最少交叉）/ 网格布局、适应视图、路径分析、网段分析、拓扑校验。</p>
     <p><b>显示</b>：链路标注、子网分组、清除故障标记、清除路径高亮。</p>
     <p><b>导出</b>：CSV / Excel / <b>资产清单（Excel）</b> / PDF / 图片(PNG/SVG) / 复制图片 / Visio / 设计报告 / 生成设备配置 / IP 规划清单。</p>
     <h4>⑤ 设备与连线</h4>
@@ -3992,8 +4110,8 @@ function openHelp() {
     <p><b>连线</b>可配置接口 / IP / 带宽 / 备注 / <b>聚合组</b>；带宽以 Mbps 数值保存，图上用颜色标识（100M 灰 / 1G 蓝 / 10G 紫 / 40G 橙 / 100G 红）；右键连线可<b>标记故障</b>（模拟断链，路径分析自动绕行）。</p>
     <p><b>链路聚合</b>：编辑连线填「聚合组」（如 Eth-Trunk1 / Port-Channel1），或右键连线「与平行链路组成聚合组」、多选连线批量设置。同一对设备间<b>同名聚合组</b>的平行链路视为链路聚合：拓扑校验不再提示平行链路、路径分析按<b>成员带宽之和</b>计算容量（成员故障按剩余容量，全部故障则链路不可用）、链路标注第三行显示聚合名并同步 PDF/PNG/Visio 导出。</p>
     <p><b>接口总表</b>（「编辑 ▾ 接口总表…」）：全部链路两端接口集中成一张可筛选表格，直接修改接口 / IP / 掩码 / VLAN / 聚合组 / 二层后点「应用修改」一次写入（一个撤销步骤），支持导出 CSV——批量改 IP 时不用逐台双击。</p>
-    <h4>⑥ 路径分析 / 拓扑校验 / 单点故障分析</h4>
-    <p><b>路径分析</b>：选两台设备按带宽优选最宽路径并高亮（显示瓶颈带宽），故障链路自动绕行，聚合组按成员带宽之和参与计算。<b>拓扑校验</b>：一键检查重复 IP / 接口 / 管理地址、孤立设备、环路、平行链路、跨网段等，报告内可点击定位；同名聚合组的平行链路视为正常组网不再提示。<b>单点故障分析</b>（布局菜单）：一键找出单点设备（故障拆散网络）与无冗余关键链路，点击条目定位并红色高亮受影响设备；右键设备/连线「故障影响分析」可模拟任一单点故障：查看失联区域（红色高亮），或存在冗余路径时高亮最短绕行路径（金色）。</p>
+    <h4>⑥ 路径分析 / 网段分析 / 拓扑校验 / 单点故障分析</h4>
+    <p><b>路径分析</b>：选两台设备按带宽优选最宽路径并高亮（显示瓶颈带宽），故障链路自动绕行，聚合组按成员带宽之和参与计算。<b>网段分析</b>（布局菜单）：全部接口 IP / VLAN 接口 / 管理地址按网段汇总——成员设备与链路、已用/可用地址与利用率、VLAN、来源；自动检测<b>网段重叠</b>（不同掩码规划冲突）、<b>网段/广播地址误用</b>与<b>超容量</b>，点击行定位并金色高亮该网段全部成员，支持导出 CSV（管理地址无掩码信息，按 /24 归组）。<b>拓扑校验</b>：一键检查重复 IP / 接口 / 管理地址、孤立设备、环路、平行链路、跨网段等，报告内可点击定位；同名聚合组的平行链路视为正常组网不再提示。<b>单点故障分析</b>（布局菜单）：一键找出单点设备（故障拆散网络）与无冗余关键链路，点击条目定位并红色高亮受影响设备；右键设备/连线「故障影响分析」可模拟任一单点故障：查看失联区域（红色高亮），或存在冗余路径时高亮最短绕行路径（金色）。</p>
     <h4>⑦ Web Shell（桌面版）</h4>
     <p>右键设备「Web Shell（SSH/Telnet）…」连接管理口（多管理口可下拉选择）；在<b>独立窗口</b>以<b>多标签</b>管理多台设备，主界面不锁定。终端支持：选中即复制、Ctrl+Shift+C/V 复制粘贴、右键菜单、字号调节（A−/A+ 或 Ctrl+-/Ctrl+=）、底部<b>快捷按钮条</b>（右键或「＋」新建，内容支持 \n 回车、\t 制表、\p 暂停 1 秒）。SSH 主机密钥以 SHA256 指纹展示。</p>
     <h4>⑧ 设备管理 Web 页（桌面版）</h4>
@@ -4123,6 +4241,7 @@ function wire() {
       toast(state.orthoLinks ? '已切换为直角布线（PDF/PNG 导出同步）' : '已切换为直线布线');
     } },
     { ic: 'locate', label: '路径分析…', act: openPathAnalysis },
+    { ic: 'grid', label: '网段分析…', act: openSubnetAnalysis },
     { sep: true },
     { ic: 'shield', label: '拓扑校验', act: runValidation },
     { ic: 'shield', label: '单点故障分析', act: openSpofAnalysis }

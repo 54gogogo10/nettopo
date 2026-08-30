@@ -2135,6 +2135,111 @@ U.ipPlan = (nodes, links) => {
   return { rows, subnets };
 };
 
+/* ---------- 网段分析（网段视角的 IP 总览；纯函数，Node 测试可调用） ----------
+ * 地址来源：链路两端接口 IP（各按其掩码位，缺省 /24；二层接口无 IP 不参与）、
+ * 设备三层 VLAN 接口（n.vlans：{id, ip, mask?}）、设备管理地址（无掩码信息，按 /24 归组）。
+ * 按 CIDR 精确分组，每组：成员设备/链路、已用 IP（去重）/可用容量、VLAN、来源构成；
+ * 异常 flags：overlap 与其他网段区间相交（不同掩码规划冲突）、netbc 误用网段/广播地址（/30 及以下）、
+ * overcap 已用 IP 数超过可用容量。返回 { rows, stats }，rows 按网段地址数值升序。 */
+U.buildSubnetTable = (nodes, links) => {
+  nodes = Array.isArray(nodes) ? nodes : [];
+  links = Array.isArray(links) ? links : [];
+  const groups = new Map(); // cidr -> 组
+  const bitsOf = (v) => {
+    const b = parseInt(v, 10);
+    return Number.isFinite(b) && b >= 0 && b <= 32 ? b : 24;
+  };
+  const add = (rawIp, bits, ent, vlans) => {
+    const ip = String(rawIp || '').trim();
+    const b = bitsOf(bits);
+    const cidr = U.subnetOf(ip, b);
+    if (!cidr) return null;
+    let g = groups.get(cidr);
+    if (!g) {
+      const calc = U.subnetCalc(ip, b);
+      g = {
+        cidr, bits: b, netInt: U.ipv4ToInt(calc.network), bcInt: U.ipv4ToInt(calc.broadcast),
+        mask: calc.mask, usable: calc.usable,
+        entries: [], nodeIds: new Set(), linkIds: new Set(), vlanIds: new Set(),
+        ipSet: new Set(), srcIf: 0, srcSvi: 0, srcMgmt: 0
+      };
+      groups.set(cidr, g);
+    }
+    g.entries.push(Object.assign({ ip }, ent));
+    g.ipSet.add(U.ipv4ToInt(ip));
+    if (ent.nodeId) g.nodeIds.add(ent.nodeId);
+    if (ent.linkId) g.linkIds.add(ent.linkId);
+    if (ent.source === 'svi') g.srcSvi++;
+    else if (ent.source === 'mgmt') g.srcMgmt++;
+    else g.srcIf++;
+    for (const v of vlans || []) g.vlanIds.add(v);
+    return g;
+  };
+
+  for (const l of links) {
+    if (!l) continue;
+    for (const side of ['a', 'b']) {
+      const ip = String(l[side + 'Ip'] || '').trim();
+      if (!ip) continue;
+      add(ip, l[side + 'Mask'], {
+        source: 'if', nodeId: l[side],
+        ifn: String(l[side + 'If'] || '').trim() || '?', linkId: l.id
+      }, U.parseVlans(l[side + 'Vlan']));
+    }
+  }
+  for (const n of nodes) {
+    if (!n) continue;
+    for (const v of (Array.isArray(n.vlans) ? n.vlans : [])) {
+      if (!v || !v.ip) continue;
+      add(v.ip, v.mask, { source: 'svi', nodeId: n.id, ifn: 'VLAN' + (v.id || '?'), linkId: '' }, U.parseVlans(v.id));
+    }
+    for (const ip of U.nodeMgmts(n)) {
+      add(ip, 24, { source: 'mgmt', nodeId: n.id, ifn: '管理', linkId: '' }, []);
+    }
+  }
+
+  const rows = [...groups.values()].map((g) => {
+    const flags = [];
+    if (g.ipSet.size > g.usable) flags.push('overcap');
+    if (g.bits <= 30) {
+      for (const e of g.entries) {
+        const t = U.ipv4ToInt(e.ip);
+        if (t === g.netInt || t === g.bcInt) { flags.push('netbc'); break; }
+      }
+    }
+    return {
+      cidr: g.cidr, bits: g.bits, mask: g.mask,
+      netInt: g.netInt, bcInt: g.bcInt, usable: g.usable,
+      used: g.ipSet.size, util: g.usable > 0 ? g.ipSet.size / g.usable : 0,
+      vlanIds: [...g.vlanIds].sort((x, y) => x - y),
+      nodeIds: [...g.nodeIds], linkIds: [...g.linkIds],
+      srcIf: g.srcIf, srcSvi: g.srcSvi, srcMgmt: g.srcMgmt,
+      entries: g.entries, flags, overlaps: []
+    };
+  });
+  rows.sort((x, y) => x.netInt - y.netInt || y.bits - x.bits);
+
+  // 网段重叠：已按网段地址升序，右侧网段起点不超过左侧广播地址即区间相交（相同 CIDR 已合并为一组）
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = i + 1; j < rows.length; j++) {
+      if (rows[j].netInt > rows[i].bcInt) break;
+      rows[i].overlaps.push(rows[j].cidr);
+      rows[j].overlaps.push(rows[i].cidr);
+      if (!rows[i].flags.includes('overlap')) rows[i].flags.push('overlap');
+      if (!rows[j].flags.includes('overlap')) rows[j].flags.push('overlap');
+    }
+  }
+
+  const stats = {
+    subnetCount: rows.length,
+    ipCount: rows.reduce((s, r) => s + r.entries.length, 0),
+    overlap: rows.filter(r => r.flags.includes('overlap')).length,
+    netbc: rows.filter(r => r.flags.includes('netbc')).length,
+    overcap: rows.filter(r => r.flags.includes('overcap')).length
+  };
+  return { rows, stats };
+};
+
 /* Excel 设备名合并区间：同一台设备的连续行合并（数据行从第 1 行起，设备名列 = 0） */
 U.deviceMergeRanges = (rows) => {
   const merges = [];
