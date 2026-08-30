@@ -843,6 +843,270 @@ const puppeteer = require('puppeteer-core');
     if (!fbOk) errors.push('[fallback] 浏览器降级提示缺失: ' + JSON.stringify(fb));
   }
 
+  // ---- 删除级联 + 多步撤销/重做（键盘 Delete + 右键删除 + btnUndo/btnRedo） ----
+  {
+    await page.evaluate(() => {
+      window.__topo.loadGraph({
+        // 坐标全部非零：loadGraph 以 n.x||n.y 判定「全部带坐标」，含 (0,0) 会触发自动布局动画导致视图/位置不确定
+        nodes: [
+          { id: 'da', name: '级联A', type: 'switch', x: 120, y: 80, w: 160, h: 56 },
+          { id: 'db', name: '级联B', type: 'switch', x: 520, y: 80, w: 160, h: 56 },
+          { id: 'dc', name: '级联C', type: 'switch', x: 920, y: 80, w: 160, h: 56 }
+        ],
+        links: [{ id: 'dl1', a: 'da', b: 'db' }, { id: 'dl2', a: 'db', b: 'dc' }],
+        texts: []
+      }, 'e2e');
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    // 点击选中中间节点 → Delete 键 → 级联删除其 2 条连线。
+    // 选中用合成 pointerdown/up（与 app.onDown 同一处理链）；真实 mouse.click 在长序列下会受
+    // 前序用例指针状态影响出现视图漂移（单跑无此现象），该路径已由开头「节点选中/拖拽」用例覆盖。
+    const selOk = await page.evaluate(() => {
+      const b = window.__topo.state.nodes.find(n => n.name === '级联B');
+      const el = document.querySelector('g.node[data-id="' + b.id + '"]');
+      const r = el.getBoundingClientRect();
+      const ev = { bubbles: true, cancelable: true, pointerId: 5, pointerType: 'mouse', isPrimary: true, clientX: r.left + 10, clientY: r.top + 10, buttons: 1 };
+      el.dispatchEvent(new PointerEvent('pointerdown', ev));
+      el.dispatchEvent(new PointerEvent('pointerup', { ...ev, buttons: 0 }));
+      return window.__topo.state.sel && window.__topo.state.sel.id === b.id;
+    });
+    await page.keyboard.press('Delete');
+    await new Promise(r => setTimeout(r, 250));
+    const del = await page.evaluate(() => ({ nodes: window.__topo.state.nodes.length, links: window.__topo.state.links.length }));
+    await page.evaluate(() => document.getElementById('btnUndo').click());
+    await new Promise(r => setTimeout(r, 250));
+    const undone = await page.evaluate(() => ({ nodes: window.__topo.state.nodes.length, links: window.__topo.state.links.length }));
+    await page.evaluate(() => document.getElementById('btnRedo').click());
+    await new Promise(r => setTimeout(r, 250));
+    const redone = await page.evaluate(() => ({ nodes: window.__topo.state.nodes.length, links: window.__topo.state.links.length }));
+    // 右键删除端点设备 → 撤销还原
+    await page.evaluate(() => {
+      const a = window.__topo.state.nodes.find(n => n.name === '级联A');
+      const r = document.querySelector('g.node[data-id="' + a.id + '"]').getBoundingClientRect();
+      document.querySelector('g.node[data-id="' + a.id + '"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 10, clientY: r.top + 10 }));
+    });
+    await new Promise(r => setTimeout(r, 150));
+    await page.evaluate(() => {
+      const t = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('删除设备及连线'));
+      if (t) t.click();
+    });
+    await new Promise(r => setTimeout(r, 250));
+    const ctxDel = await page.evaluate(() => window.__topo.state.nodes.length);
+    await page.evaluate(() => document.getElementById('btnUndo').click());
+    await new Promise(r => setTimeout(r, 250));
+    const ctxUndone = await page.evaluate(() => window.__topo.state.nodes.length);
+    // 重做后画布剩 级联A/级联C 两台：右键删 A → 1 台，撤销还原 → 2 台
+    const delOk = selOk && del.nodes === 2 && del.links === 0 && undone.nodes === 3 && undone.links === 2
+      && redone.nodes === 2 && redone.links === 0 && ctxDel === 1 && ctxUndone === 2;
+    console.log('删除级联+撤销重做:', delOk ? 'OK' : 'FAIL', JSON.stringify({ del, undone, redone, ctxDel, ctxUndone }));
+    if (!delOk) errors.push('[delete] 删除级联/撤销重做不符合预期: ' + JSON.stringify({ del, undone, redone, ctxDel, ctxUndone }));
+  }
+
+  // ---- 平行链路校验提示 → 右键组成聚合组后豁免（校验联动集成） ----
+  {
+    await page.evaluate(() => {
+      window.__topo.loadGraph({
+        nodes: [
+          { id: 'pa', name: '并联A', type: 'switch', x: 0, y: 0, w: 160, h: 56 },
+          { id: 'pb', name: '并联B', type: 'switch', x: 600, y: 0, w: 160, h: 56 }
+        ],
+        links: [
+          { id: 'pl1', a: 'pa', b: 'pb', aIf: 'GE0/0/1', bIf: 'GE0/0/1' },
+          { id: 'pl2', a: 'pa', b: 'pb', aIf: 'GE0/0/2', bIf: 'GE0/0/2' }
+        ],
+        texts: []
+      }, 'e2e');
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    await clickMenuItem('btnDropLayout', '拓扑校验');
+    await new Promise(r => setTimeout(r, 250));
+    const rep1 = await page.evaluate(() => [...document.querySelectorAll('#modalRoot .overlay .v-msg')].map(v => v.textContent));
+    await closeOverlay();
+    // 右键其中一条连线 → 「与平行链路组成聚合组…」→ 命名提交 → 两条平行链路同组
+    await page.evaluate(() => {
+      const l = window.__topo.state.links[0];
+      const el = document.querySelector('g.link[data-id="' + l.id + '"]');
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 }));
+    });
+    await new Promise(r => setTimeout(r, 150));
+    const aggItem = await page.evaluate(() => {
+      const t = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('组成聚合组'));
+      if (t) t.click();
+      return !!t;
+    });
+    await new Promise(r => setTimeout(r, 250));
+    await page.evaluate(() => {
+      const inp = document.querySelector('#modalRoot .overlay input[name="agg"]');
+      inp.value = 'Eth-Trunk1';
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#modalRoot .overlay button[type=submit]').click();
+    });
+    await new Promise(r => setTimeout(r, 300));
+    const aggs = await page.evaluate(() => window.__topo.state.links.map(l => l.agg));
+    await clickMenuItem('btnDropLayout', '拓扑校验');
+    await new Promise(r => setTimeout(r, 250));
+    const rep2 = await page.evaluate(() => [...document.querySelectorAll('#modalRoot .overlay .v-msg')].map(v => v.textContent));
+    await closeOverlay();
+    const aggOk = rep1.some(t => t.includes('平行链路')) && aggItem && aggs.length === 2 && aggs.every(a => a === 'Eth-Trunk1')
+      && !rep2.some(t => t.includes('平行链路'));
+    console.log('聚合组校验豁免:', aggOk ? 'OK' : 'FAIL', JSON.stringify({ before: rep1.length, aggs, after: rep2.length }));
+    if (!aggOk) errors.push('[agg] 聚合组标记后平行链路提示未豁免: ' + JSON.stringify({ rep1, aggs, rep2 }));
+  }
+
+  // ---- 保存工程：下载拦截 + 文件内容断言（导出管线集成） ----
+  {
+    const dlDir = path.join(__dirname, '_e2e-dl');
+    require('fs').rmSync(dlDir, { recursive: true, force: true });
+    require('fs').mkdirSync(dlDir, { recursive: true });
+    const client = await page.createCDPSession();
+    await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dlDir });
+    await clickMenuItem('btnDropFile', '保存工程');
+    await new Promise(r => setTimeout(r, 250));
+    await page.evaluate(() => document.querySelector('#modalRoot .overlay [data-act=save]').click());
+    await new Promise(r => setTimeout(r, 1200));
+    const files = require('fs').readdirSync(dlDir).filter(f => f.endsWith('.nettopo'));
+    let saved = null;
+    if (files.length) {
+      const data = JSON.parse(require('fs').readFileSync(path.join(dlDir, files[0]), 'utf8'));
+      saved = { nodes: (data.nodes || []).length, links: (data.links || []).length, ver: data.ver || data.version || '' };
+    }
+    client.detach();
+    require('fs').rmSync(dlDir, { recursive: true, force: true });
+    const saveOk = files.length === 1 && saved && saved.nodes === 2 && saved.links === 2;
+    console.log('保存工程下载:', saveOk ? 'OK' : 'FAIL', JSON.stringify({ files, saved }));
+    if (!saveOk) errors.push('[save] 保存工程未产出有效文件: ' + JSON.stringify({ files, saved }));
+  }
+
+  // ---- 接口总表 CSV 导出：下载拦截 + 表头/行数内容断言 ----
+  {
+    await page.evaluate(() => { window.__topo.loadSample(); });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 1500));
+    const dlDir = path.join(__dirname, '_e2e-dl');
+    require('fs').rmSync(dlDir, { recursive: true, force: true });
+    require('fs').mkdirSync(dlDir, { recursive: true });
+    const client = await page.createCDPSession();
+    await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dlDir });
+    await clickMenuItem('btnDropEdit', '接口总表');
+    await new Promise(r => setTimeout(r, 250));
+    const rowCount = await page.evaluate(() => document.querySelectorAll('#modalRoot .overlay #iftBody tr[data-key]').length);
+    await page.evaluate(() => document.querySelector('#modalRoot .overlay [data-act=csv]').click());
+    await new Promise(r => setTimeout(r, 1200));
+    const files = require('fs').readdirSync(dlDir).filter(f => f.endsWith('.csv'));
+    let csv = null;
+    if (files.length) {
+      const lines = require('fs').readFileSync(path.join(dlDir, files[0]), 'utf8').trim().split(/\r?\n/);
+      csv = { lines: lines.length, head: lines[0] };
+    }
+    await closeOverlay();
+    client.detach();
+    require('fs').rmSync(dlDir, { recursive: true, force: true });
+    const csvOk = files.length === 1 && csv && csv.lines === rowCount + 1 && csv.head.includes('设备') && csv.head.includes('聚合组');
+    console.log('接口总表 CSV 导出:', csvOk ? 'OK' : 'FAIL', JSON.stringify({ rowCount, files, csv }));
+    if (!csvOk) errors.push('[csvexport] 接口总表 CSV 导出内容不符: ' + JSON.stringify({ rowCount, files, csv }));
+  }
+
+  // ---- Excel（xlsx）导入管线：Node 侧用内置 xlsx 库生成文件 → 文件选择器上传 ----
+  {
+    await page.evaluate(() => { window.__topo.newGraph(); });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    const XLSX = require(path.join(__dirname, '..', 'lib', 'xlsx.full.min.js'));
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['源设备', '源接口', '源IP', '目标设备', '目标接口', '目标IP'],
+      ['ExcelA', 'GE0/0/1', '10.9.1.1', 'ExcelB', 'GE0/0/2', '10.9.1.2'],
+      ['ExcelB', 'GE0/0/24', '10.9.2.2', 'ExcelC', 'GE0/0/1', '10.9.2.1']
+    ]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '拓扑');
+    const tmpX = path.join(__dirname, '_e2e-import.xlsx');
+    require('fs').writeFileSync(tmpX, XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }));
+    await page.$eval('input#fileInput', (el) => { el.value = ''; });
+    const fileInput = await page.$('input#fileInput');
+    await fileInput.uploadFile(tmpX);
+    await new Promise(r => setTimeout(r, 700));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 600));
+    const imp = await page.evaluate(() => {
+      const st = window.__topo.state;
+      return {
+        names: st.nodes.map(n => n.name).sort(),
+        links: st.links.map(l => l.aIp + '>' + l.bIf).sort()
+      };
+    });
+    require('fs').unlinkSync(tmpX);
+    const impOk = imp.names.length === 3 && imp.names.includes('ExcelA') && imp.names.includes('ExcelC')
+      && imp.links.length === 2 && imp.links.every(s => s.includes('10.9.1.1') || s.includes('10.9.2.2'));
+    console.log('Excel 导入:', impOk ? 'OK' : 'FAIL', JSON.stringify(imp));
+    if (!impOk) errors.push('[xlsx] Excel 导入未生效: ' + JSON.stringify(imp));
+  }
+
+  // ---- 接口总表勾「二层」清空 IP（与连线弹窗口径一致的集成验证） ----
+  {
+    await page.evaluate(() => {
+      window.__topo.loadGraph({
+        nodes: [
+          { id: 'l2a', name: '二层A', type: 'switch', x: 0, y: 0, w: 160, h: 56 },
+          { id: 'l2b', name: '二层B', type: 'switch', x: 400, y: 0, w: 160, h: 56 }
+        ],
+        links: [{ id: 'l2l', a: 'l2a', b: 'l2b', aIf: 'GE0/0/1', aIp: '10.5.0.1', bIf: 'GE0/0/2' }],
+        texts: []
+      }, 'e2e');
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    await clickMenuItem('btnDropEdit', '接口总表');
+    await new Promise(r => setTimeout(r, 250));
+    await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('#modalRoot .overlay #iftBody tr[data-key]')];
+      const tr = rows.find(r => r.querySelector('input[data-f=ip]').value);
+      const cb = tr.querySelector('input[data-f=l2]');
+      cb.checked = true;
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.evaluate(() => document.querySelector('#modalRoot .overlay [data-act=apply]').click());
+    await new Promise(r => setTimeout(r, 300));
+    const l2res = await page.evaluate(() => {
+      const l = window.__topo.state.links[0];
+      return { aIp: l.aIp, aL2: l.aL2, aIf: l.aIf };
+    });
+    const l2Ok = l2res.aIp === '' && l2res.aL2 === true && l2res.aIf === 'GE0/0/1';
+    console.log('二层勾选清 IP:', l2Ok ? 'OK' : 'FAIL', JSON.stringify(l2res));
+    if (!l2Ok) errors.push('[l2] 勾二层未清空 IP: ' + JSON.stringify(l2res));
+  }
+
+  // ---- 主题切换：暗色 attribute 应用 + 描边颜色随主题变化（:where() 特异性回归） ----
+  {
+    const before = await page.evaluate(() => ({
+      theme: document.documentElement.getAttribute('data-theme'),
+      stroke: getComputedStyle(document.querySelector('g.node .shape')).stroke
+    }));
+    await page.evaluate(() => document.getElementById('btnTheme').click());
+    await new Promise(r => setTimeout(r, 150));
+    const dark = await page.evaluate(() => ({
+      theme: document.documentElement.getAttribute('data-theme'),
+      stroke: getComputedStyle(document.querySelector('g.node .shape')).stroke
+    }));
+    await page.evaluate(() => document.getElementById('btnTheme').click());
+    await new Promise(r => setTimeout(r, 150));
+    const back = await page.evaluate(() => ({
+      theme: document.documentElement.getAttribute('data-theme'),
+      stroke: getComputedStyle(document.querySelector('g.node .shape')).stroke
+    }));
+    const themeOk = before.theme === 'light' && dark.theme === 'dark' && dark.stroke.startsWith('rgba(0, 0, 0')
+      && back.theme === 'light' && back.stroke.startsWith('rgba(15, 23, 42');
+    console.log('主题切换描边:', themeOk ? 'OK' : 'FAIL', JSON.stringify({ before, dark, back }));
+    if (!themeOk) errors.push('[theme] 主题切换描边未生效: ' + JSON.stringify({ before, dark, back }));
+  }
+
   // ---- 区域慢速拖动（回归：moved 须按累计位移判定，慢速拖动也要有撤销点） ----
   // 重新载入示例 → 建一个罩住首台设备的区域 → 1px/步 慢速拖动（合成 pointer 事件，避开上层链路命中层）→ 断言区域被移动且 Ctrl+Z 能还原
   await page.evaluate(() => { window.__topo.loadSample(); });

@@ -167,7 +167,7 @@ nettopo/
 
 ```bash
 node test/run-tests.js        # 805 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、多管理口、数据清洗、布局、路径、单点故障、网段分析、链路聚合、邻居表解析、接口总表、备份库、子网计算、快速搜索、区域容器、SNMP ifTable/性能采集与响应校验、合规模板、加载防重合、性能、回归）
-cd test && npm i && node e2e.js   # 无头 Chrome 端到端集成测试（需本机 Chrome）：画布编辑/拖拽撤销、CSV 导入、邻居表导入、接口总表、网段分析、单点故障/故障影响、快速搜索、多图纸、浏览器降级等
+cd test && npm i && node e2e.js   # 无头 Chrome 端到端集成测试（需本机 Chrome）：画布编辑/拖拽撤销、删除级联与多步撤销重做、CSV/Excel 导入、保存工程与 CSV 导出内容断言、邻居表导入、接口总表（编辑应用/二层清 IP）、网段分析、单点故障/故障影响、聚合组校验豁免、快速搜索、多图纸、主题切换、浏览器降级等
 node test/gen-e2e.js              # index.html 结构变化后再生 e2e 挂具 test/e2e.html（避免手工同步漂移）
 node test/smoke-shell.js          # Electron 端到端冒烟（Web Shell 独立窗口/多标签，需本机桌面环境）
 node test/smoke-backup.js         # Electron 冒烟（备份管理：IPC 备份库 + 弹窗浏览/删除，需本机桌面环境）
