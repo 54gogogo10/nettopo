@@ -7,8 +7,9 @@ UI 文案、代码注释、commit 信息均为中文，请保持一致。
 ## 常用命令
 ```bash
 npm start                          # 开发运行（Electron）
-node test/run-tests.js             # 单元测试（纯 Node，当前 773 项；改动后必跑且须全绿）
-cd test && npm i && node e2e.js    # 无头 Chrome e2e（需本机 Chrome）
+node test/run-tests.js             # 单元测试（纯 Node，当前 805 项；改动后必跑且须全绿）
+cd test && npm i && node e2e.js    # 无头 Chrome e2e 集成测试（需本机 Chrome）
+node test/gen-e2e.js               # 从 index.html 再生 e2e 挂具（index.html 结构变化后重跑，再跑 e2e.js 验证）
 node test/smoke-shell.js           # Electron 冒烟（需桌面环境）：另有 smoke-backup / smoke-center / smoke-monitor
 npm run build                      # bump-version.js 自动升版本 + electron-builder 便携版打包（dist/portable）
 node bump-version.js --dry-run     # 预览版本变更不写入
