@@ -4096,7 +4096,7 @@ function openHelp() {
     </table>
     <p>无表头按「设备A, 设备B, 接口A, IP A, 接口B, IP B, 带宽, 备注」顺序识别；自动识别 UTF-8 / GBK 编码，兼容 .csv / .txt / .xlsx / .xls。</p>
     <h4>②⁺ 从邻居表导入（LLDP / CDP）</h4>
-    <p>在设备上执行 <b>display lldp neighbor</b>（华为/H3C，支持 brief 简表、详细键值块、「接口 has N neighbor(s)」段头）或 <b>show cdp neighbors</b>（思科表格 / detail 块），把输出<b>原样粘贴</b>到「文件 ▾ 从邻居表导入…」弹窗，选好本端设备点「解析预览」：软件自动识别格式、列出「本端接口 ⇄ 对端设备 ⇄ 对端接口」，确认后合并进拓扑——同名对端复用画布设备、新设备按名称推断类型自动创建、已有链路回填空缺接口、重复导入幂等。纯本机解析，不上传。</p>
+    <p>在设备上执行 <b>display lldp neighbor</b>（华为/H3C，支持 brief 简表、详细键值块、「接口 has N neighbor(s)」段头、H3C verbose）或 <b>show cdp neighbors</b>（思科表格 / detail 块）、<b>show lldp neighbors</b>（思科标准表格），把输出<b>原样粘贴</b>到「文件 ▾ 从邻居表导入…」弹窗，选好本端设备点「解析预览」：软件自动识别格式、列出「本端接口 ⇄ 对端设备 ⇄ 对端接口」，确认后合并进拓扑——同名对端复用画布设备、新设备按名称推断类型自动创建、已有链路回填空缺接口、重复导入幂等。纯本机解析，不上传。</p>
     <h4>③ 画布操作</h4>
     <p>滚轮缩放（以光标为中心）、拖拽空白或中键平移；<b>Ctrl 点选</b>多选、<b>Shift 拖拽框选</b>；<kbd>Delete</kbd> 删除选中；多选后可整体拖动、批量编辑、对齐/分布。</p>
     <h4>④ 工具栏菜单</h4>

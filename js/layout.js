@@ -349,6 +349,8 @@ function layerTopoLayout(nodes, links, opts) {
  * 已分离的布局为 no-op（坐标不变）。原地修改 nodes 的 x/y，返回 nodes。 */
 function separateOverlaps(nodes) {
   if (!Array.isArray(nodes) || nodes.length < 2) return nodes;
+  // 大图钳制（与 simulate 的 heavy 阈值同口径）：O(n²) 三趟分离在超大工程下会阻塞加载线程，跳过
+  if (nodes.length > 2500) return nodes;
   const pos = nodes.map(nd => ({ x: nd.x + nd.w / 2, y: nd.y + nd.h / 2 }));
   separateRects(pos, nodes);
   nodes.forEach((nd, i) => { nd.x = pos[i].x - nd.w / 2; nd.y = pos[i].y - nd.h / 2; });

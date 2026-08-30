@@ -769,6 +769,72 @@ console.log('== LLDP/CDP 邻居表解析 ==');
   ok(rf.ok && rf.entries.length === 2, 'has-neighbor 段头识别 2 条');
   eq(rf.entries[0].localIf, 'GigabitEthernet0/0/1', '段头本端接口');
   eq(rf.entries[1].peer, 'FW1', '段头对端设备');
+  // 段头多邻居（堆叠/挂 hub）：第 2+ 个 Device ID 继承本段 localIf（此前被静默丢弃）
+  const hasMulti = [
+    'GigabitEthernet0/0/1 has 2 neighbor(s):',
+    '  Device ID: SW2',
+    '  Port ID : GigabitEthernet0/0/24',
+    '  Device ID: SW3',
+    '  Port ID : GigabitEthernet0/0/23',
+    ''
+  ].join('\n');
+  const rg = U.parseNeighbors(hasMulti);
+  ok(rg.ok && rg.entries.length === 2, '段头下 2 个邻居均识别（不静默丢弃）');
+  eq(rg.entries[0].localIf, 'GigabitEthernet0/0/1', '第 1 邻居本端接口');
+  eq(rg.entries[1].localIf, 'GigabitEthernet0/0/1', '第 2 邻居继承本端接口');
+  eq(rg.entries[1].peer, 'SW3', '第 2 邻居对端设备');
+  // 思科 detail：Interface 与 Port ID (outgoing port) 同行（此前 Port ID 被吞、对端接口全空）
+  const cdpSameLine = [
+    'Device ID: SW2.lab',
+    'IP address: 10.1.1.2',
+    'Interface: GigabitEthernet0/1,  Port ID (outgoing port): GigabitEthernet0/24',
+    ''
+  ].join('\n');
+  const rsl = U.parseNeighbors(cdpSameLine);
+  ok(rsl.ok && rsl.entries.length === 1, 'CDP detail 同行双键识别 1 条');
+  eq(rsl.entries[0].localIf, 'GigabitEthernet0/1', '同行双键本端接口');
+  eq(rsl.entries[0].peerIf, 'GigabitEthernet0/24', '同行双键对端接口（二次提取）');
+  // 思科 show lldp neighbors 标准表格（表头无 neighbor 字样）
+  const ciscoLldp = [
+    'SW1#show lldp neighbors',
+    'Capability Codes:',
+    '',
+    'Device ID           Local Intf     Hold-time  Capability     Port ID',
+    'SW2.lab             Gi1/0/1        120        B,R            Gi1/0/24',
+    'FW1.lab             Gi1/0/2        110        R              Gi1/0/3',
+    ''
+  ].join('\n');
+  const rcl = U.parseNeighbors(ciscoLldp);
+  ok(rcl.ok && rcl.entries.length === 2, '思科 LLDP 标准表格识别 2 条（' + (rcl.entries || []).length + '）');
+  eq(rcl.entries[0].localIf, 'Gi1/0/1', '思科 LLDP 本端接口');
+  eq(rcl.entries[0].peerIf, 'Gi1/0/24', '思科 LLDP 对端接口');
+  // H3C verbose 段头（neighbor-information of port N[接口]）+ Neighbors' 键名
+  const h3cVerbose = [
+    '<SW1>display lldp neighbor-information verbose',
+    'LLDP neighbor-information of port 1[GigabitEthernet1/0/1]:',
+    "  Neighbors' system name : SW2",
+    "  Neighbors' port ID : GigabitEthernet1/0/24",
+    'LLDP neighbor-information of port 2[GigabitEthernet1/0/2]:',
+    "  Neighbors' system name : FW1",
+    "  Neighbors' port ID : Ten-GigabitEthernet1/0/3",
+    ''
+  ].join('\n');
+  const rh3 = U.parseNeighbors(h3cVerbose);
+  ok(rh3.ok && rh3.entries.length === 2, 'H3C verbose 段头识别 2 条（' + (rh3.entries || []).length + '）');
+  eq(rh3.entries[0].localIf, 'GigabitEthernet1/0/1', 'H3C verbose 本端接口（方括号提取）');
+  eq(rh3.entries[1].peerIf, 'Ten-GigabitEthernet1/0/3', 'H3C verbose 对端接口');
+  // CDP 表格超长 Device ID 换行（独占一行）：续行拼接
+  const cdpWrap = [
+    'Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID',
+    'SW3.core.lab.local',
+    '                 Gig 0/4           150        S I         WS-C2960  Gig 0/24',
+    ''
+  ].join('\n');
+  const rcw = U.parseNeighbors(cdpWrap);
+  ok(rcw.ok && rcw.entries.length === 1, 'CDP 表格换行 Device ID 拼接识别（' + (rcw.entries || []).length + '）');
+  eq(rcw.entries[0].peer, 'SW3.core.lab.local', '换行 Device ID 对端设备');
+  eq(rcw.entries[0].localIf, 'Gig0/4', '换行续行本端接口');
+  eq(rcw.entries[0].peerIf, 'Gig0/24', '换行续行对端接口');
   // 非邻居文本：解析失败并给提示
   const rn = U.parseNeighbors('hello world\nnothing here\n');
   ok(!rn.ok && rn.error, '无关文本解析失败并带提示');
@@ -849,6 +915,11 @@ console.log('== 加载防重合（separateOverlaps） ==');
   const one = [{ id: 'a', name: 'A', x: 5, y: 5, w: 160, h: 56 }];
   Layout.separateOverlaps(one);
   ok(one[0].x === 5 && one[0].y === 5, '单节点不移动');
+  // 大图保护：超过阈值（与 simulate 的 heavy 口径一致）跳过 O(n²) 分离，坐标原样返回
+  const big = Array.from({ length: 2600 }, (_, i) => ({ id: 'n' + i, x: 100, y: 100, w: 160, h: 56 }));
+  const bigBefore = JSON.stringify(big.map(n => [n.x, n.y]));
+  Layout.separateOverlaps(big);
+  ok(JSON.stringify(big.map(n => [n.x, n.y])) === bigBefore, '超大工程（>2500 节点）跳过分离不阻塞加载');
 }
 
 console.log('== 布局预设 ==');
@@ -1762,6 +1833,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     eq(sanitizeFilename('R1.core'), 'R1.core', 'sanitizeFilename 保留单点');
     eq(sanitizeFilename('abc.'), 'abc', 'sanitizeFilename 剔除尾点');
     eq(sanitizeFilename(''), 'device', 'sanitizeFilename 空值兜底');
+    eq(sanitizeFilename('CON'), '_CON', 'sanitizeFilename 拦截 Windows 保留名 CON');
+    eq(sanitizeFilename('NUL.log'), '_NUL.log', 'sanitizeFilename 拦截保留名 NUL.log（带扩展名）');
+    eq(sanitizeFilename('com1'), '_com1', 'sanitizeFilename 拦截保留名 com1（大小写不敏感）');
+    eq(sanitizeFilename('console'), 'console', '普通名含保留名前缀不受影响');
     const tmpBase = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-mon-test-'));
     const stubShell = { on() {}, connect() { return { ok: true, id: 's1' }; }, close() {}, trustFingerprint() { return true; } };
     const mgr = new MonitorManager(stubShell, tmpBase, null, {});
@@ -2186,7 +2261,12 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         const tlv = (tag, body) => Buffer.concat([Buffer.from([tag, body.length]), body]);
         const val = Buffer.from('Huawei Versatile Routing Platform Software VRP (R) software V300R019 Version 8.180', 'utf8');
         const vb = tlv(0x30, Buffer.concat([tlv(0x06, Buffer.from([43, 6, 1, 2, 1, 1, 1, 0])), tlv(0x04, val)]));
-        const pduBody = Buffer.concat([tlv(0x02, Buffer.from([0x12, 0x34])), tlv(0x02, Buffer.from([0])), tlv(0x02, Buffer.from([0])), tlv(0x30, vb)]);
+        // 回显请求的 request-id（真实 agent 行为；响应按 rid/community 校验，不匹配的抢答包被丢弃）
+        const rd = (buf, p) => ({ body: buf.subarray(p + 2, p + 2 + buf[p + 1]), next: p + 2 + buf[p + 1] });
+        const top = rd(msg, 0);
+        const f2 = rd(top.body, rd(top.body, 0).next); // community（version 之后）
+        const reqRid = rd(rd(top.body, f2.next).body, 0).body; // PDU 首字段 = request-id
+        const pduBody = Buffer.concat([tlv(0x02, reqRid), tlv(0x02, Buffer.from([0])), tlv(0x02, Buffer.from([0])), tlv(0x30, vb)]);
         const resp = tlv(0x30, Buffer.concat([tlv(0x02, Buffer.from([1])), tlv(0x04, Buffer.from('public')), tlv(0xa2, pduBody)]));
         agent.send(resp, rinfo.port, rinfo.address);
       });
@@ -2204,12 +2284,54 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       agent.close();
     }
 
+    console.log('== 回归：SNMP 响应 rid/community 校验（防伪造抢答） ==');
+    {
+      const { snmpGet, snmpResponseMeta, OID_SYSDESCR } = require(path.join(root, 'js', 'monitor.js'));
+      const dgram = require('dgram');
+      const tlv = (tag, body) => Buffer.concat([Buffer.from([tag, body.length]), body]);
+      const val = Buffer.from('fake-agent', 'utf8');
+      const vb = tlv(0x30, Buffer.concat([tlv(0x06, Buffer.from([43, 6, 1, 2, 1, 1, 1, 0])), tlv(0x04, val)]));
+      const mkResp = (ridBytes, community) => tlv(0x30, Buffer.concat([
+        tlv(0x02, Buffer.from([1])),
+        tlv(0x04, Buffer.from(community, 'utf8')),
+        tlv(0xa2, Buffer.concat([tlv(0x02, ridBytes), tlv(0x02, Buffer.from([0])), tlv(0x02, Buffer.from([0])), tlv(0x30, vb)]))
+      ]));
+      // 响应元数据提取
+      const meta = snmpResponseMeta(mkResp(Buffer.from([7]), 'public'));
+      ok(!!meta && meta.rid === 7 && meta.community === 'public', 'snmpResponseMeta 提取 rid/community');
+      ok(snmpResponseMeta(Buffer.from('junk')) === null, '非 SNMP 报文返回 null');
+      // 伪造抢答：rid 或 community 不匹配的响应被丢弃，等待真实响应直至超时
+      const evil = dgram.createSocket('udp4');
+      evil.on('message', (msg, rinfo) => {
+        evil.send(mkResp(Buffer.from([9]), 'public'), rinfo.port, rinfo.address); // rid 不匹配
+        evil.send(mkResp(Buffer.from([1]), 'hacker'), rinfo.port, rinfo.address); // community 不匹配
+      });
+      await new Promise((res) => evil.bind(0, '127.0.0.1', res));
+      const rBad = await snmpGet('127.0.0.1', 'public', [OID_SYSDESCR], 400, evil.address().port);
+      ok(rBad.ok === false, 'rid/community 不匹配的伪造响应被拒收');
+      evil.close();
+      // 正确回显 rid/community 的响应被采信
+      const good = dgram.createSocket('udp4');
+      good.on('message', (msg, rinfo) => {
+        const rd = (buf, p) => ({ body: buf.subarray(p + 2, p + 2 + buf[p + 1]), next: p + 2 + buf[p + 1] });
+        const top = rd(msg, 0);
+        const f2 = rd(top.body, rd(top.body, 0).next); // community（version 之后）
+        const reqRid = rd(rd(top.body, f2.next).body, 0).body; // PDU 首字段 = request-id
+        good.send(mkResp(reqRid, 'public'), rinfo.port, rinfo.address);
+      });
+      await new Promise((res) => good.bind(0, '127.0.0.1', res));
+      const rGood = await snmpGet('127.0.0.1', 'public', [OID_SYSDESCR], 2000, good.address().port);
+      ok(rGood.ok === true && String((rGood.varbinds || [])[0].value) === 'fake-agent', 'rid/community 匹配的真实响应被采信');
+      good.close();
+    }
+
     console.log('== 回归：备份自动合规巡检与 sysinfo（新功能） ==');
     {
       const os = require('os');
       const { MonitorManager, compileComplianceRules, runCompliance } = require(path.join(root, 'js', 'monitor.js'));
       const rules = compileComplianceRules([{ id: 'r1', name: '必须NTP', pattern: 'ntp', negate: false }, { id: 'r2', name: '禁Telnet', pattern: 'telnet server enable', negate: true }]);
       ok(rules.length === 2 && typeof rules[0].re.test === 'function', '主进程侧规则编译可用');
+      ok(compileComplianceRules([{ id: 'bad', name: '灾难回溯', pattern: '(a+)+$' }, { id: 'r1', name: 'NTP', pattern: 'ntp' }]).length === 1, '主进程侧嵌套量词规则同样被启发式拒绝');
       const rep = runCompliance('ntp-service unicast-server 1.1.1.1\n#\ntelnet server enable', rules);
       ok(rep.failed === 1 && rep.results[1].pass === false, '主进程侧检查口径与渲染层一致');
       const tmpC = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-cmp-'));
@@ -2294,6 +2416,14 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const snmp = defs.find(r => r.id === 'snmpv2');
       ok(!!snmp && U.checkCompliance('undo snmp-agent community read abc\n#', [snmp]).results[0].pass === true, 'undo snmp-agent community 不误报');
       ok(U.checkCompliance('snmp-agent community read cipher %^%#abc\n#', [snmp]).results[0].pass === false, 'snmp-agent community 仍判违规');
+      // transport input / protocol inbound 混合词序与 all（此前 transport input ssh telnet 漏报）
+      ok(U.checkCompliance('transport input ssh telnet\n#', [telnet]).results[0].pass === false, 'transport input ssh telnet（混合词序）判违规');
+      ok(U.checkCompliance('transport input all\n#', [telnet]).results[0].pass === false, 'transport input all 判违规');
+      ok(U.checkCompliance('protocol inbound all\n#', [telnet]).results[0].pass === false, 'protocol inbound all 判违规');
+      ok(U.checkCompliance('transport input ssh\n#', [telnet]).results[0].pass === true, 'transport input ssh 不误报');
+      // 灾难性回溯规则被启发式拒绝（其余规则不受影响）
+      const redos = U.cleanComplianceRules([{ id: 'bad', name: '灾难回溯', pattern: '(a+)+$' }, { id: 'ok1', name: '正常', pattern: 'ntp' }]);
+      ok(redos.length === 1 && redos[0].id === 'ok1', '嵌套量词规则被启发式拒绝');
       const saved = U.saveComplianceRules(U.COMPLIANCE_DEFAULT_RULES);
       ok(saved.every(r => r.group) && saved.find(r => r.id === 'ntp').group === '时间同步', '分组字段随规则保存保留');
     }
@@ -2716,18 +2846,19 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
           v = (v << 7) | (b[k] & 0x7f);
           if (!(b[k] & 0x80)) { arcs.push(v); v = 0; }
         }
-        return arcs.join('.');
+        return { req: arcs.join('.'), rid: rid.body }; // rid 原样回显（响应按 rid/community 校验）
       };
       const agent = dgram.createSocket('udp4');
       agent.on('message', (msg, rinfo) => {
-        const req = parseReqOid(msg);
+        const q = parseReqOid(msg);
+        const req = q.req;
         fillDyn();
         const keys = Object.keys(tree).sort();
         const next = keys.find(k => k > req);
         const pick = next || '1.3.6.1.2.1.1.1.0'; // 表结束：返回子树外 OID 让 walk 停止
         const ent = next ? tree[pick] : { tag: 0x04, val: Buffer.from('x') };
         const vb = tlv(0x30, Buffer.concat([tlv(0x06, oidBytes(pick)), tlv(ent.tag, ent.val)]));
-        const pduBody = Buffer.concat([tlv(0x02, [0, 1]), tlv(0x02, [0]), tlv(0x02, [0]), tlv(0x30, vb)]);
+        const pduBody = Buffer.concat([tlv(0x02, q.rid), tlv(0x02, [0]), tlv(0x02, [0]), tlv(0x30, vb)]);
         const resp = tlv(0x30, Buffer.concat([tlv(0x02, [1]), tlv(0x04, Buffer.from('c', 'utf8')), tlv(0xa2, pduBody)]));
         agent.send(resp, rinfo.port, rinfo.address);
       });
@@ -2856,18 +2987,18 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         const arcs = [Math.floor(b[0] / 40), b[0] % 40];
         let v = 0;
         for (let k = 1; k < b.length; k++) { v = (v << 7) | (b[k] & 0x7f); if (!(b[k] & 0x80)) { arcs.push(v); v = 0; } }
-        return { tag: pdu.tag, oid: arcs.join('.') };
+        return { tag: pdu.tag, rid: f1.body, oid: arcs.join('.') }; // rid 原样回显（响应按 rid/community 校验）
       };
       const agent2 = dgram.createSocket('udp4');
       agent2.on('message', (msg, rinfo) => {
         fillPerf();
-        const { tag, oid: req } = parsePdu2(msg);
+        const { tag, rid: reqRid, oid: req } = parsePdu2(msg);
         const keys = Object.keys(perfTree).sort();
         let pick = (tag === 0xa0 && perfTree[req]) ? req : keys.find(k => k > req) || null;
         if (!pick) pick = '1.3.6.1.2.1.1.99.0'; // 子树外空 OID
         const ent = perfTree[pick] || { tag: 0x04, val: Buffer.from('x') };
         const vb = tlv2(0x30, Buffer.concat([tlv2(0x06, oidBytes2(pick)), tlv2(ent.tag, ent.val)]));
-        const pduBody = Buffer.concat([tlv2(0x02, [0, 1]), tlv2(0x02, [0]), tlv2(0x02, [0]), tlv2(0x30, vb)]);
+        const pduBody = Buffer.concat([tlv2(0x02, reqRid), tlv2(0x02, [0]), tlv2(0x02, [0]), tlv2(0x30, vb)]);
         const resp = tlv2(0x30, Buffer.concat([tlv2(0x02, [1]), tlv2(0x04, Buffer.from('c', 'utf8')), tlv2(0xa2, pduBody)]));
         agent2.send(resp, rinfo.port, rinfo.address);
       });

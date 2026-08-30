@@ -700,12 +700,13 @@ class Renderer {
       .filter(t => t.x > r.x && t.x < r.x + r.w && t.y > r.y && t.y < r.y + r.h)
       .map(t => ({ t, dx: t.x - r.x, dy: t.y - r.y }));
     const dx0 = w0.x - r.x, dy0 = w0.y - r.y;
+    const rx0 = r.x, ry0 = r.y; // 拖拽起点：moved 按累计位移判定（与节点拖动 orig 口径一致），慢速拖动不漏判
     let moved = false;
     try { this.svg.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件无活动指针时忽略 */ }
     const move = (ev) => {
       const w2 = this.toWorld(ev.clientX, ev.clientY);
       const nx = w2.x - dx0, ny = w2.y - dy0;
-      if (!moved && (Math.abs(nx - r.x) > 2 || Math.abs(ny - r.y) > 2)) moved = true;
+      if (!moved && (Math.abs(nx - rx0) > 2 || Math.abs(ny - ry0) > 2)) moved = true;
       r.x = nx; r.y = ny;
       for (const it of insideN) { it.n.x = nx + it.dx; it.n.y = ny + it.dy; }
       for (const it of insideT) { it.t.x = nx + it.dx; it.t.y = ny + it.dy; }

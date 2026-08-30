@@ -23,6 +23,8 @@ function sanitizeFilename(s) {
   out = out.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').trim();
   out = out.replace(/\.\./g, '_').replace(/^\.+/, '').replace(/[. ]+$/, '');
   if (!out) out = 'device';
+  // Windows 保留设备名（CON/NUL/COM1…，带扩展名同样保留）：写入会静默失败，前缀下划线规避（与 backup-store 口径一致）
+  if (/^(con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(\.[^.]*)?$/i.test(out)) out = '_' + out;
   if (out.length > 60) out = out.slice(0, 60);
   return out;
 }
@@ -134,8 +136,8 @@ function decodeOidBody(b) {
   }
   return arr.join('.');
 }
-/** 解析 SNMP GET 响应 → [{oid, value}]（OCTET STRING → 文本；OID 值 → 点分串） */
-function parseSnmpResponse(buf) {
+/** 解析 SNMP 响应的 message/PDU 字段结构（version, community, PDU{request-id, errStatus, errIndex, varbinds}） */
+function snmpPduFields(buf) {
   const root = tlvWalk(buf, 0);
   if (!root || root.tag !== 0x30) throw new Error('响应格式错误');
   let cur = 0;
@@ -156,6 +158,22 @@ function parseSnmpResponse(buf) {
     pf.push(t);
     c = t.next;
   }
+  return { fields, pf };
+}
+
+/** 提取响应的 request-id 与 community：与请求不符的响应包一律丢弃（防同网段伪造抢答污染监控数据） */
+function snmpResponseMeta(buf) {
+  try {
+    const { fields, pf } = snmpPduFields(buf);
+    const commT = fields[1], ridT = pf[0];
+    if (!commT || commT.tag !== 0x04 || !ridT || ridT.tag !== 0x02 || !ridT.body.length || ridT.body.length > 6) return null;
+    return { community: commT.body.toString('utf8'), rid: ridT.body.readUIntBE(0, ridT.body.length) };
+  } catch (e) { return null; }
+}
+
+/** 解析 SNMP GET 响应 → [{oid, value}]（OCTET STRING → 文本；OID 值 → 点分串） */
+function parseSnmpResponse(buf) {
+  const { pf } = snmpPduFields(buf);
   const vbs = pf[3];
   if (!vbs || vbs.tag !== 0x30) throw new Error('varbind 列表缺失');
   const out = [];
@@ -214,7 +232,12 @@ function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
       const done = (res) => { clearTimeout(t); try { sock.close(); } catch (e) { /* ignore */ } resolve(res); };
       const t = setTimeout(() => done({ ok: false, error: 'SNMP 响应超时' }), timeoutMs || 3000);
       sock.on('message', (buf) => {
-        try { done({ ok: true, varbinds: parseSnmpResponse(buf) }); }
+        try {
+          // 先校验 request-id 与 community：不匹配的抢答包直接丢弃（继续等待真实响应直至超时）
+          const meta = snmpResponseMeta(buf);
+          if (!meta || meta.rid !== rid || meta.community !== String(community || 'public')) return;
+          done({ ok: true, varbinds: parseSnmpResponse(buf) });
+        }
         catch (e) { done({ ok: false, error: 'SNMP 响应解析失败' }); }
       });
       sock.on('error', (e) => done({ ok: false, error: 'SNMP 网络错误' }));
@@ -290,6 +313,9 @@ function compileComplianceRules(raw) {
     const name = typeof r.name === 'string' ? r.name.trim().slice(0, 64) : '';
     const pattern = typeof r.pattern === 'string' ? r.pattern.trim().slice(0, 256) : '';
     if (!id || !name || !pattern) continue;
+    // 启发式拒绝嵌套量词（如 (a+)+ / (ab*)*）：主进程同步逐行扫描，防灾难性回溯阻塞事件循环
+    // （与告警关键字/渲染层 cleanComplianceRules 同口径，非完备防线）
+    if (/\([^()]*[+*][^()]*\)[+*{]/.test(pattern)) continue;
     let re = null;
     try { re = new RegExp(pattern, 'i'); } catch (e) { continue; }
     seen.add(id);
@@ -299,7 +325,9 @@ function compileComplianceRules(raw) {
 }
 /** 配置文本逐行合规检查（与 util.js checkCompliance 同口径） */
 function runCompliance(text, rules) {
-  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+  // 单行限长：防超大行（压缩/粘贴异常）拖慢逐行正则扫描
+  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n')
+    .map(l => l.length > 10000 ? l.slice(0, 10000) : l);
   const results = [];
   let passed = 0, failed = 0;
   for (const r of rules) {
@@ -1452,7 +1480,9 @@ class MonitorManager extends EventEmitter {
           // 命令执行与保存全部完成后才 resolve（含 _bkResult 就绪）
           this._runBackupOwnCmds(job, gen, sid).then(settle, settle);
         } else if (info.state === 'fingerprint') {
-          const host = job.host;
+          // 经跳板连接时跳板与目标各自独立确认：host 取指纹事件自带的目标（info.host），
+          // 否则跳板先到时其指纹会被记到目标主机名下，后续连接全部「指纹变化」误拒
+          const host = String((info && info.host) || job.host);
           const fp = String(info.fp || '');
           const known = this.trusted.get(host);
           if (known && known !== fp) { fail('备份连接：主机指纹变化，已拒绝连接'); return; }
@@ -1598,5 +1628,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, extractVersion, rateBps, fmtUptimeTicks, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
 

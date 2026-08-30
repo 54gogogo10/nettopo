@@ -580,6 +580,41 @@ const puppeteer = require('puppeteer-core');
   console.log('新建空白画布:', blankOk ? 'OK' : 'FAIL', JSON.stringify(blank));
   if (!blankOk) errors.push('[new] 新建空白画布未生效');
 
+  // ---- 区域慢速拖动（回归：moved 须按累计位移判定，慢速拖动也要有撤销点） ----
+  // 重新载入示例 → 建一个罩住首台设备的区域 → 1px/步 慢速拖动（合成 pointer 事件，避开上层链路命中层）→ 断言区域被移动且 Ctrl+Z 能还原
+  await page.evaluate(() => { window.__topo.loadSample(); });
+  await new Promise(r => setTimeout(r, 1600));
+  const rg = await page.evaluate(() => {
+    const st = window.__topo.state, rd = window.__topo.renderer;
+    const n = st.nodes[0];
+    st.regions = [{ id: 'rg_e2e', name: '测试区域', x: n.x - 180, y: n.y - 120, w: 420, h: 280, color: '#3b82f6' }];
+    rd.setData(st.nodes, st.links, st.texts, st.regions);
+    return { rx: st.regions[0].x, ry: st.regions[0].y };
+  });
+  await page.evaluate(() => {
+    const svg = document.querySelector('#svg');
+    const fill = document.querySelector('g.region[data-id="rg_e2e"] rect.region-fill');
+    const b = fill.getBoundingClientRect();
+    const sx = b.left + 30, sy = b.top + b.height - 30; // 左下角空白处（避开区域内设备/标题/链路命中层）
+    const pe = (type, x, y, tgt) => tgt.dispatchEvent(new PointerEvent(type, {
+      bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', isPrimary: true,
+      clientX: x, clientY: y, buttons: type === 'pointerup' ? 0 : 1
+    }));
+    pe('pointerdown', sx, sy, fill);
+    for (let i = 1; i <= 120; i++) pe('pointermove', sx + i, sy - i * 0.7, svg); // 1px/步：每步增量远小于判定阈值
+    pe('pointerup', sx + 120, sy - 84, svg);
+  });
+  await new Promise(r => setTimeout(r, 250));
+  const rgMoved = await page.evaluate(() => window.__topo.state.regions[0].x);
+  await page.keyboard.down('Control');
+  await page.keyboard.press('KeyZ');
+  await page.keyboard.up('Control');
+  await new Promise(r => setTimeout(r, 250));
+  const rgUndo = await page.evaluate(() => window.__topo.state.regions[0].x);
+  const dragOk = Math.abs(rgMoved - rg.rx) > 50 && Math.abs(rgUndo - rg.rx) < 1;
+  console.log('区域慢速拖动+撤销:', dragOk ? 'OK' : 'FAIL', JSON.stringify({ before: rg.rx, after: rgMoved, undo: rgUndo }));
+  if (!dragOk) errors.push('[region] 慢速拖动未记为拖动或撤销未还原（before=' + rg.rx + ' after=' + rgMoved + ' undo=' + rgUndo + '）');
+
   console.log(errors.length ? '发现错误:\n' + errors.join('\n') : '无控制台错误 ✓');
   await browser.close();
   process.exit(errors.length ? 1 : 0);

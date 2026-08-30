@@ -108,9 +108,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .node:hover .body { transform: scale(1.035); }
 .node.selected .body { transform: scale(1.045); }
 .node .shape { stroke: rgba(15, 23, 42, .35); stroke-width: 1; }
-/* 暗色描边不带 html 前缀：与下方 selected/hover/path-hl/impact-hl 同级（0,3,0），
- * 依源码顺序让状态描边（选中/悬停/高亮）在暗色主题同样生效 */
-[data-theme="dark"] .node .shape { stroke: rgba(0, 0, 0, .55); }
+/* 暗色描边用 :where() 降特异性（0,2,0）：状态描边（selected/hover/path-hl/impact-hl，0,3,0）
+ * 无需依赖源码顺序即可覆盖，暗色仍高于裸 .shape 基础描边，两主题一致生效且不怕日后追加同特异性暗色规则回退 */
+:where([data-theme="dark"]) .node .shape { stroke: rgba(0, 0, 0, .55); }
 .node.selected .shape { stroke: #fbbf24; stroke-width: 2.2; }
 .node.hover .shape { stroke: var(--accent2); stroke-width: 2; }
 .ping {
