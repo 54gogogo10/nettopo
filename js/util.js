@@ -2401,6 +2401,182 @@ U.countCrossings = (nodes, links) => {
   return c;
 };
 
+/* ================= 单点故障 / 故障影响分析（纯图算法，无向连通性） =================
+ *  - 单点设备（割点）：该设备故障后，原本与它连通的设备被拆分成多个区域
+ *  - 关键链路（割边 / 无冗余链路）：该链路故障后两端失联；同一对设备间的平行链路
+ *    （含链路聚合成员）视为互为冗余，单条成员故障不构成关键链路
+ * opts.exclude：已标记故障的链路 id 集合（Set），分析时视为已断开
+ */
+
+/* 连通分量：返回节点 id 分组列表（每个节点恰好归属一组） */
+U.graphComponents = (nodes, links, opts) => {
+  opts = opts || {};
+  const exclude = opts.exclude || null;
+  const adj = new Map(nodes.map(n => [n.id, []]));
+  for (const l of (links || [])) {
+    if (exclude && exclude.has(l.id)) continue;
+    if (!adj.has(l.a) || !adj.has(l.b) || l.a === l.b) continue;
+    adj.get(l.a).push(l.b);
+    adj.get(l.b).push(l.a);
+  }
+  const seen = new Set();
+  const comps = [];
+  for (const n of nodes) {
+    if (seen.has(n.id)) continue;
+    const comp = [];
+    const q = [n.id];
+    seen.add(n.id);
+    while (q.length) {
+      const u = q.pop();
+      comp.push(u);
+      for (const v of adj.get(u) || []) {
+        if (seen.has(v)) continue;
+        seen.add(v);
+        q.push(v);
+      }
+    }
+    comps.push(comp);
+  }
+  return comps;
+};
+
+/* 割点 + 割边（Tarjan，迭代 DFS 防大图递归栈溢出；平行链路折叠为一组）
+ * 返回 { points: [nodeId…], bridges: [{ linkId, a, b }…] }（顺序按输入确定，不去重排序） */
+U.spofAnalysis = (nodes, links, opts) => {
+  opts = opts || {};
+  const exclude = opts.exclude || null;
+  const ids = new Set(nodes.map(n => n.id));
+  const pairKey = (a, b) => a < b ? a + '|' + b : b + '|' + a;
+  const groups = new Map(); // pairKey -> { a, b, lids[] }：同一对设备的全部有效链路
+  for (const l of (links || [])) {
+    if (exclude && exclude.has(l.id)) continue;
+    if (!ids.has(l.a) || !ids.has(l.b) || l.a === l.b) continue;
+    const k = pairKey(l.a, l.b);
+    let g = groups.get(k);
+    if (!g) { g = { a: l.a, b: l.b, lids: [] }; groups.set(k, g); }
+    g.lids.push(l.id);
+  }
+  const adj = new Map(nodes.map(n => [n.id, []]));
+  for (const g of groups.values()) {
+    adj.get(g.a).push({ to: g.b, g });
+    adj.get(g.b).push({ to: g.a, g });
+  }
+  const disc = new Map(), low = new Map();
+  const isPoint = new Set();
+  const bridges = [];
+  let timer = 0;
+  for (const root of ids) {
+    if (disc.has(root)) continue;
+    let rootChildren = 0;
+    disc.set(root, timer); low.set(root, timer); timer++;
+    // 帧结构 [节点, 进入边所属链路组, 邻接下标]：进入边组用于识别来边（其全部平行链路一并跳过）
+    const stack = [[root, null, 0]];
+    while (stack.length) {
+      const fr = stack[stack.length - 1];
+      const u = fr[0], via = fr[1];
+      const list = adj.get(u) || [];
+      if (fr[2] < list.length) {
+        const e = list[fr[2]++];
+        if (e.g === via) continue; // 来边不算回边（平行链路已折叠，天然整组跳过）
+        if (!disc.has(e.to)) {
+          if (u === root) rootChildren++;
+          disc.set(e.to, timer); low.set(e.to, timer); timer++;
+          stack.push([e.to, e.g, 0]);
+        } else if (disc.get(e.to) < low.get(u)) {
+          low.set(u, disc.get(e.to)); // 回边更新
+        }
+      } else {
+        stack.pop();
+        if (!stack.length) continue;
+        const parent = stack[stack.length - 1][0];
+        if (low.get(u) < low.get(parent)) low.set(parent, low.get(u));
+        if (parent !== root && low.get(u) >= disc.get(parent)) isPoint.add(parent);
+        if (low.get(u) > disc.get(parent) && via.lids.length === 1) {
+          bridges.push({ linkId: via.lids[0], a: via.a, b: via.b });
+        }
+      }
+    }
+    if (rootChildren >= 2) isPoint.add(root);
+  }
+  return { points: [...isPoint], bridges };
+};
+
+/* 单设备 / 单链路故障影响分析
+ * kind='node'：{ kind, id, isSPOF, groups: [{ nodeIds, size }], isolatedCount, survivorCount }
+ *   先取该设备故障前所在的连通区域，删除该设备后区域重新分组：
+ *   最大区域视为「存续主网络」，其余为失联区域；最大区域并列时无主网络
+ *   可言（survivorCount=0），全部区域计为失联；isSPOF = 存在失联区域
+ * kind='link'：{ kind, id, a, b, redundant, reroute, isolated, isolatedCount }
+ *   redundant=true：断开后两端仍连通，reroute 为最短绕行路径（{ nodeIds, linkIds }，无则 null）
+ *   redundant=false：两端失联，isolated 为两侧中较少的一侧（受影响设备） */
+U.failureImpact = (nodes, links, kind, id, opts) => {
+  opts = opts || {};
+  const exclude = opts.exclude || null;
+  const ids = new Set(nodes.map(n => n.id));
+  const keep = (l) => !!l && ids.has(l.a) && ids.has(l.b) && l.a !== l.b && !(exclude && exclude.has(l.id));
+
+  /* nodeIds 子图的连通分量（忽略 dropLinkId 这条链路） */
+  const compsOf = (nodeIds, dropLinkId) => {
+    const set = new Set(nodeIds);
+    const adj = new Map(nodeIds.map(x => [x, []]));
+    for (const l of (links || [])) {
+      if (l.id === dropLinkId || !keep(l) || !set.has(l.a) || !set.has(l.b)) continue;
+      adj.get(l.a).push(l.b);
+      adj.get(l.b).push(l.a);
+    }
+    const seen = new Set();
+    const comps = [];
+    for (const s of nodeIds) {
+      if (seen.has(s)) continue;
+      const comp = [];
+      const q = [s];
+      seen.add(s);
+      while (q.length) {
+        const u = q.pop();
+        comp.push(u);
+        for (const v of adj.get(u) || []) {
+          if (!seen.has(v)) { seen.add(v); q.push(v); }
+        }
+      }
+      comps.push(comp);
+    }
+    return comps;
+  };
+
+  if (kind === 'node') {
+    if (!ids.has(id)) return { kind, id, isSPOF: false, groups: [], isolatedCount: 0, survivorCount: 0 };
+    const comp = compsOf(nodes.map(n => n.id)).find(c => c.includes(id)) || [id];
+    const rest = comp.filter(x => x !== id);
+    if (!rest.length) return { kind, id, isSPOF: false, groups: [], isolatedCount: 0, survivorCount: 0 };
+    const comps = compsOf(rest).slice().sort((x, y) => y.length - x.length);
+    // 最大区域视为「存续主网络」，其余为失联区域；最大区域并列时无主网络可言，全部计为失联
+    const tie = comps.length > 1 && comps[0].length === comps[1].length;
+    const groups = (tie ? comps : comps.slice(1)).map(c => ({ nodeIds: c, size: c.length }));
+    return {
+      kind, id,
+      isSPOF: groups.length > 0,
+      groups,
+      isolatedCount: groups.reduce((s, g) => s + g.size, 0),
+      survivorCount: tie ? 0 : comps[0].length
+    };
+  }
+
+  const l = (links || []).find(x => x.id === id);
+  if (!l || !ids.has(l.a) || !ids.has(l.b)) {
+    return { kind, id, a: '', b: '', redundant: null, reroute: null, isolated: [], isolatedCount: 0 };
+  }
+  const comps = compsOf(nodes.map(n => n.id), l.id);
+  const ca = comps.find(c => c.includes(l.a));
+  const cb = comps.find(c => c.includes(l.b));
+  if (ca && cb && ca !== cb) {
+    const isolated = ca.length <= cb.length ? ca : cb;
+    return { kind, id, a: l.a, b: l.b, redundant: false, reroute: null, isolated, isolatedCount: isolated.length };
+  }
+  // 两端仍连通：存在冗余路径，给出最短绕行（排除该链路与故障链路）
+  const reroute = U.shortestPath(nodes, (links || []).filter(x => keep(x) && x.id !== l.id), l.a, l.b);
+  return { kind, id, a: l.a, b: l.b, redundant: true, reroute, isolated: [], isolatedCount: 0 };
+};
+
 /* ---------- 节点默认尺寸 ---------- */
 U.NODE_W = 160;
 U.NODE_H = 56;

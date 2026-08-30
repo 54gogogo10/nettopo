@@ -463,6 +463,76 @@ console.log('== 带宽数值化 / 最宽路径 ==');
   ok(U.bestPath([{ id: 'x', name: 'X', x: 0, y: 0, w: 160, h: 56 }], [], 'x', 'y') === null, '最宽路径：不可达');
 }
 
+console.log('== 单点故障 / 故障影响分析 ==');
+{
+  const mkN = (ids) => ids.map(i => ({ id: i, name: i.toUpperCase(), x: 0, y: 0, w: 160, h: 56 }));
+  const mkL = (pairs) => pairs.map((p, i) => ({ id: 'l' + i, a: p[0], b: p[1] }));
+
+  // 连通分量
+  const compLs = mkL([['a', 'b'], ['b', 'c'], ['x', 'y']]);
+  const comps = U.graphComponents(mkN(['a', 'b', 'c', 'x', 'y']), compLs);
+  eq(comps.length, 2, '连通分量：不连通拆两个分量');
+  ok(comps.some(c => c.length === 3 && c.includes('a')) && comps.some(c => c.length === 2), '连通分量：按连接关系分组');
+  eq(U.graphComponents(mkN(['a', 'b', 'c']), compLs, { exclude: new Set(['l1']) }).length, 2, '连通分量：排除链路后重新分组');
+
+  // 链 A-B-C：B 是割点，两条链路均为割边
+  const chainN = mkN(['a', 'b', 'c']);
+  const chainL = mkL([['a', 'b'], ['b', 'c']]);
+  let sp = U.spofAnalysis(chainN, chainL);
+  ok(sp.points.length === 1 && sp.points[0] === 'b', '割点：链式拓扑中点为单点');
+  eq(sp.bridges.length, 2, '割边：链式两条全为关键链路');
+
+  // 三角形：无割点无割边（全冗余）
+  sp = U.spofAnalysis(mkN(['a', 'b', 'c']), mkL([['a', 'b'], ['b', 'c'], ['a', 'c']]));
+  eq(sp.points.length, 0, '三角形无割点');
+  eq(sp.bridges.length, 0, '三角形无割边');
+
+  // 平行链路互为冗余；聚合成员同理；单成员聚合仍算关键链路
+  eq(U.spofAnalysis(mkN(['a', 'b']), mkL([['a', 'b'], ['a', 'b']])).bridges.length, 0, '平行链路：不构成关键链路');
+  eq(U.spofAnalysis(mkN(['a', 'b']), [{ id: 'l1', a: 'a', b: 'b', agg: 'Eth1' }, { id: 'l2', a: 'a', b: 'b', agg: 'Eth1' }]).bridges.length, 0, '聚合组成员互为冗余');
+  eq(U.spofAnalysis(mkN(['a', 'b']), [{ id: 'l1', a: 'a', b: 'b', agg: 'Eth1' }]).bridges.length, 1, '单成员聚合仍为关键链路');
+
+  // 故障链路排除后重算
+  sp = U.spofAnalysis(chainN, chainL, { exclude: new Set(['l1']) });
+  ok(sp.points.length === 0 && sp.bridges.length === 1 && sp.bridges[0].linkId === 'l0', '排除故障链路后割点/割边重算');
+  eq(U.spofAnalysis([], []).points.length, 0, '空图分析安全');
+  eq(U.spofAnalysis(mkN(['a', 'b']), mkL([['a', 'b'], ['zz', 'b']])).bridges.length, 1, '悬空链路（端点不存在）忽略');
+
+  // 设备故障影响：枢纽拆成两个并列区域（无存续主网络，全部计为失联）
+  const dumbN = mkN(['a', 'b', 'c', 'd', 'e']);
+  const dumbL = mkL([['a', 'b'], ['b', 'c'], ['c', 'd'], ['d', 'e']]);
+  const imNode = U.failureImpact(dumbN, dumbL, 'node', 'c');
+  ok(imNode.isSPOF && imNode.groups.length === 2, '设备影响：枢纽为单点，拆 2 区域');
+  eq(imNode.isolatedCount, 4, '设备影响：并列最大区域全部计为失联');
+  eq(imNode.survivorCount, 0, '设备影响：并列时无存续主网络');
+  const flat = imNode.groups.reduce((s, g) => s.concat(g.nodeIds), []);
+  ok(flat.includes('a') && flat.includes('e'), '设备影响：失联覆盖两侧');
+
+  // 非对称：a-b-c-d 去掉 c → 主网络 {a,b} 存续、{d} 失联
+  const imAsym = U.failureImpact(mkN(['a', 'b', 'c', 'd']), mkL([['a', 'b'], ['b', 'c'], ['c', 'd']]), 'node', 'c');
+  ok(imAsym.isSPOF && imAsym.survivorCount === 2 && imAsym.isolatedCount === 1, '设备影响：非对称拆分存续/失联');
+  ok(imAsym.groups[0].nodeIds.includes('d'), '设备影响：失联区域为 d');
+
+  // 星形中心：拆成多个单台区域
+  const imStar = U.failureImpact(mkN(['s', 'p', 'q', 'r']), mkL([['s', 'p'], ['s', 'q'], ['s', 'r']]), 'node', 's');
+  ok(imStar.isSPOF && imStar.groups.length === 3 && imStar.isolatedCount === 3, '设备影响：星形中心拆 3 区域');
+
+  // 环形无单点；预先不连通不误报
+  ok(!U.failureImpact(mkN(['a', 'b', 'c']), mkL([['a', 'b'], ['b', 'c'], ['a', 'c']]), 'node', 'a').isSPOF, '设备影响：环形无单点');
+  ok(!U.failureImpact(mkN(['a', 'b', 'x', 'y']), mkL([['a', 'b'], ['x', 'y']]), 'node', 'a').isSPOF, '设备影响：预先不连通不误报');
+  ok(!U.failureImpact(chainN, chainL, 'node', 'zz').isSPOF, '设备影响：不存在设备返回非单点');
+
+  // 链路故障影响：关键链路隔离较少一侧；冗余链路给最短绕行
+  const imLink = U.failureImpact(chainN, chainL, 'link', 'l0');
+  ok(!imLink.redundant && imLink.isolatedCount === 1 && imLink.isolated.includes('a'), '链路影响：链式为关键链路，隔离较少侧');
+  const imRer = U.failureImpact(mkN(['a', 'b', 'c']), mkL([['a', 'b'], ['b', 'c'], ['a', 'c']]), 'link', 'l0');
+  ok(imRer.redundant && imRer.reroute && imRer.reroute.linkIds.length === 2 && imRer.isolatedCount === 0, '链路影响：冗余绕行 2 跳');
+  const imPar = U.failureImpact(mkN(['a', 'b']), mkL([['a', 'b'], ['a', 'b']]), 'link', 'l0');
+  ok(imPar.redundant && imPar.reroute.linkIds.length === 1, '链路影响：平行链路互为冗余');
+  ok(!U.failureImpact(chainN, chainL, 'link', 'l0', { exclude: new Set(['l1']) }).redundant, '链路影响：结合故障标记重算');
+  eq(U.failureImpact(chainN, chainL, 'link', 'zz').redundant, null, '链路影响：不存在链路冗余为 null');
+}
+
 console.log('== 链路聚合标记 ==');
 {
   // 标注第三行携带聚合组名（画布/PDF/VSDX 共用 labelLines）

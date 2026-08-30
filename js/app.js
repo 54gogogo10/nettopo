@@ -581,6 +581,174 @@ function showPathResult(hops, steps, bottleneck) {
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); renderer.clearPath(); close(); } });
 }
 
+/* ================= 单点故障 / 故障影响分析 =================
+ * 依据无向连通性：单点设备 = 割点（故障拆散网络）、关键链路 = 割边（两端无冗余路径）；
+ * 同一对设备间的平行链路（含链路聚合成员）互为冗余。已标记故障的链路视为已断开。 */
+function spofExclude() { return state.downLinks.size ? state.downLinks : null; }
+
+function openSpofAnalysis() {
+  if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  const exclude = spofExclude();
+  const { points, bridges } = U.spofAnalysis(state.nodes, state.links, { exclude });
+  const byId = new Map(state.nodes.map(n => [n.id, n]));
+  const nameOf = (id) => { const n = byId.get(id); return n ? n.name : id; };
+  // 直连邻接（用于区分「结构性单点」与「仅隔离直连挂载设备」的局部单点，后者不逐条列出）
+  const neighborsOf = (nid) => {
+    const s = new Set();
+    for (const l of state.links) {
+      if (exclude && exclude.has(l.id)) continue;
+      if (l.a === nid) s.add(l.b); else if (l.b === nid) s.add(l.a);
+    }
+    return s;
+  };
+  const rows = []; // { level, msg, sel: [kind, id], impactIds }
+  let foldedPoints = 0, foldedBridges = 0;
+  const impacts = points
+    .map(pid => ({ pid, im: U.failureImpact(state.nodes, state.links, 'node', pid, { exclude }) }))
+    .sort((x, y) => y.im.isolatedCount - x.im.isolatedCount || nameOf(x.pid).localeCompare(nameOf(y.pid), 'zh'));
+  for (const { pid, im } of impacts) {
+    const nbs = neighborsOf(pid);
+    // 结构性单点：任一失联区域 ≥2 台，或含非直连设备（故障波及下游转接）；纯直连挂载折叠不列
+    if (!im.groups.some(g => g.size >= 2 || g.nodeIds.some(x => !nbs.has(x)))) { foldedPoints++; continue; }
+    rows.push({
+      level: 'warning', sel: ['node', pid],
+      impactIds: im.groups.reduce((s, g) => s.concat(g.nodeIds), []),
+      msg: im.survivorCount === 0
+        ? `单点设备：「${nameOf(pid)}」故障将拆散全部网络（${im.groups.length} 个孤立区域、${im.isolatedCount} 台设备互达中断）`
+        : `单点设备：「${nameOf(pid)}」故障将导致 ${im.isolatedCount} 台设备失联`
+          + (im.groups.length > 1 ? `（拆分为 ${im.groups.length} 个孤立区域）` : '')
+    });
+  }
+  const bridgeImpacts = bridges
+    .map(br => ({ br, im: U.failureImpact(state.nodes, state.links, 'link', br.linkId, { exclude }) }))
+    .sort((x, y) => y.im.isolatedCount - x.im.isolatedCount);
+  for (const { br, im } of bridgeImpacts) {
+    if (im.isolatedCount < 2) { foldedBridges++; continue; } // 仅隔离单台直连设备 = 单上联，不逐条列出
+    rows.push({
+      level: 'info', sel: ['link', br.linkId], impactIds: im.isolated || [],
+      msg: `关键链路（无冗余）：${nameOf(br.a)} ⇄ ${nameOf(br.b)} 故障将隔离 ${im.isolatedCount} 台设备`
+    });
+  }
+
+  const pCount = rows.filter(r => r.sel[0] === 'node').length;
+  const bCount = rows.length - pCount;
+  const cls = { warning: 'warn', info: 'info' };
+  const icon = { warning: '!', info: 'i' };
+  const rowsHtml = rows.length ? rows.map((r, idx) => `
+    <div class="vrow ${cls[r.level]}" data-idx="${idx}" style="cursor:pointer" title="点击定位并在画布高亮受影响设备">
+      <span class="v-ic">${icon[r.level]}</span>
+      <span class="v-msg">${U.escHtml(r.msg)}</span>
+      <button type="button" class="tb icon" data-act="locate" title="定位到画布">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/></svg>
+      </button>
+    </div>`).join('') : `<div class="vrow ok"><span class="v-ic">✓</span><span class="v-msg">未发现结构性单点故障：任意单台设备或单条链路故障，其余设备仍保持互联。</span></div>`;
+  const foldedParts = [];
+  if (foldedPoints) foldedParts.push(`${foldedPoints} 台设备故障仅隔离直连挂载设备`);
+  if (foldedBridges) foldedParts.push(`${foldedBridges} 条链路仅影响单台直连设备`);
+  const foldedNote = foldedParts.length
+    ? `<div class="m-sub" style="margin-top:6px">另有 ${foldedParts.join('、')}（影响范围局部，未逐条列出；右键设备/连线「故障影响分析」可单独分析）</div>` : '';
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:620px">
+      <h3>单点故障分析</h3>
+      <div class="m-sub">${pCount} 台单点设备 · ${bCount} 条无冗余关键链路${exclude ? `（已排除 ${state.downLinks.size} 条故障链路）` : ''}；点击条目定位并红色高亮受影响设备</div>
+      <div class="v-list">${rowsHtml}</div>
+      ${foldedNote}
+      <div class="m-actions"><button type="button" class="tb" data-act="close">关闭</button></div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => { ov.remove(); renderer.clearImpact(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=close]').addEventListener('click', close);
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelectorAll('[data-act=locate]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const r = rows[+btn.closest('.vrow').dataset.idx];
+      close();
+      const [kind, id] = r.sel;
+      select(kind, id, { center: true });
+      if (r.impactIds.length) renderer.highlightImpact(r.impactIds);
+    });
+  });
+}
+
+/* 右键单台设备 / 单条链路的故障影响分析：精确模拟该单点故障 */
+function openImpactAnalysis(kind, id) {
+  const exclude = spofExclude();
+  const byId = new Map(state.nodes.map(n => [n.id, n]));
+  const nameOf = (nid) => { const n = byId.get(nid); return n ? n.name : nid; };
+  const chips = (ids) => ids.map(nid => `<button type="button" class="imp-chip" data-nid="${nid}" title="点击定位">${U.escHtml(nameOf(nid))}</button>`).join('');
+  let title = '', sub = '', body = '';
+
+  if (kind === 'node') {
+    const n = byId.get(id);
+    if (!n) return;
+    const im = U.failureImpact(state.nodes, state.links, 'node', id, { exclude });
+    title = `故障影响分析：${n.name}`;
+    if (!im.isSPOF) {
+      sub = `「${n.name}」非单点设备：故障后其余设备仍保持互联（无下游转接依赖或存在冗余路径）`;
+    } else if (im.survivorCount === 0) {
+      sub = `「${n.name}」为单点设备：故障后网络拆分为 ${im.groups.length} 个孤立区域、${im.isolatedCount} 台设备互达中断（红色高亮），无存续主网络`;
+    } else {
+      sub = `「${n.name}」为单点设备：故障后 ${im.isolatedCount} 台设备与主网络失联（红色高亮），存续主网络 ${im.survivorCount} 台`;
+      body = `<div class="imp-groups">${im.groups.map((g, i) => `
+        <div class="imp-group">
+          <div class="imp-gt">失联区域 ${i + 1}（${g.size} 台，点击设备名定位）</div>
+          <div class="imp-chips">${chips(g.nodeIds)}</div>
+        </div>`).join('')}</div>`;
+      renderer.highlightImpact(im.groups.reduce((s, g) => s.concat(g.nodeIds), []));
+    }
+  } else {
+    const l = state.links.find(x => x.id === id);
+    if (!l) return;
+    const im = U.failureImpact(state.nodes, state.links, 'link', id, { exclude });
+    title = `故障影响分析：${nameOf(l.a)} ⇄ ${nameOf(l.b)}`;
+    if (im.redundant) {
+      sub = `该链路故障不影响连通：两端存在冗余路径${im.reroute && im.reroute.linkIds.length ? `（绕行 ${im.reroute.linkIds.length} 跳，画布已金色高亮）` : ''}`;
+      if (im.reroute && im.reroute.nodeIds.length > 1) {
+        const steps = im.reroute.nodeIds.map(nid => nameOf(nid)).join(' → ');
+        body = `<div class="path-steps">${U.escHtml(steps)}</div>`;
+        renderer.highlightPath(im.reroute.nodeIds, im.reroute.linkIds);
+      }
+    } else {
+      sub = `该链路为关键链路（无冗余）：故障将使 ${im.isolatedCount} 台设备与主网络隔离（红色高亮）`;
+      body = `<div class="imp-groups"><div class="imp-group">
+        <div class="imp-gt">受影响区域（${im.isolatedCount} 台，点击设备名定位）</div>
+        <div class="imp-chips">${chips(im.isolated)}</div>
+      </div></div>`;
+      renderer.highlightImpact(im.isolated);
+    }
+  }
+
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:560px">
+      <h3>${U.escHtml(title)}</h3>
+      <div class="m-sub">${U.escHtml(sub)}</div>
+      ${exclude ? `<div class="m-sub">已排除 ${state.downLinks.size} 条故障链路（红色虚线）</div>` : ''}
+      ${body}
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="clear">清除高亮</button>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => { ov.remove(); renderer.clearImpact(); }; // 金色绕行路径保留，用「显示 ▾ 清除路径高亮」清除
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('[data-act=clear]').onclick = () => { renderer.clearImpact(); renderer.clearPath(); close(); };
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelectorAll('.imp-chip').forEach(c => {
+    c.onclick = () => select('node', c.dataset.nid, { center: true });
+  });
+}
+
 /* ================= 设备模板库 ================= */
 const DEVICE_TEMPLATES = [
   { label: '路由器（华为 AR）', type: 'router', name: 'AR-核心路由器', mgmt: '10.255.0.1' },
@@ -3183,6 +3351,7 @@ function openCtx(e, kind, id) {
       { ic: 'terminal', label: 'Web Shell（SSH/Telnet）…', act: () => openWebShell(id) },
       { ic: 'pulse', label: '设备监控（静默采集）…', act: () => openMonitorConfig(id) },
       { ic: 'web', label: '打开设备管理页面', act: () => openDeviceWeb(id) },
+      { ic: 'shield', label: '故障影响分析…', act: () => openImpactAnalysis('node', id) },
       { sep: true },
       { ic: 'trash', label: '删除设备及连线', danger: true, act: () => deleteNode(id) }
     ];
@@ -3195,6 +3364,7 @@ function openCtx(e, kind, id) {
     items = [
       { ic: 'edit', label: '编辑连线…', act: () => editLink(id) },
       { ic: isDown ? 'undo' : 'shield', label: isDown ? '恢复链路（解除故障）' : '标记链路故障（模拟断链）', act: () => toggleLinkDown(id) },
+      { ic: 'shield', label: '故障影响分析…', act: () => openImpactAnalysis('link', id) },
       { ic: 'link', label: l && l.agg ? '取消聚合标记' : '与平行链路组成聚合组…', act: () => {
         if (l && l.agg) { batchLinkAgg([id]); return; }
         const keyOf = (x) => x.a < x.b ? x.a + '|' + x.b : x.b + '|' + x.a;
@@ -3822,8 +3992,8 @@ function openHelp() {
     <p><b>连线</b>可配置接口 / IP / 带宽 / 备注 / <b>聚合组</b>；带宽以 Mbps 数值保存，图上用颜色标识（100M 灰 / 1G 蓝 / 10G 紫 / 40G 橙 / 100G 红）；右键连线可<b>标记故障</b>（模拟断链，路径分析自动绕行）。</p>
     <p><b>链路聚合</b>：编辑连线填「聚合组」（如 Eth-Trunk1 / Port-Channel1），或右键连线「与平行链路组成聚合组」、多选连线批量设置。同一对设备间<b>同名聚合组</b>的平行链路视为链路聚合：拓扑校验不再提示平行链路、路径分析按<b>成员带宽之和</b>计算容量（成员故障按剩余容量，全部故障则链路不可用）、链路标注第三行显示聚合名并同步 PDF/PNG/Visio 导出。</p>
     <p><b>接口总表</b>（「编辑 ▾ 接口总表…」）：全部链路两端接口集中成一张可筛选表格，直接修改接口 / IP / 掩码 / VLAN / 聚合组 / 二层后点「应用修改」一次写入（一个撤销步骤），支持导出 CSV——批量改 IP 时不用逐台双击。</p>
-    <h4>⑥ 路径分析 / 拓扑校验</h4>
-    <p><b>路径分析</b>：选两台设备按带宽优选最宽路径并高亮（显示瓶颈带宽），故障链路自动绕行，聚合组按成员带宽之和参与计算。<b>拓扑校验</b>：一键检查重复 IP / 接口 / 管理地址、孤立设备、环路、平行链路、跨网段等，报告内可点击定位；同名聚合组的平行链路视为正常组网不再提示。</p>
+    <h4>⑥ 路径分析 / 拓扑校验 / 单点故障分析</h4>
+    <p><b>路径分析</b>：选两台设备按带宽优选最宽路径并高亮（显示瓶颈带宽），故障链路自动绕行，聚合组按成员带宽之和参与计算。<b>拓扑校验</b>：一键检查重复 IP / 接口 / 管理地址、孤立设备、环路、平行链路、跨网段等，报告内可点击定位；同名聚合组的平行链路视为正常组网不再提示。<b>单点故障分析</b>（布局菜单）：一键找出单点设备（故障拆散网络）与无冗余关键链路，点击条目定位并红色高亮受影响设备；右键设备/连线「故障影响分析」可模拟任一单点故障：查看失联区域（红色高亮），或存在冗余路径时高亮最短绕行路径（金色）。</p>
     <h4>⑦ Web Shell（桌面版）</h4>
     <p>右键设备「Web Shell（SSH/Telnet）…」连接管理口（多管理口可下拉选择）；在<b>独立窗口</b>以<b>多标签</b>管理多台设备，主界面不锁定。终端支持：选中即复制、Ctrl+Shift+C/V 复制粘贴、右键菜单、字号调节（A−/A+ 或 Ctrl+-/Ctrl+=）、底部<b>快捷按钮条</b>（右键或「＋」新建，内容支持 \n 回车、\t 制表、\p 暂停 1 秒）。SSH 主机密钥以 SHA256 指纹展示。</p>
     <h4>⑧ 设备管理 Web 页（桌面版）</h4>
@@ -3954,7 +4124,8 @@ function wire() {
     } },
     { ic: 'locate', label: '路径分析…', act: openPathAnalysis },
     { sep: true },
-    { ic: 'shield', label: '拓扑校验', act: runValidation }
+    { ic: 'shield', label: '拓扑校验', act: runValidation },
+    { ic: 'shield', label: '单点故障分析', act: openSpofAnalysis }
   ]);
   $('#btnDropMonitor').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'grid', label: '监控中心…', act: () => openMonitorCenter() },

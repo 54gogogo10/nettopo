@@ -506,6 +506,7 @@ class Renderer {
   /* ---------- 路径高亮 ---------- */
   highlightPath(nodeIds, linkIds) {
     this.clearPath();
+    this.clearImpact();
     this.pathHl = { nodeIds: nodeIds || [], linkIds: linkIds || [] };
     for (const id of nodeIds || []) { const g = this.nodeEls.get(id); if (g) g.classList.add('path-hl'); }
     for (const id of linkIds || []) { const g = this.linkEls.get(id); if (g) g.classList.add('path-hl'); }
@@ -515,6 +516,19 @@ class Renderer {
     this.pathHl = null;
     for (const g of this.nodeEls.values()) g.classList.remove('path-hl');
     for (const g of this.linkEls.values()) g.classList.remove('path-hl');
+  }
+
+  /* ---------- 故障影响高亮（受影响设备红色标注，与路径高亮互斥） ---------- */
+  highlightImpact(nodeIds) {
+    this.clearImpact();
+    this.clearPath();
+    this.impactHl = nodeIds || [];
+    for (const id of this.impactHl) { const g = this.nodeEls.get(id); if (g) g.classList.add('impact-hl'); }
+  }
+
+  clearImpact() {
+    this.impactHl = null;
+    for (const g of this.nodeEls.values()) g.classList.remove('impact-hl');
   }
 
   flash(kind, id) {
