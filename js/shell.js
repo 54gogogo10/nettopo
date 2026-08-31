@@ -45,6 +45,7 @@ class ShellManager extends EventEmitter {
     opts = opts || {};
     this.sessions = new Map();
     this._seq = 0;
+    this._params = new Map(); // sid -> 建连参数副本（断线重连用；仅内存，不落盘）
     this._pendingVerify = new Map(); // host -> [{verify, ...}]（SSH 首次连接待确认指纹；同一主机可有多个会话排队）
     this.logDir = (typeof opts.logDir === 'string' && opts.logDir.trim()) ? opts.logDir.trim() : '';
   }
@@ -102,6 +103,14 @@ class ShellManager extends EventEmitter {
     }
 
     const id = 's' + (++this._seq);
+    this._params.set(id, base); // 保存建连参数：会话断开后原地重建（reconnect）用
+    this._attach(id, base, session);
+    return { ok: true, id };
+  }
+
+  /** 把会话 emitter 接入事件转发（output/status/end → 按 id 对外 emit），并注册到 sessions 表。
+   *  connect 与 reconnect 共用：保证两路以同一 sid 对外发事件。 */
+  _attach(id, base, session) {
     const slog = this.logDir ? this._openSessionLog(base) : null; // 会话审计日志（可选）
     session.on('output', (d) => {
       this._logSessionChunk(slog, d);
@@ -114,6 +123,20 @@ class ShellManager extends EventEmitter {
       this.emit('end', id, reason);
     });
     this.sessions.set(id, session);
+  }
+
+  /** 会话断开后用保存的建连参数原地重建（复用同一 sid）。返回 {ok:true, id} 或 {ok:false, error}。
+   *  仅供 Web Shell 窗口「重新连接」使用；SSH TOFU/认证与首次建连走同一会话逻辑。 */
+  reconnect(id) {
+    const base = typeof id === 'string' ? this._params.get(id) : null;
+    if (!base) return { ok: false, error: '会话参数不存在，无法重连' };
+    let session;
+    try {
+      session = base.protocol === 'ssh' ? this._ssh(base) : this._telnet(base);
+    } catch (err) {
+      return { ok: false, error: '重连初始化失败：' + ((err && err.message) || err) };
+    }
+    this._attach(id, base, session); // 同 sid 重建：前端终端闭包/监听全部复用，无需重新挂接
     return { ok: true, id };
   }
 
@@ -166,6 +189,7 @@ class ShellManager extends EventEmitter {
   close(id) {
     const s = this.sessions.get(id);
     if (s) { s._close(); this.sessions.delete(id); }
+    this._params.delete(id); // 用户显式关闭标签：参数随之清掉，内存不留凭据副本
   }
   closeAll() {
     for (const id of [...this.sessions.keys()]) this.close(id);

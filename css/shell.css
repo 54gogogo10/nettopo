@@ -158,3 +158,15 @@
 .cd-body { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; font: 11.5px/1.6 Consolas, 'Courier New', monospace; color: var(--text); white-space: pre-wrap; word-break: break-all; background: var(--panel); }
 .cd-hl { color: var(--danger); font-weight: 600; }
 .m-sub .cd-hl { color: var(--danger); }
+
+/* ---- 断线重连横幅（会话结束后显示在终端顶部，可原地重新连接） ---- */
+.sh-rc {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; z-index: 8;
+  max-width: 82%; padding: 8px 12px 8px 14px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--border); box-shadow: var(--shadow);
+  color: var(--text); font-size: 12.5px;
+}
+.sh-rc.hide { display: none; }
+.sh-rc .sh-rc-reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.sh-rc .sh-rc-btn { height: 28px; padding: 0 14px; flex: none; }

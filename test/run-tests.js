@@ -1823,6 +1823,34 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     await Promise.race([new Promise((res) => manual.close(res)), new Promise((res) => setTimeout(res, 1000))]);
   }
 
+  // Telnet：断线重连（reconnect 复用同一 sid 原地重建）
+  {
+    const rcSocks = new Set();
+    const rcGreet = (sock) => { rcSocks.add(sock); sock.on('close', () => rcSocks.delete(sock)); sock.on('error', () => {}); sock.write('\r\nR1>'); };
+    const rcServer = net.createServer((sock) => rcGreet(sock));
+    await new Promise((res) => rcServer.listen(0, '127.0.0.1', res));
+    const port = rcServer.address().port;
+    const mgr = new ShellManager();
+    const outs = [];
+    mgr.on('output', (id, d) => outs.push(d));
+    const r = mgr.connect({ protocol: 'telnet', host: '127.0.0.1', port, timeout: 3000 });
+    await waitFor(() => outs.join('').includes('R1>'), 3000);
+    ok(r.ok, 'Telnet 重连：首次连接成功');
+    // 模拟对端断开（自然结束，参数保留）：服务端销毁 socket 触发客户端 end
+    const ended1 = new Promise((res) => mgr.on('end', (id) => res(id)));
+    for (const s of rcSocks) s.destroy();
+    await ended1;
+    const rr = mgr.reconnect(r.id); // 重连复用同一 sid（参数仍在）
+    ok(rr.ok && rr.id === r.id, 'Telnet 重连：复用同一 sid（' + rr.id + ')');
+    await waitFor(() => outs.join('').includes('R1>'), 3000);
+    ok(outs.join('').includes('R1>'), 'Telnet 重连：同一 sid 再次收到输出');
+    mgr.close(r.id);
+    const r2 = mgr.reconnect('s99999'); // 无参数的假 sid
+    ok(r2.ok === false && /不存在/.test(r2.error), 'Telnet 重连：无建连参数的 sid 报错（' + r2.error + '）');
+    for (const s of rcSocks) s.destroy();
+    await Promise.race([new Promise((res) => rcServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+  }
+
   // SSH：本地模拟服务器（ssh2 自带测试主机密钥）
   {
     const { Server } = require('ssh2');

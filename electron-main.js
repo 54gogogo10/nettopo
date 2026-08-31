@@ -463,6 +463,13 @@ ipcMain.handle('shell:trust', (e, p) => {
   if (!shellWin || shellWin.isDestroyed() || e.sender !== shellWin.webContents) return { ok: false, error: 'forbidden' };
   return { ok: shell.trustFingerprint(String((p && p.host) || ''), !!(p && p.trust)) };
 });
+ipcMain.handle('shell:reconnect', (e, p) => {
+  // 会话断开后原地重连：用保存的建连参数重建同一 sid 的会话（不新开标签，前端终端复用）
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  const sid = String((p && p.id) || '');
+  if (!/^s\d+$/.test(sid)) return { ok: false, error: '无效会话' };
+  return shell.reconnect(sid);
+});
 ipcMain.on('shell:data', (e, id, data) => {
   if (!shellSender(e)) return;
   if (typeof data !== 'string') return; // 仅接受字符串：防非字符串绕过限长并致流写入崩溃

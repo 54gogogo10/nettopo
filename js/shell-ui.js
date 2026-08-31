@@ -96,6 +96,7 @@ function diffSessionOutputs(outputs) {
     if (s.term) s.term.write('\r\n\x1b[33m[会话已结束] ' + (reason || '连接已关闭') + '\x1b[0m\r\n');
     castSel.delete(sid0(s));
     refreshCastCount();
+    showReconnectBar(s, reason);
   }
   const sid0 = (s) => { for (const [id, v] of sessions) if (v === s) return id; return null; };
   function bindListeners() {
@@ -117,6 +118,35 @@ function diffSessionOutputs(outputs) {
     window.topoShell.onNewTab((info) => addTab(info));
   }
 
+  /* ---- 断线重连横幅：会话结束后在终端顶部显示「重新连接」按钮，原地重建同一标签 ---- */
+  function showReconnectBar(s, reason) {
+    if (!s.rcBar) return;
+    s.rcReason.textContent = reason || '连接已关闭';
+    s.rcBar.classList.remove('hide');
+  }
+  function hideReconnectBar(s) {
+    if (s.rcBar) s.rcBar.classList.add('hide');
+  }
+  async function reconnectNow(s) {
+    if (s._reconnecting) return;
+    const id = sid0(s);
+    if (!id) { toast('会话已关闭，无法重连'); return; }
+    s._reconnecting = true;
+    if (s.rcBtn) { s.rcBtn.disabled = true; s.rcBtn.textContent = '重连中…'; }
+    let res;
+    try { res = await window.topoShell.reconnect(id); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
+    s._reconnecting = false;
+    if (s.rcBtn) { s.rcBtn.disabled = false; s.rcBtn.textContent = '重新连接'; }
+    if (!res || !res.ok) { toast((res && res.error) || '重连失败'); return; }
+    // 复用同一 sid：终端与闭包无需改动；重置会话态，恢复可输入
+    s.ended = false;
+    s._fpShown = false; // 新连接可能重新触发 SSH 指纹确认
+    if (s.term) s.term.write('\r\n\x1b[33m[正在重新连接 ' + ((s.tabEl.querySelector('.tt') || {}).textContent || '') + ' …]\x1b[0m\r\n');
+    if (castMode) castSel.add(id);
+    hideReconnectBar(s);
+    refreshCastCount();
+    if (s.dotEl) s.dotEl.className = 'dot';
+  }
   function addTab(info) {
     info = info || {};
     if (sessions.has(info.sid)) { activate(info.sid); return; }
@@ -131,6 +161,17 @@ function diffSessionOutputs(outputs) {
     wrapEl.className = 'sh-term-wrap';
     const termEl = document.createElement('div');
     wrapEl.appendChild(termEl);
+    // 断线重连横幅（会话结束后显示；点击原地重建，不新开标签、不清空历史）
+    const rcBar = document.createElement('div');
+    rcBar.className = 'sh-rc hide';
+    const rcReason = document.createElement('span');
+    rcReason.className = 'sh-rc-reason';
+    const rcBtn = document.createElement('button');
+    rcBtn.className = 'tb primary sh-rc-btn';
+    rcBtn.textContent = '重新连接';
+    rcBar.appendChild(rcReason);
+    rcBar.appendChild(rcBtn);
+    wrapEl.appendChild(rcBar);
     termsEl.appendChild(wrapEl);
     tabsEl.appendChild(tabEl);
     const term = new Terminal({
@@ -142,7 +183,8 @@ function diffSessionOutputs(outputs) {
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(termEl);
-    const rec = { tabEl, wrapEl, term, fit, dotEl: tabEl.querySelector('.dot'), castEl: tabEl.querySelector('.cast'), ended: false, buf: [] };
+    const rec = { tabEl, wrapEl, term, fit, dotEl: tabEl.querySelector('.dot'), castEl: tabEl.querySelector('.cast'), ended: false, buf: [], rcBar, rcReason, rcBtn };
+    rcBtn.addEventListener('click', (e) => { e.stopPropagation(); reconnectNow(rec); });
     sessions.set(sid, rec);
     term.write('\x1b[33m正在连接 ' + (info.title || sid) + ' …\r\n\x1b[0m');
     for (const item of rec.buf.splice(0)) {
@@ -193,7 +235,8 @@ function diffSessionOutputs(outputs) {
   function closeTab(sid) {
     const s = sessions.get(sid);
     if (!s) return;
-    if (!s.ended) window.topoShell.close(sid);
+    // 始终通知主进程关闭：活动会话关闭连接；已结束会话清理其建连参数（防内存留凭据副本）
+    window.topoShell.close(sid);
     s.tabEl.remove();
     s.wrapEl.remove();
     try { if (s.fit && s.fit.dispose) s.fit.dispose(); } catch (e) { /* ignore */ }
@@ -323,6 +366,7 @@ function diffSessionOutputs(outputs) {
       const s = a && a.s;
       const sel = s && s.term.getSelection();
       items = [
+        { label: '重新连接', disabled: !s || !s.ended, act: () => reconnectNow(s) },
         { label: '复制选中', disabled: !sel, act: () => copySelection(s) },
         { label: '粘贴', disabled: !s || s.ended, act: () => pasteTo(s) },
         { label: '全选', disabled: !s, act: () => { try { s.term.selectAll(); } catch (e) { /* ignore */ } } },

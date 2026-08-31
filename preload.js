@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('topoShell', {
   connect: (opts) => ipcRenderer.invoke('shell:connect', opts),
+  reconnect: (id) => ipcRenderer.invoke('shell:reconnect', { id }),
   sendData: (id, data) => ipcRenderer.send('shell:data', id, data),
   resize: (id, cols, rows) => ipcRenderer.send('shell:resize', id, cols, rows),
   close: (id) => ipcRenderer.send('shell:close', id),
