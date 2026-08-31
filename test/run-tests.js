@@ -1743,6 +1743,86 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     await new Promise((res) => server.close(res));
   }
 
+  // Telnet：自动登录（后台监控 autoLogin 路径）——登录成功回填用户名/密码
+  {
+    const loginSteps = [];
+    const loginSocks = new Set();
+    const loginServer = net.createServer((sock) => {
+      loginSocks.add(sock);
+      sock.on('close', () => loginSocks.delete(sock));
+      sock.on('error', () => {});
+      sock.write('\r\nUser Access Verification\r\n\r\nUsername: ');
+      sock.on('data', (d) => {
+        const t = d.toString('latin1');
+        if (t.includes('admin')) { loginSteps.push('user'); sock.write('\r\nPassword: '); }
+        else if (t.includes('secret')) { loginSteps.push('pwd'); sock.write('\r\n<SW1>'); }
+      });
+    });
+    await new Promise((res) => loginServer.listen(0, '127.0.0.1', res));
+    const mgr1 = new ShellManager();
+    const outs1 = [], statuses1 = [];
+    mgr1.on('output', (id, d) => outs1.push(d));
+    mgr1.on('status', (id, s) => statuses1.push(s));
+    const r1 = mgr1.connect({ protocol: 'telnet', host: '127.0.0.1', port: loginServer.address().port, username: 'admin', password: 'secret', autoLogin: true, timeout: 5000 });
+    await waitFor(() => outs1.join('').includes('<SW1>'), 5000);
+    ok(loginSteps.join(',') === 'user,pwd', 'Telnet 自动登录依次回填用户名/密码（' + loginSteps.join(',') + '）');
+    ok(outs1.join('').includes('<SW1>'), 'Telnet 自动登录后收到命令提示符');
+    ok(!statuses1.some(s => s.state === 'error'), 'Telnet 自动登录成功无错误状态');
+    const end1 = new Promise((res) => mgr1.on('end', res));
+    mgr1.close(r1.id);
+    await end1;
+    for (const s of loginSocks) s.destroy();
+    await Promise.race([new Promise((res) => loginServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+  }
+
+  // Telnet：自动登录认证失败——密码提交后设备重新索要用户名，应报错断开而非挂死
+  {
+    const failSocks = new Set();
+    const failServer = net.createServer((sock) => {
+      failSocks.add(sock);
+      sock.on('close', () => failSocks.delete(sock));
+      sock.on('error', () => {});
+      sock.write('Username: ');
+      sock.on('data', (d) => {
+        const t = d.toString('latin1');
+        if (t.includes('admin')) sock.write('\r\nPassword: ');
+        else if (t.includes('badpwd')) sock.write('\r\nUsername: '); // 拒绝凭据并重新索要用户名
+      });
+    });
+    await new Promise((res) => failServer.listen(0, '127.0.0.1', res));
+    const mgr2 = new ShellManager();
+    const statuses2 = [];
+    mgr2.on('status', (id, s) => statuses2.push(s));
+    const ended2 = new Promise((res) => mgr2.on('end', (id, reason) => res(reason)));
+    mgr2.connect({ protocol: 'telnet', host: '127.0.0.1', port: failServer.address().port, username: 'admin', password: 'badpwd', autoLogin: true, timeout: 5000 });
+    const reason2 = await Promise.race([ended2, new Promise((res) => setTimeout(() => res('__TIMEOUT__'), 5000))]);
+    ok(String(reason2).includes('认证失败'), 'Telnet 认证失败触发断开（' + reason2 + '）');
+    ok(statuses2.some(s => s.state === 'error' && s.text.includes('认证失败')), 'Telnet 认证失败上报 error 状态');
+    for (const s of failSocks) s.destroy();
+    await Promise.race([new Promise((res) => failServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+  }
+
+  // Telnet：未启用 autoLogin（Web Shell 人工交互路径回归）——登录提示出现时不自动回填凭据
+  {
+    const manualRecv = [];
+    const manualSocks = new Set();
+    const manual = net.createServer((sock) => {
+      manualSocks.add(sock);
+      sock.on('close', () => manualSocks.delete(sock));
+      sock.on('error', () => {});
+      sock.on('data', (d) => manualRecv.push(d.toString('latin1')));
+      sock.write('Username: ');
+    });
+    await new Promise((res) => manual.listen(0, '127.0.0.1', res));
+    const mgr3 = new ShellManager();
+    const r3 = mgr3.connect({ protocol: 'telnet', host: '127.0.0.1', port: manual.address().port, username: 'admin', password: 'secret', timeout: 3000 });
+    await new Promise((res) => setTimeout(res, 400));
+    ok(!manualRecv.some(t => t.includes('admin') || t.includes('secret')), '未启用 autoLogin 不自动回填凭据（交互式登录不受影响）');
+    mgr3.close(r3.id);
+    for (const s of manualSocks) s.destroy();
+    await Promise.race([new Promise((res) => manual.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+  }
+
   // SSH：本地模拟服务器（ssh2 自带测试主机密钥）
   {
     const { Server } = require('ssh2');

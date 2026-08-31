@@ -813,6 +813,7 @@ class MonitorManager extends EventEmitter {
       keyPassphrase: job.keyPassphrase || '',
       jump: job.jump || null,
       cols: 120, rows: 40,
+      autoLogin: job.protocol === 'telnet', // Telnet 无传输层认证：由 shell 层自动应答 Username:/Password: 登录提示（SSH 不受影响）
       expectFp: job.expectFp || ''
     });
     if (!r.ok) {
@@ -897,7 +898,8 @@ class MonitorManager extends EventEmitter {
     // 会话就绪门槛：TCP/认证完成 ≠ 设备命令行就绪（banner/初始化期间下发的首条命令会被吞）。
     // 发送空行探测，收到设备提示符行后 _ready=true，命令才正式下发；超时兜底照常执行。
     job._ready = false;
-    if (job.sid) { try { this.shell.write(job.sid, '\r\n'); } catch (e) { /* ignore */ } }
+    // Telnet 自动登录进行中不发空行探测：空行落在 Username:/Password: 提示上会引发提示重印，干扰登录应答
+    if (job.sid && !(job.protocol === 'telnet' && job.password)) { try { this.shell.write(job.sid, '\r\n'); } catch (e) { /* ignore */ } }
     // 状态文本三态：监控中（有周期命令）/ 仅读取中 / 仅探测中（无命令无仅读取，只做在线探测）
     const modeText = job.readOnly ? '仅读取中：' : (job.commands.length ? '监控中：' : '仅探测中：');
     job.statusText = modeText + job.host + ':' + job.port + '（' + job.protocol.toUpperCase() + '）';
@@ -1465,7 +1467,9 @@ class MonitorManager extends EventEmitter {
         username: job.username, password: job.password,
         privateKey: job.privateKey || '', keyPassphrase: job.keyPassphrase || '',
         jump: job.jump || null,
-        cols: 120, rows: 40, expectFp: job.expectFp || ''
+        cols: 120, rows: 40,
+        autoLogin: job.protocol === 'telnet', // 与监控会话同口径：独立备份会话也要过 Telnet 登录提示
+        expectFp: job.expectFp || ''
       });
       if (!r.ok) { this._finishBackup(job, gen, { ok: false, error: r.error || '备份连接失败' }); resolve(); return; }
       const sid = r.id;
@@ -1522,7 +1526,8 @@ class MonitorManager extends EventEmitter {
       };
       this.shell.on('output', onOut);
       (async () => {
-        try { this.shell.write(sid, '\r\n'); } catch (e) { /* ignore */ } // 空行探测提示符
+        // 空行探测提示符（Telnet 自动登录中跳过，防空行落在登录提示上引发重印干扰应答）
+        if (!(job.protocol === 'telnet' && job.password)) { try { this.shell.write(sid, '\r\n'); } catch (e) { /* ignore */ } }
         const t0 = Date.now();
         while (!ownReady && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
           await sleep(200);

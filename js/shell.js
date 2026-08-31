@@ -84,6 +84,8 @@ class ShellManager extends EventEmitter {
       rows: Math.max(parseInt(opts.rows, 10) || 24, 5),
       timeout: tout,
       expectFp: String(opts.expectFp || '').trim(),
+      // Telnet 明文登录自动应答（仅 _telnet 消费；后台监控场景无人工介入，必须自动过登录提示）
+      autoLogin: !!opts.autoLogin,
       jump,
       // SSH 公钥认证（可选）：私钥内容 + 私钥口令；缺省仍走密码/keyboard-interactive
       privateKey: typeof opts.privateKey === 'string' ? opts.privateKey.trim() : '',
@@ -335,11 +337,47 @@ class ShellManager extends EventEmitter {
     sock.setTimeout(o.timeout || 12000);
     const send = (b) => { if (!sock.destroyed) sock.write(b); };
     const finish = (reason) => {
+      if (loginTimer) { clearTimeout(loginTimer); loginTimer = null; }
       if (closed) return;
       closed = true;
       try { sock.destroy(); } catch (e) { /* ignore */ }
       try { decoder.end(); } catch (e) { /* ignore */ }
       em.emit('end', reason || '连接已关闭');
+    };
+
+    // Telnet 明文登录自动应答（可选，o.autoLogin）。Telnet 协议无传输层认证（SSH 的认证在 _ssh
+    // 握手期完成），登录靠设备弹出 Username:/Password: 提示由人工输入——后台监控无人工介入，
+    // 不应答则永远等不到提示符，命令全部被吞。状态机：0 等用户名提示 → 1 已发用户名 →
+    // 2 已发密码 → 3 终止（完成/失败/超窗）。仅在 password 非空时启用。
+    const autoLogin = !!o.autoLogin && String(o.password || '').length > 0;
+    let loginPhase = autoLogin ? 0 : 3;
+    let loginBuf = '';
+    let loginPwdRetry = false;
+    // 登录窗口 30s：超窗后不再应答——防登录完成很久后，设备输出恰好以 "Password:" 字样结尾
+    // （chunk 边界落在提示冒号处）时把凭据误发进命令行
+    let loginTimer = autoLogin ? setTimeout(() => { loginPhase = 3; }, 30000) : null;
+    const loginFail = (text) => {
+      loginPhase = 3;
+      em.emit('status', { state: 'error', text });
+      finish(text);
+    };
+    const loginFeed = (plain) => {
+      if (loginPhase >= 3) return;
+      loginBuf = (loginBuf + plain).slice(-160); // 提示符可能跨包拆分（"Usernam"+"e: "），滑窗匹配尾部
+      if (/(?:user\s*name|username|login)\s*[:：]\s*$/i.test(loginBuf)) {
+        if (loginPhase === 2) { loginFail('Telnet 认证失败：用户名或密码被设备拒绝'); return; } // 密码已提交仍要用户名＝凭据被拒
+        if (loginPhase === 0) { loginPhase = 1; send(String(o.username) + '\r\n'); }
+        // phase 1 的重复 Username:（重印提示）不重复发送，等 Password:
+      } else if (/password\s*[:：]\s*$/i.test(loginBuf)) {
+        if (loginPhase === 2) {
+          if (loginPwdRetry) { loginFail('Telnet 认证失败：密码被设备拒绝'); return; }
+          loginPwdRetry = true; // 密码提示重印（探测空行落在提示上）：容忍一次重发
+          send(String(o.password) + '\r\n');
+          return;
+        }
+        loginPhase = 2; // phase 0/1：有些设备只要密码不要用户名
+        send(String(o.password) + '\r\n');
+      }
     };
     const sendNaws = () => {
       // RFC1073：NAWS 载荷为 16 位大端（65535 表示「未知」），载荷内出现 0xFF 必须双写 IAC 转义，否则被服务端当作 IAC 误读
@@ -390,7 +428,11 @@ class ShellManager extends EventEmitter {
         }
         buf = buf.slice(2); // 其它命令（NOP 等）丢弃
       }
-      if (out.length) em.emit('output', decoder.write(Buffer.concat(out)));
+      if (out.length) {
+        const plain = decoder.write(Buffer.concat(out));
+        loginFeed(plain); // 自动登录应答先于 output 事件（monitor 侧无人值守，靠这里回填凭据）
+        em.emit('output', plain);
+      }
     });
     sock.on('timeout', () => {
       em.emit('status', { state: 'error', text: '连接超时' });
