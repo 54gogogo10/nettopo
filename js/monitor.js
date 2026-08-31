@@ -32,24 +32,31 @@ function sanitizeFilename(s) {
 
 /** 清理备份捕获行：只保留命令执行后的输出内容。
  *  - 输入的命令行（或其终端回显，可能带「提示符+命令」前缀，如 Switch#display current-configuration）一律不保留
- *  - 提示符行（Switch# / R1> 等）不保留
+ *  - 命令回显被折行/分片（TCP 分包、Telnet 协商字节穿插、终端重打）的残片不保留：
+ *    匹配前先剥行首提示符（R1#displ… → displ…，Cisco 形态提示符无 <>/[] 包裹，旧版漏剔）
+ *    与行尾残渣（空白/控制符/UTF-8 误码 U+FFFD——Telnet 协商字节混入回显的产物，会让整行尾部匹配失配）；
+ *    残片锚定命令首/尾时最短 2 字符、居中片段 4 字符，避免误杀短的真实输出行（如状态值）
+ *  - 提示符行（Switch# / R1> / [SW1] 等含系统视图形态）不保留
+ *  - 分页提示行（华为/H3C「  ---- More ----」/思科「--More--」：未关分页时插在输出流中）不保留
  *  返回：过滤后的行数组（保留原始行文本） */
 function cleanBackupLines(lines, cmds) {
   const out = [];
-  const list = Array.isArray(cmds) ? cmds : [];
+  const list = (Array.isArray(cmds) ? cmds : []).map(c => String(c == null ? '' : c).trim()).filter(Boolean);
   for (const raw of (Array.isArray(lines) ? lines : [])) {
-    const t = String(raw == null ? '' : raw).replace(/\s+$/, '');
+    const t = String(raw == null ? '' : raw).replace(/[\s\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\uFFFD]+$/, '');
     if (!t) continue;
-    if (list.some(c => {
-      if (!c) return false;
-      if (t === c || t.endsWith(c)) return true; // 输入的命令行（可能带提示符前缀）
-      // 命令回显被折行/分片（一条命令显示成很多行）的残片：行是某命令的前缀/后缀/片段。
-      // 长度≥4 才处理，避免误杀短的真实输出行（如状态值）。
-      return c.length >= 8 && t.length >= 4 && (c.startsWith(t) || c.endsWith(t) || c.includes(t));
-    })) continue;
     if (/^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]$/.test(t)) continue; // 提示符行（含 [SW1] 系统视图形态）
     // 提示符与 Telnet 协商残渣粘连的行（如 <SW1>\uFFFD..x(）：行首即提示符形态、后随噪声、非命令输出，剔除
     if (t.length <= 160 && /^[<\[][A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/.test(t)) continue;
+    // 分页提示行（仅由连字符/空白组成 + More 字样）
+    if (/^[\s-]*more[\s-]*$/i.test(t)) continue;
+    // 行首提示符剥除后的行内容：残片匹配对「提示符+残片」「残片+残渣」两种粘连形态生效
+    const m = t.match(/^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]][ :]?/);
+    const body = (m && m[0].length < t.length) ? t.slice(m[0].length) : t;
+    if (list.some(c => t.endsWith(c) || body.endsWith(c) // 整条命令回显（可能带提示符/杂前缀）
+      || (c.length >= 8 && (
+        (body.length >= 2 && (c.startsWith(body) || c.endsWith(body)))  // 锚定命令首/尾的残片（≥2 字符）
+        || (body.length >= 4 && c.includes(body)))))) continue;          // 居中片段（≥4 字符）
     out.push(raw);
   }
   return out;
@@ -1509,16 +1516,23 @@ class MonitorManager extends EventEmitter {
   }
 
   /** 独立备份会话：写命令序列并收集输出（不进监控日志）。
+   *  输出按行缓冲组包（与 _onOutput 同口径）：Telnet 的回显/输出会被 TCP 分包与协商字节
+   *  任意切碎，按事件直接拆行会把一条命令回显炸成多段残片漏进备份文件。
+   *  只采集首条命令下发之后的输出：连接横幅、登录提示、用户名回显不属于配置内容。
    *  返回 Promise：命令执行 + 过滤 + 保存全部完成后 resolve。 */
   _runBackupOwnCmds(job, gen, sid) {
     return new Promise((resolveCmds) => {
       const lines = [];
+      let lineBuf = '';
       let ownReady = false; // 独立新会话的就绪标志（与监控会话 _ready 互不干扰）
       const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
       const onOut = (sid2, data) => {
         if (sid2 !== sid) return;
         let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-        for (const ln of text.split('\n')) {
+        lineBuf += text;
+        const parts = lineBuf.split('\n');
+        lineBuf = parts.pop(); // 半行留缓冲，等下个事件续拼成整行
+        for (const ln of parts) {
           const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
           if (!ownReady && PROMPT_RE.test(t.trim())) ownReady = true; // 独立会话就绪判据
           if (t) lines.push(t);
@@ -1529,19 +1543,28 @@ class MonitorManager extends EventEmitter {
         // 空行探测提示符（Telnet 自动登录中跳过，防空行落在登录提示上引发重印干扰应答）
         if (!(job.protocol === 'telnet' && job.password)) { try { this.shell.write(sid, '\r\n'); } catch (e) { /* ignore */ } }
         const t0 = Date.now();
+        // 提示符常不带换行结尾（…\r\n> 截止于提示符）：半行残段同样参与就绪判定，否则白等满超时
         while (!ownReady && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
+          if (lineBuf && PROMPT_RE.test(lineBuf.trim())) { ownReady = true; break; }
           await sleep(200);
         }
+        // 命令下发前的输出（登录横幅/提示/用户名回显）不属于配置内容：丢弃并重置组包缓冲，
+        // 让首条命令回显从新行开始（残留在缓冲里的尾部提示符不会拼进回显行）
+        lines.length = 0;
+        lineBuf = '';
         for (const cmd of job.backup.commands) {
           if (!job.enabled || job.stopping || gen !== job.gen) break;
           try { this.shell.write(sid, cmd + eol); } catch (e) { /* ignore */ }
           await sleep(job.backup.waitMs);
         }
         await sleep(400); // 尾部输出缓冲
+        // 尾部半行（末行无换行/收尾提示符）冲进结果（提示符行由 cleanBackupLines 剔除）
+        const tail = lineBuf.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+        if (tail.trim()) lines.push(tail);
         this.shell.removeListener('output', onOut);
         try { this.shell.close(sid); } catch (e) { /* ignore */ }
         if (!job.enabled || job.stopping || gen !== job.gen) { resolveCmds(); return; }
-        // 过滤命令回显（含提示符前缀整行）与提示符行：只保留命令执行后的输出内容
+        // 过滤命令回显（含提示符前缀整行/残片）与提示符行：只保留命令执行后的输出内容
         this._saveBackup(job, gen, cleanBackupLines(lines, job.backup.commands).join('\n'));
         resolveCmds();
       })().catch(() => resolveCmds());

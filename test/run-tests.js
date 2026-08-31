@@ -2061,6 +2061,76 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!got.some(l => l.trim() === 'ation' || l.trim() === 'lay current-configuration' || l.trim() === 'current-configur'),
         '命令碎片不再漏入备份');
     }
+    // 9) cleanBackupLines：Telnet 回显残片粘连提示符（Cisco 形态 R1#…）/行尾协商误码残渣/短残片/More 分页行剔除
+    {
+      const { cleanBackupLines } = require(path.join(root, 'js', 'monitor.js'));
+      const cmds9 = ['display current-configuration'];
+      const got = cleanBackupLines([
+        'R1#display cur',                        // Cisco 形态提示符+回显首片（无 <>/[] 包裹，旧规则漏剔）
+        'rent-configuration\uFFFD\u0001\u0003',  // 回显尾片+Telnet 协商误码残渣（行尾匹配失配，旧规则漏剔）
+        'SW1>di',                                // 裸提示符形态+2 字符锚定残片
+        '  ---- More ----',                      // 华为/H3C 分页提示行
+        '--More--',                              // 思科分页提示行
+        '#',
+        'sysname SW1',
+        'return'
+      ], cmds9);
+      ok(got.length === 2 && got.includes('sysname SW1') && got.includes('return'),
+        '提示符粘连残片/误码残渣/短残片/分页行全部剔除，真实输出保留（' + JSON.stringify(got) + '）');
+      ok(!got.some(l => l.includes('displ') || l.includes('rent-') || l.trim() === 'SW1>di' || /more/i.test(l.trim())),
+        '命令字符不再残留在备份中');
+      // 反向保护：真实配置行（含 > 符号的描述、含 More 字样的正文）不得被误杀
+      const keep = cleanBackupLines([
+        ' description ->uplink-port',   // 正文含 > ：剥提示符匹配须以残片命中为前提，不整行误杀
+        'sysname More-SW',              // 正文含 More 字样：仅「整行只有连字符/空白+More」才算分页行
+        'return'
+      ], cmds9);
+      ok(keep.length === 3, '含 >/More 字样的真实配置行不被误杀（' + JSON.stringify(keep) + '）');
+    }
+    // 10) own 独立备份会话：分包回显按行组包（Telnet 回显被 TCP/协商字节切碎）+ 只采集命令下发后的输出
+    {
+      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const tmpO = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-ownbk-'));
+      const storeO = new ConfigBackupStore(path.join(tmpO, 'cfg'));
+      const outLns = [], writes = [];
+      const stubO = {
+        on(ev, fn) { if (ev === 'output') outLns.push(fn); },
+        removeListener(ev, fn) { const i = outLns.indexOf(fn); if (i >= 0) outLns.splice(i, 1); },
+        write(_sid, d) { writes.push(d); },
+        close() {},
+        connect() { return { ok: true, id: 's9' }; },
+        trustFingerprint() { return true; }
+      };
+      const mgrO = new MonitorManager(stubO, tmpO, null, { backupStore: storeO });
+      const vO = mgrO._validate({
+        key: 'n9@10.0.0.9', host: '10.0.0.9', protocol: 'telnet', password: 'pw', commands: ['display clock'],
+        backup: { enabled: true, mode: 'own', command: 'display current-configuration', waitMs: 500 }
+      });
+      eq(vO.ok, true, 'own 备份任务参数校验通过');
+      const jobO = mgrO._newJob(vO.cfg);
+      mgrO.jobs.set(jobO.key, jobO);
+      const emit = (d) => { for (const fn of outLns.slice()) fn('s9', d); };
+      setTimeout(() => {
+        emit('Welcome to Huawei...\r\nUsername: ');      // 登录横幅+提示：不属于配置内容
+        setTimeout(() => emit('admin\r\nPassword: '), 30); // 用户名回显：曾随备份落盘
+        setTimeout(() => emit('\r\nR1#'), 80);           // 提示符（不带换行结尾：半行残段判就绪）
+        setTimeout(() => {
+          emit('R1#dis');                                // 回显被分包/协商字节切碎的形态
+          setTimeout(() => emit('play cur'));
+          setTimeout(() => emit('rent-configura'), 20);
+          setTimeout(() => emit('tion\r\n#\r\nsysname SW1\r\n#\r\nreturn\r\nR1#'), 40);
+        }, 400);
+      }, 50);
+      await mgrO._runBackupOwnCmds(jobO, jobO.gen, 's9');
+      const devKey = jobO.name || jobO.deviceId;
+      const nameO = storeO.latest(devKey, jobO.host);
+      ok(!!nameO, 'own 备份已保存');
+      const contentO = nameO ? storeO.read(devKey, jobO.host, nameO).content : '';
+      eq(contentO, 'sysname SW1\nreturn', '分包回显组包整行剔除+登录横幅/用户名回显不落盘（实际：' + JSON.stringify(contentO) + '）');
+      ok(writes.some(w => String(w).indexOf('display current-configuration') >= 0), '备份命令确实已下发');
+      fs.rmSync(tmpO, { recursive: true, force: true });
+    }
 
     /* ================= 回归（R4 审查修复项·第二批） ================= */
     console.log('== 回归：isValidImg 收紧与节点图标口径统一（R4/F-2②③） ==');
