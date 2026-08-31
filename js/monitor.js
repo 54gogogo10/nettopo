@@ -23,8 +23,9 @@ function sanitizeFilename(s) {
   out = out.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').trim();
   out = out.replace(/\.\./g, '_').replace(/^\.+/, '').replace(/[. ]+$/, '');
   if (!out) out = 'device';
-  // Windows 保留设备名（CON/NUL/COM1…，带扩展名同样保留）：写入会静默失败，前缀下划线规避（与 backup-store 口径一致）
-  if (/^(con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(\.[^.]*)?$/i.test(out)) out = '_' + out;
+  // Windows 保留设备名（CON/NUL/COM1…）：判定看首个圆点前的词干（con.a.b 同样保留），
+  // 写入会静默失败，前缀下划线规避（与 backup-store 口径一致）
+  if (/^(con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(?:\.|$)/i.test(out)) out = '_' + out;
   if (out.length > 60) out = out.slice(0, 60);
   return out;
 }

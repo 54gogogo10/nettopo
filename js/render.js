@@ -27,6 +27,8 @@ class Renderer {
     this.linkEls = new Map();
     this.textEls = new Map();
     this.regionEls = new Map();
+    this._regionSig = '';         // 区域层重建签名（update 高频路径防抖，见 _buildRegions）
+    this._groupSig = '';          // 聚合组层重建签名（同上）
     this.sel = { kind: null, id: null };
     this.selIds = new Set(); // 多选（仅节点）
     this.selLinkIds = new Set(); // 多选（连线）
@@ -150,6 +152,7 @@ class Renderer {
     this.linkEls.clear();
     this.textEls.clear();
     this.regionEls.clear();
+    this._regionSig = ''; // regionLayer 已清空：强制下次 update 重建，不吃签名缓存
     this.nodeLayer.innerHTML = '';
     this.linkLayer.innerHTML = '';
     this.textLayer.innerHTML = '';
@@ -211,9 +214,17 @@ class Renderer {
 
   /* ---------- 子网分组 ---------- */
   _buildGroups() {
+    const groups = this.showSubnets ? U.subnetGroups(this.nodes, this.links, this.subnetNames) : [];
+    // update() 是拖拽/缩放等指针级高频路径：分组几何/名称/缩放未变时跳过整层 DOM 重建
+    // （subnetGroups 仍每帧重算——O(节点+链路)；省的是 O(分组×元素) 的销毁重建）
+    let sig = (this.showSubnets ? 1 : 0) + '/' + this.zoom.toFixed(4) + '/' + groups.length;
+    for (const g of groups) {
+      sig += `|${g.key},${(Number(g.x) || 0).toFixed(2)},${(Number(g.y) || 0).toFixed(2)},${(Number(g.w) || 0).toFixed(2)},${(Number(g.h) || 0).toFixed(2)},${g.name},${g.color},${g.nodeIds.length}`;
+    }
+    if (sig === this._groupSig) return;
+    this._groupSig = sig;
     this.groupLayer.innerHTML = '';
     if (!this.showSubnets) return;
-    const groups = U.subnetGroups(this.nodes, this.links, this.subnetNames);
     for (const g of groups) {
       const grp = el('g', { class: 'subnet', transform: `translate(${g.x} ${g.y})`, 'data-key': g.key }, this.groupLayer);
       el('rect', { class: 'subnet-box', x: 0, y: 0, width: g.w, height: g.h, rx: 16, fill: g.color }, grp).style.opacity = '0.08';
@@ -237,12 +248,25 @@ class Renderer {
   /* 区域为用户手画的几何容器（区别于按网段自动归组的 subnetGroups）：
    * 仅渲染框与标题；设备是否属于区域由「中心点是否在框内」实时决定，不存成员表。 */
   _buildRegions() {
+    // 同 _buildGroups：区域几何/名称/缩放/框内设备数未变时跳过整层 DOM 重建（节点拖拽不重建，跨框才重建）
+    const counts = [];
+    let sig = this.zoom.toFixed(4) + '/' + (this.regions ? this.regions.length : -1);
+    for (const r of this.regions || []) {
+      let inside = 0;
+      for (const n of this.nodes) {
+        if (n.x + n.w / 2 > r.x && n.x + n.w / 2 < r.x + r.w &&
+          n.y + n.h / 2 > r.y && n.y + n.h / 2 < r.y + r.h) inside++;
+      }
+      counts.push(inside);
+      sig += `|${r.id},${(Number(r.x) || 0).toFixed(2)},${(Number(r.y) || 0).toFixed(2)},${(Number(r.w) || 0).toFixed(2)},${(Number(r.h) || 0).toFixed(2)},${r.name},${r.color || ''},${inside}`;
+    }
+    if (sig === this._regionSig) return;
+    this._regionSig = sig;
     this.regionLayer.innerHTML = '';
     this.regionEls.clear();
+    let ri = 0;
     for (const r of this.regions || []) {
-      const inside = this.nodes.filter(n =>
-        n.x + n.w / 2 > r.x && n.x + n.w / 2 < r.x + r.w &&
-        n.y + n.h / 2 > r.y && n.y + n.h / 2 < r.y + r.h).length;
+      const inside = counts[ri++];
       const g = el('g', { class: 'region', 'data-id': r.id, transform: `translate(${r.x} ${r.y})` }, this.regionLayer);
       el('rect', { class: 'region-fill', x: 0, y: 0, width: r.w, height: r.h, rx: 14, fill: r.color || '#6366f1' }, g).style.opacity = '0.06';
       el('rect', {

@@ -1837,6 +1837,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     eq(sanitizeFilename('NUL.log'), '_NUL.log', 'sanitizeFilename 拦截保留名 NUL.log（带扩展名）');
     eq(sanitizeFilename('com1'), '_com1', 'sanitizeFilename 拦截保留名 com1（大小写不敏感）');
     eq(sanitizeFilename('console'), 'console', '普通名含保留名前缀不受影响');
+    eq(sanitizeFilename('nul.a.b'), '_nul.a.b', 'sanitizeFilename 拦截保留名多级扩展名（nul.a.b，词干判定）');
+    eq(sanitizeFilename('com1.tar.gz'), '_com1.tar.gz', 'sanitizeFilename 拦截保留名多级扩展名（com1.tar.gz）');
+    eq(sanitizeFilename('lpt1x.log'), 'lpt1x.log', 'lpt1x 等非保留词干不受影响');
     const tmpBase = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-mon-test-'));
     const stubShell = { on() {}, connect() { return { ok: true, id: 's1' }; }, close() {}, trustFingerprint() { return true; } };
     const mgr = new MonitorManager(stubShell, tmpBase, null, {});
@@ -2014,6 +2017,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         .flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.basename(e.name)]);
       const inLib = walk(cbDir).filter(n => /^cfg_\d{8}_\d{6}(_\d+)?\.cfg$/.test(n));
       ok(inLib.length === 1, '整库仅此一份备份，无库外落盘（旧实现会把 cfg 文件写到临时目录上级）');
+      // R5：保留设备名多级扩展名（词干判定）——修复前 mkdirSync('nul.a.b') 在 Windows 静默失败
+      const rn = store.save('nul.a.b', '1.2.3.4', 'sysname R1\nreturn');
+      ok(rn.ok === true && fs.existsSync(path.join(cbDir, '_nul.a.b', '1.2.3.4', rn.name || '#')), '保留名设备目录加下划线前缀后可正常落盘（nul.a.b → _nul.a.b）');
       fs.rmSync(cbDir, { recursive: true, force: true });
     }
 
