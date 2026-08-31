@@ -1165,6 +1165,26 @@ class MonitorManager extends EventEmitter {
     return !!job._ready;
   }
 
+  /** 备份开捕获窗口前排空上一条命令的输出：等输出静默（行缓冲 ≥400ms 无新增）且残段为提示符形态
+   *  （提示符重现 = 上一条命令输出完毕），再把残段刷进监控日志并重置组包缓冲。
+   *  命令循环只保证命令「已写完」即释放互斥位，慢设备的输出尾部可能仍在流动——不排空则
+   *  上一轮监控输出的行/迟到的命令回显会混进备份文件（SSH 与 Telnet 共用此路径）。
+   *  超时（2s）后照常执行不阻塞备份；届时迟到的命令回显由捕获过滤名单兜底剔除。 */
+  async _drainForBackup(job, gen, timeoutMs) {
+    const t0 = Date.now();
+    let lastLen = -1, quietMs = 0;
+    while (job.enabled && !job.stopping && gen === job.gen && (Date.now() - t0) < timeoutMs) {
+      const len = job.lineBuf ? job.lineBuf.length : 0;
+      quietMs = (len === lastLen) ? quietMs + 100 : 0;
+      lastLen = len;
+      if (quietMs >= 400 && PROMPT_RE.test(String(job.lineBuf || '').trim())) break;
+      await sleep(100);
+    }
+    const rest = String(job.lineBuf || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+    if (rest.trim()) this._logLine(job, rest); // 残段（通常是提示符）如实入监控日志，不凭空丢字
+    job.lineBuf = '';
+  }
+
   async _runCycle(job, gen) {
     if (!job.enabled || job.state !== 'monitoring' || gen !== job.gen || job.readOnly) return;
     // 配置备份捕获期间暂停命令循环（避免输出互相污染），1 秒后再试
@@ -1450,7 +1470,9 @@ class MonitorManager extends EventEmitter {
     this._rollLogIfNeeded(job);
     this._logCmd(job, job.backup.commands.join('；') + '（配置备份）');
     await this._waitReady(job, gen, READY_TIMEOUT_MS); // 复用监控会话：等会话就绪再下发首条备份命令
-    job._backupCap = { commands: job.backup.commands.slice(), lines: [], startedAt: Date.now() };
+    await this._drainForBackup(job, gen, 2000);        // 排空上一条监控命令的输出尾部，防混入备份
+    // 过滤名单并入监控/连接时命令：排空超时的退化场景下，迟到的监控命令回显行同样不得混入备份
+    job._backupCap = { commands: job.backup.commands.concat(job.commands || [], job.onConnect || []), lines: [], startedAt: Date.now() };
     const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
     for (const cmd of job.backup.commands) {
       if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) { job._backupCap = null; return; }

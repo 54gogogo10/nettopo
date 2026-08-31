@@ -2131,6 +2131,152 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(writes.some(w => String(w).indexOf('display current-configuration') >= 0), '备份命令确实已下发');
       fs.rmSync(tmpO, { recursive: true, force: true });
     }
+    // 11) own 独立备份会话（SSH）：回显被 SSH 通道数据切碎/CRLF 跨块切断/MOTD 与提示符重印不落盘
+    {
+      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const tmpS = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-sshbk-'));
+      const storeS = new ConfigBackupStore(path.join(tmpS, 'cfg'));
+      const outS = [];
+      const stubS = {
+        on(ev, fn) { if (ev === 'output') outS.push(fn); },
+        removeListener(ev, fn) { const i = outS.indexOf(fn); if (i >= 0) outS.splice(i, 1); },
+        write() {},
+        close() {},
+        connect() { return { ok: true, id: 's10' }; },
+        trustFingerprint() { return true; }
+      };
+      const mgrS = new MonitorManager(stubS, tmpS, null, { backupStore: storeS });
+      const vS = mgrS._validate({
+        key: 'n10@10.0.0.10', host: '10.0.0.10', protocol: 'ssh', username: 'admin', password: 'pw', commands: ['display clock'],
+        backup: { enabled: true, mode: 'own', command: ['screen-length 0 temporary', 'display current-configuration'], waitMs: 500 }
+      });
+      eq(vS.ok, true, 'own 备份（SSH）任务参数校验通过');
+      const jobS = mgrS._newJob(vS.cfg);
+      mgrS.jobs.set(jobS.key, jobS);
+      const emitS = (d) => { for (const fn of outS.slice()) fn('s10', d); };
+      setTimeout(() => {
+        emitS('Info: The max number of VTY users...\r\n<R1> \r\n');   // MOTD + 提示符 + 探测空行回显
+        setTimeout(() => emitS('<R1>'), 120);                          // 提示符重印（无换行结尾：半行残段判就绪）
+      }, 30);
+      let wiS = 0;
+      stubS.write = (_sid, d) => {
+        wiS++;
+        if (wiS === 2) { // 首次 write 是空行探测，其后依次为两条备份命令
+          setTimeout(() => emitS('scr'), 30);
+          setTimeout(() => emitS('een-length 0 '), 45);
+          setTimeout(() => emitS('tempo'), 60);
+          setTimeout(() => emitS('rary\r\n'), 75);          // 首条命令回显被通道数据切碎
+        }
+        if (wiS === 3) {
+          setTimeout(() => emitS('dis'), 30);
+          setTimeout(() => emitS('play cur'), 45);
+          setTimeout(() => emitS('rent-configura'), 60);
+          setTimeout(() => emitS('tion\r'), 75);
+          setTimeout(() => emitS('\n#\r\n'), 90);           // 回显行尾 CRLF 跨块切断
+          setTimeout(() => emitS('sysname R1\r'), 105);
+          setTimeout(() => emitS('\n#\r\nreturn\r\n<R1>'), 130); // 输出 CRLF 跨块切断 + 尾部提示符
+        }
+      };
+      await mgrS._runBackupOwnCmds(jobS, jobS.gen, 's10');
+      const devKeyS = jobS.name || jobS.deviceId;
+      const nameS = storeS.latest(devKeyS, jobS.host);
+      ok(!!nameS, 'own 备份（SSH）已保存');
+      const contentS = nameS ? storeS.read(devKeyS, jobS.host, nameS).content : '';
+      eq(contentS, 'sysname R1\nreturn', 'SSH 碎片回显/CRLF 跨块切断组包整行剔除，MOTD/提示符重印不落盘（实际：' + JSON.stringify(contentS) + '）');
+      fs.rmSync(tmpS, { recursive: true, force: true });
+    }
+    // 12) shared 复用监控会话（SSH）：上一轮提示符残段 + 备份命令碎片回显不落盘
+    {
+      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const tmpH = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-shbk-'));
+      const storeH = new ConfigBackupStore(path.join(tmpH, 'cfg'));
+      const outH = [];
+      const stubH = {
+        on(ev, fn) { if (ev === 'output') outH.push(fn); },
+        removeListener(ev, fn) { const i = outH.indexOf(fn); if (i >= 0) outH.splice(i, 1); },
+        write() {},
+        close() {},
+        connect() { return { ok: true, id: 's11' }; },
+        trustFingerprint() { return true; }
+      };
+      const mgrH = new MonitorManager(stubH, tmpH, null, { backupStore: storeH });
+      const vH = mgrH._validate({
+        key: 'n11@10.0.0.11', host: '10.0.0.11', protocol: 'ssh', username: 'admin', password: 'pw', commands: ['display clock'],
+        backup: { enabled: true, mode: 'session', command: ['screen-length 0 temporary', 'display current-configuration'], waitMs: 400 }
+      });
+      eq(vH.ok, true, 'shared 备份（SSH）任务参数校验通过');
+      const jobH = mgrH._newJob(vH.cfg);
+      mgrH.jobs.set(jobH.key, jobH);
+      jobH.sid = 's11'; jobH.state = 'monitoring'; jobH._ready = true;
+      jobH.logStream = { bytesWritten: 0, write() {}, end() {} };
+      mgrH._bySid.set('s11', jobH.key);
+      const emitH = (d) => { for (const fn of outH.slice()) fn('s11', d); };
+      emitH('\r\n2026-09-01 10:00:00\r\n<R1>'); // 上一轮时钟输出 + 提示符残段（无换行）
+      let wiH = 0;
+      stubH.write = (_sid, d) => {
+        wiH++;
+        const seq = wiH === 1
+          ? ['screen-len', 'gth 0 tempo', 'rary\r\n']                                              // 首条命令回显切碎
+          : ['dis', 'play current-configuration\r\n#\r\nsysname R1\r\n#\r\nreturn\r\n<R1>'];       // 次条回显+输出
+        let i = 0; for (const ch of seq) { setTimeout(() => emitH(ch), 30 + i++ * 20); }
+      };
+      await mgrH._runBackupShared(jobH, jobH.gen);
+      const devKeyH = jobH.name || jobH.deviceId;
+      const nameH = storeH.latest(devKeyH, jobH.host);
+      ok(!!nameH, 'shared 备份（SSH）已保存');
+      const contentH = nameH ? storeH.read(devKeyH, jobH.host, nameH).content : '';
+      eq(contentH, 'sysname R1\nreturn', 'SSH shared 会话：碎片回显组包剔除+上一轮提示符残段不落盘（实际：' + JSON.stringify(contentH) + '）');
+      fs.rmSync(tmpH, { recursive: true, force: true });
+    }
+    // 13) shared 备份排空：上一条监控命令输出仍在流动（More/尾部行）不混入；排空后迟到的监控/连接时命令回显行被过滤名单剔除
+    {
+      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const tmpD = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-shdr-'));
+      const storeD = new ConfigBackupStore(path.join(tmpD, 'cfg'));
+      const outD = [];
+      const stubD = {
+        on(ev, fn) { if (ev === 'output') outD.push(fn); },
+        removeListener(ev, fn) { const i = outD.indexOf(fn); if (i >= 0) outD.splice(i, 1); },
+        write() {},
+        close() {},
+        connect() { return { ok: true, id: 's12' }; },
+        trustFingerprint() { return true; }
+      };
+      const mgrD = new MonitorManager(stubD, tmpD, null, { backupStore: storeD });
+      const vD = mgrD._validate({
+        key: 'n12@10.0.0.12', host: '10.0.0.12', protocol: 'ssh', username: 'admin', password: 'pw',
+        commands: ['display interface brief'], onConnect: ['screen-length disable'],
+        backup: { enabled: true, mode: 'session', command: ['display current-configuration'], waitMs: 400 }
+      });
+      eq(vD.ok, true, 'shared 备份排空任务参数校验通过');
+      const jobD = mgrD._newJob(vD.cfg);
+      mgrD.jobs.set(jobD.key, jobD);
+      jobD.sid = 's12'; jobD.state = 'monitoring'; jobD._ready = true;
+      jobD.logStream = { bytesWritten: 0, write() {}, end() {} };
+      mgrD._bySid.set('s12', jobD.key);
+      const emitD = (d) => { for (const fn of outD.slice()) fn('s12', d); };
+      emitD('PHY   Speed  Duplex  Link\r\n');                              // 上一命令已刷出的输出行
+      setTimeout(() => emitD('\u001b[K  ---- More ----\u001b[K\r\n'), 120); // 仍在流动：More 分页行（带 ANSI）
+      setTimeout(() => emitD('Eth0/0/1  up  up\r\n'), 260);                 // 仍在流动：上一命令尾部行
+      setTimeout(() => emitD('<HW>'), 420);                                 // 输出完毕：提示符重现（无换行）
+      let wiD = 0;
+      stubD.write = (_sid, d) => {
+        wiD++;
+        // 捕获窗口打开后迟到的监控/连接时命令回显（排空兜底：过滤名单剔除）+ 备份命令回显与真实输出
+        const seq = ['display interface brief\r\n', 'screen-length disable\r\n', 'dis', 'play current-configuration\r\n', '#\r\nsysname HW\r\nreturn\r\n<HW>'];
+        let i = 0; for (const ch of seq) { setTimeout(() => emitD(ch), 30 + i++ * 20); }
+      };
+      await mgrD._runBackupShared(jobD, jobD.gen);
+      const devKeyD = jobD.name || jobD.deviceId;
+      const nameD = storeD.latest(devKeyD, jobD.host);
+      ok(!!nameD, 'shared 备份排空场景已保存');
+      const contentD = nameD ? storeD.read(devKeyD, jobD.host, nameD).content : '';
+      eq(contentD, 'sysname HW\nreturn', '监控输出尾部/More/迟到命令回显均不混入备份（实际：' + JSON.stringify(contentD) + '）');
+      fs.rmSync(tmpD, { recursive: true, force: true });
+    }
 
     /* ================= 回归（R4 审查修复项·第二批） ================= */
     console.log('== 回归：isValidImg 收紧与节点图标口径统一（R4/F-2②③） ==');
