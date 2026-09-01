@@ -302,7 +302,7 @@ function openNeighborImport() {
         <div class="frow" style="flex:1;margin-bottom:0"><label>本端设备（粘贴的是该设备的邻居表）</label>
           <select id="nbLocal">${nodesSorted.map(n => `<option value="${U.escHtml(n.id)}"${n.id === selId ? ' selected' : ''}>${U.escHtml(n.name)}</option>`).join('')}</select>
         </div>
-        <label style="display:flex;align-items:center;gap:5px;margin:0 0 4px" title="解析结果中对端接口为空时也创建连线（对端接口留空，之后可手动补）"><input id="nbNewIf" type="checkbox" style="width:auto" checked/>对端接口未识别也创建连线</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0 0 4px" title="解析结果中对端接口为空时也创建连线（对端接口留空，之后可手动补）"><input id="nbNewIf" type="checkbox" checked/>对端接口未识别也创建连线</label>
         <button type="button" class="tb" id="nbParse"><i class="ic" data-ic="search"></i>解析预览</button>
       </div>
       <div class="frow"><textarea id="nbText" rows="8" spellcheck="false" style="font-family:Consolas,monospace;font-size:12px" placeholder="<SW1>display lldp neighbor brief&#10;Local Intf     Neighbor Dev     Neighbor Intf&#10;GE0/0/1        SW2              GE0/0/24&#10;..."></textarea></div>
@@ -4972,9 +4972,9 @@ function openMonitorConfig(id) {
         <div class="frow"><label>命令间隔（秒，一轮内命令之间）</label><input id="monCmdDelay" type="number" min="0" step="0.1" value="${U.escHtml(saved.cmdDelayMs != null ? saved.cmdDelayMs / 1000 : 1)}"/></div>
       </div></div>
       <div class="frow" style="display:flex;align-items:center;gap:16px">
-        <label style="display:flex;align-items:center;gap:6px;margin:0"><input id="monEnable" type="checkbox" style="width:auto"${saved.enabled ? ' checked' : ''}/>启用后台监控</label>
-        <label style="display:flex;align-items:center;gap:6px;margin:0" title="设备离线 / 输出匹配告警关键字 / 备份失败时弹出系统通知"><input id="monNotify" type="checkbox" style="width:auto" checked/>离线/告警/备份失败时弹系统通知</label>
-        <label style="display:flex;align-items:center;gap:6px;margin:0" title="关闭主窗口后应用最小化到系统托盘，后台监控继续运行"><input id="monTray" type="checkbox" style="width:auto"/>托盘常驻（关窗后后台继续监控）</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0"><input id="monEnable" type="checkbox"${saved.enabled ? ' checked' : ''}/>启用后台监控</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0" title="设备离线 / 输出匹配告警关键字 / 备份失败时弹出系统通知"><input id="monNotify" type="checkbox" checked/>离线/告警/备份失败时弹系统通知</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0" title="关闭主窗口后应用最小化到系统托盘，后台监控继续运行"><input id="monTray" type="checkbox"/>托盘常驻（关窗后后台继续监控）</label>
       </div>
       <div id="monStatus" class="m-sub" style="margin-top:4px"></div>
       <div class="m-actions">
