@@ -278,8 +278,12 @@ class SyslogServer extends EventEmitter {
   _writeEntry(ent) {
     const d = new Date(ent.ts);
     const day = fmtDate(d);
-    if (this.lastDay && this.lastDay !== day) this._cleanupOld(); // 跨天：清理过期
-    this.lastDay = day;
+    // 过期清理按本机墙上时钟的「天」滚动触发一次：消息时间戳可能因设备时钟错误落在
+    // 过去/未来（差出一天即触发），若按消息日期触发会在正常消息后立即清掉刚写入的
+    // 「旧日期」文件（设备时钟回拨场景下日志一写就丢）
+    const localDay = fmtDate(new Date());
+    if (this.lastDay && this.lastDay !== localDay) this._cleanupOld();
+    this.lastDay = localDay;
     const hostDir = sanitizeHostDir(ent.host);
     const base = path.resolve(this.baseDir);
     const dir = path.resolve(base, hostDir);
@@ -313,8 +317,12 @@ class SyslogServer extends EventEmitter {
         for (const f of fs.readdirSync(hd)) {
           const m = f.match(/^(\d{4})-(\d{2})-(\d{2})\.log$/);
           if (!m) continue;
+          const full = path.join(hd, f);
+          let fst;
+          try { fst = fs.lstatSync(full); } catch (e) { continue; }
+          if (fst.mtimeMs > Date.now() - 3600000) continue; // 近 1 小时内有写入的不清（设备时钟错误也会持续写「旧日期」文件）
           const t = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
-          if (Number.isFinite(t) && t < cutoff) { try { fs.unlinkSync(path.join(hd, f)); } catch (e) { /* ignore */ } }
+          if (Number.isFinite(t) && t < cutoff) { try { fs.unlinkSync(full); } catch (e) { /* ignore */ } }
         }
       }
     } catch (e) { /* ignore */ }

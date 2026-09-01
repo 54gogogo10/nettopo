@@ -3408,6 +3408,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const { NetServices, normalizeConfig } = require(path.join(root, 'js', 'net-services.js'));
     const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
     const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
+    const waitUntil = async (fn, ms = 3000, step = 80) => { const t0 = Date.now(); for (;;) { let v; try { v = fn(); } catch (e) { v = false; } if (v) return true; if (Date.now() - t0 > ms) return false; await waitMs(step); } };
     const tmpSvc = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-netsvc-'));
     const randPort = () => 20000 + Math.floor(Math.random() * 25000);
 
@@ -3750,8 +3751,12 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     /* ---------- Syslog 服务器（UDP / TCP） ---------- */
     console.log('== 网络服务：Syslog 服务器 ==');
     const syslogBase = path.join(tmpSvc, 'syslog');
-    const ssrv = new SyslogServer({ baseDir: syslogBase, maxPerSec: 10000 }); // 限速在专用用例中单独测
-    const sstart = await ssrv.start(0, true);
+    // 随机端口的「UDP+TCP 同端口」偶发与另一协议的临时端口撞车（EADDRINUSE）：整个 start 重试
+    let ssrv = null, sstart = null;
+    for (let i = 0; i < 6 && !(sstart && sstart.ok); i++) {
+      ssrv = new SyslogServer({ baseDir: syslogBase, maxPerSec: 10000 }); // 限速在专用用例中单独测
+      sstart = await ssrv.start(0, true);
+    }
     ok(sstart.ok && sstart.port > 0 && ssrv.tcp, 'Syslog 启动（UDP+TCP 同端口）');
     const us = dgram.createSocket('udp4');
     const sendUdp = (msg, port) => new Promise((res) => us.send(Buffer.from(msg), 0, Buffer.byteLength(msg), port || ssrv.port, '127.0.0.1', res));
@@ -3765,7 +3770,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const md = new Date(tail.msgs[0].ts); // 归档日期跟随消息时间戳（Oct 12 → 当年 10-12）
     const dayStr = md.getFullYear() + '-' + String(md.getMonth() + 1).padStart(2, '0') + '-' + String(md.getDate()).padStart(2, '0');
     const logPath = path.join(syslogBase, 'r1', dayStr + '.log');
-    ok(fs.existsSync(logPath) && /Accepted password/.test(fs.readFileSync(logPath, 'utf8')), 'Syslog 按主机/日期归档落盘');
+    ok(await waitUntil(() => /Accepted password/.test(fs.readFileSync(logPath, 'utf8'))), 'Syslog 按主机/日期归档落盘');
     // TCP 换行 framing + 半包
     const tc = net.connect(ssrv.port, '127.0.0.1');
     tc.on('error', () => {});
@@ -3790,10 +3795,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     await waitMs(120);
     const inc = ssrv.tail(seqBefore);
     ok(inc.msgs.length === 1 && /UNIQUE-KEY-XYZ/.test(inc.msgs[0].msg) && inc.msgs[0].severity === 5, 'Syslog 增量拉取（sinceSeq）');
-    const sr = ssrv.search({ keyword: 'unique-key-xyz' });
-    ok(sr.ok && sr.total >= 1 && sr.items.some(i => i.host === 'fw1'), 'Syslog 关键字检索（大小写不敏感、含主机）');
-    const srh = ssrv.search({ keyword: 'down', host: 'sw2' });
-    ok(srh.ok && srh.items.every(i => i.host === 'sw2') && srh.total >= 1, 'Syslog 检索按主机过滤');
+    ok(await waitUntil(() => { const r = ssrv.search({ keyword: 'unique-key-xyz' }); return r.ok && r.total >= 1 && r.items.some(i => i.host === 'fw1'); }), 'Syslog 关键字检索（大小写不敏感、含主机）');
+    ok(await waitUntil(() => { const r = ssrv.search({ keyword: 'down', host: 'sw2' }); return r.ok && r.total >= 1 && r.items.every(i => i.host === 'sw2'); }), 'Syslog 检索按主机过滤');
     ok(ssrv.search({ keyword: '' }).ok === false, 'Syslog 检索空关键字拒绝');
     // 过期清理：伪造旧日期文件（注：消息时间戳 Oct 12 经跨年回退判为去年，其文件名日期早于
     // keepDays 窗口同样会被清理——这正是按文件名日期滚动清理的预期行为，不在此断言它）
@@ -3801,6 +3804,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     fs.writeFileSync(path.join(syslogBase, 'r1', '2020-01-01.log'), 'old\n');
     fs.writeFileSync(path.join(syslogBase, 'r1', '1999-12-31.log'), 'older\n');
     fs.writeFileSync(path.join(syslogBase, 'r1', '2099-01-01.log'), 'future\n');
+    // 清理带「近 1 小时内有写入不清」保护（防设备时钟错误持续写旧日期文件被误清）：伪旧文件 mtime 一并回拨
+    fs.utimesSync(path.join(syslogBase, 'r1', '2020-01-01.log'), new Date('2020-01-02'), new Date('2020-01-02'));
+    fs.utimesSync(path.join(syslogBase, 'r1', '1999-12-31.log'), new Date('2000-01-01'), new Date('2000-01-01'));
     ssrv._cleanupOld();
     ok(!fs.existsSync(path.join(syslogBase, 'r1', '2020-01-01.log')) && !fs.existsSync(path.join(syslogBase, 'r1', '1999-12-31.log')) && fs.existsSync(path.join(syslogBase, 'r1', '2099-01-01.log')), 'Syslog 过期日志清理（旧文件删除、未过期保留）');
     await ssrv.stop();
@@ -3811,12 +3817,25 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const cbk = new ConfigBackupStore(tmpBk);
     const mgrBase = path.join(tmpSvc, 'mgr');
     const mgr = new NetServices({ baseDir: mgrBase, configBackup: cbk });
-    // 探测空闲端口（先 bind 0 再释放）并重试：直接随机挑高位端口偶发与本机既有服务撞车
+    // 探测空闲端口（先 bind 0 再释放）并重试：直接随机挑高位端口偶发与本机既有服务撞车；
+    // syslog 的「UDP+TCP 同端口」还需该端口号在 TCP 侧也空闲（跨协议端口互不冲突但各自占用）
     const freeUdpPort = () => new Promise((res) => { const s = dgram.createSocket('udp4'); s.bind(0, () => { const p = s.address().port; s.close(() => res(p)); }); });
     const freeTcpPort = () => new Promise((res) => { const s = net.createServer(); s.listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); });
+    const freeSyslogPort = async () => {
+      for (let i = 0; i < 10; i++) {
+        const p = await freeUdpPort();
+        const tcpFree = await new Promise((res) => {
+          const s = net.createServer();
+          s.once('error', () => res(false));
+          s.listen(p, '0.0.0.0', () => s.close(() => res(true)));
+        });
+        if (tcpFree) return p;
+      }
+      return await freeUdpPort();
+    };
     let tPort = 0, fPort = 0, sPort = 0, st1 = null;
     for (let i = 0; i < 6; i++) {
-      tPort = await freeUdpPort(); fPort = await freeTcpPort(); sPort = await freeUdpPort();
+      tPort = await freeUdpPort(); fPort = await freeTcpPort(); sPort = await freeSyslogPort();
       st1 = await mgr.applyConfig({
         tftp: { enabled: true, port: tPort },
         ftp: { enabled: true, port: fPort, username: 'op', password: 'secret' },
@@ -3824,6 +3843,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       });
       if (st1.tftp.running && st1.ftp.running && st1.syslog.running) break;
     }
+    if (!(st1.tftp.running && st1.ftp.running && st1.syslog.running)) console.log('    [dbg] manager status:', JSON.stringify(st1));
     ok(st1.tftp.running && st1.tftp.port === tPort, '管理器：TFTP 按配置端口启动');
     ok(st1.ftp.running && st1.ftp.port === fPort, '管理器：FTP 按配置端口启动');
     ok(st1.syslog.running && st1.syslog.tcp === true, '管理器：Syslog（UDP+TCP）启动');
