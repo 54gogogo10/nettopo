@@ -1048,3 +1048,73 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 }
 .mc-day-sep::before, .mc-day-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 .mc-events .mc-day-sep:first-child { margin-top: 2px; }
+
+/* ============ 网络服务（TFTP / FTP / Syslog）面板 ============ */
+.nsv-dialog { display: flex; flex-direction: column; }
+.nsv-top { display: flex; gap: 10px; margin-bottom: 10px; }
+.nsv-cards { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.nsv-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--panel2); display: flex; flex-direction: column; gap: 6px; }
+.nsv-card-h { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.nsv-card-h b { font-size: 12.5px; white-space: nowrap; }
+.nsv-card-h .nsv-dot { margin-left: auto; }
+.nsv-st { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: -2px; }
+.nsv-st:empty { display: none; }
+.nsv-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; background: var(--border); }
+.nsv-dot.ok { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .18); }
+.nsv-dot.err { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .2); }
+.nsv-sw { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text); cursor: pointer; }
+.nsv-sw input { accent-color: var(--accent); }
+.nsv-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+.nsv-row > label:first-child { color: var(--muted); flex: 0 0 auto; }
+.nsv-row input[type=number] { width: 74px; height: 24px; }
+.nsv-row input[type=text] { flex: 1; min-width: 0; height: 24px; }
+.nsv-mini { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.nsv-mini input { accent-color: var(--accent); }
+.nsv-hint { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.nsv-note { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+.nsv-aside { flex: 0 0 250px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--panel2); display: flex; flex-direction: column; gap: 6px; overflow: auto; }
+.nsv-h { font-size: 11px; font-weight: 600; color: var(--muted); }
+.nsv-ips { display: flex; flex-wrap: wrap; gap: 4px; }
+.nsv-ip { font-size: 11px; font-family: Consolas, monospace; border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; background: var(--panel); cursor: pointer; }
+.nsv-ip:hover { border-color: var(--accent); color: var(--accent); }
+.nsv-ip.none { cursor: default; color: var(--muted); }
+.nsv-cmd { font-size: 10.5px; line-height: 1.55; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; margin: 0; white-space: pre-wrap; word-break: break-all; font-family: Consolas, monospace; color: var(--text); }
+.nsv-tabs { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.nsv-tabs-sp { flex: 1; }
+.nsv-mini-btn { height: 24px; padding: 0 10px; font-size: 11px; }
+.nsv-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.nsv-pane[hidden] { display: none; } /* display:flex 会覆盖 hidden 属性，需显式兜底 */
+.nsv-files { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border); border-radius: 8px; font-size: 11.5px; }
+.nsv-fh, .nsv-fr { display: grid; grid-template-columns: 118px 46px 170px 1fr 64px 200px; gap: 6px; align-items: center; padding: 4px 8px; }
+.nsv-fh { position: sticky; top: 0; color: var(--muted); font-size: 10.5px; background: var(--panel); border-bottom: 1px solid var(--border); z-index: 1; }
+.nsv-fr { border-bottom: 1px dashed var(--border); }
+.nsv-fr:hover { background: var(--accent-soft); }
+.nsv-fr .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; }
+.nsv-fr .ops { display: flex; gap: 4px; justify-content: flex-end; }
+.nsv-badge { font-size: 10px; font-weight: 600; border-radius: 5px; padding: 1px 5px; }
+.nsv-badge.tftp { color: #2563eb; background: rgba(37, 99, 235, .12); }
+.nsv-badge.ftp { color: #7c3aed; background: rgba(124, 58, 237, .12); }
+.nsv-empty { padding: 22px 14px; color: var(--muted); text-align: center; }
+.nsv-view { flex: 1; min-height: 0; overflow: auto; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 11.5px; font-family: Consolas, monospace; white-space: pre-wrap; word-break: break-all; margin: 0; }
+.nsv-logbar { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+.nsv-logbar select { height: 24px; font-size: 11px; }
+.nsv-logbar input[type=text] { height: 24px; font-size: 11px; padding: 0 7px; }
+#nsvLogHost { width: 130px; }
+#nsvLogKw { width: 170px; }
+.nsv-logcnt { font-size: 10.5px; color: var(--muted); }
+.nsv-log { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-size: 11px; font-family: Consolas, monospace; background: var(--panel); }
+.nsv-lg { display: flex; gap: 8px; align-items: baseline; padding: 1px 0; border-bottom: 1px dashed color-mix(in srgb, var(--border) 55%, transparent); }
+.nsv-lg .t { color: var(--muted); flex: 0 0 52px; }
+.nsv-lg .sev { flex: 0 0 52px; font-weight: 600; }
+.nsv-lg .h { flex: 0 0 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.nsv-lg .m { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-all; }
+.nsv-lg.s-emerg .sev, .nsv-lg.s-alert .sev { color: #dc2626; }
+.nsv-lg.s-emerg .m, .nsv-lg.s-alert .m { color: #dc2626; font-weight: 600; }
+.nsv-lg.s-crit .sev { color: #ef4444; }
+.nsv-lg.s-err .sev { color: #f59e0b; }
+.nsv-lg.s-warn .sev { color: #d97706; }
+.nsv-lg.s-note .sev { color: #0ea5e9; }
+.nsv-lg.s-info .sev { color: var(--muted); }
+.nsv-lg.s-dbg .sev, .nsv-lg.s-dbg .m { color: var(--muted); }
+.nsv-lg.s-found .dt { flex: 0 0 84px; color: var(--muted); }
+.nsv-lg.s-srchhead { color: var(--muted); padding: 3px 0; font-family: inherit; }

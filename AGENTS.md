@@ -18,7 +18,7 @@ Linux 包由 `build/electron-builder-linux.yml` 交叉打包（产物不入库�
 
 ## 架构边界
 - **渲染层**（浏览器兼容）：`index.html` 按 util→model→layout→visio→vsdx→pdf→render→app 顺序以普通 `<script>` 加载；**无 ES modules、无打包器**，模块间靠全局对象（`js/util.js` 的 `U`）。画布/交互在 `render.js`，业务在 `app.js`，数据转换/校验在 `model.js`。
-- **主进程纯 Node 模块**（头部注明「不依赖 Electron」，可在 Node 测试中直接调用）：`js/shell.js`（SSH/Telnet ShellManager）、`js/monitor.js`（定时采集/日志归档）、`js/backup-store.js`（工程备份库）、`js/config-backup.js`（设备配置备份库）。这些模块不得 `require('electron')`，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
+- **主进程纯 Node 模块**（头部注明「不依赖 Electron」，可在 Node 测试中直接调用）：`js/shell.js`（SSH/Telnet ShellManager）、`js/monitor.js`（定时采集/日志归档）、`js/backup-store.js`（工程备份库）、`js/config-backup.js`（设备配置备份库）、`js/svc-tftp.js` / `js/svc-ftp.js` / `js/svc-syslog.js`（内置 TFTP/FTP/Syslog 服务器）、`js/net-services.js`（网络服务管理器）。这些模块不得 `require('electron')`，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
 - `preload.js` 是渲染层↔主进程的唯一 contextBridge 安全桥。
 - `shell.html`+`shell-ui.js` = Web Shell 独立窗口；`webview.html`+`webview-ui.js` = 设备管理页窗口（三页面各有 CSP）。
 - `lib/` 为内置离线第三方库（xlsx/xterm），勿修改。

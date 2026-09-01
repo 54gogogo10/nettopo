@@ -3397,6 +3397,492 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
+
+  /* ================= 内置网络服务（TFTP / FTP / Syslog / 管理器） ================= */
+  {
+    const dgram = require('dgram');
+    const net = require('net');
+    const { TftpServer, sanitizeTftpName } = require(path.join(root, 'js', 'svc-tftp.js'));
+    const { FtpServer } = require(path.join(root, 'js', 'svc-ftp.js'));
+    const { SyslogServer, parseSyslogMsg } = require(path.join(root, 'js', 'svc-syslog.js'));
+    const { NetServices, normalizeConfig } = require(path.join(root, 'js', 'net-services.js'));
+    const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+    const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
+    const tmpSvc = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-netsvc-'));
+    const randPort = () => 20000 + Math.floor(Math.random() * 25000);
+
+    /* ---------- 解析层单测 ---------- */
+    console.log('== 网络服务：解析与清洗 ==');
+    ok(sanitizeTftpName('r1-config.cfg') === 'r1-config.cfg', 'TFTP 文件名白名单：合法名保留');
+    ok(sanitizeTftpName('../../evil.cfg') === null, 'TFTP 文件名白名单：拒绝路径穿越');
+    ok(sanitizeTftpName('a/b.cfg') === null && sanitizeTftpName('a\\b.cfg') === null, 'TFTP 文件名白名单：拒绝分隔符');
+    const pr3 = parseSyslogMsg('<134>Oct 12 22:14:15 myhost su: \'su root\' failed for lonvick on /dev/pts/8', '10.0.0.9');
+    ok(pr3.facility === 16 && pr3.severity === 6, 'syslog RFC3164：facility/severity（local0/info）');
+    ok(pr3.host === 'myhost' && pr3.ts != null, 'syslog RFC3164：主机名与时间戳');
+    ok(/failed for lonvick/.test(pr3.msg) && pr3.tag === 'su', 'syslog RFC3164：tag 与消息体');
+    const pr5 = parseSyslogMsg('<165>1 2003-10-11T22:14:15.003Z mymachine.example.com evntslog 12345 ID47 [exampleSDID@32473 iut="3"] An application event log entry', '10.0.0.9');
+    ok(pr5.facility === 20 && pr5.severity === 5, 'syslog RFC5424：facility/severity（local4/notice）');
+    ok(pr5.host === 'mymachine.example.com' && pr5.ts === Date.UTC(2003, 9, 11, 22, 14, 15, 3), 'syslog RFC5424：主机名与 ISO 时间戳（UTC）');
+    ok(/An application event log entry/.test(pr5.msg) && !pr5.msg.includes('['), 'syslog RFC5424：结构化数据剥除');
+    const prRaw = parseSyslogMsg('Interface GigabitEthernet0/0/1 is DOWN', '10.0.0.9');
+    ok(prRaw.pri == null && prRaw.host === '10.0.0.9' && /is DOWN/.test(prRaw.msg), 'syslog 裸文本：无 PRI 回退来源地址');
+    const prBig = parseSyslogMsg('<999>Sep  1 10:00:00 r1 some message', '10.0.0.9');
+    ok(prBig.pri === 191 && prBig.facility === 23 && prBig.severity === 7, 'syslog PRI 越界钳制 191');
+    const nc = normalizeConfig({ tftp: { enabled: 1, port: 99999 }, ftp: { port: 'x', username: 'a\u000db', password: ' p ', pasvMin: 80, pasvMax: 90 }, syslog: { enabled: 'true' } });
+    ok(nc.tftp.enabled === false && nc.tftp.port === 69, '配置归一化：非法端口/布尔钳制（tftp）');
+    ok(nc.ftp.port === 21 && nc.ftp.username === 'ab' && nc.ftp.password === 'p', '配置归一化：端口回退与凭据控制字符剔除');
+    ok(nc.ftp.pasvMin === 0 && nc.ftp.pasvMax === 0, '配置归一化：非法被动端口范围（<1024）回退随机');
+    ok(nc.syslog.enabled === false, '配置归一化：字符串开关按 false');
+
+    /* ---------- TFTP 服务器（协议级客户端） ---------- */
+    console.log('== 网络服务：TFTP 服务器 ==');
+    const tftpRoot = path.join(tmpSvc, 'tftp');
+    const tsrv = new TftpServer({ rootDir: tftpRoot });
+    const tstart = await tsrv.start(0);
+    ok(tstart.ok && tstart.port > 0, 'TFTP 启动（随机端口）');
+    const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16BE(n & 0xffff, 0); return b; };
+    const req = (op, name, opts) => Buffer.concat([Buffer.from([0, op]), Buffer.from(name + '\0octet\0'),
+      ...(opts || []).map(([k, v]) => Buffer.from(k + '\0' + String(v) + '\0'))]);
+    const dataPkt = (n, c) => Buffer.concat([Buffer.from([0, 3]), u16(n), c]);
+    const ackPkt = (n) => Buffer.concat([Buffer.from([0, 4]), u16(n)]);
+    const sendTo = (sock, buf, port) => new Promise((res) => sock.send(buf, 0, buf.length, port, '127.0.0.1', res));
+    const recvFrom = (sock, ms) => new Promise((res) => { const t = setTimeout(() => res(null), ms || 3000); sock.once('message', (buf, rinfo) => { clearTimeout(t); res({ buf, rinfo }); }); });
+    const files = [];
+    tsrv.on('file', (f) => files.push(f));
+
+    /** 模拟设备 WRQ 上传：返回收到的错误码（null=成功）。srvPort 缺省打首个服务器实例 */
+    async function tftpPut(name, content, opts, srvPort) {
+      const port = srvPort || tsrv.port;
+      const sock = dgram.createSocket('udp4');
+      try {
+        await sendTo(sock, req(2, name, opts), port);
+        let r = await recvFrom(sock);
+        if (!r) throw new Error('无响应');
+        const rp = r.rinfo.port;
+        let blksize = 512;
+        if (r.buf.readUInt16BE(0) === 6) {
+          let p = 2;
+          const o = {};
+          while (p < r.buf.length - 1) {
+            const z1 = r.buf.indexOf(0, p), z2 = r.buf.indexOf(0, z1 + 1);
+            if (z1 < 0 || z2 < 0) break;
+            o[r.buf.toString('utf8', p, z1)] = r.buf.toString('utf8', z1 + 1, z2);
+            p = z2 + 1;
+          }
+          if (o.blksize) blksize = parseInt(o.blksize, 10);
+        } else if (r.buf.readUInt16BE(0) === 5) {
+          return r.buf.readUInt16BE(2);
+        }
+        const buf = Buffer.from(content);
+        for (let off = 0, blk = 1; ; blk++) {
+          const chunk = buf.slice(off, off + blksize);
+          await sendTo(sock, dataPkt(blk, chunk), rp);
+          const a = await recvFrom(sock);
+          if (!a) throw new Error('等待 ACK 超时');
+          if (a.buf.readUInt16BE(0) === 5) return a.buf.readUInt16BE(2);
+          if (a.buf.readUInt16BE(0) !== 4 || a.buf.readUInt16BE(2) !== (blk & 0xffff)) throw new Error('ACK 块号错位');
+          off += blksize;
+          if (chunk.length < blksize) return null;
+        }
+      } finally { try { sock.close(); } catch (e) { /* ignore */ } }
+      }
+    /** 模拟设备 RRQ 下载：返回内容或 { error: code } */
+    async function tftpGet(name, opts) {
+      const sock = dgram.createSocket('udp4');
+      try {
+        await sendTo(sock, req(1, name, opts), tsrv.port);
+        let r = await recvFrom(sock);
+        if (!r) throw new Error('无响应');
+        const rp = r.rinfo.port;
+        let blksize = 512;
+        if (r.buf.readUInt16BE(0) === 6) {
+          let p = 2;
+          while (p < r.buf.length - 1) {
+            const z1 = r.buf.indexOf(0, p), z2 = r.buf.indexOf(0, z1 + 1);
+            if (z1 < 0 || z2 < 0) break;
+            if (r.buf.toString('utf8', p, z1) === 'blksize') blksize = parseInt(r.buf.toString('utf8', z1 + 1, z2), 10);
+            p = z2 + 1;
+          }
+          await sendTo(sock, ackPkt(0), rp); // 接受选项
+          r = await recvFrom(sock);
+        } else if (r.buf.readUInt16BE(0) === 5) {
+          return { error: r.buf.readUInt16BE(2) };
+        }
+        const parts = [];
+        let blk = 0;
+        for (;;) {
+          if (r.buf.readUInt16BE(0) === 5) return { error: r.buf.readUInt16BE(2) };
+          if (r.buf.readUInt16BE(0) !== 3) throw new Error('期望 DATA');
+          const n = r.buf.readUInt16BE(2);
+          const chunk = r.buf.slice(4);
+          parts.push(chunk);
+          blk = n;
+          await sendTo(sock, ackPkt(n), rp);
+          if (chunk.length < blksize) return Buffer.concat(parts);
+          r = await recvFrom(sock);
+          if (!r) throw new Error('等待 DATA 超时');
+        }
+      } finally { try { sock.close(); } catch (e) { /* ignore */ } }
+    }
+
+    const cfgText = '!\nversion 15.2\nhostname R1\ninterface GigabitEthernet0/0\n ip address 10.1.1.1 255.255.255.0\n!\nend\n';
+    const cfg2 = 'A'.repeat(1024); // 恰好 2 个满块：末尾必须补 0 字节块
+    ok(await tftpPut('r1.cfg', cfgText, []) === null, 'TFTP WRQ 无选项：短文件上传成功');
+    ok(fs.readFileSync(path.join(tftpRoot, '127.0.0.1', 'r1.cfg'), 'utf8') === cfgText, 'TFTP 落盘：内容一致且按来源 IP 分目录');
+    ok(await tftpPut('aligned.bin', cfg2, []) === null, 'TFTP WRQ：整块对齐文件（空结束块）上传成功');
+    ok(fs.readFileSync(path.join(tftpRoot, '127.0.0.1', 'aligned.bin'), 'utf8') === cfg2, 'TFTP 落盘：整块对齐内容一致');
+    ok(await tftpPut('opt.cfg', cfgText, [['blksize', 1024], ['tsize', Buffer.byteLength(cfgText)]]) === null, 'TFTP WRQ blksize+tsize 选项（OACK 协商）');
+    ok(await tftpPut('empty.cfg', '', []) === null, 'TFTP WRQ 空文件（单个 0 字节块）');
+    ok(fs.statSync(path.join(tftpRoot, '127.0.0.1', 'empty.cfg')).size === 0, 'TFTP 落盘：空文件 0 字节');
+    const got = await tftpGet('r1.cfg', []);
+    ok(got && !got.error && got.toString() === cfgText, 'TFTP RRQ 无选项：读回内容一致');
+    const got2 = await tftpGet('aligned.bin', []);
+    ok(got2 && !got.error && got2.toString() === cfg2, 'TFTP RRQ：整块对齐文件读回（结束空块）');
+    const got3 = await tftpGet('r1.cfg', [['blksize', 2048]]);
+    ok(got3 && !got3.error && got3.toString() === cfgText, 'TFTP RRQ blksize 选项：OACK 后读回一致');
+    const gerr = await tftpGet('nope.cfg', []);
+    ok(gerr && gerr.error === 1, 'TFTP RRQ 不存在文件：ERROR 1');
+    // 对端重传：非结束块重复发送只触发重复 ACK，文件不损坏
+    {
+      const sock = dgram.createSocket('udp4');
+      await sendTo(sock, req(2, 'dup.cfg', []), tsrv.port);
+      const r0 = await recvFrom(sock);
+      const rp = r0.rinfo.port;
+      ok(r0.buf.readUInt16BE(0) === 4 && r0.buf.readUInt16BE(2) === 0, 'TFTP WRQ：首包 ACK0');
+      const half = Buffer.alloc(512, 0x41); // 第一块为满块（非结束块）
+      await sendTo(sock, dataPkt(1, half), rp);
+      const a1 = await recvFrom(sock);
+      ok(a1.buf.readUInt16BE(0) === 4 && a1.buf.readUInt16BE(2) === 1, 'TFTP 块 1 ACK');
+      await sendTo(sock, dataPkt(1, half), rp); // 重传块 1
+      const a1b = await recvFrom(sock);
+      ok(a1b && a1b.buf.readUInt16BE(0) === 4 && a1b.buf.readUInt16BE(2) === 1, 'TFTP 重传块：补发 ACK 不重写');
+      await sendTo(sock, dataPkt(2, Buffer.from('tail')), rp);
+      const a2 = await recvFrom(sock);
+      ok(a2 && a2.buf.readUInt16BE(2) === 2, 'TFTP 结束短块 ACK');
+      const dupContent = fs.readFileSync(path.join(tftpRoot, '127.0.0.1', 'dup.cfg'));
+      ok(dupContent.length === 516 && dupContent.slice(512).toString() === 'tail', 'TFTP 重传场景文件不损坏');
+      try { sock.close(); } catch (e) { /* ignore */ }
+    }
+    const werr = await tftpPut('../../evil.cfg', 'x', []);
+    ok(werr === 2, 'TFTP WRQ 路径穿越：ERROR 2（访问违规）');
+    ok(!fs.existsSync(path.join(tmpSvc, 'evil.cfg')), 'TFTP 路径穿越：库外无文件');
+    ok(files.length >= 5 && files.every(f => f.svc === 'tftp' && f.ip === '127.0.0.1'), 'TFTP file 事件（含来源 IP）');
+    ok(tsrv.status().rxFiles >= 5 && tsrv.status().rxBytes > 1500, 'TFTP 状态计数（rxFiles/rxBytes）');
+
+    /* ---------- FTP 服务器（协议级客户端） ---------- */
+    console.log('== 网络服务：FTP 服务器 ==');
+    const ftpRoot = path.join(tmpSvc, 'ftp');
+    const fsrv = new FtpServer({ rootDir: ftpRoot, username: 'nettopo', password: 'nettopo' });
+    const fstart = await fsrv.start(0);
+    ok(fstart.ok && fstart.port > 0, 'FTP 启动（随机端口）');
+    class FtpCli {
+      constructor(sock) {
+        this.sock = sock;
+        this.buf = '';
+        this.group = [];
+        this.queue = [];      // 已完成但未被消费的应答组（避免迟到应答与下一条命令串台）
+        this.resolve = null;
+        sock.on('data', (d) => {
+          this.buf += d.toString('utf8');
+          for (;;) {
+            const idx = this.buf.indexOf('\r\n');
+            if (idx < 0) break;
+            const line = this.buf.slice(0, idx);
+            this.buf = this.buf.slice(idx + 2);
+            this.group.push(line);
+            if (/^\d{3} /.test(line)) {
+              const text = this.group.join('\n');
+              this.group = [];
+              const w = this.resolve;
+              this.resolve = null;
+              if (w) w(text); else this.queue.push(text);
+            }
+          }
+        });
+        this.closedP = new Promise((res) => sock.once('close', res));
+      }
+      resp() {
+        if (this.queue.length) return Promise.resolve(this.queue.shift());
+        return new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('FTP 响应超时')), 5000); this.resolve = (v) => { clearTimeout(t); res(v); }; });
+      }
+      async cmd(line) { const p = this.resp(); this.sock.write(line + '\r\n'); return p; }
+      static async connect(port) {
+        const sock = net.connect(port, '127.0.0.1');
+        const cl = new FtpCli(sock);
+        await new Promise((res, rej) => { sock.once('connect', res); sock.once('error', rej); });
+        cl.greet = await cl.resp();
+        return cl;
+      }
+      async pasv() {
+        const r = await this.cmd('PASV');
+        const m = r.match(/\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/);
+        if (!m) throw new Error('PASV 解析失败: ' + r);
+        const port = parseInt(m[5], 10) * 256 + parseInt(m[6], 10);
+        return new Promise((res, rej) => {
+          const s = net.connect(port, '127.0.0.1');
+          s.on('error', () => {});
+          s.once('connect', () => res(s));
+          s.once('error', rej);
+        });
+      }
+      async stor(name, buf) {
+        const data = await this.pasv();
+        data.on('error', () => {});
+        const p150 = this.resp();
+        this.sock.write('STOR ' + name + '\r\n');
+        const r150 = await p150;
+        data.write(buf);
+        data.end();
+        const p226 = this.resp();
+        const r226 = await p226;
+        return { r150, r226 };
+      }
+      async retr(name) {
+        const data = await this.pasv();
+        const chunks = [];
+        data.on('data', (c) => chunks.push(c));
+        data.on('error', () => {});
+        const p150 = this.resp();
+        this.sock.write('RETR ' + name + '\r\n');
+        await p150;
+        await new Promise((res) => data.once('close', res));
+        const p226 = this.resp();
+        await p226;
+        return Buffer.concat(chunks);
+      }
+    }
+    const fc = await FtpCli.connect(fsrv.port);
+    ok(fc.greet.startsWith('220'), 'FTP 220 就绪横幅');
+    ok((await fc.cmd('USER nettopo')).startsWith('331'), 'FTP USER 331');
+    ok((await fc.cmd('PASS wrong')).startsWith('530'), 'FTP 错误密码 530');
+    ok((await fc.cmd('USER nettopo')).startsWith('331'), 'FTP 重新 USER');
+    ok((await fc.cmd('PASS nettopo')).startsWith('230'), 'FTP 正确密码 230');
+    ok((await fc.cmd('SYST')).startsWith('215'), 'FTP SYST');
+    ok((await fc.cmd('FEAT')).includes('PASV') && (await fc.cmd('FEAT')).includes('SIZE'), 'FTP FEAT 特性列表');
+    ok((await fc.cmd('OPTS UTF8 ON')).startsWith('200'), 'FTP OPTS UTF8');
+    ok((await fc.cmd('TYPE I')).startsWith('200') && (await fc.cmd('TYPE A')).startsWith('200'), 'FTP TYPE I/A');
+    ok((await fc.cmd('NOOP')).startsWith('200'), 'FTP NOOP');
+    ok((await fc.cmd('PWD')).startsWith('257'), 'FTP PWD');
+    ok((await fc.cmd('REST 0')).startsWith('350'), 'FTP REST 0（华为/思科 copy 前的习惯探测）');
+    const big = require('crypto').randomBytes(700 * 1024); // 700KB：流式分块
+    const sres = await fc.stor('r2-big.cfg', big);
+    ok(sres.r150.startsWith('150') && sres.r226.startsWith('226'), 'FTP PASV+STOR 上传 700KB（150→226）');
+    ok(fs.readFileSync(path.join(ftpRoot, 'r2-big.cfg')).equals(big), 'FTP 上传落盘内容一致');
+    const cfgF = 'sysname HW1\n#\nreturn\n';
+    await fc.stor('hw1.cfg', Buffer.from(cfgF));
+    const down = await fc.retr('hw1.cfg');
+    ok(down.toString() === cfgF, 'FTP PASV+RETR 下载内容一致');
+    ok((await fc.cmd('SIZE hw1.cfg')).startsWith('213 '), 'FTP SIZE');
+    ok(/^213 \d{14}$/.test((await fc.cmd('MDTM hw1.cfg')).trim()), 'FTP MDTM');
+    // PORT 主动模式：客户端开监听并通告，服务器主动连入
+    {
+      const dl = net.createServer();
+      const connP = new Promise((res) => dl.once('connection', (s) => res(s)));
+      await new Promise((res) => dl.listen(0, '127.0.0.1', res));
+      const dp = dl.address().port;
+      const pr = await fc.cmd('PORT 127,0,0,1,' + Math.floor(dp / 256) + ',' + (dp % 256));
+      ok(pr.startsWith('200'), 'FTP PORT 主动模式 200');
+      const p150 = fc.resp();
+      fc.sock.write('STOR active.cfg\r\n');
+      ok((await p150).startsWith('150'), 'FTP 主动模式 STOR 150');
+      const ds = await connP;
+      ds.write('active-mode-ok');
+      ds.end();
+      ok((await fc.resp()).startsWith('226'), 'FTP PORT+STOR 上传 226');
+      ok(fs.readFileSync(path.join(ftpRoot, 'active.cfg'), 'utf8') === 'active-mode-ok', 'FTP 主动模式落盘一致');
+      try { dl.close(); } catch (e) { /* ignore */ }
+    }
+    {
+      const d = await fc.pasv();
+      const chunks = [];
+      d.on('data', (c) => chunks.push(c));
+      d.on('error', () => {});
+      ok((await fc.cmd('LIST')).startsWith('150'), 'FTP LIST 150');
+      await new Promise((r) => d.once('close', r));
+      const listing = Buffer.concat(chunks).toString('utf8');
+      ok((await fc.resp()).startsWith('226'), 'FTP LIST 226');
+      ok(/hw1\.cfg/.test(listing) && /r2-big\.cfg/.test(listing), 'FTP LIST 内容含已上传文件');
+      const d2 = await fc.pasv();
+      const chunks2 = [];
+      d2.on('data', (c) => chunks2.push(c));
+      d2.on('error', () => {});
+      await fc.cmd('NLST');
+      await new Promise((r) => d2.once('close', r));
+      const nl = Buffer.concat(chunks2).toString('utf8');
+      ok(nl.includes('hw1.cfg') && nl.includes('active.cfg'), 'FTP NLST 包含已上传文件');
+      await fc.resp(); // 消费 226
+    }
+    ok((await fc.cmd('STOR ../evil.cfg')).startsWith('550'), 'FTP STOR 穿越路径 550');
+    ok(!fs.existsSync(path.join(tmpSvc, 'evil.cfg')), 'FTP 穿越无文件落盘');
+    ok((await fc.cmd('RETR /../../etc/passwd')).startsWith('550'), 'FTP RETR 穿越路径 550');
+    ok((await fc.cmd('QUIT')).startsWith('221'), 'FTP QUIT 221');
+    await fc.closedP;
+    {
+      const f2 = await FtpCli.connect(fsrv.port);
+      await f2.cmd('USER nettopo'); await f2.cmd('PASS nettopo');
+      ok((await f2.cmd('MKD sub1')).startsWith('257'), 'FTP MKD 建目录');
+      ok((await f2.cmd('CWD sub1')).startsWith('250'), 'FTP CWD 进子目录');
+      const s = await f2.stor('nested.cfg', Buffer.from('nested-ok'));
+      ok(s.r226.startsWith('226'), 'FTP 子目录上传');
+      ok(fs.readFileSync(path.join(ftpRoot, 'sub1', 'nested.cfg'), 'utf8') === 'nested-ok', 'FTP 子目录落盘正确');
+      ok((await f2.cmd('CDUP')).startsWith('250'), 'FTP CDUP');
+      ok((await f2.cmd('DELE sub1/nested.cfg')).startsWith('250'), 'FTP DELE 删除');
+      ok((await f2.cmd('QUIT')).startsWith('221'), 'FTP（第二会话）QUIT');
+      const f3 = await FtpCli.connect(fsrv.port);
+      const r3 = await f3.cmd('STOR x.cfg');
+      ok(r3.startsWith('530'), 'FTP 未登录 STOR 530');
+      await f3.cmd('QUIT');
+    }
+    {
+      // 单文件大小上限：超限 552 中止且不留半截文件
+      const fsmall = new FtpServer({ rootDir: path.join(tmpSvc, 'ftp-small'), maxFileSize: 1024 });
+      const st2 = await fsmall.start(0);
+      ok(st2.ok, 'FTP（小上限实例）启动');
+      const c2 = await FtpCli.connect(fsmall.port);
+      await c2.cmd('USER nettopo'); await c2.cmd('PASS nettopo');
+      const r2 = await c2.stor('too-big.cfg', Buffer.alloc(4096, 0x61));
+      ok(r2.r226.startsWith('552'), 'FTP 超单文件上限 552');
+      ok(!fs.existsSync(path.join(tmpSvc, 'ftp-small', 'too-big.cfg')), 'FTP 超限文件不落盘');
+      await c2.cmd('QUIT');
+      await fsmall.stop();
+    }
+
+    /* ---------- Syslog 服务器（UDP / TCP） ---------- */
+    console.log('== 网络服务：Syslog 服务器 ==');
+    const syslogBase = path.join(tmpSvc, 'syslog');
+    const ssrv = new SyslogServer({ baseDir: syslogBase, maxPerSec: 10000 }); // 限速在专用用例中单独测
+    const sstart = await ssrv.start(0, true);
+    ok(sstart.ok && sstart.port > 0 && ssrv.tcp, 'Syslog 启动（UDP+TCP 同端口）');
+    const us = dgram.createSocket('udp4');
+    const sendUdp = (msg, port) => new Promise((res) => us.send(Buffer.from(msg), 0, Buffer.byteLength(msg), port || ssrv.port, '127.0.0.1', res));
+    await sendUdp('<134>Oct 12 22:14:15 r1 sshd[123]: Accepted password for admin');
+    await sendUdp('Interface GigabitEthernet0/0/1 is DOWN');
+    await waitMs(150);
+    let tail = ssrv.tail(0);
+    ok(tail.msgs.length === 2, 'Syslog UDP 接收 2 条（RFC3164 + 裸文本）');
+    ok(tail.msgs[0].host === 'r1' && tail.msgs[0].severity === 6, 'Syslog RFC3164 解析入库（host/severity）');
+    ok(tail.msgs[1].host === '127.0.0.1' && /is DOWN/.test(tail.msgs[1].msg), 'Syslog 裸文本回退来源地址');
+    const md = new Date(tail.msgs[0].ts); // 归档日期跟随消息时间戳（Oct 12 → 当年 10-12）
+    const dayStr = md.getFullYear() + '-' + String(md.getMonth() + 1).padStart(2, '0') + '-' + String(md.getDate()).padStart(2, '0');
+    const logPath = path.join(syslogBase, 'r1', dayStr + '.log');
+    ok(fs.existsSync(logPath) && /Accepted password/.test(fs.readFileSync(logPath, 'utf8')), 'Syslog 按主机/日期归档落盘');
+    // TCP 换行 framing + 半包
+    const tc = net.connect(ssrv.port, '127.0.0.1');
+    tc.on('error', () => {});
+    await new Promise((res) => tc.once('connect', res));
+    tc.write('<133>Sep  1 10:00:0');
+    await waitMs(80);
+    tc.write('0 sw2 %%01IFNET/4/IF_STATE(l): interface state changed to down.\n<134>sw2 daemon.info: ok\n');
+    await waitMs(150);
+    tail = ssrv.tail(tail.last);
+    ok(tail.msgs.length === 2 && tail.msgs[0].host === 'sw2', 'Syslog TCP 换行 framing（半包拼帧）');
+    // TCP 字节数 framing（RFC 6587 octet-counting）
+    const m1 = '<190>Sep  1 10:00:01 sw3 %%01SYS/4/STP(l): stp block';
+    tc.write(String(Buffer.byteLength(m1)) + ' ' + m1 + String(Buffer.byteLength(m1)) + ' ' + m1);
+    await waitMs(150);
+    tail = ssrv.tail(tail.last);
+    ok(tail.msgs.length === 2 && tail.msgs.every(m => /stp block/.test(m.msg)), 'Syslog TCP 字节数 framing（一包两帧）');
+    tc.end();
+    await waitMs(80);
+    // 增量拉取 + 检索
+    const seqBefore = ssrv.tail(0).last;
+    await sendUdp('<189>Oct 12 22:14:16 fw1 %%01SEC/4/attack(l): detect attack UNIQUE-KEY-XYZ');
+    await waitMs(120);
+    const inc = ssrv.tail(seqBefore);
+    ok(inc.msgs.length === 1 && /UNIQUE-KEY-XYZ/.test(inc.msgs[0].msg) && inc.msgs[0].severity === 5, 'Syslog 增量拉取（sinceSeq）');
+    const sr = ssrv.search({ keyword: 'unique-key-xyz' });
+    ok(sr.ok && sr.total >= 1 && sr.items.some(i => i.host === 'fw1'), 'Syslog 关键字检索（大小写不敏感、含主机）');
+    const srh = ssrv.search({ keyword: 'down', host: 'sw2' });
+    ok(srh.ok && srh.items.every(i => i.host === 'sw2') && srh.total >= 1, 'Syslog 检索按主机过滤');
+    ok(ssrv.search({ keyword: '' }).ok === false, 'Syslog 检索空关键字拒绝');
+    // 过期清理：伪造旧日期文件（注：消息时间戳 Oct 12 经跨年回退判为去年，其文件名日期早于
+    // keepDays 窗口同样会被清理——这正是按文件名日期滚动清理的预期行为，不在此断言它）
+    fs.mkdirSync(path.join(syslogBase, 'r1'), { recursive: true });
+    fs.writeFileSync(path.join(syslogBase, 'r1', '2020-01-01.log'), 'old\n');
+    fs.writeFileSync(path.join(syslogBase, 'r1', '1999-12-31.log'), 'older\n');
+    fs.writeFileSync(path.join(syslogBase, 'r1', '2099-01-01.log'), 'future\n');
+    ssrv._cleanupOld();
+    ok(!fs.existsSync(path.join(syslogBase, 'r1', '2020-01-01.log')) && !fs.existsSync(path.join(syslogBase, 'r1', '1999-12-31.log')) && fs.existsSync(path.join(syslogBase, 'r1', '2099-01-01.log')), 'Syslog 过期日志清理（旧文件删除、未过期保留）');
+    await ssrv.stop();
+
+    /* ---------- 管理器 NetServices ---------- */
+    console.log('== 网络服务：管理器（配置应用/文件编目/导入备份） ==');
+    const tmpBk = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-nsvbk-'));
+    const cbk = new ConfigBackupStore(tmpBk);
+    const mgrBase = path.join(tmpSvc, 'mgr');
+    const mgr = new NetServices({ baseDir: mgrBase, configBackup: cbk });
+    // 探测空闲端口（先 bind 0 再释放）并重试：直接随机挑高位端口偶发与本机既有服务撞车
+    const freeUdpPort = () => new Promise((res) => { const s = dgram.createSocket('udp4'); s.bind(0, () => { const p = s.address().port; s.close(() => res(p)); }); });
+    const freeTcpPort = () => new Promise((res) => { const s = net.createServer(); s.listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); });
+    let tPort = 0, fPort = 0, sPort = 0, st1 = null;
+    for (let i = 0; i < 6; i++) {
+      tPort = await freeUdpPort(); fPort = await freeTcpPort(); sPort = await freeUdpPort();
+      st1 = await mgr.applyConfig({
+        tftp: { enabled: true, port: tPort },
+        ftp: { enabled: true, port: fPort, username: 'op', password: 'secret' },
+        syslog: { enabled: true, port: sPort, tcp: true }
+      });
+      if (st1.tftp.running && st1.ftp.running && st1.syslog.running) break;
+    }
+    ok(st1.tftp.running && st1.tftp.port === tPort, '管理器：TFTP 按配置端口启动');
+    ok(st1.ftp.running && st1.ftp.port === fPort, '管理器：FTP 按配置端口启动');
+    ok(st1.syslog.running && st1.syslog.tcp === true, '管理器：Syslog（UDP+TCP）启动');
+    const mgrFiles = [];
+    mgr.on('file', (f) => mgrFiles.push(f));
+    // TFTP 走管理器端口上传
+    ok(await tftpPut('mgr-tftp.cfg', cfgText, [['blksize', 1024]], tPort) === null, '管理器：TFTP 上传（经管理器实例）');
+    // FTP 走管理器端口上传（用配置的账号）
+    {
+      const c = await FtpCli.connect(fPort);
+      await c.cmd('USER op');
+      ok((await c.cmd('PASS secret')).startsWith('230'), '管理器：FTP 配置账号登录');
+      const r = await c.stor('mgr-ftp.cfg', Buffer.from(cfgText));
+      ok(r.r226.startsWith('226'), '管理器：FTP 上传');
+      await c.cmd('QUIT');
+    }
+    await sendUdp('<134>Oct 12 22:14:15 r1 mgr: syslog via manager', sPort);
+    await waitMs(150);
+    const lf = mgr.listFiles();
+    const tItem = (lf.items || []).find(i => i.svc === 'tftp' && i.name === 'mgr-tftp.cfg');
+    const fItem = (lf.items || []).find(i => i.svc === 'ftp' && i.name === 'mgr-ftp.cfg');
+    ok(!!tItem && tItem.ip === '127.0.0.1', '管理器：TFTP 文件编目（含来源 IP）');
+    ok(!!fItem, '管理器：FTP 文件编目');
+    const rf = mgr.readFile({ svc: 'tftp', ip: '127.0.0.1', name: 'mgr-tftp.cfg' });
+    ok(rf.ok && rf.content === cfgText, '管理器：读取收到的文件');
+    ok(mgr.readFile({ svc: 'tftp', ip: '../../..', name: 'mgr-tftp.cfg' }).ok === false, '管理器：读取路径穿越拒绝');
+    ok(mgr.readFile({ svc: 'tftp', ip: '127.0.0.1', name: '../cfg' }).ok === false, '管理器：读取文件名穿越拒绝');
+    const imp = mgr.importBackup({ svc: 'tftp', ip: '127.0.0.1', name: 'mgr-tftp.cfg', device: 'R1', host: '10.1.1.1' });
+    ok(imp.ok && /^cfg_\d{8}_\d{6}/.test(imp.name), '管理器：导入配置备份库');
+    const bkList = cbk.list('R1', '10.1.1.1');
+    ok(bkList.ok && bkList.items.length === 1, '导入后备份库列表可见');
+    ok(cbk.read('R1', '10.1.1.1', bkList.items[0].name).content === cfgText, '导入备份内容一致');
+    const impF = mgr.importBackup({ svc: 'ftp', ip: '', name: 'mgr-ftp.cfg', device: 'SW1', host: '10.2.2.2' });
+    ok(impF.ok, '管理器：FTP 文件导入备份库');
+    ok(mgr.syslogTail(0).msgs.length >= 1, '管理器：syslogTail 转发');
+    ok(mgrFiles.length >= 2 && mgrFiles.some(f => f.svc === 'tftp') && mgrFiles.some(f => f.svc === 'ftp'), '管理器：file 事件（两服务）');
+    ok(mgr.deleteFile({ svc: 'tftp', ip: '127.0.0.1', name: 'mgr-tftp.cfg' }).ok, '管理器：删除收到的文件');
+    ok(!fs.existsSync(path.join(mgrBase, 'tftp', '127.0.0.1', 'mgr-tftp.cfg')), '删除后文件不在盘上');
+    // 同配置重复应用：不重启（端口不变、保持运行）
+    const st2 = await mgr.applyConfig(mgr.getConfig());
+    ok(st2.tftp.running && st2.tftp.port === tPort && !st2.tftp.error, '管理器：同配置重复应用不重启');
+    // FTP 账号热更新（不重启监听）
+    await mgr.applyConfig({ tftp: { enabled: true, port: tPort }, ftp: { enabled: true, port: fPort, username: 'newop', password: 'newpass' }, syslog: { enabled: true, port: sPort, tcp: true } });
+    {
+      const c = await FtpCli.connect(fPort);
+      await c.cmd('USER newop');
+      ok((await c.cmd('PASS newpass')).startsWith('230'), '管理器：FTP 账号热更新生效（端口未变）');
+      await c.cmd('QUIT');
+    }
+    // 全部停用
+    const st3 = await mgr.applyConfig({ tftp: { enabled: false, port: tPort }, ftp: { enabled: false, port: fPort }, syslog: { enabled: false, port: sPort } });
+    ok(!st3.tftp.running && !st3.ftp.running && !st3.syslog.running, '管理器：停用后全部停止');
+    await mgr.stopAll();
+    await tsrv.stop();
+    await fsrv.stop();
+    try { us.close(); } catch (e) { /* ignore */ }
+    fs.rmSync(tmpBk, { recursive: true, force: true });
+    fs.rmSync(tmpSvc, { recursive: true, force: true });
+  }
 })().then(() => {
   console.log('');
   console.log(`结果：${pass} 通过，${fail} 失败`);

@@ -79,3 +79,18 @@ contextBridge.exposeInMainWorld('topoSecure', {
   encryptSecret: (text) => ipcRenderer.invoke('secure:encrypt', text),
   decryptSecret: (cipher) => ipcRenderer.invoke('secure:decrypt', cipher)
 });
+
+/* 内置网络服务（TFTP / FTP / Syslog）：接收设备配置文件与收集日志（仅主窗口可用） */
+contextBridge.exposeInMainWorld('topoNetSvc', {
+  getConfig: () => ipcRenderer.invoke('netsvc:get'),
+  setConfig: (cfg) => ipcRenderer.invoke('netsvc:set', { cfg }),
+  files: () => ipcRenderer.invoke('netsvc:files'),
+  fileRead: (p) => ipcRenderer.invoke('netsvc:file-read', p),
+  fileDelete: (p) => ipcRenderer.invoke('netsvc:file-delete', p),
+  importBackup: (p) => ipcRenderer.invoke('netsvc:import', p),
+  syslogTail: (since) => ipcRenderer.invoke('netsvc:syslog-tail', { since }),
+  syslogSearch: (p) => ipcRenderer.invoke('netsvc:syslog-search', p),
+  openFolder: (svc) => ipcRenderer.invoke('netsvc:open-folder', { svc }),
+  onFile: (cb) => ipcRenderer.on('netsvc:file', (_e, info) => cb(info)),
+  onStatus: (cb) => ipcRenderer.on('netsvc:status', (_e, st) => cb(st))
+});

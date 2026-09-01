@@ -44,6 +44,7 @@
 - **设备后台静默监控**：右键设备配置 SSH/Telnet 账号与命令，后台定时采集输出写入本地日志（按天归档），每个管理口可单独设置：**连接时执行命令**（每次连接仅执行一次）、**在线探测**（TCP/ICMP，离线弹通知）、**输出关键字告警**（多关键字全部命中显示、全部不再命中才解除，事件携带匹配行）、**配置自动备份**（复用监控连接 / 独立连接，可选自动合规）、**SNMP 识别**（sysDescr 自动回填软件版本）、**重启检测**（sysUpTime 骤减判定，记入事件时间线并弹通知）、**CPU/内存采集**（OID 可配置，华为/思科厂家预设一键填充）、**接口流量采集**（ifTable 采集每接口 UP/DOWN 与收发速率，64 位计数器优先）；支持**仅读取**与**仅探测**两种轻量模式；Telnet 监控在配置了密码时自动应答设备的 `Username:`/`Password:` 登录提示（认证失败在状态栏明确上报，Web Shell 交互式登录不受影响）
 - **监控中心**：聚合全部监控状态、**近 7 天在线率**（10 分钟粒度，重启不丢）、「事件时间线 / 配置备份 / 接口流量 / 性能」四标签页（CPU/内存趋势线与开机时长；事件带设备徽标，点击设备名或管理地址筛选）；「监控日志…」支持全局跨文件搜索并点击定位到行
 - **配置合规基线检查**：对备份库最新配置执行本地规则扫描（纯本机）。内置 **5 套基线模板**（等保通用 11 条 / 最小基线 / 华为 VRP / 思科 IOS / 接入层交换机）按需加载，也可把当前规则**另存为多套自定义模板**；规则按「时间同步 / 日志审计 / 认证与授权 / 服务与协议 / 路由与网关」五组分组，逐行正则（必须存在 / 禁止出现），禁止类自动排除 `undo`/`no` 关闭命令与 `stelnet` 误命中；违规定位到具体配置行，结果一键导出报告（Excel/CSV）；监控「自动合规」在每次备份后按当前规则集自动扫描
+- **内置网络服务（TFTP / FTP / Syslog）**：「监控 ▾ 网络服务…」把本机变成内网运维服务器——**TFTP / FTP** 接收设备主动推送的配置文件（思科 `copy running-config tftp://`、华为/H3C `tftp … put`；FTP 支持账号密码 / 被动与主动模式），文件**按来源 IP 分目录**落盘、收到弹通知，可查看 / 删除并**一键导入配置备份库**（自动按来源 IP 匹配拓扑设备，进入备份中心 / 对比 / 合规检查体系）；**Syslog**（UDP，可选 TCP）收集设备日志（`info-center loghost` / `logging host` 指向本机），按来源主机 / 日期归档，实时滚动 + 级别/来源过滤 + 关键字检索历史，超限自动限速丢弃并计数；面板展示本机地址与各厂家命令示例（点击复制），端口可改（Linux 特权端口需 root），启用状态随设置自动恢复
 - **备份管理**：自动备份与「立即备份」集中存本机备份库，可浏览/恢复/删除/清空，按「保留最近 N 份」滚动清理
 - **托盘常驻**：开启后关闭主窗口仅最小化到系统托盘，后台监控继续运行
 
@@ -124,6 +125,7 @@
 | 监控日志            | 「监控 ▾ 监控日志…」：按设备/日期/文件浏览，关键字**全局跨文件搜索**并点击定位（桌面版） |
 | 备份管理            | 「文件 ▾ 备份管理…」：浏览/恢复/删除/清空本机备份库（桌面版） |
 | 配置合规检查        | 「监控 ▾ 配置合规检查…」或配置备份中心「合规检查…」：模板选择 + 规则管理 + 扫描备份库（桌面版） |
+| 网络服务             | 「监控 ▾ 网络服务（TFTP / FTP / Syslog）…」：启用内置 TFTP/FTP 接收设备推送配置（可导入备份库）、Syslog 收集设备日志并实时查看/检索（桌面版） |
 | 托盘常驻            | 「监控 ▾ 托盘常驻」或监控配置弹窗：关窗后后台监控继续运行（桌面版） |
 | 自动布局 / 适应视图 | L / F                             |
 
@@ -153,6 +155,10 @@ nettopo/
 │   ├── monitor.js     # 设备后台监控：定时采集/探测/告警/备份/SNMP（主进程，纯 Node）
 │   ├── config-backup.js # 设备配置备份库（行级 diff、滚动保留，主进程，纯 Node）
 │   ├── backup-store.js  # 工程备份库（本机备份目录、滚动保留、文件名校验，主进程）
+│   ├── svc-tftp.js      # 内置 TFTP 服务器（RFC1350 + blksize/tsize 选项，主进程，纯 Node）
+│   ├── svc-ftp.js       # 内置 FTP 服务器（RFC959 子集：认证/PASV·PORT/STOR·RETR，主进程，纯 Node）
+│   ├── svc-syslog.js    # 内置 Syslog 服务器（UDP/TCP、RFC3164/5424 解析、按主机日期归档，主进程，纯 Node）
+│   ├── net-services.js  # 网络服务管理器（三服务启停/文件编目/导入备份库，主进程，纯 Node）
 │   ├── shell-ui.js    # Web Shell 窗口标签/终端逻辑
 │   ├── webview-ui.js  # 设备管理页窗口标签/内嵌浏览器逻辑
 │   └── app.js         # 主逻辑（UI、弹窗、撤销、面板、导入导出、监控配置）
@@ -161,18 +167,19 @@ nettopo/
 └── test/              # 单元测试、无头浏览器 e2e、Electron 冒烟、VDX 校验样例
 ```
 
-> `js/shell.js`、`js/monitor.js`、`js/config-backup.js`、`js/backup-store.js` 为**主进程纯 Node 模块**（不依赖 Electron），可在 Node 测试中直接调用，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
+> `js/shell.js`、`js/monitor.js`、`js/config-backup.js`、`js/backup-store.js`、`js/svc-tftp.js`、`js/svc-ftp.js`、`js/svc-syslog.js`、`js/net-services.js` 为**主进程纯 Node 模块**（不依赖 Electron），可在 Node 测试中直接调用，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
 
 ## 开发测试
 
 ```bash
-node test/run-tests.js        # 819 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、多管理口、数据清洗、布局、路径、单点故障、网段分析、链路聚合、邻居表解析、接口总表、备份库、子网计算、快速搜索、区域容器、SNMP ifTable/性能采集与响应校验、合规模板、加载防重合、性能、回归）
+node test/run-tests.js        # 946 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、多管理口、数据清洗、布局、路径、单点故障、网段分析、链路聚合、邻居表解析、接口总表、备份库、子网计算、快速搜索、区域容器、SNMP ifTable/性能采集与响应校验、合规模板、加载防重合、性能、回归、内置网络服务 TFTP/FTP/Syslog 协议级客户端与导入备份）
 cd test && npm i && node e2e.js   # 无头 Chrome 端到端集成测试（需本机 Chrome）：画布编辑/拖拽撤销、删除级联与多步撤销重做、CSV/Excel 导入、保存工程与 CSV 导出内容断言、邻居表导入、接口总表（编辑应用/二层清 IP）、网段分析、单点故障/故障影响、聚合组校验豁免、快速搜索、多图纸、主题切换、浏览器降级等
 node test/gen-e2e.js              # index.html 结构变化后再生 e2e 挂具 test/e2e.html（避免手工同步漂移）
 node test/smoke-shell.js          # Electron 端到端冒烟（Web Shell 独立窗口/多标签，需本机桌面环境）
 node test/smoke-backup.js         # Electron 冒烟（备份管理：IPC 备份库 + 弹窗浏览/删除，需本机桌面环境）
 node test/smoke-monitor.js        # Electron 冒烟（设备监控采集/日志归档）
 node test/smoke-center.js         # Electron 冒烟（监控中心 / 配置变更事件 / 合规模板 / ZIP 导出 / 设备图标 / 托盘，需本机桌面环境）
+node test/smoke-services.js       # Electron 冒烟（内置网络服务：TFTP/FTP/Syslog 真实协议流量 + 面板 UI + 导入备份 + 截图走查）
 python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备用格式）
 ```
 
@@ -182,6 +189,6 @@ python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备�
 - 浏览器无法覆盖写入磁盘原文件，「保存回表格」以导出文件形式提供
 - 自定义类型与图片保存在浏览器 localStorage（本机）——清理浏览器数据会丢失，建议用「保存工程」备份
 - 桌面版 Web Shell 支持 SSH（密码/keyboard-interactive）与 Telnet（RFC854 协商 + 窗口尺寸 NAWS）；SSH 主机密钥首次连接展示 SHA256 指纹并记忆，指纹变化时拒绝连接（内网实验环境默认信任首连）
-- 后台监控日志（`userData/monitor-logs`）、配置备份（`userData/config-backups`）与监控配置（含密码）均保存在本机用户数据目录；密码经系统级加密（Windows DPAPI safeStorage）后落盘，监控指纹记录同样存于本机
+- 后台监控日志（`userData/monitor-logs`）、配置备份（`userData/config-backups`）、网络服务收到的文件与 Syslog 日志（`userData/net-services`）与监控配置（含密码）均保存在本机用户数据目录；密码经系统级加密（Windows DPAPI safeStorage）后落盘，监控指纹记录同样存于本机
 - 版本号唯一来源是 `js/util.js` 的 `U.APP_VERSION`（如 `v20260829i`），界面标题/状态栏同步显示；`npm run build` 会自动升版本并重建产物；package.json 的语义版本仅为 Electron 打包用途
 - 安全策略：三个页面均启用 CSP（script-src 仅 'self'，无 'unsafe-eval'——本地内置 SheetJS 与全部应用代码均不使用 eval，其余来源严格限定本地/data/blob）；所有本地文件/日志/备份路径走白名单式文件名清洗，杜绝路径穿越

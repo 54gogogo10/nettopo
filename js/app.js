@@ -4120,6 +4120,8 @@ function openHelp() {
     <p><b>工程文件 .nettopo</b>：保存 / 打开含位置、视图、自定义类型、多管理口的完整工程；<b>CSV / Excel</b>：把修改后的拓扑保存回连线关系表（多管理口逗号分隔，可再导入；含聚合组列）；<b>PDF</b>：矢量高清交付；<b>PNG / SVG</b>：图片导出与复制到剪贴板；<b>Visio</b>：.vsdx 原生格式可在 Visio 继续编辑；<b>资产清单（Excel）</b>：设备名 / 类型 / 管理地址 / 型号 / 软件版本 / 监控状态 / 配置备份概况的交付台账；<b>设计报告</b>：自包含 HTML（设备 / IP / 子网 / 链路 / 配置）；<b>IP 规划清单</b>：Excel 导出含对端接口 IP；<b>生成设备配置</b>：华为 / H3C / 思科 / 锐捷及自定义模板（{name} {mgmt} {iface} {ip} {peer} {vlan}…），生成前自动做<b>冲突检查</b>，可<b>下载 ZIP</b> 按厂家分目录打包；模板掩码变量支持点分 / CIDR / 反掩码三种：{mask}（255.255.255.0）、{maskCidr}（/24）、{wildcard}（0.0.0.255）；「编辑设备」中可为设备指定<b>厂家与自定义图标</b>。</p>
     <h4>⑩ 后台监控（桌面版）</h4>
     <p>右键设备「设备监控（静默采集）…」配置协议 / 管理口 / 账号 / 命令与循环间隔后，即可在后台静默通过 SSH/Telnet 定时采集命令输出，<b>全部输出连同时间戳写入本地日志（按天归档）</b>：<userData>/monitor-logs/设备名/日期/<设备名>_<管理口>.log，同一天内连接/重连只追加同一文件，不再重复生成。每个管理口可单独配置：<b>连接时执行命令</b>（每行一条可多条，每次连接成功仅执行一次、先于周期循环，适合登录后的会话初始化）、<b>在线探测</b>（TCP/ICMP，离线变红并弹通知）、<b>输出关键字告警</b>（正则匹配即告警，周期循环 / 连接时命令 / 仅读取模式的输出均可匹配；多条关键字同时命中时全部显示，<b>全部不再命中才解除</b>；告警事件携带具体匹配行）与<b>配置自动备份</b>（命令可多条、输出合并保存；连接方式可选<b>复用监控连接</b>或<b>独立连接</b>；首份备份显示「首次」而非「有变化」；可勾选<b>自动合规</b>——每次备份保存后按合规模板自动扫描，违规进事件时间线并弹通知）。SNMP 采集组还提供：<b>SNMP 识别</b>（v2c 读取 sysDescr 自动回填设备「软件版本」）、<b>重启检测</b>（定时 GET sysUpTime，数值骤减判定设备重启，记入事件时间线并弹通知）、<b>CPU/内存采集</b>（OID 可配置，内置华为/华三百分比型与思科字节型<b>厂家预设</b>一键填充，表型 OID 填基础前缀即可，GET 失败自动 GETNEXT）与<b>接口流量</b>（ifTable 采集每接口 UP/DOWN 与收发速率）。<b>仅读取模式</b>不执行周期命令，但连接时命令、在线探测、关键字告警、自动备份均可用；<b>仅探测模式</b>可不勾选仅读取、不填命令、只勾选「在线探测」，保持连接并仅做连通性探测。<b>监控中心…</b>（工具栏「监控」菜单或右键设备）聚合全部设备状态与统计与<b>近 7 天在线率</b>，「事件时间线 / 配置备份 / 接口流量 / 性能」以<b>标签页</b>切换——接口流量页查看每接口 UP/DOWN、出入速率与采样趋势线；性能页查看 CPU / 内存当前值（≥75% 橙 / ≥90% 红）、趋势线与本次开机时长；<b>点击左侧设备名或管理地址可筛选时间线</b>，事件带设备徽标（离线 / 告警 / 备份变化 / 接口离线 / <b>设备重启</b>等），告警事件显示匹配到的具体内容；「监控日志…」支持<b>全局跨文件搜索</b>（一次搜全部设备 / 日期 / 文件，点击结果直接定位到对应行）。关闭主窗口时可<b>托盘常驻</b>（工具栏「监控」菜单或监控配置弹窗）让后台监控继续运行；正在监控的设备在<b>右侧设备列表显示绿色标记</b>（连接失败显示琥珀/红色）。断线自动重连，可在弹窗打开日志目录查看。</p>
+    <h4>⑪ 网络服务：TFTP / FTP / Syslog（桌面版）</h4>
+    <p>「监控 ▾ 网络服务…」把本机变成一台内网运维服务器：<b>TFTP / FTP 服务器</b>接收设备主动推送的配置文件（思科 <b>copy running-config tftp://本机地址/文件名</b>、华为/H3C <b>tftp 本机地址 put vrpcfg.zip</b>；FTP 需在面板配置用户名/密码），文件<b>按来源 IP 分目录</b>落在 <userData>/net-services/，收到文件弹系统通知，可查看 / 删除，并<b>一键导入配置备份库</b>（按来源 IP 自动匹配拓扑设备，进入备份中心 / 对比 / 合规检查体系）；<b>Syslog 服务器</b>（UDP，可选 TCP）收集设备日志（<b>info-center loghost</b> / <b>logging host</b> 指向本机），按来源主机 / 日期归档，面板实时滚动查看、按级别与来源过滤、关键字检索历史。端口默认 69 / 21 / 514（可改），Linux 特权端口需 root 或改高位端口；服务随设置自动启停（保存后重启软件自动恢复）。</p>
     <h4>⑪ 配置合规基线检查（桌面版）</h4>
     <p>「监控 ▾ 配置合规检查…」对配置备份库中各地址的<b>最新配置</b>执行本地规则扫描（纯本机，不上传）。顶部<b>「模板」</b>条可按需选择加载：<b>内置 5 套基线模板</b>——等保通用基线（11 条，推荐）/ 最小基线（快速检查）/ 华为 VRP 基线 / 思科 IOS 基线 / 接入层交换机基线（厂家模板按对应命令风格判定）；也可把当前规则<b>「另存为模板」</b>保存多套自定义模板（同名覆盖、可删除），随时切换。规则按「时间同步 / 日志审计 / 认证与授权 / 服务与协议 / 路由与网关」五组分组，每条为逐行正则（必须存在 / 禁止出现），禁止类规则自动排除 undo/no 前缀的关闭命令与 stelnet（SSH）误命中；违规项<b>定位到具体配置行</b>（悬停规则芯片查看），扫描结果可<b>一键导出报告</b>（Excel/CSV）。监控开启自动备份后勾选「自动合规」即每次备份后按当前规则集自动扫描。</p>
     <h4>快捷键</h4>
@@ -4262,6 +4264,7 @@ function wire() {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
       openConfigBackups(selId || '');
     } },
+    { ic: 'server', label: '网络服务（TFTP / FTP / Syslog）…', act: openNetServices },
     { sep: true },
     { ic: 'tray', label: '托盘常驻（关闭窗口后台继续监控）', act: async () => {
       if (!window.topoMonitor || !window.topoMonitor.setTray) { toast('托盘常驻需要桌面版软件'); return; }
@@ -6300,6 +6303,385 @@ function openConfigBackups(devicePreset) {
   loadHosts();
 }
 
+/* ================= 内置网络服务（TFTP / FTP / Syslog） ================= */
+/** 按 IP 找设备：管理地址或任一接口 IP 命中即返回（网络服务收到的文件按来源 IP 归目录） */
+function nodeBySvcIp(ip) {
+  if (!ip) return null;
+  for (const n of state.nodes) {
+    try { if ((U.nodeMgmts(n) || []).some(m => m === ip)) return n; } catch (e) { /* ignore */ }
+  }
+  for (const l of state.links) {
+    if (l && l.a && l.a.node && l.a.ip === ip) return state.nodes.find(n => n.id === l.a.node) || null;
+    if (l && l.b && l.b.ip === ip) return state.nodes.find(n => n.id === l.b.node) || null;
+  }
+  return null;
+}
+
+const NSV_SEV = [
+  { v: 'all', t: '全部级别' }, { v: 0, t: 'emerg 及以上' }, { v: 1, t: 'alert 及以上' }, { v: 2, t: 'crit 及以上' },
+  { v: 3, t: 'err 及以上' }, { v: 4, t: 'warning 及以上' }, { v: 5, t: 'notice 及以上' }, { v: 6, t: 'info 及以上' }, { v: 7, t: 'debug（全部）' }
+];
+const NSV_SEV_NAME = ['emerg', 'alert', 'crit', 'err', 'warning', 'notice', 'info', 'debug'];
+const NSV_SEV_CLS = ['s-emerg', 's-alert', 's-crit', 's-err', 's-warn', 's-note', 's-info', 's-dbg'];
+
+function openNetServices() {
+  if (!window.topoNetSvc || !window.topoNetSvc.getConfig) { toast('网络服务需要桌面版（Electron）环境'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal nsv-dialog" role="dialog" style="width:1020px;height:86vh">
+      <h3>网络服务（TFTP / FTP / Syslog）</h3>
+      <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）并<b>向本机发送 syslog 日志</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
+      <div class="nsv-top">
+        <div class="nsv-cards">
+          <div class="nsv-card">
+            <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvTftpOn"/>启用</label><b>TFTP 服务器</b><span class="nsv-dot" id="nsvTftpDot"></span></div>
+            <div class="nsv-st" id="nsvTftpSt"></div>
+            <div class="nsv-row"><label>端口</label><input type="number" id="nsvTftpPort" min="1" max="65535"/><span class="nsv-hint">标准 69</span></div>
+            <div class="nsv-note">设备推配置最常用。同名文件直接覆盖（先落 .part 临时文件，失败不残留）。</div>
+          </div>
+          <div class="nsv-card">
+            <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvFtpOn"/>启用</label><b>FTP 服务器</b><span class="nsv-dot" id="nsvFtpDot"></span></div>
+            <div class="nsv-st" id="nsvFtpSt"></div>
+            <div class="nsv-row"><label>端口</label><input type="number" id="nsvFtpPort" min="1" max="65535"/><span class="nsv-hint">标准 21</span></div>
+            <div class="nsv-row"><label>用户名</label><input type="text" id="nsvFtpUser" maxlength="64" autocomplete="off"/></div>
+            <div class="nsv-row"><label>密码</label><input type="text" id="nsvFtpPass" maxlength="64" autocomplete="off"/><span class="nsv-hint">设备侧 copy 命令使用</span></div>
+            <div class="nsv-row"><label>被动端口</label><input type="text" id="nsvFtpPasv" placeholder="如 50000-50100，留空随机"/><label class="nsv-mini"><input type="checkbox" id="nsvFtpOverwrite"/>允许覆盖同名文件</label></div>
+          </div>
+          <div class="nsv-card">
+            <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvSysOn"/>启用</label><b>Syslog 服务器</b><span class="nsv-dot" id="nsvSysDot"></span></div>
+            <div class="nsv-st" id="nsvSysSt"></div>
+            <div class="nsv-row"><label>端口</label><input type="number" id="nsvSysPort" min="1" max="65535"/><span class="nsv-hint">标准 514（UDP）</span></div>
+            <div class="nsv-row"><label class="nsv-mini"><input type="checkbox" id="nsvSysTcp"/>同时监听 TCP（RFC 6587）</label></div>
+            <div class="nsv-note">按来源主机 / 日期归档，支持级别过滤与关键字检索；超限自动限速丢弃并计数。</div>
+          </div>
+        </div>
+        <div class="nsv-aside">
+          <div class="nsv-h">本机地址（设备侧指向）</div>
+          <div class="nsv-ips" id="nsvIps"></div>
+          <div class="nsv-h">设备侧命令示例</div>
+          <pre class="nsv-cmd" id="nsvCmd"></pre>
+          <div class="nsv-note">如设备连不通：检查本机防火墙是否放行对应端口；Linux 特权端口（69/21/514）需 root 或改用高位端口。</div>
+        </div>
+      </div>
+      <div class="nsv-tabs">
+        <button type="button" class="mc-tab on" data-pane="files">接收文件（TFTP / FTP）</button>
+        <button type="button" class="mc-tab" data-pane="syslog">Syslog 日志</button>
+        <span class="nsv-tabs-sp"></span>
+        <button type="button" class="tb nsv-mini-btn" data-act="openfiles">打开文件目录</button>
+        <button type="button" class="tb nsv-mini-btn" data-act="opensys">打开日志目录</button>
+        <button type="button" class="tb nsv-mini-btn" data-act="refresh">刷新</button>
+      </div>
+      <div class="nsv-pane" data-pane="files">
+        <div class="nsv-files" id="nsvFiles"></div>
+      </div>
+      <div class="nsv-pane" data-pane="syslog" hidden>
+        <div class="nsv-logbar">
+          <select id="nsvLogSev">${NSV_SEV.map(s => '<option value="' + s.v + '">' + s.t + '</option>').join('')}</select>
+          <input type="text" id="nsvLogHost" placeholder="按来源主机过滤…"/>
+          <label class="nsv-mini"><input type="checkbox" id="nsvLogPause"/>暂停滚动</label>
+          <span class="nsv-tabs-sp"></span>
+          <input type="text" id="nsvLogKw" placeholder="检索历史日志关键字…"/>
+          <button type="button" class="tb nsv-mini-btn" id="nsvLogSearch">检索</button>
+          <span class="nsv-logcnt" id="nsvLogCnt"></span>
+        </div>
+        <div class="nsv-log" id="nsvLog"></div>
+      </div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="defaults">恢复默认</button>
+        <button type="button" class="tb primary" data-act="apply">保存并应用</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => { clearInterval(pollTimer); ov.remove(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.querySelector('[data-act=refresh]').onclick = () => { loadFiles(); refreshTail(true); };
+
+  /* ---------- 服务状态与配置回填 ---------- */
+  let st = null;   // netsvc status
+  let ips = [];
+  const dotFor = (el, s) => {
+    el.className = 'nsv-dot ' + (s.error ? 'err' : (s.running ? 'ok' : ''));
+    el.title = s.error || '';
+  };
+  const stText = (s) => s.error ? ('错误：' + s.error)
+    : (s.running ? '运行中 :' + s.port + (s.cfgPort !== s.port ? '（配置 ' + s.cfgPort + '）' : '') : '已停止');
+  function renderStatus() {
+    if (!st) return;
+    dotFor(ov.querySelector('#nsvTftpDot'), st.tftp); ov.querySelector('#nsvTftpSt').textContent = stText(st.tftp);
+    dotFor(ov.querySelector('#nsvFtpDot'), st.ftp); ov.querySelector('#nsvFtpSt').textContent = stText(st.ftp);
+    dotFor(ov.querySelector('#nsvSysDot'), st.syslog); ov.querySelector('#nsvSysSt').textContent = st.syslog.running
+      ? ('运行中 :' + st.syslog.port + (st.syslog.tcp ? '（UDP+TCP）' : '（UDP）')) : (st.syslog.error ? '错误：' + st.syslog.error : '已停止');
+    ov.querySelector('#nsvLogCnt').textContent = st.syslog.rxMsgs
+      ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : '')) : '';
+  }
+  function fillForm(cfg) {
+    ov.querySelector('#nsvTftpOn').checked = !!cfg.tftp.enabled;
+    ov.querySelector('#nsvTftpPort').value = cfg.tftp.port;
+    ov.querySelector('#nsvFtpOn').checked = !!cfg.ftp.enabled;
+    ov.querySelector('#nsvFtpPort').value = cfg.ftp.port;
+    ov.querySelector('#nsvFtpUser').value = cfg.ftp.username;
+    ov.querySelector('#nsvFtpPass').value = cfg.ftp.password;
+    ov.querySelector('#nsvFtpPasv').value = cfg.ftp.pasvMax ? (cfg.ftp.pasvMin + '-' + cfg.ftp.pasvMax) : '';
+    ov.querySelector('#nsvFtpOverwrite').checked = cfg.ftp.overwrite !== false;
+    ov.querySelector('#nsvSysOn').checked = !!cfg.syslog.enabled;
+    ov.querySelector('#nsvSysPort').value = cfg.syslog.port;
+    ov.querySelector('#nsvSysTcp').checked = !!cfg.syslog.tcp;
+  }
+  function readForm() {
+    const pasv = String(ov.querySelector('#nsvFtpPasv').value || '').match(/^(\d+)\s*-\s*(\d+)$/);
+    return {
+      tftp: { enabled: ov.querySelector('#nsvTftpOn').checked, port: parseInt(ov.querySelector('#nsvTftpPort').value, 10) || 69 },
+      ftp: {
+        enabled: ov.querySelector('#nsvFtpOn').checked,
+        port: parseInt(ov.querySelector('#nsvFtpPort').value, 10) || 21,
+        username: ov.querySelector('#nsvFtpUser').value.trim() || 'nettopo',
+        password: ov.querySelector('#nsvFtpPass').value,
+        pasvMin: pasv ? parseInt(pasv[1], 10) : 0,
+        pasvMax: pasv ? parseInt(pasv[2], 10) : 0,
+        overwrite: ov.querySelector('#nsvFtpOverwrite').checked
+      },
+      syslog: { enabled: ov.querySelector('#nsvSysOn').checked, port: parseInt(ov.querySelector('#nsvSysPort').value, 10) || 514, tcp: ov.querySelector('#nsvSysTcp').checked }
+    };
+  }
+  async function loadCfg() {
+    try {
+      const r = await window.topoNetSvc.getConfig();
+      if (!r || !r.ok || !ov.isConnected) return;
+      fillForm(r.cfg);
+      st = r.status;
+      ips = r.ips || [];
+      renderStatus();
+      ov.querySelector('#nsvIps').innerHTML = ips.length
+        ? ips.map(i => '<span class="nsv-ip" data-ip="' + U.escHtml(i) + '" title="点击复制">' + U.escHtml(i) + '</span>').join('')
+        : '<span class="nsv-ip none">未检测到（未联网亦可使用本机回环地址 127.0.0.1 调试）</span>';
+      ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
+      ov.querySelectorAll('.nsv-ip[data-ip]').forEach(el => {
+        el.onclick = () => {
+          const ip = el.dataset.ip;
+          ov.querySelector('#nsvCmd').textContent = buildCmdExample(ip);
+          try { navigator.clipboard.writeText(ip); toast('已复制 ' + ip + '，命令示例已同步'); } catch (e) { toast('命令示例已切换为 ' + ip); }
+        };
+      });
+    } catch (e) { /* ignore */ }
+  }
+  function buildCmdExample(ip) {
+    return [
+      '# 思科：推送配置到 TFTP / FTP',
+      'copy running-config tftp://' + ip + '/r1.cfg',
+      'copy running-config ftp://' + (ov.querySelector('#nsvFtpUser').value.trim() || 'nettopo') + '@' + ip + '/r1.cfg',
+      '',
+      '# 华为 / H3C：推送配置到 TFTP',
+      'tftp ' + ip + ' put vrpcfg.zip',
+      '',
+      '# 日志发送到本机 Syslog（华为/H3C：info-center；思科：logging）',
+      'info-center loghost ' + ip,
+      'logging host ' + ip
+    ].join('\n');
+  }
+  ov.querySelector('[data-act=apply]').onclick = async () => {
+    const btn = ov.querySelector('[data-act=apply]');
+    btn.disabled = true;
+    try {
+      const r = await window.topoNetSvc.setConfig(readForm());
+      if (r && r.ok) {
+        st = r.status;
+        renderStatus();
+        const parts = [];
+        for (const [k, nm] of [['tftp', 'TFTP'], ['ftp', 'FTP'], ['syslog', 'Syslog']]) {
+          const s = r.status[k];
+          parts.push(nm + (s.error ? '错误' : (s.running ? ':' + s.port : '已停止')));
+        }
+        toast('已保存并应用：' + parts.join(' · '));
+      } else toast((r && r.error) || '应用失败');
+    } catch (e) { toast('应用失败'); }
+    btn.disabled = false;
+  };
+  ov.querySelector('[data-act=defaults]').onclick = async () => {
+    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false } });
+    ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
+    toast('已恢复默认值（尚未保存，请点「保存并应用」）');
+  };
+  ov.querySelector('[data-act=openfiles]').onclick = () => { window.topoNetSvc.openFolder('tftp').catch(() => {}); };
+  ov.querySelector('[data-act=opensys]').onclick = () => { window.topoNetSvc.openFolder('syslog').catch(() => {}); };
+
+  /* ---------- 接收文件表 ---------- */
+  async function loadFiles() {
+    const el = ov.querySelector('#nsvFiles');
+    let items = [];
+    try {
+      const r = await window.topoNetSvc.files();
+      items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+    } catch (e) { /* ignore */ }
+    if (!items.length) {
+      el.innerHTML = '<div class="nsv-empty">尚未收到文件：在设备上执行 copy running-config tftp://<本机地址>/<文件名> 后，文件会出现在这里（按来源 IP 分目录）</div>';
+      return;
+    }
+    el.innerHTML = '<div class="nsv-fh"><span>时间</span><span>服务</span><span>来源</span><span>文件名</span><span>大小</span><span></span></div>' +
+      items.map((f, i) => {
+        const dev = nodeBySvcIp(f.ip);
+        return '<div class="nsv-fr" data-i="' + i + '">' +
+          '<span>' + U.fmtDateTime(new Date(f.time)) + '</span>' +
+          '<span><b class="nsv-badge ' + f.svc + '">' + (f.svc === 'tftp' ? 'TFTP' : 'FTP') + '</b></span>' +
+          '<span title="' + U.escHtml(dev ? '已匹配设备：' + dev.name : '未匹配到拓扑设备') + '">' + U.escHtml(f.ip || '—') + (dev ? ' ⇢ ' + U.escHtml(dev.name) : '') + '</span>' +
+          '<span class="nm" title="' + U.escHtml(f.name) + '">' + U.escHtml(f.name) + '</span>' +
+          '<span>' + U.fmtSize(f.size) + '</span>' +
+          '<span class="ops"><button type="button" class="tb nsv-mini-btn" data-op="view">查看</button><button type="button" class="tb nsv-mini-btn" data-op="imp">导入备份</button><button type="button" class="tb nsv-mini-btn" data-op="del">删除</button></span>' +
+          '</div>';
+      }).join('');
+    el.querySelectorAll('.nsv-fr .ops button').forEach(btn => {
+      btn.onclick = () => {
+        const f = items[parseInt(btn.closest('.nsv-fr').dataset.i, 10)];
+        const op = btn.dataset.op;
+        if (op === 'view') viewSvcFile(f);
+        else if (op === 'imp') importSvcFile(f);
+        else if (op === 'del') delSvcFile(f);
+      };
+    });
+  }
+  function viewSvcFile(f) {
+    window.topoNetSvc.fileRead(f).then((r) => {
+      const v = document.createElement('div');
+      v.className = 'overlay';
+      v.innerHTML = '<div class="modal" role="dialog" style="width:820px;height:76vh">' +
+        '<h3>' + U.escHtml(f.name) + '</h3>' +
+        '<div class="m-sub">' + (f.svc === 'tftp' ? 'TFTP' : 'FTP') + ' 收到 · 来源 ' + U.escHtml(f.ip || '—') + ' · ' + U.fmtSize(f.size) + '</div>' +
+        '<pre class="nsv-view" spellcheck="false">' + (r && r.ok ? U.escHtml(r.content) : '（读取失败：' + U.escHtml((r && r.error) || '未知错误') + '）') + '</pre>' +
+        '<div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+      $('#modalRoot').appendChild(v);
+      v.tabIndex = -1; v.focus();
+      const vc = () => v.remove();
+      v.addEventListener('pointerdown', (e) => { if (e.target === v) vc(); });
+      v.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); vc(); } });
+      v.querySelector('[data-act=close]').onclick = vc;
+    }).catch(() => toast('读取失败'));
+  }
+  function importSvcFile(f) {
+    const hit = nodeBySvcIp(f.ip);
+    const v = document.createElement('div');
+    v.className = 'overlay';
+    const opts = state.nodes.map(n => {
+      const mg = U.nodeMgmts(n);
+      const selIp = (n === hit) ? (f.ip || mg[0] || '') : (mg[0] || '');
+      return '<option value="' + U.escHtml(n.id) + '"' + (n === hit ? ' selected' : '') + (selIp ? ' data-ip="' + U.escHtml(selIp) + '"' : '') + '>' + U.escHtml(n.name) + (mg.length ? '（' + U.escHtml(mg[0]) + '）' : '（无管理地址）') + '</option>';
+    }).join('');
+    v.innerHTML = '<div class="modal" role="dialog" style="width:460px">' +
+      '<h3>导入配置备份库</h3>' +
+      '<div class="m-sub">把 ' + U.escHtml(f.name) + '（来源 ' + U.escHtml(f.ip || '—') + '）保存为设备的配置备份：可在「监控 ▾ 配置备份…」浏览 / 对比 / 合规检查。</div>' +
+      '<div class="frow"><label>设备</label><select id="nsvImpDev">' + (opts || '<option value="">（画布中没有设备）</option>') + '</select></div>' +
+      '<div class="frow"><label>归属地址</label><input type="text" id="nsvImpHost" value="' + U.escHtml(f.ip || '') + '"/></div>' +
+      '<div class="m-actions"><button type="button" class="tb" data-act="cancel">取消</button><button type="button" class="tb primary" data-act="ok">导入</button></div></div>';
+    $('#modalRoot').appendChild(v);
+    v.tabIndex = -1; v.focus();
+    const vc = () => v.remove();
+    v.addEventListener('pointerdown', (e) => { if (e.target === v) vc(); });
+    v.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); vc(); } });
+    v.querySelector('[data-act=cancel]').onclick = vc;
+    const devSel = v.querySelector('#nsvImpDev');
+    const hostIn = v.querySelector('#nsvImpHost');
+    devSel.onchange = () => {
+      const o = devSel.selectedOptions[0];
+      if (o && o.dataset.ip && !hostIn.value.trim()) hostIn.value = o.dataset.ip;
+    };
+    v.querySelector('[data-act=ok]').onclick = async () => {
+      const node = state.nodes.find(n => n.id === devSel.value);
+      if (!node) { toast('请选择设备'); return; }
+      const r = await window.topoNetSvc.importBackup({ svc: f.svc, ip: f.ip, name: f.name, device: node.name, host: hostIn.value.trim() || f.ip || '' });
+      if (r && r.ok) { toast('已导入备份库：' + node.name + ' @ ' + (hostIn.value.trim() || f.ip) + ' → ' + (r.name || '')); vc(); }
+      else toast((r && r.error) || '导入失败');
+    };
+    setTimeout(() => { if (document.body.contains(v)) devSel.focus(); }, 150);
+  }
+  async function delSvcFile(f) {
+    const r = await window.topoNetSvc.fileDelete(f);
+    if (r && r.ok) { toast('已删除 ' + f.name); loadFiles(); }
+    else toast((r && r.error) || '删除失败');
+  }
+
+  /* ---------- Syslog 实时视图 / 检索 ---------- */
+  let lastSeq = 0, paused = false, searchMode = false;
+  const logEl = ov.querySelector('#nsvLog');
+  ov.querySelector('#nsvLogPause').addEventListener('change', (e) => { paused = e.target.checked; });
+  async function refreshTail(reset) {
+    if (reset) searchMode = false;
+    if (searchMode && !reset) return;
+    if (paused && !reset) return;
+    try {
+      const r = await window.topoNetSvc.syslogTail(reset ? 0 : lastSeq);
+      if (!r || !ov.isConnected) return;
+      lastSeq = r.last;
+      if (reset) { logEl.innerHTML = ''; appendLog(r.msgs || [], true); return; }
+      appendLog(r.msgs || [], false);
+    } catch (e) { /* ignore */ }
+  }
+  function appendLog(msgs, replaceAll) {
+    if (replaceAll) logEl.innerHTML = '';
+    if (!msgs.length && !replaceAll) return;
+    const sevSel = ov.querySelector('#nsvLogSev').value;
+    const sevMax = sevSel === 'all' ? 7 : parseInt(sevSel, 10);
+    const hostF = String(ov.querySelector('#nsvLogHost').value || '').trim().toLowerCase();
+    const html = [];
+    for (const m of msgs) {
+      if (m.severity != null && m.severity > sevMax) continue;
+      if (hostF && String(m.host || '').toLowerCase().indexOf(hostF) < 0) continue;
+      const d = new Date(m.ts);
+      html.push('<div class="nsv-lg ' + (m.severity != null ? NSV_SEV_CLS[m.severity] : '') + '">' +
+        '<span class="t">' + pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()) + ':' + pad2s(d.getSeconds()) + '</span>' +
+        '<span class="sev">' + (m.severity != null ? NSV_SEV_NAME[m.severity] : '-') + '</span>' +
+        '<span class="h" title="' + U.escHtml(m.host || '') + '">' + U.escHtml(m.host || '-') + '</span>' +
+        '<span class="m">' + U.escHtml(m.msg || '') + '</span></div>');
+    }
+    if (!html.length && !replaceAll) return;
+    const stick = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+    logEl.insertAdjacentHTML('beforeend', html.join(''));
+    while (logEl.childElementCount > 600) logEl.firstElementChild.remove();
+    if (stick || replaceAll) logEl.scrollTop = logEl.scrollHeight;
+  }
+  const pad2s = (n) => String(n).padStart(2, '0');
+  ov.querySelector('#nsvLogSearch').onclick = async () => {
+    const kw = String(ov.querySelector('#nsvLogKw').value || '').trim();
+    if (!kw) { toast('请输入检索关键字'); return; }
+    const r = await window.topoNetSvc.syslogSearch({ keyword: kw });
+    if (!r || !r.ok) { toast((r && r.error) || '检索失败'); return; }
+    searchMode = true;
+    const rows = [];
+    for (const it of (r.items || [])) {
+      for (const ln of it.matches) rows.push('<div class="nsv-lg s-found"><span class="h">' + U.escHtml(it.host) + '</span><span class="dt">' + U.escHtml(it.date) + '</span><span class="m">' + U.escHtml(ln) + '</span></div>');
+    }
+    logEl.innerHTML = '<div class="nsv-lg s-srchhead">检索「' + U.escHtml(kw) + '」命中 ' + (r.total || 0) + ' 条（最多显示 500）—— <button type="button" class="tb nsv-mini-btn" id="nsvBackLive">返回实时视图</button></div>' + (rows.join('') || '<div class="nsv-lg">无命中</div>');
+    logEl.querySelector('#nsvBackLive').onclick = () => { searchMode = false; refreshTail(true); };
+  };
+  ov.querySelector('#nsvLogKw').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.stopPropagation(); ov.querySelector('#nsvLogSearch').click(); } });
+
+  /* ---------- 标签切换 / 轮询 / 实时事件 ---------- */
+  ov.querySelectorAll('.nsv-tabs .mc-tab').forEach(tab => {
+    tab.onclick = () => {
+      ov.querySelectorAll('.nsv-tabs .mc-tab').forEach(t => t.classList.toggle('on', t === tab));
+      ov.querySelectorAll('.nsv-pane').forEach(p => { p.hidden = p.dataset.pane !== tab.dataset.pane; });
+      if (tab.dataset.pane === 'syslog') refreshTail(true);
+      else loadFiles();
+    };
+  });
+  const onFileEvt = () => { if (ov.isConnected && ov.querySelector('.nsv-pane[data-pane=files]').hidden === false) loadFiles(); };
+  const onStEvt = (s) => { st = s; renderStatus(); };
+  window.topoNetSvc.onFile(onFileEvt);
+  window.topoNetSvc.onStatus(onStEvt);
+  const pollTimer = setInterval(() => {
+    if (!ov.isConnected) { clearInterval(pollTimer); return; }
+    window.topoNetSvc.getConfig().then((r) => { if (r && r.ok && ov.isConnected) { st = r.status; renderStatus(); } }).catch(() => {});
+    refreshTail(false);
+  }, 2500);
+
+  loadCfg();
+  loadFiles();
+  refreshTail(true);
+}
+
 /* ================= Web Shell ================= */
 function openWebShell(id) {
   const n = state.nodes.find(x => x.id === id);
@@ -6496,6 +6878,7 @@ if (typeof globalThis !== 'undefined') {
     openMonitorCenter,
     openMonitorLogs,
     openConfigBackups,
+    openNetServices,
     applyMonitor,
     reconcileMonitors,
     monitorStatus: state.monitorStatus,

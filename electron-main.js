@@ -6,6 +6,7 @@ const { ShellManager } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
+const { NetServices } = require('./js/net-services.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
  *   否则 SUID 沙箱初始化直接 fatal abort（"Running as root without --no-sandbox is not supported"）。
@@ -45,6 +46,35 @@ const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'mo
 const uptimeStore = new UptimeStore(path.join(app.getPath('userData'), 'monitor-uptime.json'));
 monitor.on('probe', (info) => { try { uptimeStore.record(info.key, info.ok === true); } catch (e) { /* ignore */ } });
 setInterval(() => uptimeStore.flush(), 5 * 60 * 1000).unref();
+
+/* ---- 内置网络服务（TFTP / FTP / Syslog）：接收设备推送的配置文件与集中收集日志 ---- */
+const netSvc = new NetServices({
+  baseDir: path.join(app.getPath('userData'), 'net-services'),
+  configBackup: configBackup
+});
+netSvc.on('file', (info) => {
+  // 设备推文件是低频事件：实时推送面板 + 系统通知（等待设备 copy 命令执行完成时很有用）
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:file', info);
+  if (notifyEnabled()) {
+    notifyUser('网络拓扑管理软件 · 收到设备文件',
+      (info.svc === 'tftp' ? 'TFTP' : 'FTP') + ' 收到 ' + info.name + '（来自 ' + info.ip + '，' + info.size + ' 字节），可在「网络服务」面板导入配置备份库');
+  }
+});
+netSvc.on('status', (st) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:status', st); });
+
+/** 本机 IPv4 地址列表（面板展示，方便在设备侧配置 tftp/ftp/loghost 指向） */
+function localIPv4s() {
+  const os = require('os');
+  const out = [];
+  try {
+    for (const list of Object.values(os.networkInterfaces())) {
+      for (const it of list || []) {
+        if (it && it.family === 'IPv4' && !it.internal) out.push(it.address);
+      }
+    }
+  } catch (e) { /* ignore */ }
+  return out;
+}
 
 /* ---- 应用设置持久化（备份目录等，存于用户数据目录 settings.json） ---- */
 let appSettings = null;
@@ -794,6 +824,32 @@ ipcMain.handle('backupcfg:open', (e) => {
   return require('electron').shell.openPath(configBackup.baseDir).then(() => ({ ok: true }), (err) => ({ ok: false, error: String(err && err.message || err) }));
 });
 
+/* ---- 内置网络服务 IPC（TFTP / FTP / Syslog，仅主窗口可调用） ---- */
+ipcMain.handle('netsvc:get', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  return { ok: true, cfg: netSvc.getConfig(), status: netSvc.status(), ips: localIPv4s() };
+});
+ipcMain.handle('netsvc:set', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const cfg = (p && p.cfg && typeof p.cfg === 'object') ? p.cfg : {};
+  loadAppSettings().netSvc = cfg;
+  saveAppSettings();
+  const status = await netSvc.applyConfig(cfg);
+  return { ok: true, cfg: netSvc.getConfig(), status };
+});
+ipcMain.handle('netsvc:files', (e) => monitorGuard(e) ? netSvc.listFiles() : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:file-read', (e, p) => monitorGuard(e) ? netSvc.readFile(p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:file-delete', (e, p) => monitorGuard(e) ? netSvc.deleteFile(p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:import', (e, p) => monitorGuard(e) ? netSvc.importBackup(p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:syslog-tail', (e, p) => monitorGuard(e) ? netSvc.syslogTail(p && p.since) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:syslog-search', (e, p) => monitorGuard(e) ? netSvc.syslogSearch(p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:open-folder', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const dir = netSvc.dirOf(String((p && p.svc) || ''));
+  if (!dir) return { ok: false, error: '未知的服务' };
+  return require('electron').shell.openPath(dir).then(() => ({ ok: true, dir }), (err) => ({ ok: false, error: String(err && err.message || err) }));
+});
+
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框
   session.defaultSession.on('will-download', (e, item) => {
@@ -814,6 +870,11 @@ app.whenReady().then(() => {
   });
   createWindow();
   applyTray();
+  // 内置网络服务：上次启用的服务自动恢复（配置存 settings.netSvc）
+  try {
+    const saved = loadAppSettings().netSvc;
+    if (saved && typeof saved === 'object') netSvc.applyConfig(saved);
+  } catch (e) { /* ignore */ }
   // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
   app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
     if (webContents.getType() !== 'webview') return; // 仅处理设备管理页内嵌浏览器
@@ -847,6 +908,7 @@ app.on('will-quit', () => {
   monitor.stopAll();
   shell.closeAll();
   uptimeStore.flush();
+  netSvc.stopAll();
   if (tray) { try { tray.destroy(); } catch (e) { /* ignore */ } tray = null; }
 });
 
