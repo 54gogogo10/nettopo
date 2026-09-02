@@ -106,8 +106,9 @@ function parseIsoTs(s) {
   const ms = m[7] ? parseInt((m[7] + '00').slice(0, 3), 10) : 0;
   let t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], ms);
   if (m[8] && m[8] !== 'Z') {
+    // +08:00 表示墙钟超前 UTC 8 小时：UTC = 墙钟 − 偏移（负偏移则加回）
     const off = (+m[8].slice(1, 3)) * 60 + (+m[8].slice(4, 6));
-    t += (m[8][0] === '-' ? -1 : 1) * off * 60000;
+    t += (m[8][0] === '-' ? 1 : -1) * off * 60000;
   } else if (!m[8]) {
     // 无时区标记按本地时间解释（设备与采集机通常同时区）
     const l = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], ms);
@@ -211,26 +212,41 @@ class SyslogServer extends EventEmitter {
 
   _onTcpConn(sock) {
     let acc = Buffer.alloc(0);
-    const idle = setTimeout(() => { try { sock.destroy(); } catch (e) { /* ignore */ } }, 5 * 60 * 1000);
-    idle.unref();
+    // 空闲保护覆盖整个连接生命周期：每收到数据都重置（否则发过一条消息后保护消失，
+    // 对端僵死/NAT 重置出的半开 TCP 连接会缓慢累积句柄）
+    let idle = null;
+    const bumpIdle = () => {
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(() => { try { sock.destroy(); } catch (e) { /* ignore */ } }, 5 * 60 * 1000);
+      idle.unref();
+    };
+    bumpIdle();
     const peer = sock.remoteAddress || '';
+    // framing 判定（RFC 6587）：null 未知，'octet' 已确认字节数帧，'newline' 已确认换行切分。
+    // 裸文本消息以「数字 空格」开头（如 "100 errors detected"）会被误读成 octet 帧头且帧
+    // 永远凑不齐——帧未收全期间若已等到换行，则判定本连接为换行 framing，避免整条流死锁丢日志
+    let framing = null;
     sock.on('data', (d) => {
-      clearTimeout(idle);
+      bumpIdle();
       acc = Buffer.concat([acc, d]);
       if (acc.length > 1 * 1024 * 1024) { try { sock.destroy(); } catch (e) { /* ignore */ } return; }
       // 循环切帧：RFC 6587 字节数 framing（"NNN msg"，首字节为数字）优先，否则换行分隔的非透明 framing
       for (;;) {
-        const head = acc.toString('latin1', 0, 16).match(/^(\d{1,10}) /);
-        if (head) {
-          const prefixLen = head[1].length + 1;
-          const len = parseInt(head[1], 10);
-          if (len > MAX_MSG_LEN * 4) { try { sock.destroy(); } catch (e) { /* ignore */ } return; }
-          if (acc.length >= prefixLen + len) {
-            this._ingest(acc.slice(prefixLen, prefixLen + len).toString('utf8'), peer);
-            acc = acc.slice(prefixLen + len);
-            continue;
+        if (framing !== 'newline') {
+          const head = acc.toString('latin1', 0, 16).match(/^(\d{1,10}) /);
+          if (head) {
+            const prefixLen = head[1].length + 1;
+            const len = parseInt(head[1], 10);
+            if (len > MAX_MSG_LEN * 4) { try { sock.destroy(); } catch (e) { /* ignore */ } return; }
+            if (acc.length >= prefixLen + len) {
+              this._ingest(acc.slice(prefixLen, prefixLen + len).toString('utf8'), peer);
+              acc = acc.slice(prefixLen + len);
+              framing = 'octet';
+              continue;
+            }
+            if (acc.indexOf(0x0a) >= 0) framing = 'newline'; // 换行先到：并非 octet 流，落回换行切分
+            else break; // 帧未收全，等待后续数据
           }
-          break; // 帧未收全，等待后续数据
         }
         const nl = acc.indexOf(0x0a);
         if (nl >= 0) {
@@ -241,8 +257,8 @@ class SyslogServer extends EventEmitter {
         break;
       }
     });
-    sock.on('error', () => { clearTimeout(idle); });
-    sock.on('close', () => clearTimeout(idle));
+    sock.on('error', () => { if (idle) clearTimeout(idle); });
+    sock.on('close', () => { if (idle) clearTimeout(idle); });
   }
 
   _bindHint(err) {

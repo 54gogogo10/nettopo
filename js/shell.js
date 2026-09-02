@@ -79,6 +79,9 @@ class ShellManager extends EventEmitter {
     }
     const base = {
       host, port, protocol,
+      // 会话归属：'ui'（Web Shell 窗口，断开后可用 reconnect 复用 sid）或 'monitor'（监控/备份，
+      // 断开后总是全新 connect 重建）。closeAll('monitor') 借此只关 UI 会话，不误杀后台监控连接
+      owner: opts.owner === 'monitor' ? 'monitor' : 'ui',
       username: String(opts.username || '').trim() || 'admin',
       password: String(opts.password || ''),
       cols: Math.max(parseInt(opts.cols, 10) || 80, 10),
@@ -120,6 +123,9 @@ class ShellManager extends EventEmitter {
     session.on('end', (reason) => {
       this._closeSessionLog(slog, reason);
       this.sessions.delete(id);
+      // 监控侧断开后总是以全新 connect() 重建（不复用 sid），参数副本随会话结束即清，
+      // 防 7×24 重连循环下凭据副本在 _params 无界累积；UI 会话保留参数供「重新连接」
+      if (base.owner === 'monitor') this._params.delete(id);
       this.emit('end', id, reason);
     });
     this.sessions.set(id, session);
@@ -130,6 +136,9 @@ class ShellManager extends EventEmitter {
   reconnect(id) {
     const base = typeof id === 'string' ? this._params.get(id) : null;
     if (!base) return { ok: false, error: '会话参数不存在，无法重连' };
+    // 旧会话尚未 end（如还卡在指纹确认/连接超时窗口）时禁止原地重建：
+    // 同 sid 双会话会让旧会话的收尾逻辑误删新会话并向前端误报结束
+    if (this.sessions.has(id)) return { ok: false, error: '会话仍在进行中，请稍候再试' };
     let session;
     try {
       session = base.protocol === 'ssh' ? this._ssh(base) : this._telnet(base);
@@ -141,6 +150,16 @@ class ShellManager extends EventEmitter {
   }
 
   /* ---------- 会话审计日志（<logDir>/WebShell-<主机>/<日期>/<主机>_<端口>_<时间>.log） ---------- */
+  /** 创建审计日志写流。必须同步挂 error 监听：WriteStream 的失败（磁盘满/文件被锁）
+   *  走异步 error 事件，无监听器时 EventEmitter 直接抛出并崩掉整个主进程。 */
+  _makeLogStream(rec, dateDir, fname) {
+    const stream = fs.createWriteStream(path.join(dateDir, fname), { flags: 'a' });
+    stream.on('error', () => {
+      try { stream.destroy(); } catch (e) { /* ignore */ }
+      if (rec.stream === stream) rec.stream = null; // 静默降级：后续日志跳过，不影响会话本身
+    });
+    return stream;
+  }
   _openSessionLog(base) {
     try {
       const hostSan = sanitizeLogName(base.host);
@@ -149,9 +168,10 @@ class ShellManager extends EventEmitter {
       let fname = hostSan + '_' + base.port + '_' + logStamp() + '.log';
       let seq = 0;
       while (fs.existsSync(path.join(dateDir, fname))) { seq++; fname = hostSan + '_' + base.port + '_' + logStamp() + '_' + seq + '.log'; }
-      const stream = fs.createWriteStream(path.join(dateDir, fname), { flags: 'a' });
-      stream.write('[' + logStamp() + '] ===== 会话开始 ' + String(base.protocol).toUpperCase() + ' ' + base.host + ':' + base.port + ' 用户名: ' + base.username + ' =====\r\n');
-      return { stream, hostSan, port: base.port, bytes: 0, seq: 0 };
+      const rec = { stream: null, hostSan, port: base.port, bytes: 0, seq: 0 };
+      rec.stream = this._makeLogStream(rec, dateDir, fname);
+      rec.stream.write('[' + logStamp() + '] ===== 会话开始 ' + String(base.protocol).toUpperCase() + ' ' + base.host + ':' + base.port + ' 用户名: ' + base.username + ' =====\r\n');
+      return rec;
     } catch (e) { return null; } // 日志失败不影响会话
   }
   _logSessionChunk(rec, data) {
@@ -164,7 +184,7 @@ class ShellManager extends EventEmitter {
         fs.mkdirSync(dateDir, { recursive: true });
         const fname = rec.hostSan + '_' + rec.port + '_' + logStamp() + '_' + rec.seq + '.log';
         rec.stream.end();
-        rec.stream = fs.createWriteStream(path.join(dateDir, fname), { flags: 'a' });
+        rec.stream = this._makeLogStream(rec, dateDir, fname);
       }
       rec.stream.write(typeof data === 'string' ? data : Buffer.from(data)); // 原样留痕（设备回显即含用户命令）
     } catch (e) { try { rec.stream = null; } catch (e2) { /* ignore */ } }
@@ -191,8 +211,16 @@ class ShellManager extends EventEmitter {
     if (s) { s._close(); this.sessions.delete(id); }
     this._params.delete(id); // 用户显式关闭标签：参数随之清掉，内存不留凭据副本
   }
-  closeAll() {
-    for (const id of [...this.sessions.keys()]) this.close(id);
+  /** 关闭会话。exceptOwner 提供时跳过该归属的会话（如 Web Shell 窗口关闭时
+   *  closeAll('monitor') 只收 UI 会话，后台监控连接不受牵连）。 */
+  closeAll(exceptOwner) {
+    for (const id of [...this.sessions.keys()]) {
+      if (exceptOwner) {
+        const base = this._params.get(id);
+        if (base && base.owner === exceptOwner) continue;
+      }
+      this.close(id);
+    }
   }
 
   /** SSH 首次连接指纹确认：用户信任后放行该主机的全部待确认握手（TOFU） */
@@ -299,6 +327,10 @@ class ShellManager extends EventEmitter {
       port: o.port,
       username: o.username,
       readyTimeout: 12000,
+      // 周期 keepalive 探活：NAT/防火墙静默掐断空闲 TCP 后本地 socket 仍是 ESTABLISHED，
+      // 无探活时命令写进黑洞要等内核级重传超时（十几分钟）才报错，监控/备份长时间假死
+      keepaliveInterval: 15000,
+      keepaliveCountMax: 4,
       hostHash: 'sha256',
       hostVerifier: makeVerifier(o.host, pendingRec)
     };
@@ -331,6 +363,8 @@ class ShellManager extends EventEmitter {
         port: o.jump.port || 22,
         username: o.jump.username || o.username,
         readyTimeout: 12000,
+        keepaliveInterval: 15000,
+        keepaliveCountMax: 4,
         hostHash: 'sha256',
         hostVerifier: makeVerifier(o.jump.host, jumpRec)
       };
@@ -432,7 +466,11 @@ class ShellManager extends EventEmitter {
         if (cmd === IAC) { out.push(Buffer.from([IAC])); buf = buf.slice(2); continue; }
         if (cmd === SB) {
           const j = buf.indexOf(Buffer.from([IAC, SE]), 2);
-          if (j < 0) break;
+          if (j < 0) {
+            // 畸形/恶意对端持续发 IAC SB 不收尾：滞留缓冲设上限，超限断链防内存无界增长
+            if (buf.length > 64 * 1024) { finish('协议数据异常：子协商无结束符'); return; }
+            break;
+          }
           buf = buf.slice(j + 2);
           continue;
         }

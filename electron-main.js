@@ -19,12 +19,29 @@ if (process.platform === 'linux' && typeof process.getuid === 'function' && proc
 // 测试隔离：冒烟测试通过 NETTOPO_USERDATA 覆盖用户数据目录（临时目录），避免污染真实备份数据
 if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_USERDATA);
 
+/* ---- 单实例锁：双开会产生双托盘、内置 TFTP/FTP/Syslog 端口互抢（第二实例服务全部起不来）、
+ *   两边 settings.json 互相覆盖——第二个实例直接退出并唤起已有主窗 */
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWin && !mainWin.isDestroyed()) {
+      if (mainWin.isMinimized()) mainWin.restore();
+      mainWin.show();
+      mainWin.focus();
+    }
+  });
+}
+
 let mainWin = null;
 let shellWin = null;
 let webWin = null;
 let tray = null;
 let trayQuitting = false;
-const trayEnabled = () => loadAppSettings().trayEnabled === true;
+const trayWanted = () => loadAppSettings().trayEnabled === true; // 设置开关（创建/销毁托盘用）
+// 「托盘真实可用」= 设置开且托盘创建成功：图标缺失/Linux 无系统托盘的桌面环境下创建会失败，
+// 此时若仍按设置判定，关窗会隐藏成无窗无盘的僵尸进程——创建失败视同托盘关闭（关窗即退出）
+const trayEnabled = () => trayWanted() && tray !== null;
 let trayJobCount = 0; // 托盘菜单显示的活动监控任务数
 let webReady = false;              // Web 管理页窗口渲染层是否就绪
 const pendingWebTabs = [];         // 等待 Web 窗口加载完成的 newtab 消息
@@ -131,14 +148,14 @@ function rebuildTrayMenu() {
   tray.setContextMenu(Menu.buildFromTemplate(items));
 }
 function applyTray() {
-  if (trayEnabled() && !tray) {
+  if (trayWanted() && !tray) {
     try {
       tray = new Tray(path.join(__dirname, 'icon.png'));
       tray.setToolTip('网络拓扑管理软件（后台监控运行中）');
       tray.on('click', () => { if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); } });
       rebuildTrayMenu();
     } catch (e) { tray = null; }
-  } else if (!trayEnabled() && tray) {
+  } else if (!trayWanted() && tray) {
     try { tray.destroy(); } catch (e) { /* ignore */ }
     tray = null;
   }
@@ -174,7 +191,9 @@ function createShellWindow() {
     shellReady = false;
     shellQueue.length = 0;
     pendingTabs.length = 0; // 丢弃未送达的标签消息，避免下次打开出现死标签
-    shell.closeAll(); // 窗口关闭即结束全部会话
+    // 只收 UI 会话：后台监控/备份与 Web Shell 共用同一连接管理器，无差别 closeAll 会把
+    // 进行中的监控连接与配置备份一并强断（监控任务随后引发一轮无谓的重连风暴）
+    shell.closeAll('monitor');
   });
   shellWin.webContents.once('did-finish-load', () => {
     // 先送达标签消息，再冲刷连接过程中的输出，避免首屏输出丢失
@@ -609,7 +628,11 @@ ipcMain.handle('secure:decrypt', (e, cipher) => {
   try {
     const { safeStorage } = require('electron');
     if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: '系统加密不可用' };
-    return { ok: true, text: safeStorage.decryptString(Buffer.from(cipher, 'base64')) };
+    const text = safeStorage.decryptString(Buffer.from(cipher, 'base64'));
+    // decryptString 对损坏/异机密文不抛错而是返回空串：须显式判失败，否则监控拿空密码
+    // 无限重试登录（表象是认证失败，实为 DPAPI 密钥已随换机/重装丢失，排障方向完全错误）
+    if (!text) return { ok: false, error: '解密失败（密文无效或本机加密密钥已变化，请重新保存密码）' };
+    return { ok: true, text };
   } catch (err) { return { ok: false, error: '解密失败' }; }
 });
 ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? { ok: true, notify: loadAppSettings().monitorNotify !== false, tray: trayEnabled() } : { ok: false, error: 'forbidden' });
@@ -765,10 +788,14 @@ ipcMain.handle('monitor:logs-search', (e, p) => {
         let content = '';
         try {
           const fd = fs.openSync(full, 'r');
-          const buf = Buffer.alloc(Math.min(st.size, MAX_PER_FILE));
-          fs.readSync(fd, buf, 0, buf.length, 0);
-          fs.closeSync(fd);
-          content = buf.toString('utf8');
+          try {
+            const buf = Buffer.alloc(Math.min(st.size, MAX_PER_FILE));
+            fs.readSync(fd, buf, 0, buf.length, 0);
+            content = buf.toString('utf8');
+          } finally {
+            // readSync 抛错（文件在 lstat 与读取之间被删/锁定）也必须关 fd，否则反复检索耗尽句柄
+            try { fs.closeSync(fd); } catch (err2) { /* ignore */ }
+          }
         } catch (err) { continue; }
         const lines = content.split(/\r?\n/);
         const matches = [];
@@ -873,7 +900,7 @@ app.whenReady().then(() => {
   // 内置网络服务：上次启用的服务自动恢复（配置存 settings.netSvc）
   try {
     const saved = loadAppSettings().netSvc;
-    if (saved && typeof saved === 'object') netSvc.applyConfig(saved);
+    if (saved && typeof saved === 'object') netSvc.applyConfig(saved).catch(() => { /* 恢复失败由面板状态展示 */ });
   } catch (e) { /* ignore */ }
   // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
   app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
@@ -889,6 +916,7 @@ app.whenReady().then(() => {
   });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); } // 托盘模式隐藏后经 Dock 唤回
   });
   // 导航守卫：宿主窗口（主窗/Shell 窗/设备页宿主窗）只允许 file:// 本地页面——
   // 一旦被诱导跳转到远程页面，preload 桥（topoShell/topoBackup）将随之泄露；webview guest 不受限

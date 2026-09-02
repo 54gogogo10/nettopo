@@ -295,8 +295,13 @@ class FtpConnection {
       this.reply('501 PORT 参数非法。');
       return;
     }
+    // 防 FTP 反弹：PORT 目标必须与控制连接对端同源，否则认证后的客户端可借本服务
+    // 向任意第三方 host:port 收发流量（内网端口探测面）
+    const host = parts.slice(0, 4).join('.');
+    const peerIp = (this.sock.remoteAddress || '').replace(/^::ffff:/, '');
+    if (host !== peerIp) { this.reply('501 PORT 目标地址与控制连接来源不一致。'); return; }
     this._closePasv();
-    this.portAddr = { host: parts.slice(0, 4).join('.'), port: parts[4] * 256 + parts[5] };
+    this.portAddr = { host, port: parts[4] * 256 + parts[5] };
     this.reply('200 PORT 命令成功。');
   }
 
@@ -358,7 +363,11 @@ class FtpConnection {
         this.reply(code, msg);
         this.busy = false;
       };
+      // 写流异步错误（磁盘满/临时文件被锁）必须挂监听：无监听的 error 事件会崩掉主进程，
+      // 且 Node 的 end 回调在流出错时仍会触发——不带 failed 门卫会把半截文件 rename 成成品
+      ws.on('error', () => bail(451, '写入目标文件失败。'));
       dataSock.on('data', (chunk) => {
+        this._bumpIdle(); // 数据传输期没有控制命令，空闲超时不能掐断慢速大文件
         size += chunk.length;
         if (size > this.server.maxFileSize) { bail(552, '超出单文件大小上限，传输中止。'); return; }
         ws.write(chunk);
@@ -395,6 +404,7 @@ class FtpConnection {
       if (this.closed || !dataSock) { this.reply('425 数据连接建立失败。'); this.busy = false; return; }
       const rs = fs.createReadStream(full);
       let failed = false;
+      rs.on('data', () => this._bumpIdle()); // 下载传输期同样不能被空闲超时掐断
       rs.on('error', () => { if (!failed) { failed = true; this.reply('451 读取文件失败。'); try { dataSock.destroy(); } catch (e) { /* ignore */ } this.busy = false; } });
       dataSock.on('error', () => { if (!failed) { failed = true; try { rs.destroy(); } catch (e) { /* ignore */ } this.reply(426, '数据连接异常，传输中止。'); this.busy = false; } });
       dataSock.on('close', () => {

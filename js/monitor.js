@@ -95,7 +95,7 @@ const OID_SYSOBJECT = '1.3.6.1.2.1.1.2.0';
 const OID_SYSUPTIME = '1.3.6.1.2.1.1.3.0'; // TimeTicks（1/100 秒），骤减即设备重启
 /* ifTable（MIB-2 interfaces）：接口名/速率/状态/收发字节计数（64 位优先，32 位兜底） */
 const OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2';
-const OID_IF_SPEED = '1.3.6.1.2.1.2.2.1.7';
+const OID_IF_SPEED = '1.3.6.1.2.1.2.2.1.5'; // ifSpeed（bps）；.7 是 ifAdminStatus（1/2/3 枚举），勿混用
 const OID_IF_OPER = '1.3.6.1.2.1.2.2.1.8';
 const OID_IF_IN32 = '1.3.6.1.2.1.2.2.1.10';
 const OID_IF_OUT32 = '1.3.6.1.2.1.2.2.1.16';
@@ -821,7 +821,8 @@ class MonitorManager extends EventEmitter {
       jump: job.jump || null,
       cols: 120, rows: 40,
       autoLogin: job.protocol === 'telnet', // Telnet 无传输层认证：由 shell 层自动应答 Username:/Password: 登录提示（SSH 不受影响）
-      expectFp: job.expectFp || ''
+      expectFp: job.expectFp || '',
+      owner: 'monitor' // 标记归属：Web Shell 窗口关闭时 closeAll('monitor') 不会误杀监控连接
     });
     if (!r.ok) {
       if (gen !== job.gen || !job.enabled) return;
@@ -888,7 +889,9 @@ class MonitorManager extends EventEmitter {
     if (fmtDateDir() !== job.logDate) this._openLog(job);
   }
   _logLine(job, text) {
-    if (!job.logStream) this._openLog(job);
+    // 写入前自查跨天滚动：仅读取/仅探测任务没有命令轮次（_runCycle/_runBackupShared 才调
+    // _rollLogIfNeeded），不自查会一直往昨天的日期目录里追加
+    if (!job.logStream || fmtDateDir() !== job.logDate) this._openLog(job);
     if (!job.logStream) return;
     // 单文件超过大小上限即滚动新文件（防高输出设备占满磁盘）
     if (job.logStream.bytesWritten > MAX_LOG_BYTES) this._openLog(job, true);
@@ -1193,6 +1196,7 @@ class MonitorManager extends EventEmitter {
       job.loopTimer = setTimeout(() => this._runCycle(job, gen), 1000);
       return;
     }
+    const cycleStart = Date.now();
     this._rollLogIfNeeded(job);
     this._logLine(job, '----- 命令轮次 ' + fmtTimestamp() + ' -----');
     job._cycleActive = true;
@@ -1210,7 +1214,10 @@ class MonitorManager extends EventEmitter {
     }
     if (!job.enabled || gen !== job.gen) return;
     this._checkAlerts(job);
-    job.loopTimer = setTimeout(() => this._runCycle(job, job.gen), job.intervalSec * 1000);
+    // 下一轮按「本轮开始时刻 + 间隔」调度：等命令全部执行完才计时会让实际周期持续
+    // 正漂移（周期 = intervalSec + 每轮执行耗时），多命令大延迟任务采集间隔明显变长
+    const nextDelay = Math.max(1000, job.intervalSec * 1000 - (Date.now() - cycleStart));
+    job.loopTimer = setTimeout(() => this._runCycle(job, job.gen), nextDelay);
   }
 
   /* ---------------- 连接时执行命令（每次连接成功仅执行一次，可多条依次执行） ---------------- */
@@ -1232,7 +1239,9 @@ class MonitorManager extends EventEmitter {
   _onOutput(sid, data) {
     const key = this._bySid.get(sid);
     const job = key && this.jobs.get(key);
-    if (!job || !job.logStream) return;
+    // 不能因 logStream 降级为 null 就整体退出：就绪判定/告警匹配/备份捕获都在本函数里，
+    // 日志 I/O 失败只该丢日志（_logLine 内部自愈重开），仅读取任务的输出处理不能跟着停摆
+    if (!job) return;
     let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '');
     // 去掉独立的回车（CRLF / CR 均归一为换行）
     text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
@@ -1498,13 +1507,19 @@ class MonitorManager extends EventEmitter {
         jump: job.jump || null,
         cols: 120, rows: 40,
         autoLogin: job.protocol === 'telnet', // 与监控会话同口径：独立备份会话也要过 Telnet 登录提示
-        expectFp: job.expectFp || ''
+        expectFp: job.expectFp || '',
+        owner: 'monitor'
       });
       if (!r.ok) { this._finishBackup(job, gen, { ok: false, error: r.error || '备份连接失败' }); resolve(); return; }
       const sid = r.id;
       let settled = false;
       const settle = (res) => { if (settled) return; settled = true; resolve(res); };
-      const fail = (err) => { settle(); this._finishBackup(job, gen, { ok: false, error: err }); };
+      const fail = (err) => {
+        // 连接超时/出错/指纹拒连时连接可能仍在建：主动关闭，防慢设备稍后连上时留下无人认领的会话
+        try { this.shell.close(sid); } catch (e) { /* ignore */ }
+        settle();
+        this._finishBackup(job, gen, { ok: false, error: err });
+      };
       // 独立会话指纹处理（与监控会话相同的信任语义）
       const onStatus = (sid2, info) => {
         if (sid2 !== sid) return;

@@ -97,8 +97,9 @@ class NetServices extends EventEmitter {
       if (this.applied.tftp) { await this.tftp.stop(); this.applied.tftp = null; }
     } else if (!this.applied.tftp || this.applied.tftp.port !== n.tftp.port) {
       await this.tftp.stop();
-      this.applied.tftp = { port: n.tftp.port };
-      await this.tftp.start(n.tftp.port);
+      const r = await this.tftp.start(n.tftp.port);
+      // 启动失败（端口被占等）不记录 applied：否则同端口配置被短路永不再尝试启动，错误粘滞到重启
+      this.applied.tftp = (r && r.ok) ? { port: n.tftp.port } : null;
     }
     // FTP：端口/被动范围变化或启停才重启；账号/覆盖热更新
     if (!n.ftp.enabled) {
@@ -113,8 +114,8 @@ class NetServices extends EventEmitter {
           pasvMin: n.ftp.pasvMin, pasvMax: n.ftp.pasvMax, overwrite: n.ftp.overwrite
         });
         this.ftp.on('file', (info) => this.emit('file', info));
-        this.applied.ftp = { port: n.ftp.port, pasvMin: n.ftp.pasvMin, pasvMax: n.ftp.pasvMax };
-        await this.ftp.start(n.ftp.port);
+        const r = await this.ftp.start(n.ftp.port);
+        this.applied.ftp = (r && r.ok) ? { port: n.ftp.port, pasvMin: n.ftp.pasvMin, pasvMax: n.ftp.pasvMax } : null;
       } else {
         this.ftp.setAuth({ username: n.ftp.username, password: n.ftp.password, overwrite: n.ftp.overwrite });
       }
@@ -124,8 +125,8 @@ class NetServices extends EventEmitter {
       if (this.applied.syslog) { await this.syslog.stop(); this.applied.syslog = null; }
     } else if (!this.applied.syslog || this.applied.syslog.port !== n.syslog.port || this.applied.syslog.tcp !== n.syslog.tcp) {
       await this.syslog.stop();
-      this.applied.syslog = { port: n.syslog.port, tcp: n.syslog.tcp };
-      await this.syslog.start(n.syslog.port, n.syslog.tcp);
+      const r = await this.syslog.start(n.syslog.port, n.syslog.tcp);
+      this.applied.syslog = (r && r.ok) ? { port: n.syslog.port, tcp: n.syslog.tcp } : null;
     }
     this.emit('status', this.status());
     return this.status();

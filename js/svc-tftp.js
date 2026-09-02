@@ -27,11 +27,12 @@ const MAX_NAME_LEN = 120;
 function sanitizeTftpName(name) {
   let s = String(name == null ? '' : name).trim();
   if (!s) return null;
-  // 请求里的路径分隔符与穿越成分一律拒收（设备推配置只用纯文件名）
+  // 请求里的路径分隔符与穿越成分一律拒收（设备推配置只用纯文件名）；':' 在 Windows 上
+  // 会被解释为 NTFS 交替数据流（文件不可见），与全库清洗口径一致替换掉
   if (s.indexOf('/') >= 0 || s.indexOf('\\') >= 0 || s.indexOf('\0') >= 0) return null;
   if (s.indexOf('..') >= 0) return null;
   if (/^(con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(?:\.|$)/i.test(s)) s = '_' + s;
-  s = s.replace(/[\u0000-\u001f\u007f]/g, '_');
+  s = s.replace(/[\u0000-\u001f\u007f]/g, '_').replace(/:/g, '_');
   if (s.length > MAX_NAME_LEN) s = s.slice(0, MAX_NAME_LEN);
   s = s.replace(/[. ]+$/, '');
   return s || null;
@@ -110,7 +111,8 @@ class TftpSession {
     const sock = dgram.createSocket('udp4');
     this.sock = sock;
     sock.on('message', (buf, rinfo) => {
-      if (rinfo.address !== this.peer.address) return; // 只信任首包来源
+      // RFC 1350 的 TID 语义：地址与端口都必须与首包来源一致，缺一半可被同 IP 其它端口注入伪造包
+      if (rinfo.address !== this.peer.address || rinfo.port !== this.peer.port) return;
       this.retries = 0;
       try { this._onPacket(buf); } catch (e) { this.abort(e); }
     });
@@ -240,8 +242,16 @@ class TftpSession {
         this.finished = true;
         this._stopTimers();
         this.ws.on('finish', () => {
-          try { fs.renameSync(this.tmpPath, this.finalPath); } catch (e) { /* 目标被占用等：保留临时文件 */ }
+          let renamed = true;
+          try { fs.renameSync(this.tmpPath, this.finalPath); } catch (e) { renamed = false; }
           this.tmpPath = null;
+          if (!renamed) {
+            // 目标被占用（Windows 下用户正在编辑器里打开同名文件等）：如实向设备报错、不广播收件，
+            // 保留 .part 临时文件供事后找回——此前回 ACK 会让设备显示推送成功而配置实际丢失
+            this._sendError(0, 'Target file busy (rename failed)');
+            this.close();
+            return;
+          }
           this.server._fileReceived(this);
           // 先回 ACK 再登记文件（客户端拿到 ACK 即认为推完）
           this._send(this._ack(n));
