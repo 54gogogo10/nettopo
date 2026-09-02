@@ -35,6 +35,10 @@ eq(U.typeOf('防火墙FW1'), 'firewall', '类型推断-防火墙');
 eq(U.typeOf('文件服务器FS1'), 'server', '类型推断-服务器');
 eq(U.typeOf('办公PC1'), 'pc', '类型推断-终端');
 eq(U.typeOf('互联网出口Cloud'), 'cloud', '类型推断-云');
+eq(U.typeOf('RT01'), 'router', '类型推断-RT 前缀路由');
+eq(U.typeOf('RTR-1'), 'router', '类型推断-RTR 路由');
+eq(U.typeOf('PortChannel1'), 'other', '类型推断-port 含 rt 子串不误判路由');
+eq(U.typeOf('support01'), 'other', '类型推断-support 含 rt 子串不误判路由');
 
 console.log('== CSV 解析 ==');
 const csv = 'a,b,c\n"1,2",3,"he said ""hi"""\n4,5,6';
@@ -45,6 +49,8 @@ eq(rows[1][2], 'he said "hi"', 'CSV 双引号转义');
 ok(U.parseCSV('x\tb\n1\t2')[0][1] === 'b', '制表符分隔检测');
 const rt = U.buildCSV([['a', 'b,c'], ['d', 'e"f']]);
 ok(rt.includes('"b,c"') && rt.includes('"e""f"'), 'CSV 构建转义');
+ok(U.buildCSV([['a', 'b;c']], { delim: ';' }).includes('"b;c"'), 'CSV 构建转义含自定义分隔符');
+ok(U.detectDelim('a,b\n' + 'x;y;y;y;y;y;y;y;y;y\n'.repeat(3)) === ';', '分隔符检测按出现次数计票');
 ok(rt.charCodeAt(0) === 0xFEFF, 'CSV 带 BOM');
 ok(U.escXml("a'b<c&d\"e") === 'a&#39;b&lt;c&amp;d&quot;e', 'XML 转义含单引号');
 ok(U.escXml('a\x00b\x1Fc') === 'abc', 'XML 非法控制字符剔除');
@@ -320,6 +326,31 @@ console.log('== 多管理地址 ==');
   const gM2 = M.textToGraph(csv);
   const nm = gM2.nodes.find(x => x.name === gM.nodes[0].name);
   ok(U.nodeMgmts(nm).join(',') === '5.5.5.1,5.5.5.2', '多管理口 CSV 导出→导入回环');
+  // VLAN 接口（SVI）列往返：导出表头「VLAN接口」必须能映射回 vlans 角色（含掩码）
+  {
+    const gV = M.textToGraph('源设备,目标设备,VLAN接口\nSW1,R1,10:192.168.10.1/26;20:192.168.20.1');
+    const nv = gV.nodes.find(n => n.name === 'SW1');
+    ok(nv && Array.isArray(nv.vlans) && nv.vlans.length === 2 && nv.vlans[0].mask === 26 && nv.vlans[1].mask === 24, 'VLAN接口列导入（含 /mask 掩码，默认 24）');
+    const csvV = U.buildCSV(M.graphToTableRows(gV.nodes, gV.links));
+    const gV2 = M.textToGraph(csvV);
+    const nv2 = gV2.nodes.find(n => n.name === 'SW1');
+    ok(nv2 && nv2.vlans && nv2.vlans.length === 2 && nv2.vlans[0].ip === '192.168.10.1' && nv2.vlans[0].mask === 26, 'VLAN接口列导出→导入回环（掩码保留）');
+  }
+  // 常见表头 IP1/IP2 与端口1/端口2：数字后缀按端归属（1→源、2→目标）
+  {
+    const gH = M.textToGraph('设备1,接口1,IP1,设备2,接口2,IP2\nRT1,GE0/0/0,10.1.1.1,SW1,GE0/0/1,10.1.1.2');
+    const lH = gH.links[0];
+    ok(lH && lH.aIf === 'GE0/0/0' && lH.aIp === '10.1.1.1' && lH.bIf === 'GE0/0/1' && lH.bIp === '10.1.1.2', 'IP1/IP2 表头按端归属识别');
+    const gH2 = M.textToGraph('源设备,端口1,目标设备,端口2\nRT1,GE0,SW1,GE1');
+    ok(gH2.links[0] && gH2.links[0].aIf === 'GE0' && gH2.links[0].bIf === 'GE1', '端口1/端口2 表头识别');
+  }
+  // 公式注入前缀往返：导出时 sanitizeCell 给 =+-@ 开头加 '，导入须剥掉（导出→导入幂等）
+  {
+    const gQ = M.textToGraph('源设备,目标设备,备注\n-SW1,R1,-测试');
+    const csvQ = U.buildCSV(M.graphToTableRows(gQ.nodes, gQ.links));
+    const gQ2 = M.textToGraph(csvQ);
+    ok(gQ2.nodes.some(n => n.name === '-SW1'), "公式注入 ' 前缀导出→导入不污染文本（'-SW1 → -SW1）");
+  }
   // M1：非法/重复 id 与 type 清洗
   const bad = U.sanitizeGraph(
     [{ id: 'n" onload="x', name: 'A', type: 'r" onload="x' }, { id: 'n1', name: 'B' }, { id: 'n1', name: 'C' }],
@@ -406,6 +437,19 @@ console.log('== 拓扑校验 ==');
   ok(has('multi', 'info'), '校验：平行链路提示');
   ok(has('net-mismatch', 'warning'), '校验：不同网段警告');
   ok(M.validateTopology([], []).length === 0, '校验：空图无问题');
+  // /23 等大掩码同网段互联不误报（两端掩码一致时按掩码计算网段，与 checkConfigs 口径一致）
+  {
+    const r23 = M.validateTopology(
+      [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }],
+      [{ id: 'l', a: 'a', b: 'b', aIp: '10.0.0.1', bIp: '10.0.1.2', aMask: 23, bMask: 23 }]
+    );
+    ok(!r23.some(i => i.kind === 'net-mismatch'), '校验：/23 同网段（按掩码）不误报 net-mismatch');
+  }
+  // 悬空链路引用（手工编辑的工程数据）不炸校验
+  {
+    const rd = M.validateTopology([{ id: 'a', name: 'A' }], [{ id: 'lx', a: 'a', b: 'ghost' }]);
+    ok(Array.isArray(rd), '校验：悬空链路引用不抛错');
+  }
 }
 
 
@@ -428,6 +472,8 @@ console.log('== 最短路径 ==');
   ok(p2 === null, '最短路径：不可达返回 null');
   const p3 = U.shortestPath(ns, ls, 'n2', 'n2');
   ok(p3 && p3.nodeIds.length === 1 && p3.linkIds.length === 0, '最短路径：同节点');
+  const p4 = U.shortestPath(ns, ls.concat([{ id: 'lx', a: 'n1', b: 'ghost' }]), 'n1', 'n3');
+  ok(p4 && p4.nodeIds.length === 2, '最短路径：悬空链路引用不抛错');
 }
 
 
@@ -1219,7 +1265,16 @@ console.log('== Visio VSDX 导出（2012 格式） ==');
     const bufT = V2.buildVSDX({ nodes: nodes2, links: links2, texts }, {});
     const sT = Buffer.from(bufT).toString('utf8'); // 中文需按 UTF-8 解码
     ok(sT.includes('核心区说明') && sT.includes('第二行'), 'VSDX 导出文本框内容（多行）');
-    ok(sT.includes('ID=\'50000') && sT.includes("<Cell N='Color' V='#dc2626'") && sT.includes("<Cell N='Style' V='1'") && sT.includes("<Cell N='Para.HorzAlign' V='1'"), 'VSDX 文本框字体样式（颜色/粗体/居中）');
+    ok(sT.includes("<Cell N='Color' V='#dc2626'") && sT.includes("<Cell N='Style' V='1'") && sT.includes("<Cell N='Para.HorzAlign' V='1'"), 'VSDX 文本框字体样式（颜色/粗体/居中）');
+  }
+  // Shape ID 全局唯一：统一计数器分配（旧的 id+10000/30000/40000/50000 分段在链路 ≥10001 时重叠）
+  {
+    const manyNodes = [{ id: 'a', name: 'A', x: 0, y: 0, w: 160, h: 56 }, { id: 'b', name: 'B', x: 300, y: 0, w: 160, h: 56 }];
+    const manyLinks = [];
+    for (let i = 0; i < 10050; i++) manyLinks.push({ id: 'L' + i, a: 'a', b: 'b', aIf: 'G' + i, bIf: 'G' + (i + 50000) });
+    const sMany = Buffer.from(V2.buildVSDX({ nodes: manyNodes, links: manyLinks }, { showLabels: false })).toString('latin1');
+    const ids = [...sMany.matchAll(/<Shape ID='(\d+)'/g)].map(m => m[1]);
+    ok(new Set(ids).size === ids.length, `VSDX 万级链路 Shape ID 无重复（${ids.length} 个形状）`);
   }
   ok(s.includes("<Cell N='Angle' V='") && s.includes('LineColor'), 'VSDX 连线 Angle/线色（2-D 直线）');
   // 设备保持色块 + 白字（已回退图标替换改动）：内置类型不嵌入图片，默认色块；自定义图片仍嵌入
@@ -3425,6 +3480,13 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ok(pr5.facility === 20 && pr5.severity === 5, 'syslog RFC5424：facility/severity（local4/notice）');
     ok(pr5.host === 'mymachine.example.com' && pr5.ts === Date.UTC(2003, 9, 11, 22, 14, 15, 3), 'syslog RFC5424：主机名与 ISO 时间戳（UTC）');
     ok(/An application event log entry/.test(pr5.msg) && !pr5.msg.includes('['), 'syslog RFC5424：结构化数据剥除');
+    // RFC5424 数字时区偏移：+08:00 表示墙钟超前 UTC 8 小时（UTC = 墙钟 − 偏移）
+    {
+      const pz = parseSyslogMsg('<134>1 2026-09-02T10:00:00+08:00 dev1 app - - msg', '10.0.0.9');
+      ok(pz.ts === Date.UTC(2026, 8, 2, 2, 0, 0), 'syslog RFC5424：+08:00 偏移换算 UTC（减偏移）');
+      const pn = parseSyslogMsg('<134>1 2026-09-02T02:00:00-05:00 dev1 app - - msg', '10.0.0.9');
+      ok(pn.ts === Date.UTC(2026, 8, 2, 7, 0, 0), 'syslog RFC5424：-05:00 偏移换算 UTC（加偏移）');
+    }
     const prRaw = parseSyslogMsg('Interface GigabitEthernet0/0/1 is DOWN', '10.0.0.9');
     ok(prRaw.pri == null && prRaw.host === '10.0.0.9' && /is DOWN/.test(prRaw.msg), 'syslog 裸文本：无 PRI 回退来源地址');
     const prBig = parseSyslogMsg('<999>Sep  1 10:00:00 r1 some message', '10.0.0.9');

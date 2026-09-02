@@ -184,6 +184,9 @@ function buildVSDX(graph, opts) {
   const Y = (y) => ph - (y - minY) * scale;
 
   /* ---- ID ---- */
+  // 全部形状从同一计数器顺序分配：此前「连线 id+10000 / 图片 30000 / 图例 40000 / 文本 50000」
+  // 的分段方案在链路数 ≥ 10001 时区间互相重叠，产生重复 Shape ID（MS-VSDX 要求页内唯一，
+  // Visio 打开重复 ID 文件会丢形状或报损坏）
   let sid = 2;
   const nodeShape = new Map();
   for (const n of nodes) nodeShape.set(n.id, sid++);
@@ -236,7 +239,6 @@ function buildVSDX(graph, opts) {
 
   // 设备
   const imageParts = new Map(); // dataURL -> {rId, idx, ext, bytes}
-  let imgSid = 30000;
   for (const n of nodes) {
     const t = U.getType(n.type);
     const cx = (n.x + n.w / 2 - minX) * scale;
@@ -256,7 +258,7 @@ function buildVSDX(graph, opts) {
         const imgW = 44 * scale, imgH = (n.h - 12) * scale;
         const pinX = (n.x - minX) * scale + 28 * scale; // 图标中心 x = 左边界 + 28px
         const pinY = cy; // 图标垂直居中
-        const isid = imgSid++;
+        const isid = sid++;
         shapes.push(`    <Shape ID='${isid}' Type='Foreign' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(pinX))}
       ${cell('PinY', IN(pinY))}
@@ -335,7 +337,7 @@ function buildVSDX(graph, opts) {
           ${cell('Style', 1)}
         </Row>
       </Section>
-      <Text><cp IX='0'/><pp IX='0'/>${XRAW(n.name)}${U.nodeMgmts(n).length ? '\r\n管理: ' + XRAW(U.nodeMgmts(n).join(', ')) : ''}\r\n</Text>
+      <Text><cp IX='0'/><pp IX='0'/>${XRAW(U.truncate(n.name, 40))}${U.nodeMgmts(n).length ? '\r\n管理: ' + XRAW(U.truncate(U.nodeMgmts(n).join(', '), 60)) : ''}\r\n</Text>
     </Shape>`);
   }
 
@@ -353,8 +355,8 @@ function buildVSDX(graph, opts) {
     pairCount.set(k, (pairCount.get(k) || 0) + 1);
   }
 
-  // 连线几何复用 linkGeom（含平行链路偏移），与画布显示完全一致
-  const geom = U.linkGeom(nodes, links);
+  // 连线几何复用 linkGeom（含平行链路偏移与可选直角折线），与画布显示完全一致
+  const geom = U.linkGeom(nodes, links, { ortho: !!(opts && opts.ortho) });
   for (const l of links) {
     const a = byId[l.a], b = byId[l.b];
     if (!a || !b) continue;
@@ -367,7 +369,7 @@ function buildVSDX(graph, opts) {
     const id = linkShape.get(l.id);
 
     // 独立 2D 文本框（永远水平）：先收集，全部算完后统一防碰撞
-    const lines = opts.showLabels === false ? [] : U.labelLines(l);
+    const lines = opts.showLabels === false ? [] : U.labelLines(l).map(s => U.truncate(s, 40));
     if (lines.length) {
       const FONT = 10; // pt
       const tw = Math.max(0.7, U.measureText(lines.reduce((a, b) => a.length > b.length ? a : b, ''), FONT) / 96 + 0.3);
@@ -376,16 +378,53 @@ function buildVSDX(graph, opts) {
       const uy = len > 0.01 ? (ey - by) / len : 0;
       const pairOff = (pairIdx.get(l.id) || 0) * 0.7;
       labelBoxes.push({
-        id: id + 10000,
+        id: sid++,
         x: mx + ux * 0.1,
         y: my + uy * 0.1 + 0.35 + pairOff,
         w: tw, h: th, text: lines.join('\n')
       });
     }
 
-    // 连线用 2-D 直线形状（Pin + Angle 旋转 + 直线几何）：
-    // 裸 1-D 动态连接线在 Visio 中渲染不可靠（多连线时端点不跟随/线被截短），
-    // 2-D 方式与节点一致，保证线严格按 Begin/End 方向正确绘制、按带宽着色。
+    // 连线用 2-D 形状（裸 1-D 动态连接线在 Visio 中渲染不可靠——多连线时端点不跟随/线被截短），
+    // 2-D 方式与节点一致，保证线严格按几何绘制、按带宽着色。
+    // 直角折线（ortho）：按折点序列生成 MoveTo+LineTo 折线（形状框取折线包围盒，局部坐标绘制）；
+    // 直线：退化为旋转矩形 + 两点几何。
+    const pts2 = (g.pts && g.pts.length >= 2)
+      ? g.pts.map(p => [(p[0] - minX) * scale, Y(p[1])])
+      : null;
+    if (pts2) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [px, py] of pts2) { x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); }
+      const bw2 = Math.max(x1 - x0, 0.001), bh2 = Math.max(y1 - y0, 0.02);
+      const rows = pts2.map((p, i) => i === 0
+        ? `<Row T='MoveTo' IX='1'><Cell N='X' V='${IN(p[0] - x0)}'/><Cell N='Y' V='${IN(p[1] - y0)}'/></Row>`
+        : `<Row T='LineTo' IX='${i + 1}'><Cell N='X' V='${IN(p[0] - x0)}'/><Cell N='Y' V='${IN(p[1] - y0)}'/></Row>`).join('\n        ');
+      shapes.push(`    <Shape ID='${id}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+      ${cell('PinX', IN(x0 + bw2 / 2))}
+      ${cell('PinY', IN(y0 + bh2 / 2))}
+      ${cell('Width', IN(bw2))}
+      ${cell('Height', IN(bh2))}
+      ${cell('LocPinX', IN(bw2 / 2))}
+      ${cell('LocPinY', IN(bh2 / 2))}
+      ${cell('Angle', 0)}
+      ${cell('FlipX', 0)}
+      ${cell('FlipY', 0)}
+      ${cell('ResizeMode', 0)}
+      ${cell('LineWeight', 0.025)}
+      ${cell('LineColor', U.bwColor(l.bw))}
+      ${cell('LinePattern', 1)}
+      ${cell('BeginArrow', 0)}
+      ${cell('EndArrow', 0)}
+      <Section N='Geometry' IX='0'>
+        ${cell('NoFill', 1)}
+        ${cell('NoLine', 0)}
+        ${cell('NoShow', 0)}
+        ${cell('NoSnap', 0)}
+        ${rows}
+      </Section>
+    </Shape>`);
+      continue;
+    }
     const angle = Math.atan2(ey - by, ex - bx);
     shapes.push(`    <Shape ID='${id}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(mx))}
@@ -465,7 +504,6 @@ function buildVSDX(graph, opts) {
 
   // 画布文本框（自定义字体样式）
   {
-    let tsid = 50000;
     for (const t of (graph.texts || [])) {
       const tw = (t.w || 160) * scale, th = (t.h || 40) * scale;
       const tpx = (t.x + (t.w || 160) / 2 - minX) * scale;
@@ -474,7 +512,7 @@ function buildVSDX(graph, opts) {
       const style = (t.bold ? 1 : 0) | (t.italic ? 2 : 0);
       const hAlign = t.align === 'center' ? 1 : (t.align === 'right' ? 2 : 0);
       const textRuns = "<cp IX='0'/><pp IX='0'/>" + String(t.text || '').split('\n').map(XRAW).join('\r\n') + '\r\n';
-      shapes.push(`    <Shape ID='${tsid++}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+      shapes.push(`    <Shape ID='${sid++}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(tpx))}
       ${cell('PinY', IN(tpy))}
       ${cell('Width', IN(tw))}
@@ -514,16 +552,18 @@ function buildVSDX(graph, opts) {
     }
   }
 
-  // 带宽图例：颜色标识带宽大小（不显示带宽文字）
+  // 带宽图例：颜色标识带宽大小（不显示带宽文字）。与 PDF 导出同款「底部一行横排」——
+  // 此前从页底向上逐条堆叠，第 2 条起直接叠在左下角设备上、条目多时还会溢出页顶
   {
     const bwSet = new Map();
     for (const l of links) { const n = U.normalizeBw(l.bw); if (n && !bwSet.has(n)) bwSet.set(n, U.bwColor(n)); }
     if (bwSet.size) {
-      let lx = 0.5, ly = 0.5;
+      let lx = 0.5, ly = 0.28;
       const sorted = [...bwSet.entries()].sort((a, b) => b[0] - a[0]);
-      sorted.forEach((entry, i) => {
+      sorted.forEach((entry) => {
         const n = entry[0], color = entry[1];
-        const lsid = 40000 + i * 2;
+        if (lx + 2.0 > pw - 0.3) { lx = 0.5; ly += 0.32; } // 超出页宽折上一行（仅带宽种类很多时发生）
+        const lsid = sid++;
         shapes.push(`    <Shape ID='${lsid}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(lx + 0.35))}
       ${cell('PinY', IN(ly))}
@@ -547,7 +587,7 @@ function buildVSDX(graph, opts) {
         <Row T='LineTo' IX='2'><Cell N='X' V='0.7'/><Cell N='Y' V='0'/></Row>
       </Section>
     </Shape>`);
-        const tsid = lsid + 1;
+        const tsid = sid++;
         const lab = U.formatBw(n);
         shapes.push(`    <Shape ID='${tsid}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(lx + 0.95))}
@@ -583,7 +623,7 @@ function buildVSDX(graph, opts) {
       </Section>
       <Text><cp IX='0'/><pp IX='0'/>${XRAW(lab)}\r\n</Text>
     </Shape>`);
-        ly += 0.35;
+        lx += 1.9;
       });
     }
   }

@@ -231,7 +231,7 @@ ${cF('X', len, 'Width*1', '')}${cF('Y', 0, 'Height*0', '')}      </LineTo>
     lines.forEach((ln, i) => {
       textRuns += `<pp IX='${i}'/>${i === 0 ? "<cp IX='0'/>" : ''}` + X(ln);
     });
-    const sidT = sid_ + 10000; // 文本框 ID（与线 ID 错开，避免冲突）
+    const sidT = sid++; // 文本框 ID：与全部形状共用同一计数器（固定偏移 +10000 在链路过万时与线 ID 重叠）
     shapeParts.push(`  <Shape ID='${sidT}' Type='Shape' NameU='Label${sidT}' Name='标注-${X((l.aIf || '') + '-' + (l.bIf || ''))}'>
     <XForm>
 ${c('PinX', tpx, "Unit='IN'")}${c('PinY', tpy, "Unit='IN'")}${c('Width', tw, "Unit='IN'")}${c('Height', th, "Unit='IN'")}${cF('LocPinX', tw / 2, 'Width*0.5', "Unit='IN'")}${cF('LocPinY', th / 2, 'Height*0.5', "Unit='IN'")}

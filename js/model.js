@@ -12,16 +12,16 @@ const U = global.TopoUtil;
 const ROLE_SETS = {
   sa:  ['源设备', '设备a', '设备1', '主机a', '主机1', 'a设备', 'a端设备', 'a端', '源', '源主机',
         'sourcedevice', 'sourcedev', 'source', 'srchost', 'devicea', 'dev_a', 'dev1', 'nodea', 'namea', 'a_device', 'srca', 'a'],
-  si:  ['源接口', '接口a', '接口1', 'a接口', '源端口', '端口a',
+  si:  ['源接口', '接口a', '接口1', 'a接口', '源端口', '端口a', '端口1',
         'sourceinterface', 'sourceif', 'srcif', 'srcintf', 'if_a', 'ifacea', 'porta', 'sourceport', 'srcport'],
-  sip: ['源ip', 'ip地址a', 'ipa', '源ip地址', 'ip_a', 'ip_a地址',
+  sip: ['源ip', 'ip地址a', 'ipa', '源ip地址', 'ip_a', 'ip_a地址', 'ip1',
         'sourceip', 'srcip', 'sip', 'ip_a', 'ipaddressa'],
   sb:  ['目标设备', '目的设备', '对端设备', '设备b', '设备2', '主机b', '主机2', 'b设备', 'b端设备', 'b端',
         '目标', '目的', '对端', '目标主机', '目的主机',
         'targetdevice', 'destdevice', 'target', 'destination', 'dest', 'dsthost', 'deviceb', 'dev_b', 'dev2', 'nodeb', 'nameb', 'b_device', 'dstb', 'b'],
-  sii: ['目标接口', '目的接口', '对端接口', '接口b', '接口2', 'b接口', '目标端口', '端口b', '对端端口',
+  sii: ['目标接口', '目的接口', '对端接口', '接口b', '接口2', 'b接口', '目标端口', '端口b', '对端端口', '端口2',
         'targetinterface', 'targetif', 'dstif', 'dstintf', 'if_b', 'ifaceb', 'portb', 'destport', 'dstport'],
-  sib: ['目标ip', '目的ip', 'ip地址b', 'ipb', '目标ip地址', 'ip_b', 'ip_b地址',
+  sib: ['目标ip', '目的ip', 'ip地址b', 'ipb', '目标ip地址', 'ip_b', 'ip_b地址', 'ip2',
         'targetip', 'dstip', 'dip', 'ip_b', 'ipaddressb'],
   bw:  ['带宽', '速率', '链路带宽', '带宽gbps', '带宽mbps',
         'bandwidth', 'bw', 'speed', 'rate'],
@@ -46,7 +46,9 @@ const ROLE_SETS = {
   bmask:['目标掩码', '目标掩码位', '目标掩码长度', 'b端掩码',
         'dstmask', 'b_mask', 'bmask', 'dstnetmask'],
   agg: ['聚合组', '链路聚合', '聚合', '聚合名称', '链路聚合组',
-        'agg', 'aggregate', 'lag', 'ethtrunk', 'eth_trunk', 'eth-trunk', 'portchannel', 'port-channel', 'trunkgroup']
+        'agg', 'aggregate', 'lag', 'ethtrunk', 'eth_trunk', 'eth-trunk', 'portchannel', 'port-channel', 'trunkgroup'],
+  // 三层 VLAN 接口（SVI）：导出列「VLAN接口」的回读角色——缺了这一项整列导出后无法再导入
+  vlans: ['vlan接口', '三层vlan接口', '三层vlan', 'vlaninterface', 'svi', 'vlan']
 };
 
 const RE_ROLES = [
@@ -56,8 +58,10 @@ const RE_ROLES = [
   [/^(目标|目的|对端|dst|dest|target|b)?(接口|端口|port|interface|intf|iface|if)$/i, 'sii'],
   [/^(源|src|a)?(ip地址|ipaddress|ip|地址|address)$/i, 'sip'],
   [/^(目标|目的|对端|dst|dest|target|b)?(ip地址|ipaddress|ip|地址|address)$/i, 'sib'],
-  [/^接口[ab一二]?$/, 'si'], [/^端口[ab]?$/, 'si'],
-  [/^(ip|ip地址)[ab一二]?$/, 'sip'],
+  [/^接口[ab一二12]?$/, 'si'], [/^端口[ab12]?$/, 'si'],
+  // IP 列的序号后缀：2/二/B 归目标端，1/一/A 与无后缀归源端（此前正则把 ip1/ip2 一律算源端）
+  [/^(ip|ip地址)(b|2|二)$/, 'sib'],
+  [/^(ip|ip地址)(a|1|一)?$/, 'sip'],
   [/^设备[12一二]$/, 'sa'], [/^主机[12一二]$/, 'sa'],
   [/^设备[34三四]$/, 'sb'], [/^主机[34三四]$/, 'sb']
 ];
@@ -106,12 +110,18 @@ function parseRows(rows) {
   }
 
   const records = [];
+  // 回读剥掉导出时 sanitizeCell 为防公式注入加的 ' 前缀（与坐标列 num() 同规则）——
+  // 不剥的话设备名 '-SW1' 往返后变 ''-SW1，导出→导入不幂等
+  const stripFormulaQuote = (s) => {
+    const t = String(s == null ? '' : s).trim();
+    return /^'[=+\-@]/.test(t) ? t.slice(1) : t;
+  };
   data.forEach((cells, ri) => {
     if (!cells || !cells.some(c => String(c).trim() !== '')) return;
     const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '', vlans: '', sax: '', say: '', sbx: '', sby: '', a2l: '', avlan: '', avm: '', b2l: '', bvlan: '', bvm: '', amask: '', bmask: '', agg: '' };
     cells.forEach((c, ci) => {
       const role = roles[ci];
-      if (role && rec[role] !== undefined) rec[role] = String(c).trim();
+      if (role && rec[role] !== undefined) rec[role] = stripFormulaQuote(c);
     });
     if (rec.sa || rec.sb) records.push(rec);
   });
@@ -176,10 +186,22 @@ function recordsToGraph(records) {
         else if (!U.nodeMgmts(b).length) { U.setNodeMgmts(b, ms); b.h = U.nodeHeightFor(b); }
       }
     }
-    // 三层 VLAN 接口（格式：10:192.168.10.1;20:192.168.20.1，源端优先，同 mgmt 规则）
+    // 三层 VLAN 接口（格式：10:192.168.10.1/26;20:192.168.20.1，源端优先，同 mgmt 规则；掩码可省略=24）
     if (r.vlans) {
       const vs = String(r.vlans).split(/[;；]+/).map(s => s.trim()).filter(Boolean)
-        .map(s => { const i = s.indexOf(':'); return i > 0 ? { id: s.slice(0, i).trim(), ip: s.slice(i + 1).trim() } : null; })
+        .map(s => {
+          const i = s.indexOf(':');
+          if (i <= 0) return null;
+          let ip = s.slice(i + 1).trim();
+          let mask = 24;
+          const j = ip.indexOf('/');
+          if (j > 0) {
+            const m = parseInt(ip.slice(j + 1), 10);
+            if (m > 0 && m <= 32) mask = m;
+            ip = ip.slice(0, j).trim();
+          }
+          return { id: s.slice(0, i).trim(), ip, mask };
+        })
         .filter(v => v && v.id && v.ip);
       if (vs.length) {
         const target = !(a.vlans && a.vlans.length) ? a : (!(b.vlans && b.vlans.length) ? b : null);
@@ -209,8 +231,10 @@ function graphToRecords(nodes, links) {
   return links.map(l => {
     const a = byId[l.a], b = byId[l.b];
     let mgmt = ''; let vlans = '';
-    if (a && !emitted.has(a.id)) { mgmt = U.nodeMgmts(a).join(','); vlans = (a.vlans || []).map(v => v.id + ':' + v.ip).join(';'); emitted.add(a.id); }
-    else if (b && !emitted.has(b.id)) { mgmt = U.nodeMgmts(b).join(','); vlans = (b.vlans || []).map(v => v.id + ':' + v.ip).join(';'); emitted.add(b.id); }
+    // SVI 掩码非默认 24 时随导出串带上（id:ip/mask），回读不再退化为 /24
+    const vlanStr = (n) => (n.vlans || []).map(v => v.id + ':' + v.ip + (v.mask && v.mask !== 24 ? '/' + v.mask : '')).join(';');
+    if (a && !emitted.has(a.id)) { mgmt = U.nodeMgmts(a).join(','); vlans = vlanStr(a); emitted.add(a.id); }
+    else if (b && !emitted.has(b.id)) { mgmt = U.nodeMgmts(b).join(','); vlans = vlanStr(b); emitted.add(b.id); }
     return {
       sa: a ? a.name : '', si: l.aIf, sip: l.aIp,
       sb: b ? b.name : '', sii: l.bIf, sib: l.bIp,
@@ -357,7 +381,11 @@ function validateTopology(nodes, links) {
   // 6. 环路检测（无向图存在环）
   const adj = new Map();
   for (const n of nodes) adj.set(n.id, []);
-  for (const l of links) { adj.get(l.a).push(l.b); adj.get(l.b).push(l.a); }
+  // 悬空链路引用（手工编辑的工程 JSON 可能出现）跳过：adj.get(undefined).push 会直接抛错炸掉整个校验
+  for (const l of links) {
+    if (!adj.has(l.a) || !adj.has(l.b)) continue;
+    adj.get(l.a).push(l.b); adj.get(l.b).push(l.a);
+  }
   const visited = new Set();
   let hasCycle = false;
   // 迭代版 DFS（避免大图递归栈溢出）；语义与递归版一致：节点首次处理时检查邻接已访问节点
@@ -404,12 +432,19 @@ function validateTopology(nodes, links) {
     }
   }
 
-  // 8. 链路两端 IP 不同网段（按 /24 判断）
-  const netOf = (ip) => { const p = String(ip).split('.'); return p.length >= 3 ? p[0] + '.' + p[1] + '.' + p[2] : null; };
+  // 8. 链路两端 IP 不同网段（两端掩码一致且合法时按掩码计算网段——/23 等大掩码互联是合法配置；
+  //    掩码缺失或两端不一致时按 /24 兜底，与 checkConfigs 的掩码口径对齐）
+  const netOf = (ip, mask) => {
+    const net = U.subnetOf(ip, mask);
+    if (net) return net;
+    const p = String(ip).split('.');
+    return p.length >= 3 ? p[0] + '.' + p[1] + '.' + p[2] : null;
+  };
   for (const l of links) {
     const aip = (l.aIp || '').trim(), bip = (l.bIp || '').trim();
     if (aip && bip && aip !== bip) {
-      const an = netOf(aip), bn = netOf(bip);
+      const mk = (l.aMask > 0 && l.aMask <= 32 && l.aMask === l.bMask) ? l.aMask : 24;
+      const an = netOf(aip, mk), bn = netOf(bip, mk);
       if (an && bn && an !== bn) issues.push({
         level: 'warning', kind: 'net-mismatch', linkIds: [l.id],
         msg: `链路 ${nameOf(l.a)}⇄${nameOf(l.b)} 两端 IP 不在同一网段（${aip} / ${bip}）`

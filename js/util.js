@@ -192,9 +192,12 @@ U.detectDelim = (text) => {
   const first = text.slice(0, 4000);
   let best = ','; let bestScore = 0;
   for (const d of [',', '\t', ';']) {
-    const re = new RegExp(`(?:^|\\n|\\r)[^\\n\\r]*${d === '\t' ? '\\t' : d === ';' ? '\\;' : ','}`, 'g');
-    const m = first.match(re);
-    if (m && m.length > bestScore) { bestScore = m.length; best = d; }
+    // 按出现总次数计票（而非「含该分隔符的行数」）：100 行各 1 个逗号不应压过 99 行各 10 个分号
+    let score = 0;
+    for (const line of first.split(/[\n\r]+/)) {
+      for (const ch of line) if (ch === d) score++;
+    }
+    if (score > bestScore) { bestScore = score; best = d; }
   }
   return best;
 };
@@ -240,9 +243,12 @@ U.sanitizeCell = (v) => {
 U.buildCSV = (rows, opts) => {
   opts = opts || {};
   const delim = opts.delim || ',';
+  // 判定加引号的条件必须包含实际分隔符：按 ; / \t 分隔导出时，字段值本身含该字符
+  // 却不加引号，导出文件再解析会列错位
+  const escRe = new RegExp('["\\r\\n' + String(delim).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ']');
   const esc = (v) => {
     v = U.sanitizeCell(v);
-    return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+    return escRe.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   };
   return '\uFEFF' + rows.map(r => r.map(esc).join(delim)).join('\r\n');
 };
@@ -353,7 +359,8 @@ U.typeOf = (name) => {
   const s = String(name || '').toLowerCase();
   if (/云|internet|互联网|cloud/.test(s)) return 'cloud';
   if (/防火|fw|firewall/.test(s)) return 'firewall';
-  if (/路由|rt|router/.test(s)) return 'router';
+  // rt 加边界约束（前后不能是英文字母）：裸子串会把 PortChannel1 / support / export 误判为路由器
+  if (/路由|router|rtr|(?:^|[^a-z])rt(?![a-z])/.test(s)) return 'router';
   if (/交换|sw|switch/.test(s)) return 'switch';
   if (/服务|srv|server/.test(s)) return 'server';
   if (/pc|终端|主机|电脑|计算机|办公|client|host|打印机|print/.test(s)) return 'pc';
@@ -457,7 +464,8 @@ U.sanitizeGraph = (nodes, links, texts) => {
       icon: (typeof n.icon === 'string' && U.NODE_ICON_KEYS.includes(n.icon)) ? n.icon
         : (U.isValidImg(n.icon, { svg: true }) ? n.icon : ''), // 设备级图标：内置 key 或白名单 dataURL（与 isValidImg 同口径）
       x: coord(n.x, 0), y: coord(n.y, 0),
-      w: Math.max(num(n.w, U.NODE_W), 40), h: Math.max(num(n.h, U.NODE_H), 24),
+      // 宽高与坐标同口径双向钳制：只钳下限时 w:1e300 之类的畸形数据能通过清洗，画布/导出几何异常
+      w: Math.max(Math.min(num(n.w, U.NODE_W), 1e5), 40), h: Math.max(Math.min(num(n.h, U.NODE_H), 1e5), 24),
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',
       model: str(n.model).slice(0, 64), osver: str(n.osver).slice(0, 64), // 设备型号 / 软件版本（资产清单；SNMP 识别可自动回填版本）
       mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20).map(s => s.slice(0, 200)),
@@ -499,9 +507,9 @@ U.sanitizeGraph = (nodes, links, texts) => {
     usedT.add(id);
     return {
       id, x: coord(t.x, 0), y: coord(t.y, 0),
-      w: Math.max(num(t.w, 220), 40), h: Math.max(num(t.h, 56), 24),
+      w: Math.max(Math.min(num(t.w, 220), 1e5), 40), h: Math.max(Math.min(num(t.h, 56), 1e5), 24),
       text: str(t.text), font: U.TEXT_FONTS.includes(str(t.font)) ? str(t.font) : 'Microsoft YaHei',
-      size: Math.max(num(t.size, 16), 8),
+      size: Math.max(Math.min(num(t.size, 16), 200), 8),
       color: U.isValidColor(t.color) ? t.color : '#1e293b',
       bold: !!t.bold, italic: !!t.italic,
       align: ['left', 'center', 'right'].includes(t.align) ? t.align : 'left',
@@ -2412,6 +2420,8 @@ U.shortestPath = (nodes, links, fromId, toId) => {
   for (const n of nodes) adj.set(n.id, []);
   const linkOf = new Map(); // "a|b" -> link
   for (const l of links) {
+    // 悬空链路引用（手工编辑的工程数据可能出现）跳过：adj.get(undefined).push 会直接抛错
+    if (!adj.has(l.a) || !adj.has(l.b)) continue;
     adj.get(l.a).push(l.b); adj.get(l.b).push(l.a);
     const k1 = l.a + '|' + l.b, k2 = l.b + '|' + l.a;
     if (!linkOf.has(k1)) linkOf.set(k1, l.id);

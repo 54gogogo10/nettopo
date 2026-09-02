@@ -77,7 +77,7 @@ function buildSvgImage(graph, opts) {
   for (const l of links) {
     const g = geom[l.id];
     if (!g) continue;
-    const lines = opts.showLabels === false ? [] : U.labelLines(l);
+    const lines = opts.showLabels === false ? [] : U.labelLines(l).map(s => U.truncate(s, 40));
     if (!lines.length) continue;
     const mx = X((g.x1 + g.x2) / 2), my = Y((g.y1 + g.y2) / 2);
     const dx = g.x2 - g.x1, dy = g.y2 - g.y1;
@@ -123,10 +123,11 @@ function buildSvgImage(graph, opts) {
     parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="${t.c1}" stroke="${t.stroke}" stroke-width="1.5"/>`);
     const cx = x + w / 2, cy = y + h / 2;
     const hasMgmt = !!(n.mgmt || '').trim();
-    parts.push(`<text x="${cx}" y="${hasMgmt ? cy - 11 : cy - 4}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="13.5" font-weight="bold" fill="#ffffff" text-anchor="middle">${esc(n.name)}</text>`);
+    // 超长设备名截断：SVG text 无裁剪直接溢出绘制，200 字符名会压盖相邻设备（画布上有 _fitName，导出同口径收敛）
+    parts.push(`<text x="${cx}" y="${hasMgmt ? cy - 11 : cy - 4}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="13.5" font-weight="bold" fill="#ffffff" text-anchor="middle">${esc(U.truncate(n.name, 40))}</text>`);
     parts.push(`<text x="${cx}" y="${hasMgmt ? cy + 5 : cy + 15}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.8)" text-anchor="middle">${esc(t.label)}</text>`);
     if (hasMgmt) {
-      parts.push(`<text x="${cx}" y="${cy + 19}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.7)" text-anchor="middle">管理: ${esc(U.nodeMgmts(n).join(', '))}</text>`);
+      parts.push(`<text x="${cx}" y="${cy + 19}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.7)" text-anchor="middle">管理: ${esc(U.truncate(U.nodeMgmts(n).join(', '), 60))}</text>`);
     }
   }
 
