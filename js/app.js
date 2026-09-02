@@ -56,8 +56,8 @@ const renderer = new TopoRender($('#svg'), {
       return true;
     }
     if (kind !== 'bg') select(kind, id, { center: false, multi: e.ctrlKey || e.metaKey, extend: e.shiftKey });
-    // 记录拖拽前的状态，拖动结束时用于撤销（避免撤销栈记录“当前态”）
-    state._dragPre = kind === 'node' ? snapshot() : null;
+    // 记录拖拽前的状态，拖动结束时用于撤销（文本框与节点同样可拖动，均须有快照）
+    state._dragPre = (kind === 'node' || kind === 'text') ? snapshot() : null;
     return true;
   },
   onBoxSelect(ids) {
@@ -186,15 +186,16 @@ function snapshot() {
   };
 }
 function restore(s) {
-  state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
-  state.regions = s.regions || [];
-  state.sel = { kind: null, id: null };
-  // 跨页撤销：先把当前页写回 sheets，再切到快照所属页并同步其数据
+  // 跨页撤销：必须先把「当前页」数据写回 sheets 再整体替换活动数据——顺序反了的话
+  // sheetStash 会把他页快照写进当前页（两页数据同化，当前页原内容丢失）
   if (s.sheetIdx != null && s.sheetIdx !== state.sheetIdx && state.sheets[s.sheetIdx]) {
     sheetStash();
     state.sheetIdx = s.sheetIdx;
     refreshSheets();
   }
+  state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
+  state.regions = s.regions || [];
+  state.sel = { kind: null, id: null };
   if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; state.sheets[state.sheetIdx].regions = state.regions; }
   if (Array.isArray(s.downLinks)) { state.downLinks = new Set(s.downLinks); renderer.setDownLinks(state.downLinks); }
   if (s.subnetNames && typeof s.subnetNames === 'object') { state.subnetNames = s.subnetNames; renderer.subnetNames = s.subnetNames; }
@@ -203,6 +204,11 @@ function restore(s) {
   refreshAll();
   updateLegend();
   renderSelCard(); // 隐藏可能残留的选中卡
+  // deleteNode 随快照带走的监控配置（含加密口令）：撤销删除时一并放回
+  if (s.monitorCfgUndo && s.monitorCfgUndo.cfg) {
+    state.monitorCfg[s.monitorCfgUndo.id] = s.monitorCfgUndo.cfg;
+    saveMonitorCfg().catch(() => {});
+  }
   reconcileMonitors(); // 撤销/重做后对齐后台监控
 }
 function pushUndo(pre) {
@@ -601,6 +607,7 @@ function openSubnetAnalysis() {
 /* ================= 自动布局 ================= */
 function autoLayout() {
   if (!state.nodes.length) return;
+  pushUndo(); // 力导向重排同样入撤销栈（与其余布局预设一致），否则误触发无法恢复
   layoutCancel = false;
   // 先给节点一个圆环初始位（layout 内部处理）
   const pts = {};
@@ -1715,7 +1722,8 @@ function setupAutoBackup() {
   setupAutoBackup._timer = setInterval(async () => {
     if (!state.nodes.length) return;
     const data = await buildProjectData();
-    const hash = JSON.stringify([state.nodes, state.links, state.texts, state.downLinks ? [...state.downLinks] : []]);
+    // 变化检测须覆盖区域与其他图纸页：只改区域/他页内容时同样要产生自动备份
+    const hash = JSON.stringify([state.nodes, state.links, state.texts, state.regions || [], state.downLinks ? [...state.downLinks] : [], U.clone(state.sheets)]);
     if (hash === setupAutoBackup._last) return;
     setupAutoBackup._last = hash;
     if (window.topoBackup) {
@@ -1821,11 +1829,16 @@ async function removeSheet(idx) {
   }
   saveMonitorCfg().catch(() => {});
   state.sheets.splice(idx, 1);
-  if (state.sheetIdx > idx) state.sheetIdx--;
-  else if (state.sheetIdx === idx) {
+  if (state.sheetIdx > idx) {
+    state.sheetIdx--;
+    // 前面的页被删后索引左移：撤销栈里旧快照的 sheetIdx 已指向别的页，跨页撤销会跳错页
+    // 并覆盖他页数据（restore 的跨页分支），与删除当前页同口径清空撤销栈
+    state.undoStack = []; state.redoStack = [];
+  } else if (state.sheetIdx === idx) {
     state.sheetIdx = Math.min(state.sheetIdx, state.sheets.length - 1);
     const t = state.sheets[state.sheetIdx];
     state.nodes = t.nodes || []; state.links = t.links || []; state.texts = t.texts || [];
+    state.regions = t.regions || []; // 漏切会让已删页的区域框串到新页并被 saveGraph 持久化
     state.sel = { kind: null, id: null };
     state.undoStack = []; state.redoStack = [];
     renderer.setData(state.nodes, state.links, state.texts, state.regions);
@@ -1834,6 +1847,7 @@ async function removeSheet(idx) {
     reconcileMonitors();
   }
   refreshSheets();
+  updateUndoBtns(); // 清空撤销栈后同步按钮可用态
   saveGraph();
   toast('已删除图纸页');
 }
@@ -1885,10 +1899,21 @@ async function exportInventory() {
 
 function exportVisio() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels });
+  // ortho 透传：直角连线模式下导出与画布/PDF/SVG 显示一致（否则画布直角、Visio 里变斜线）
+  const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   U.download(`网络拓扑图_${U.fmtDate()}.vsdx`,
     new Blob([buf], { type: 'application/vnd.ms-visio' }));
   toast('已导出 Visio 文件（.vsdx，Visio 2013+ 可直接打开编辑）');
+}
+
+/* 导出 canvas 安全缩放：目标 2 倍像素，但总尺寸/单边受浏览器 canvas 上限（Blink 单边 16384）
+ * 与 Acrobat 页面上限（14400 单位，1px=1pt）约束——超限时自动降 scale，超限导出会得到
+ * 空白 canvas（toDataURL 返回 "data:,"）并生成 0 字节图片流的“成功”PDF */
+function exportCanvasScale(img, wantScale) {
+  const MAX_SIDE = 12000;
+  let s = wantScale;
+  if (Math.max(img.width, img.height) * s > MAX_SIDE) s = MAX_SIDE / Math.max(img.width, img.height);
+  return Math.max(0.1, Math.min(s, 4));
 }
 
 function exportPdf() {
@@ -1898,7 +1923,7 @@ function exportPdf() {
   const url = URL.createObjectURL(blob);
   const img = new Image();
   img.onload = () => {
-    const scale = 2;
+    const scale = exportCanvasScale(img, 2);
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
@@ -1907,8 +1932,10 @@ function exportPdf() {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     const jpeg = canvas.toDataURL('image/jpeg', 0.92);
-    // dataURL → 二进制
-    const bin = atob(jpeg.split(',')[1]);
+    // 空白 canvas（超限被浏览器拒绝）时 toDataURL 返回 "data:,"——如实报错，不产 0 字节图片的坏 PDF
+    const b64 = jpeg.split(',')[1];
+    if (!b64 || !b64.length) { URL.revokeObjectURL(url); toast('PDF 渲染失败：图像尺寸超出浏览器上限'); return; }
+    const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const pdf = TopoPdf.buildImagePDF(bytes, canvas.width, canvas.height, {});
@@ -1928,7 +1955,7 @@ function renderTopologyPng(cb) {
   const url = URL.createObjectURL(blob);
   const img = new Image();
   img.onload = () => {
-    const scale = 2;
+    const scale = exportCanvasScale(img, 2);
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
@@ -2771,6 +2798,7 @@ function editNode(id) {
       renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll();
       select('node', n.id);
+      saveGraph(); // pushUndo 里的 saveGraph 保存的是变更前状态，变更后须再落一次
     }
   });
 }
@@ -2779,6 +2807,9 @@ function deleteNode(id) {
   const n = state.nodes.find(n => n.id === id);
   if (!n) return;
   pushUndo(); // 变更前快照
+  // 监控配置随快照带走：撤销栈不覆盖 monitorCfg，Ctrl+Z 恢复设备时把配置（含加密口令）一并放回，
+  // 否则误删后撤销设备回来了、整套监控配置与凭据却永久丢失
+  state.undoStack[state.undoStack.length - 1].monitorCfgUndo = { id, cfg: U.clone(state.monitorCfg[id]) };
   stopMonitorForNode(id); // 删除设备时停止其后台监控
   delete state.monitorCfg[id]; saveMonitorCfg().catch(() => {});
   const removed = state.links.filter(l => l.a === id || l.b === id);
@@ -2787,6 +2818,7 @@ function deleteNode(id) {
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
+  saveGraph();
   toast(`已删除 ${n.name} 及其 ${removed.length} 条连线`);
 }
 
@@ -2914,6 +2946,7 @@ function openLinkDialog(a, b, l) {
     renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll();
     select('link', id);
+    saveGraph();
   };
   ov.querySelector('[data-act=cancel]').onclick = close;
   ov.querySelector('[data-act=save]').onclick = save;
@@ -2928,6 +2961,7 @@ function deleteLink(id) {
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
+  saveGraph();
 }
 
 function deleteSelection() {
@@ -2956,6 +2990,7 @@ function deleteNodes(ids) {
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
+  saveGraph();
   toast(`已删除 ${names.length} 台设备及 ${removedLinks} 条连线`);
 }
 
@@ -2993,6 +3028,7 @@ function batchEditNodes() {
       renderer._syncSelClass();
       state.sel = { kind: 'node', id: ids[ids.length - 1] };
       renderSelCard();
+      saveGraph();
       toast(`已批量更新 ${ids.length} 台设备`);
     }
   });
@@ -3006,6 +3042,7 @@ function deleteLinks(ids) {
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
+  saveGraph();
   toast(`已删除 ${removed.length} 条连线`);
 }
 
@@ -3036,6 +3073,7 @@ function batchEditLinks() {
       renderer._syncSelClass();
       state.sel = { kind: 'link', id: ids[ids.length - 1] };
       renderSelCard();
+      saveGraph();
       toast(`已批量更新 ${ids.length} 条连线`);
     }
   });
@@ -3977,6 +4015,7 @@ function openTypeManager() {
     renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll();
     render();
+    saveGraph(); // 删除类型会把使用该类型的节点改为 other，属图数据变更须落盘
   };
 
   const rowHtml = (t, isCustom) => {
@@ -4078,7 +4117,10 @@ function openHelp() {
   const ov = $('#modalRoot').lastElementChild;
   const modal = ov.querySelector('.modal');
   modal.style.width = '700px';
-  ov.querySelector('form').innerHTML = `
+  // 插到 m-actions 之前而不是替换 form 内容：整体替换会把「知道了/取消」按钮连同监听一起抹掉
+  const form = ov.querySelector('form');
+  const body = document.createElement('div');
+  body.innerHTML = `
   <div class="help-body">
     <h4>① 快速开始</h4>
     <p>四种方式进入：<b>「文件 ▾ 导入表格…」</b>选择连线关系表（自动生成拓扑）、<b>「文件 ▾ 载入示例拓扑」</b>体验内置数据、<b>「文件 ▾ 新建空白画布」</b>直接手动画、<b>「文件 ▾ 从邻居表导入（LLDP/CDP）…」</b>粘贴设备邻居表输出自动生成拓扑。导入后自动布局；拖拽调整位置、双击编辑、右键更多操作，<kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd> 撤销重做。</p>
@@ -4141,6 +4183,7 @@ function openHelp() {
     <h4>说明</h4>
     <p>浏览器版可编辑与导出；<b>Web Shell、设备管理 Web 页、后台监控与配置合规检查为桌面版专属</b>（需 Electron 环境）。数据保存在本机，建议用「保存工程」备份。更多信息见右上角「关于」。</p>
   </div>`;
+  form.insertBefore(body, form.querySelector('.m-actions'));
 }
 
 function openAbout() {
@@ -4153,7 +4196,9 @@ function openAbout() {
   const ov = $('#modalRoot').lastElementChild;
   const modal = ov.querySelector('.modal');
   modal.style.width = '480px';
-  ov.querySelector('form').innerHTML = `
+  const form = ov.querySelector('form');
+  const body = document.createElement('div');
+  body.innerHTML = `
   <div class="about-body">
     <div class="about-logo">
       <svg viewBox="0 0 32 32" width="52" height="52"><rect width="32" height="32" rx="7" fill="#4f46e5"/><circle cx="16" cy="16" r="4.5" fill="#fff"/><circle cx="8" cy="8" r="2.6" fill="#a5b4fc"/><circle cx="24" cy="8" r="2.6" fill="#a5b4fc"/><circle cx="8" cy="24" r="2.6" fill="#a5b4fc"/><circle cx="24" cy="24" r="2.6" fill="#a5b4fc"/><path d="M8 8h6.2M24 8h-6.2M8 24h6.2M24 24h-6.2M16 11.5v4.5M13 20l3-4 3 4" stroke="#a5b4fc" stroke-width="1.6" fill="none"/></svg>
@@ -4172,6 +4217,7 @@ function openAbout() {
     <div class="about-license">本软件基于 MIT 许可证发布：允许自由使用、复制、修改、合并、出版发行、再许可和/或销售副本，但需保留上述版权声明与许可声明。本软件按“现状”提供，不作任何明示或暗示的担保。</div>
     <div class="about-note">数据仅保存在本机；Web Shell 与设备管理 Web 页为桌面版功能。</div>
   </div>`;
+  form.insertBefore(body, form.querySelector('.m-actions'));
   const ABOUT_URL = 'https://github.com/54gogogo10/nettopo';
   const aboutCopy = ov.querySelector('#aboutCopy');
   if (aboutCopy) aboutCopy.onclick = () => {
@@ -4431,8 +4477,11 @@ function wire() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#searchInput').focus(); $('#searchInput').select(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') { e.preventDefault(); $('#btnDropExport').click(); return; }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); toggleLabels(); return; }
-    if (e.key.toLowerCase() === 'l') { autoLayout(); return; }
-    if (e.key.toLowerCase() === 'f') { renderer.fit(); return; }
+    // 裸字母快捷键只认无修饰键：Ctrl+L/Ctrl+F 等组合键（浏览器地址栏/查找）不得触发自动布局/适应视图
+    if (!(e.ctrlKey || e.metaKey || e.altKey)) {
+      if (e.key.toLowerCase() === 'l') { autoLayout(); return; }
+      if (e.key.toLowerCase() === 'f') { renderer.fit(); return; }
+    }
     if (e.key === '+' || e.key === '=') { renderer.zoomBy(1.25); return; }
     if (e.key === '-') { renderer.zoomBy(0.8); return; }
   });
@@ -4616,10 +4665,12 @@ async function loadMonitorCfg() {
   } catch (e) { return {}; }
 }
 
-/** 返回 topoMonitor 桥；缺失（浏览器版）时提示并返回 null */
-function monitorBridge() {
+/** 返回 topoMonitor 桥；缺失（浏览器版）时返回 null。silent=true 供后台对齐路径静默降级
+ *  （reconcile/sync/stopForNode 在浏览器版每次刷新/导入/切页/删设备都会跑，弹提示会刷屏）；
+ *  用户主动操作（打开监控配置/监控中心）保持提示。 */
+function monitorBridge(silent) {
   if (window.topoMonitor && window.topoMonitor.start) return window.topoMonitor;
-  toast('后台监控需要桌面版（Electron）环境');
+  if (!silent) toast('后台监控需要桌面版（Electron）环境');
   return null;
 }
 
@@ -4851,14 +4902,14 @@ async function applyMonitor(id, cfg, enabled) {
 }
 
 function stopMonitorForNode(id) {
-  const bridge = monitorBridge();
+  const bridge = monitorBridge(true); // 后台对齐：浏览器版静默
   if (bridge) bridge.stop(id);
   delete state.monitorStatus[id];
 }
 
 /** 让启用了监控的设备与主进程运行状态对齐：期望集合 = deviceId@host，停止多余任务、启动缺失任务 */
 async function reconcileMonitors() {
-  const bridge = monitorBridge();
+  const bridge = monitorBridge(true); // 后台对齐：浏览器版静默
   if (!bridge) return;
   // 简单互斥：fire-and-forget 的多处调用（loadGraph/loadProject/restoreGraph）并发时防止重复 start
   if (reconcileMonitors._busy) return;
@@ -4906,7 +4957,9 @@ async function reconcileMonitors() {
         { probe: { enabled: row.probeEnabled, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
         { alerts: row.alerts },
         { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!row.snmpEnabled, community: row.snmpCommunity || 'public', ifTable: !!row.snmpIfTable } }
+        // 与 applyMonitor 的完整载荷同口径：缺 sysUpTime/perf 会让重启检测与 CPU/内存采集
+        // 在软件重启/恢复工程后静默失效（monitor 侧按缺省 false 处理）
+        { sysinfo: { enabled: !!row.snmpEnabled, community: row.snmpCommunity || 'public', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '' } } }
       ));
       if (!res || !res.ok) perDev[node.id][row.host] = { state: 'error', text: (res && res.error) || '启动失败', since: Date.now() };
     } catch (err) {
@@ -4926,7 +4979,7 @@ async function reconcileMonitors() {
 
 /** 从主进程拉取当前运行状态并刷新侧栏（按设备聚合成 perHost 明细） */
 async function syncMonitorStatus() {
-  const bridge = monitorBridge();
+  const bridge = monitorBridge(true); // 后台对齐：浏览器版静默
   if (!bridge) return;
   try {
     const res = await bridge.status();
@@ -5509,7 +5562,8 @@ function openMonitorCenter() {
     </div>`;
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
-  const close = () => ov.remove();
+  const mcSubs = []; // ipc 订阅退订函数：关闭弹窗时全部注销（onX 每次调用都新增监听器，反复打开会累积）
+  const close = () => { while (mcSubs.length) { try { mcSubs.pop()(); } catch (e) { /* ignore */ } } ov.remove(); };
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
@@ -5878,7 +5932,7 @@ function openMonitorCenter() {
   };
   // 接口流量实时推送：只更新缓存与当前设备详情，不整页刷新（避免其他页签闪烁）
   if (window.topoMonitor && window.topoMonitor.onIfTraffic) {
-    window.topoMonitor.onIfTraffic((info) => {
+    const off = window.topoMonitor.onIfTraffic((info) => {
       if (!info || !info.key || !document.body.contains(ov)) return;
       const hist = ifCache.get(info.key) || [];
       hist.push({ ts: info.ts, ifs: info.ifs });
@@ -5886,10 +5940,11 @@ function openMonitorCenter() {
       ifCache.set(info.key, hist);
       if (curIfDev === info.key) renderIfaces(lastJobs);
     });
+    if (typeof off === 'function') mcSubs.push(off);
   }
   // 性能采样实时推送（同接口流量：只更新缓存与当前设备）
   if (window.topoMonitor && window.topoMonitor.onPerf) {
-    window.topoMonitor.onPerf((info) => {
+    const off = window.topoMonitor.onPerf((info) => {
       if (!info || !info.key || !document.body.contains(ov)) return;
       const hist = perfCache.get(info.key) || [];
       hist.push({ ts: info.ts, cpu: info.cpu, mem: info.mem, up: info.up });
@@ -5897,15 +5952,13 @@ function openMonitorCenter() {
       perfCache.set(info.key, hist);
       if (curPerfDev === info.key) renderPerf(lastJobs);
     });
+    if (typeof off === 'function') mcSubs.push(off);
   }
   if (window.topoMonitor) {
-    const subs = [];
     for (const ch of ['onStatus', 'onProbe', 'onAlert', 'onBackup', 'onReboot']) {
       if (typeof window.topoMonitor[ch] === 'function') {
-        const fn = window.topoMonitor[ch];
-        const cb = () => refreshOn();
-        fn(cb);
-        subs.push(cb);
+        const off = window.topoMonitor[ch](() => refreshOn());
+        if (typeof off === 'function') mcSubs.push(off);
       }
     }
   }
@@ -6310,9 +6363,11 @@ function nodeBySvcIp(ip) {
   for (const n of state.nodes) {
     try { if ((U.nodeMgmts(n) || []).some(m => m === ip)) return n; } catch (e) { /* ignore */ }
   }
+  // 接口 IP 匹配：连线端点是节点 id 字符串，接口 IP 存于 aIp/bIp（l.a.node 并不存在）
   for (const l of state.links) {
-    if (l && l.a && l.a.node && l.a.ip === ip) return state.nodes.find(n => n.id === l.a.node) || null;
-    if (l && l.b && l.b.ip === ip) return state.nodes.find(n => n.id === l.b.node) || null;
+    if (!l) continue;
+    if (l.aIp === ip) return state.nodes.find(n => n.id === l.a) || null;
+    if (l.bIp === ip) return state.nodes.find(n => n.id === l.b) || null;
   }
   return null;
 }
@@ -6396,7 +6451,11 @@ function openNetServices() {
     </div>`;
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
-  const close = () => { clearInterval(pollTimer); ov.remove(); };
+  const close = () => {
+    clearInterval(pollTimer);
+    while (nsvOffs.length) { try { nsvOffs.pop()(); } catch (e) { /* ignore */ } } // 注销 ipc 订阅
+    ov.remove();
+  };
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
@@ -6465,7 +6524,12 @@ function openNetServices() {
         el.onclick = () => {
           const ip = el.dataset.ip;
           ov.querySelector('#nsvCmd').textContent = buildCmdExample(ip);
-          try { navigator.clipboard.writeText(ip); toast('已复制 ' + ip + '，命令示例已同步'); } catch (e) { toast('命令示例已切换为 ' + ip); }
+          // writeText 返回 Promise：权限被拒/非安全上下文是异步 reject，同步 try/catch 捕不到
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(ip)
+              .then(() => toast('已复制 ' + ip + '，命令示例已同步'))
+              .catch(() => toast('命令示例已切换为 ' + ip));
+          } else toast('命令示例已切换为 ' + ip);
         };
       });
     } catch (e) { /* ignore */ }
@@ -6669,8 +6733,12 @@ function openNetServices() {
   });
   const onFileEvt = () => { if (ov.isConnected && ov.querySelector('.nsv-pane[data-pane=files]').hidden === false) loadFiles(); };
   const onStEvt = (s) => { st = s; renderStatus(); };
-  window.topoNetSvc.onFile(onFileEvt);
-  window.topoNetSvc.onStatus(onStEvt);
+  // onX 每次调用都会新增 ipcRenderer 监听器：退订函数随弹窗关闭注销，防反复开合累积
+  const nsvOffs = [];
+  const offFile = window.topoNetSvc.onFile(onFileEvt);
+  if (typeof offFile === 'function') nsvOffs.push(offFile);
+  const offSt = window.topoNetSvc.onStatus(onStEvt);
+  if (typeof offSt === 'function') nsvOffs.push(offSt);
   const pollTimer = setInterval(() => {
     if (!ov.isConnected) { clearInterval(pollTimer); return; }
     window.topoNetSvc.getConfig().then((r) => { if (r && r.ok && ov.isConnected) { st = r.status; renderStatus(); } }).catch(() => {});

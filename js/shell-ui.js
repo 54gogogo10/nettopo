@@ -15,7 +15,18 @@ function diffSessionOutputs(outputs) {
 }
 (function () {
   if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs }; return; } // Node 测试直取纯函数
-  if (!window.topoShell) return; // 非 Electron 环境直接退出
+  if (!window.topoShell) {
+    // 浏览器直接打开本页：给出明确提示（否则空状态不显示、按钮无响应，整页死白）
+    const e = document.getElementById('shEmpty');
+    if (e) {
+      e.classList.remove('hidden');
+      const p = e.querySelector('p'), s = e.querySelector('small'), b = e.querySelector('#shEmptyNew');
+      if (p) p.textContent = 'Web Shell 需要桌面版';
+      if (s) s.textContent = '请在 Electron 桌面版中从拓扑右键设备打开 Web Shell；浏览器直接打开本页无法建立 SSH/Telnet 连接。';
+      if (b) b.style.display = 'none';
+    }
+    return;
+  }
   const $ = (s, r) => (r || document).querySelector(s);
   const escAttr = (s) => String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -59,8 +70,11 @@ function diffSessionOutputs(outputs) {
     // 首次连接：弹出指纹确认（TOFU），用户确认后由主进程放行握手
     if (state === 'fingerprint' && info.host) showFingerprintConfirm(info);
   }
+  // 并发首连（对多台新设备同时发起连接）时，第二个指纹事件到达时确认框还在——直接丢弃会让
+  // 该会话在主进程侧永远等不到 trustFingerprint，直到 12s 握手超时失败。排队依次展示。
+  const fpQueue = [];
   function showFingerprintConfirm(info) {
-    if ($('#fpModal')) return; // 已有确认框
+    if ($('#fpModal')) { fpQueue.push(info); return; } // 已有确认框：排队，关闭后依次展示
     const root = $('#modalRoot');
     const ov = document.createElement('div');
     ov.id = 'fpModal';
@@ -87,6 +101,9 @@ function diffSessionOutputs(outputs) {
       if (trust) { try { localStorage.setItem('topoShellFp:' + info.host, info.fp); } catch (e) { /* ignore */ } }
       window.topoShell.trustFingerprint(info.host, trust);
       close();
+      // 同主机的排队确认一并出队：trustFingerprint 已放行/拒绝该主机的全部待确认握手
+      for (let i = fpQueue.length - 1; i >= 0; i--) if (fpQueue[i].host === info.host) fpQueue.splice(i, 1);
+      if (fpQueue.length) showFingerprintConfirm(fpQueue.shift());
     }
   }
   function applyEnd(s, reason) {
@@ -160,6 +177,7 @@ function diffSessionOutputs(outputs) {
     const wrapEl = document.createElement('div');
     wrapEl.className = 'sh-term-wrap';
     const termEl = document.createElement('div');
+    termEl.className = 'sh-term'; // 配套 CSS .sh-term-wrap > .sh-term（勿用 > div：会误伤重连横幅）
     wrapEl.appendChild(termEl);
     // 断线重连横幅（会话结束后显示；点击原地重建，不新开标签、不清空历史）
     const rcBar = document.createElement('div');

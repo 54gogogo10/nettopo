@@ -85,8 +85,9 @@ class Renderer {
 
   zoomBy(factor, cx, cy) {
     const r = this.svg.getBoundingClientRect();
-    const px = (cx != null ? cx : r.width / 2) - r.left;
-    const py = (cy != null ? cy : r.height / 2) - r.top;
+    // px/py 是 svg 本地坐标（pan 相对 svg 左上角）：显式传入时减 r.left 归一，缺省取画布中心
+    const px = cx != null ? cx - r.left : r.width / 2;
+    const py = cy != null ? cy - r.top : r.height / 2;
     const nz = U.clamp(this.zoom * factor, 0.12, 4);
     const k = nz / this.zoom;
     this.pan.x = px - (px - this.pan.x) * k;
@@ -581,6 +582,9 @@ class Renderer {
     svg.addEventListener('pointerdown', (e) => {
       if (this.cb.onBgDown) this.cb.onBgDown(); // 点击画布时先隐藏悬停提示
       if (e.button === 1) { e.preventDefault(); this._startPan(e); return; }
+      // 右键等非主键不启动任何拖拽/平移：Windows 的 contextmenu 在 mouseup 才触发，
+      // 右键按下后稍有移动会把设备拖走并在菜单弹出前产生一次错误移动
+      if (e.button !== 0) return;
       const target = e.target.closest ? e.target.closest('.node, .link, .ann, .region') : null;
       if (target) {
         const kind = target.classList.contains('node') ? 'node'
@@ -667,8 +671,10 @@ class Renderer {
         const nn = this.nodes.find(x => x.id === i);
         if (!nn) continue;
         const o = this._drag.orig[i];
-        nn.x = w2.x - this._drag.dx + (o.x - this._drag.orig[this._drag.ids[0]].x);
-        nn.y = w2.y - this._drag.dy + (o.y - this._drag.orig[this._drag.ids[0]].y);
+        // 偏移基准必须与 dx/dy 一致取「被抓取节点」（id）：取 ids[0] 时抓非首个选中节点，
+        // 第一次 move 就把整组平移 (orig[id]−orig[ids[0]])，跳变坐标还会入撤销栈并被持久化
+        nn.x = w2.x - this._drag.dx + (o.x - this._drag.orig[id].x);
+        nn.y = w2.y - this._drag.dy + (o.y - this._drag.orig[id].y);
       }
       const f0 = this.nodes.find(x => x.id === id);
       if (f0 && (Math.abs(f0.x - this._drag.orig[id].x) > 2 || Math.abs(f0.y - this._drag.orig[id].y) > 2)) this._drag.moved = true;
@@ -678,12 +684,23 @@ class Renderer {
     const up = (ev) => {
       svgElRemove(this.svg, 'pointermove', move);
       svgElRemove(this.svg, 'pointerup', up);
+      svgElRemove(this.svg, 'pointercancel', cancel);
+      const d = this._drag;
+      this._drag = null;
+      if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+    };
+    // 系统取消指针（触控笔接管/窗口失焦等）：同 up 收尾但不带点击语义，防 _drag 悬挂
+    const cancel = () => {
+      svgElRemove(this.svg, 'pointermove', move);
+      svgElRemove(this.svg, 'pointerup', up);
+      svgElRemove(this.svg, 'pointercancel', cancel);
       const d = this._drag;
       this._drag = null;
       if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);
+    svgElAdd(this.svg, 'pointercancel', cancel);
   }
 
   _startTextDrag(e, id) {
@@ -704,12 +721,22 @@ class Renderer {
     const up = (ev) => {
       svgElRemove(this.svg, 'pointermove', move);
       svgElRemove(this.svg, 'pointerup', up);
+      svgElRemove(this.svg, 'pointercancel', cancel);
+      const d = this._drag;
+      this._drag = null;
+      if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+    };
+    const cancel = () => {
+      svgElRemove(this.svg, 'pointermove', move);
+      svgElRemove(this.svg, 'pointerup', up);
+      svgElRemove(this.svg, 'pointercancel', cancel);
       const d = this._drag;
       this._drag = null;
       if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);
+    svgElAdd(this.svg, 'pointercancel', cancel);
   }
 
   /* ---------- 区域整体拖动（含框内设备/文本框，几何包含按拖拽开始时判定） ---------- */
@@ -740,6 +767,7 @@ class Renderer {
     const up = (ev) => {
       svgElRemove(this.svg, 'pointermove', move);
       svgElRemove(this.svg, 'pointerup', up);
+      svgElRemove(this.svg, 'pointercancel', cancel);
       if (moved) {
         this.cb.onDragEnd && this.cb.onDragEnd(id, true);
       } else {
@@ -747,8 +775,16 @@ class Renderer {
         this.cb.onBgClick && this.cb.onBgClick(this.toWorld(ev.clientX, ev.clientY), ev);
       }
     };
+    // pointercancel：只收尾（已产生的位移入撤销栈），不带单击语义
+    const cancel = () => {
+      svgElRemove(this.svg, 'pointermove', move);
+      svgElRemove(this.svg, 'pointerup', up);
+      svgElRemove(this.svg, 'pointercancel', cancel);
+      if (moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+    };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);
+    svgElAdd(this.svg, 'pointercancel', cancel);
   }
 
   /* ---------- Shift 拖拽框选 ---------- */
@@ -757,6 +793,8 @@ class Renderer {
     if (!this._boxRect) {
       this._boxRect = el('rect', { class: 'box-sel', x: 0, y: 0, width: 0, height: 0 }, this.world);
     }
+    // capture：拖出窗口外松开时 svg 也能收到 pointerup/pointercancel，防框选矩形残留与监听器泄漏
+    try { this.svg.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件无活动指针时忽略 */ }
     const move = (ev) => {
       const w1 = this.toWorld(ev.clientX, ev.clientY);
       const x = Math.min(w0.x, w1.x), y = Math.min(w0.y, w1.y);
@@ -765,10 +803,14 @@ class Renderer {
       this._boxRect.setAttribute('width', Math.abs(w1.x - w0.x));
       this._boxRect.setAttribute('height', Math.abs(w1.y - w0.y));
     };
-    const up = (ev) => {
+    const stop = () => {
       svgElRemove(this.svg, 'pointermove', move);
       svgElRemove(this.svg, 'pointerup', up);
+      svgElRemove(this.svg, 'pointercancel', stop);
       if (this._boxRect) { this._boxRect.remove(); this._boxRect = null; }
+    };
+    const up = (ev) => {
+      stop();
       const w1 = this.toWorld(ev.clientX, ev.clientY);
       const x0 = Math.min(w0.x, w1.x), y0 = Math.min(w0.y, w1.y);
       const x1 = Math.max(w0.x, w1.x), y1 = Math.max(w0.y, w1.y);
@@ -784,11 +826,13 @@ class Renderer {
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);
+    svgElAdd(this.svg, 'pointercancel', stop);
   }
 
   _startPan(e) {
     this._panning = true;
     this.svg.classList.add('panning');
+    try { this.svg.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件无活动指针时忽略 */ }
     const sx = e.clientX, sy = e.clientY;
     const ox = this.pan.x, oy = this.pan.y;
     const move = (ev) => {
@@ -796,16 +840,21 @@ class Renderer {
       this.pan.y = oy + (ev.clientY - sy);
       this.applyView();
     };
-    const up = (ev) => {
+    const stop = () => {
       svgElRemove(this.svg, 'pointermove', move);
       svgElRemove(this.svg, 'pointerup', up);
+      svgElRemove(this.svg, 'pointercancel', stop);
       this.svg.classList.remove('panning');
-      const moved = Math.hypot(ev.clientX - sx, ev.clientY - sy) > 4;
       this._panning = false;
+    };
+    const up = (ev) => {
+      stop();
+      const moved = Math.hypot(ev.clientX - sx, ev.clientY - sy) > 4;
       if (!moved) this.cb.onBgClick && this.cb.onBgClick(this.toWorld(ev.clientX, ev.clientY), ev);
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);
+    svgElAdd(this.svg, 'pointercancel', stop);
   }
 }
 

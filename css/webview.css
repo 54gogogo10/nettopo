@@ -52,6 +52,9 @@
   border-radius: 7px; outline: none; transition: border-color .15s, box-shadow .15s;
 }
 .wv-addr input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* HTTP 明文页标识（内嵌页无浏览器地址栏可辨认协议，登录表单页尤需提示） */
+.wv-addr input.insecure { border-color: rgba(217, 119, 6, .65); background: rgba(217, 119, 6, .07); }
+.wv-addr input.insecure:focus { border-color: #d97706; box-shadow: 0 0 0 3px rgba(217, 119, 6, .18); }
 .wv-pages { flex: 1; position: relative; min-height: 0; background: var(--bg); }
 .wv-page { position: absolute; inset: 0; display: none; background: var(--bg); }
 .wv-page.active { display: block; }

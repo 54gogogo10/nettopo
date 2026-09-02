@@ -1,7 +1,18 @@
 /* NetTopo 设备管理页窗口 —— 多标签内嵌浏览器 */
 'use strict';
 (function () {
-  if (!window.topoWeb) return; // 非 Electron 环境直接退出
+  if (!window.topoWeb) {
+    // 浏览器直接打开本页：给出明确提示（否则空状态不显示、按钮无响应，整页死白）
+    const e = document.getElementById('wvEmpty');
+    if (e) {
+      e.classList.remove('hidden');
+      const p = e.querySelector('p'), s = e.querySelector('small'), b = e.querySelector('#wvEmptyNew');
+      if (p) p.textContent = '设备管理页需要桌面版';
+      if (s) s.textContent = '请在 Electron 桌面版中右键设备打开设备管理页面；浏览器直接打开本页无法内嵌设备 Web 管理页。';
+      if (b) b.style.display = 'none';
+    }
+    return;
+  }
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
   const escAttr = (s) => String(s == null ? '' : s)
@@ -35,6 +46,14 @@
     if (id) applyZoom(tabs.get(id).wv);
   };
   const active = () => { for (const [id, t] of tabs) if (t.tabEl.classList.contains('active')) return id; return null; };
+
+  /* 地址栏明文提示：内嵌页没有浏览器原生 URL 栏可辨认协议，http 页面（多为登录表单），
+   * 以琥珀色边框标识不安全，https 不标 */
+  const setAddrSecurity = (url) => {
+    const insecure = /^http:\/\//i.test(String(url || ''));
+    addrEl.classList.toggle('insecure', insecure);
+    addrEl.title = insecure ? 'HTTP 明文连接：传输不加密，登录凭据可能被窃听' : '';
+  };
 
   function showErr(rec, msg) {
     let err = rec.pageEl.querySelector('.wv-err');
@@ -104,9 +123,9 @@
     wv.addEventListener('did-fail-load', (e) => { if (e.errorCode !== -3) showErr(rec, e.errorDescription); });
     wv.addEventListener('did-navigate', (e) => {
       rec.tabEl.title = e.url;
-      if (active() === id) { addrEl.value = e.url; updateNavBtns(); }
+      if (active() === id) { addrEl.value = e.url; setAddrSecurity(e.url); updateNavBtns(); }
     });
-    wv.addEventListener('did-navigate-in-page', (e) => { if (active() === id) { addrEl.value = e.url; updateNavBtns(); } });
+    wv.addEventListener('did-navigate-in-page', (e) => { if (active() === id) { addrEl.value = e.url; setAddrSecurity(e.url); updateNavBtns(); } });
 
     tabEl.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
@@ -123,7 +142,10 @@
       t.tabEl.classList.toggle('active', on);
       t.pageEl.classList.toggle('active', on);
       if (on) {
-        try { addrEl.value = t.wv.getURL() || t.wv.getAttribute('src'); } catch (e) { addrEl.value = t.wv.getAttribute('src') || ''; }
+        let cur = '';
+        try { cur = t.wv.getURL() || t.wv.getAttribute('src') || ''; } catch (e) { cur = t.wv.getAttribute('src') || ''; }
+        addrEl.value = cur;
+        setAddrSecurity(cur);
         updateNavBtns();
       }
     }

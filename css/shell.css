@@ -37,7 +37,7 @@
 .sh-terms { flex: 1; position: relative; min-height: 0; background: #0b1220; }
 .sh-term-wrap { position: absolute; inset: 0; display: none; background: #0b1220; padding: 6px 0 6px 8px; }
 .sh-term-wrap.active { display: block; }
-.sh-term-wrap > div { height: 100%; }
+.sh-term-wrap > .sh-term { height: 100%; } /* 只作用于终端容器：> div 会连断线重连横幅一起撑成全高遮挡终端 */
 .sh-term-wrap .xterm { height: 100%; }
 .sh-empty {
   position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
