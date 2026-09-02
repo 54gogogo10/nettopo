@@ -192,3 +192,4 @@ python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备�
 - 后台监控日志（`userData/monitor-logs`）、配置备份（`userData/config-backups`）、网络服务收到的文件与 Syslog 日志（`userData/net-services`）与监控配置（含密码）均保存在本机用户数据目录；密码经系统级加密（Windows DPAPI safeStorage）后落盘，监控指纹记录同样存于本机
 - 版本号唯一来源是 `js/util.js` 的 `U.APP_VERSION`（如 `v20260829i`），界面标题/状态栏同步显示；`npm run build` 会自动升版本并重建产物；package.json 的语义版本仅为 Electron 打包用途
 - 安全策略：三个页面均启用 CSP（script-src 仅 'self'，无 'unsafe-eval'——本地内置 SheetJS 与全部应用代码均不使用 eval，其余来源严格限定本地/data/blob）；所有本地文件/日志/备份路径走白名单式文件名清洗，杜绝路径穿越
+- 安全边界：设备密码加密强度与系统账户绑定（Windows DPAPI 与登录口令相关；Linux 无密钥环时会降级为弱混淆并启动时提示）；Telnet/FTP/SNMP v2c 为明文协议，凭据与配置可被同网段嗅探，建议仅在可信内网使用并避免复用高权限口令；内置 TFTP/FTP/Syslog 面向局域网开放（FTP 单账号认证+失败封禁、来源与数据通道校验），监控告警/合规正则在工作线程内限时执行，灾难性回溯的规则会被自动禁用

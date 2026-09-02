@@ -29,7 +29,10 @@ function diffSessionOutputs(outputs) {
   }
   const $ = (s, r) => (r || document).querySelector(s);
   const escAttr = (s) => String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // 终端横幅文本净化：标题/host/原因可源自恶意 CSV/工程或设备错误消息，字面 ESC(0x1b) 会被
+  // xterm 解释为 ANSI 序列（改色/改标题/伪造横幅文案）——插值内容剔除转义与控制符
+  const bannerText = (s) => String(s == null ? '' : s).replace(/\x1b/g, '*').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ');
   const tabsEl = $('#shTabs'), termsEl = $('#shTerms'), emptyEl = $('#shEmpty');
   const ctxEl = $('#shCtx'), fontValEl = $('#shFontVal');
   const sessions = new Map(); // sid -> { tabEl, wrapEl, term, fit, dotEl, ended, buf }
@@ -65,7 +68,7 @@ function diffSessionOutputs(outputs) {
     // info 类状态（如 SSH 主机密钥指纹）写入终端，便于人工核对
     if (state === 'info' && info.text && s.term && !s._fpShown) {
       s._fpShown = true;
-      s.term.write('\r\n\x1b[90m' + info.text + '\x1b[0m\r\n');
+      s.term.write('\r\n\x1b[90m' + bannerText(info.text) + '\x1b[0m\r\n');
     }
     // 首次连接：弹出指纹确认（TOFU），用户确认后由主进程放行握手
     if (state === 'fingerprint' && info.host) showFingerprintConfirm(info);
@@ -110,7 +113,7 @@ function diffSessionOutputs(outputs) {
     s.ended = true;
     s.dotEl.className = 'dot err';
     s.tabEl.title = reason || '连接已关闭';
-    if (s.term) s.term.write('\r\n\x1b[33m[会话已结束] ' + (reason || '连接已关闭') + '\x1b[0m\r\n');
+    if (s.term) s.term.write('\r\n\x1b[33m[会话已结束] ' + bannerText(reason || '连接已关闭') + '\x1b[0m\r\n');
     castSel.delete(sid0(s));
     refreshCastCount();
     showReconnectBar(s, reason);
@@ -158,7 +161,7 @@ function diffSessionOutputs(outputs) {
     // 复用同一 sid：终端与闭包无需改动；重置会话态，恢复可输入
     s.ended = false;
     s._fpShown = false; // 新连接可能重新触发 SSH 指纹确认
-    if (s.term) s.term.write('\r\n\x1b[33m[正在重新连接 ' + ((s.tabEl.querySelector('.tt') || {}).textContent || '') + ' …]\x1b[0m\r\n');
+    if (s.term) s.term.write('\r\n\x1b[33m[正在重新连接 ' + bannerText((s.tabEl.querySelector('.tt') || {}).textContent || '') + ' …]\x1b[0m\r\n');
     if (castMode) castSel.add(id);
     hideReconnectBar(s);
     refreshCastCount();
@@ -204,7 +207,7 @@ function diffSessionOutputs(outputs) {
     const rec = { tabEl, wrapEl, term, fit, dotEl: tabEl.querySelector('.dot'), castEl: tabEl.querySelector('.cast'), ended: false, buf: [], rcBar, rcReason, rcBtn };
     rcBtn.addEventListener('click', (e) => { e.stopPropagation(); reconnectNow(rec); });
     sessions.set(sid, rec);
-    term.write('\x1b[33m正在连接 ' + (info.title || sid) + ' …\r\n\x1b[0m');
+    term.write('\x1b[33m正在连接 ' + bannerText(info.title || sid) + ' …\r\n\x1b[0m');
     for (const item of rec.buf.splice(0)) {
       if (item[0] === 'out') term.write(item[1]);
       else if (item[0] === 'status') applyStatus(rec, item[1]);

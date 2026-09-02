@@ -16,7 +16,7 @@
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
   const escAttr = (s) => String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const tabsEl = $('#wvTabs'), pagesEl = $('#wvPages'), emptyEl = $('#wvEmpty');
   const navEl = $('#wvNav'), addrEl = $('#wvAddr'), backEl = $('#wvBack'), fwdEl = $('#wvFwd'), reloadEl = $('#wvReload');
   const tabs = new Map(); // id -> { tabEl, pageEl, wv, spinEl, titleEl }

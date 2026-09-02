@@ -137,8 +137,8 @@ ${cF('TxtPinX', w / 2, 'Width*0.5', "Unit='IN'")}${cF('TxtPinY', h / 2, 'Height*
       <TxtAngle>0</TxtAngle>
     </TextXForm>
     <Fill>
-      <FillForegnd>${t.c1}</FillForegnd>
-      <FillBkgnd>${t.c2}</FillBkgnd>
+      <FillForegnd>${X(t.c1)}</FillForegnd>
+      <FillBkgnd>${X(t.c2)}</FillBkgnd>
       <FillForegndTrans>0</FillForegndTrans>
       <FillBkgndTrans>0</FillBkgndTrans>
       <FillPattern>1</FillPattern>
@@ -148,7 +148,7 @@ ${cF('TxtPinX', w / 2, 'Width*0.5', "Unit='IN'")}${cF('TxtPinY', h / 2, 'Height*
     </Fill>
     <Line>
       <LineWeight>0.01</LineWeight>
-      <LineColor>${t.stroke}</LineColor>
+      <LineColor>${X(t.stroke)}</LineColor>
       <LineColorTrans>0</LineColorTrans>
       <LinePattern>1</LinePattern>
       <Rounding>0.08</Rounding>
@@ -203,7 +203,7 @@ ${cF('Angle', Math.PI, 'ATAN2(EndY-BeginY,EndX-BeginX)', '')}
     </XForm>
     <Line>
       <LineWeight>0.01</LineWeight>
-      <LineColor>${U.bwColor(l.bw)}</LineColor>
+      <LineColor>${X(U.bwColor(l.bw))}</LineColor>
       <LineColorTrans>0</LineColorTrans>
       <LinePattern>1</LinePattern>
       <Rounding>0</Rounding>

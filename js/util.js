@@ -407,9 +407,12 @@ U.isValidImg = (v, opts) => {
 /* 清洗 typeOverrides / customTypes：剔除非法颜色与图片，避免拼入 innerHTML/SVG 时注入 */
 U.sanitizeTypeData = (overrides, customTypes) => {
   const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
+  // 原型键名能通过「普通字符串」正则但会命中原型 setter（__proto__ 赋值改写对象原型而非自有属性）
+  const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
   const ov = {};
   for (const [key, o] of Object.entries(overrides || {})) {
     if (!SAFE_KEY.test(key)) continue; // 非法 key 直接丢弃，避免拼入 HTML/SVG 属性
+    if (DANGEROUS_KEYS.has(key)) continue;
     if (!o || typeof o !== 'object') continue;
     const clean = {};
     if (U.isValidColor(o.c1)) { clean.c1 = o.c1; clean.c2 = U.isValidColor(o.c2) ? o.c2 : o.c1; clean.stroke = U.isValidColor(o.stroke) ? o.stroke : o.c1; }
@@ -420,12 +423,12 @@ U.sanitizeTypeData = (overrides, customTypes) => {
   const known = new Set(U.TYPE_ORDER);
   for (const t of arr) {
     const k = typeof t.key === 'string' ? t.key : '';
-    if (SAFE_KEY.test(k)) known.add(k);
+    if (SAFE_KEY.test(k) && !DANGEROUS_KEYS.has(k)) known.add(k);
   }
   let seq = 1;
   const ct = arr.map(t => {
     if (typeof t.label !== 'string') return null;
-    let key = (typeof t.key === 'string' && SAFE_KEY.test(t.key) && !U.TYPE_ORDER.includes(t.key)) ? t.key : null;
+    let key = (typeof t.key === 'string' && SAFE_KEY.test(t.key) && !DANGEROUS_KEYS.has(t.key) && !U.TYPE_ORDER.includes(t.key)) ? t.key : null;
     if (!key) { do { key = 'ct' + (seq++); } while (known.has(key)); known.add(key); }
     const clean = { key, label: t.label.slice(0, 64), c1: t.c1, c2: t.c2 || t.c1, stroke: t.stroke || t.c1, img: '' };
     if (!U.isValidColor(clean.c1)) clean.c1 = U.PALETTE[0];
@@ -466,7 +469,7 @@ U.sanitizeGraph = (nodes, links, texts) => {
       x: coord(n.x, 0), y: coord(n.y, 0),
       // 宽高与坐标同口径双向钳制：只钳下限时 w:1e300 之类的畸形数据能通过清洗，画布/导出几何异常
       w: Math.max(Math.min(num(n.w, U.NODE_W), 1e5), 40), h: Math.max(Math.min(num(n.h, U.NODE_H), 1e5), 24),
-      mgmt: str(n.mgmt).slice(0, 200), note: str(n.note), web: U.normalizeWebUrl(n.web) || '',
+      mgmt: str(n.mgmt).slice(0, 200), note: str(n.note).slice(0, 2000), web: U.normalizeWebUrl(n.web) || '',
       model: str(n.model).slice(0, 64), osver: str(n.osver).slice(0, 64), // 设备型号 / 软件版本（资产清单；SNMP 识别可自动回填版本）
       mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20).map(s => s.slice(0, 200)),
       // 三层 VLAN 接口（interface vlan）：[{id, ip}]，最多 32 个
@@ -489,8 +492,9 @@ U.sanitizeGraph = (nodes, links, texts) => {
     const b = idMap.get(str(l.b)) || str(l.b);
     if (!nodeIds.has(a) || !nodeIds.has(b)) return null; // 引用不存在/非法的节点则丢弃
     const vlanModeOf = (v) => (v === 'access' || v === 'trunk' || v === 'hybrid') ? v : '';
+    // 字符串字段统一限长：20MB 恶意工程可携超长文本拖慢渲染/存储（转义正确，无 XSS，纯 DoS 面）
     return {
-      id, a, b, aIf: str(l.aIf), aIp: str(l.aIp), bIf: str(l.bIf), bIp: str(l.bIp), bw: str(l.bw), note: str(l.note),
+      id, a, b, aIf: str(l.aIf).slice(0, 64), aIp: str(l.aIp).slice(0, 64), bIf: str(l.bIf).slice(0, 64), bIp: str(l.bIp).slice(0, 64), bw: str(l.bw).slice(0, 32), note: str(l.note).slice(0, 500),
       // 链路聚合组（同名 = 同一聚合组，如 Eth-Trunk1；空 = 普通链路）
       agg: str(l.agg).trim().slice(0, 32),
       // 二层接口 / VLAN 配置 / 掩码位（生成配置时使用）
@@ -508,7 +512,7 @@ U.sanitizeGraph = (nodes, links, texts) => {
     return {
       id, x: coord(t.x, 0), y: coord(t.y, 0),
       w: Math.max(Math.min(num(t.w, 220), 1e5), 40), h: Math.max(Math.min(num(t.h, 56), 1e5), 24),
-      text: str(t.text), font: U.TEXT_FONTS.includes(str(t.font)) ? str(t.font) : 'Microsoft YaHei',
+      text: str(t.text).slice(0, 10000), font: U.TEXT_FONTS.includes(str(t.font)) ? str(t.font) : 'Microsoft YaHei',
       size: Math.max(Math.min(num(t.size, 16), 200), 8),
       color: U.isValidColor(t.color) ? t.color : '#1e293b',
       bold: !!t.bold, italic: !!t.italic,
@@ -1044,9 +1048,9 @@ U.cleanComplianceRules = (raw) => {
     const name = typeof r.name === 'string' ? r.name.trim().slice(0, 64) : '';
     const pattern = typeof r.pattern === 'string' ? r.pattern.trim().slice(0, 256) : '';
     if (!id || !name || !pattern) continue;
-    // 启发式拒绝嵌套量词（如 (a+)+ / (ab*)*）：逐行同步扫描，尽力避免灾难性回溯卡死界面
+    // 启发式拒绝嵌套量词（如 (a+)+ / (a?)+ / (a|aa)*）：逐行同步扫描，尽力避免灾难性回溯卡死界面
     // （与主进程 compileComplianceRules / 告警关键字同口径，非完备防线）
-    if (/\([^()]*[+*][^()]*\)[+*{]/.test(pattern)) continue;
+    if (/\([^()]*[+*?{|][^()]*\)[+*{]/.test(pattern)) continue;
     let re = null;
     try { re = new RegExp(pattern, 'i'); } catch (e) { continue; } // 非法正则整条丢弃
     seen.add(id);

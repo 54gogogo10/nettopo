@@ -266,6 +266,10 @@ class TftpSession {
     if (!this.finished && this.tmpPath) { try { fs.unlinkSync(this.tmpPath); } catch (e) { /* ignore */ } }
     this.tmpPath = null;
     try { if (this.ws) this.ws.destroy(); } catch (e) { /* ignore */ }
+    // 中止后若来源目录已空则顺手删掉：伪造源 IP 的 WRQ（未完成传输）不再残留空目录累积
+    if (this.kind === 'wrq' && this.finalPath) {
+      try { fs.rmdirSync(path.dirname(this.finalPath)); } catch (e) { /* 非空/不存在：忽略 */ }
+    }
     if (err && !this.closed) { try { this._sendError(0, 'Transfer aborted'); } catch (e) { /* ignore */ } }
     this.server._sessionEnded(this, err);
     this.close();
@@ -290,6 +294,9 @@ class TftpServer extends EventEmitter {
     this.rootDir = opts.rootDir;
     this.maxFileSize = Math.max(1024, Math.floor(Number(opts.maxFileSize) || 32 * 1024 * 1024));
     this.maxSessions = Math.max(1, Math.floor(Number(opts.maxSessions) || 8));
+    // 单来源 IP 并发会话上限：慢会话（收 ACK0 后不发数据，等 30s 空闲超时）可用 8 个槽位
+    // 饿死同网段其它设备的配置推送——按 IP 分配配额（NAT 后多设备场景留 4）
+    this.maxSessionsPerIp = Math.max(1, Math.floor(Number(opts.maxSessionsPerIp) || 4));
     this.sock = null;
     this.port = 0;
     this.running = false;
@@ -383,6 +390,14 @@ class TftpServer extends EventEmitter {
     if (this.sessions.size >= this.maxSessions) {
       this.stats.denied++;
       this._sendErrorTo(rinfo, 4, 'Too many sessions');
+      return;
+    }
+    // 单来源 IP 配额：一个主机最多占 maxSessionsPerIp 个会话槽，防慢会话饿死其它设备
+    let perIp = 0;
+    for (const s of this.sessions.values()) { if (s.peer.address === rinfo.address) perIp++; }
+    if (perIp >= this.maxSessionsPerIp) {
+      this.stats.denied++;
+      this._sendErrorTo(rinfo, 4, 'Too many sessions for this host');
       return;
     }
     const dir = path.resolve(this.rootDir, sanitizeIpDir(rinfo.address));

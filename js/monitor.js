@@ -14,6 +14,7 @@ const dgram = require('dgram');
 const { spawn } = require('child_process');
 const path = require('path');
 const { EventEmitter } = require('events');
+const { RegexLab } = require('./regex-lab.js');
 
 /** 文件名/目录名安全化：去掉 Windows 与常见控制字符，去空白、限长。
  *  注意：正则必须独立匹配字符类（不得写成 "/字符类"——那要求字面 / 前缀，永不匹配），
@@ -228,20 +229,27 @@ function tlvWalk(buf, start) {
   if (start + hs + len > buf.length) return null;
   return { tag, body: buf.subarray(start + hs, start + hs + len), next: start + hs + len };
 }
-/** SNMP v2c GET：返回 {ok, varbinds:[{oid,value}]} 或 {ok:false, error}；port 供测试注入 mock agent（默认 161） */
+/** SNMP v2c GET：返回 {ok, varbinds:[{oid,value}]} 或 {ok:false, error}；port 供测试注入 mock agent（默认 161）
+ *  rid 混入进程级随机盐（纯顺序递增可被同网段盲猜抢答）；响应校验来源地址（IP 直连目标时）。 */
 function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
   return new Promise((resolve) => {
     try {
-      let rid = (snmpGet._rid = (snmpGet._rid || 0) + 1);
+      const seq = (snmpGet._rid = (snmpGet._rid || 0) + 1) & 0x7fff;
+      if (snmpGet._salt == null) snmpGet._salt = Math.floor(Math.random() * 0x8000);
+      const rid = ((snmpGet._salt << 15) | seq) & 0x7fffffff;
       const varb = oids.map(oid => berTlv(0x30, Buffer.concat([berOid(oid), Buffer.from([0x05, 0x00])])));
       const pdu = Buffer.concat([berInt(rid), berInt(0), berInt(0), berTlv(0x30, Buffer.concat(varb))]);
       const msg = berTlv(0x30, Buffer.concat([berInt(1) /* v2c */, berTlv(0x04, Buffer.from(String(community || 'public'), 'utf8')), berTlv(pduTag, pdu)]));
       const sock = dgram.createSocket('udp4');
+      // host 为点分 IPv4 时校验响应来源：伪造抢答包必须来自目标 IP 才可能通过后续 rid/community 校验
+      const isIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(host || ''));
       const done = (res) => { clearTimeout(t); try { sock.close(); } catch (e) { /* ignore */ } resolve(res); };
       const t = setTimeout(() => done({ ok: false, error: 'SNMP 响应超时' }), timeoutMs || 3000);
-      sock.on('message', (buf) => {
+      sock.on('message', (buf, rinfo) => {
         try {
-          // 先校验 request-id 与 community：不匹配的抢答包直接丢弃（继续等待真实响应直至超时）
+          // 来源不符的响应包直接丢弃（继续等待真实响应直至超时）
+          if (isIpLiteral && rinfo && rinfo.address !== host) return;
+          // 再校验 request-id 与 community：不匹配的抢答包同样丢弃
           const meta = snmpResponseMeta(buf);
           if (!meta || meta.rid !== rid || meta.community !== String(community || 'public')) return;
           done({ ok: true, varbinds: parseSnmpResponse(buf) });
@@ -321,9 +329,9 @@ function compileComplianceRules(raw) {
     const name = typeof r.name === 'string' ? r.name.trim().slice(0, 64) : '';
     const pattern = typeof r.pattern === 'string' ? r.pattern.trim().slice(0, 256) : '';
     if (!id || !name || !pattern) continue;
-    // 启发式拒绝嵌套量词（如 (a+)+ / (ab*)*）：主进程同步逐行扫描，防灾难性回溯阻塞事件循环
-    // （与告警关键字/渲染层 cleanComplianceRules 同口径，非完备防线）
-    if (/\([^()]*[+*][^()]*\)[+*{]/.test(pattern)) continue;
+    // 启发式拒绝嵌套量词（如 (a+)+ / (a?)+ / (a|aa)*）：主进程侧另有 RegexLab 工作线程超时兜底，
+    // 此处静态过滤是第一道廉价防线（组内含量词/分支的「被量词化的组」是指数回溯的高发形态）
+    if (/\([^()]*[+*?{|][^()]*\)[+*{]/.test(pattern)) continue;
     let re = null;
     try { re = new RegExp(pattern, 'i'); } catch (e) { continue; }
     seen.add(id);
@@ -447,6 +455,13 @@ const MAX_LOG_BYTES = 32 * 1024 * 1024;
 const MAX_LINEBUF_CHARS = 256 * 1024;
 /** 告警检查的累计输出文本上限（限制正则最坏耗时） */
 const MAX_ALERT_TEXT_CHARS = 64 * 1024;
+/** 告警待检缓冲字节上限：恶意设备高速灌输出时按字节丢最旧行，防 join/内存被撑爆
+ *  （行数 20000 上限挡不住「行数少但单行极长」的组合） */
+const MAX_ALERT_PENDING_CHARS = 1024 * 1024;
+/** 备份捕获内容字节上限（与 config-backup 的 8MB 单份上限对齐，超出丢弃后续行并标记截断） */
+const MAX_BACKUP_CAPTURE_CHARS = 8 * 1024 * 1024;
+/** 单设备单日日志滚动文件数上限：高输出设备按 32MB 滚动一天可写数百个文件，超限删最旧 */
+const MAX_LOG_FILES_PER_DAY = 24;
 
 class MonitorManager extends EventEmitter {
   /** @param {import('./shell').ShellManager} shell 共享的会话管理器
@@ -459,6 +474,7 @@ class MonitorManager extends EventEmitter {
     this.logBaseDir = logBaseDir;
     this.trustFile = trustFile;
     this.backupStore = opts.backupStore || null;
+    this.regexLab = new RegexLab({ timeoutMs: 5000 }); // 用户正则的工作线程超时执行器（防灾难性回溯挂死主进程）
     this.jobs = new Map();       // key -> job
     this._bySid = new Map();     // sid -> key
     this.trusted = new Map();    // host -> fp
@@ -504,12 +520,13 @@ class MonitorManager extends EventEmitter {
     const name = String(opts.name == null ? '' : opts.name).slice(0, 200);
     const protocol = String(opts.protocol || 'ssh').toLowerCase();
     if (protocol !== 'ssh' && protocol !== 'telnet') return { ok: false, error: '不支持的协议：' + protocol };
-    const host = String(opts.host || '').trim();
+    // host/username 会写进日志头与审计日志（shell.js）：剔除控制字符，防内嵌换行注入伪造审计行
+    const host = String(opts.host || '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
     if (!host || host.length > 256) return { ok: false, error: '请填写主机地址' };
     let port = parseInt(opts.port, 10);
     if (!(port > 0)) port = protocol === 'telnet' ? DEFAULTS.telnetPort : DEFAULTS.port;
     if (port < 1 || port > 65535) return { ok: false, error: '端口无效' };
-    const username = String(opts.username || '').trim().slice(0, 128) || DEFAULTS.username;
+    const username = String(opts.username || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 128) || DEFAULTS.username;
     const password = String(opts.password || '').slice(0, 1024);
     // SSH 公钥认证（可选）：私钥 PEM/OpenSSH 文本 + 私钥口令；两者均可为空（回退密码认证）
     const privateKey = typeof opts.privateKey === 'string' ? opts.privateKey.trim().slice(0, 65536) : '';
@@ -521,9 +538,9 @@ class MonitorManager extends EventEmitter {
       if (!(jPort > 0)) jPort = 22;
       if (!(jPort <= 65535)) jPort = 22;
       jump = {
-        host: String(opts.jump.host).trim().slice(0, 256),
+        host: String(opts.jump.host).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 256),
         port: jPort,
-        username: String(opts.jump.username || '').trim().slice(0, 128) || username,
+        username: String(opts.jump.username || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 128) || username,
         password: String(opts.jump.password || '').slice(0, 1024),
         privateKey: typeof opts.jump.privateKey === 'string' ? opts.jump.privateKey.trim().slice(0, 65536) : '',
         keyPassphrase: typeof opts.jump.keyPassphrase === 'string' ? opts.jump.keyPassphrase.slice(0, 1024) : ''
@@ -585,8 +602,8 @@ class MonitorManager extends EventEmitter {
       if (pattern.indexOf('#') >= 0) { const i = pattern.indexOf('#'); note = pattern.slice(i + 1).trim(); pattern = pattern.slice(0, i).trim(); }
       if (!pattern) continue;
       if (pattern.length > 256) pattern = pattern.slice(0, 256);
-      // 启发式拒绝嵌套量词（如 (a+)+ / (ab*)*）：主进程同步执行，尽力避免灾难性回溯拖死界面（非完备防线）
-      if (/\([^()]*[+*][^()]*\)[+*{]/.test(pattern)) continue;
+      // 启发式拒绝嵌套量词（如 (a+)+ / (a?)+ / (a|aa)*）：执行期另有 RegexLab 工作线程超时兜底（非完备防线）
+      if (/\([^()]*[+*?{|][^()]*\)[+*{]/.test(pattern)) continue;
       let re = null;
       try { re = new RegExp(pattern, 'i'); } catch (e) { re = null; }
       if (!re) continue;
@@ -676,7 +693,10 @@ class MonitorManager extends EventEmitter {
       perfHist: [],     // CPU/内存/sysUpTime 采样历史（[{ts, up, cpu, mem}]，容量 IF_HIST_MAX）
       snmpTimer: null, _snmpBusy: false,
       probeOk: null, probeLatency: null, probeFailSince: null, probeTimer: null, _probeBusy: false,
-      alerting: false, alertInfo: null, _cycleActive: false, _alertPending: [],
+      alerting: false, alertInfo: null, _cycleActive: false, _alertPending: [], _alertPendingChars: 0, _alertChecking: false,
+      // 凭据掩码（日志防回显泄密）：密码/私钥口令/跳板密码出现在设备输出时写日志前打码
+      pwMasks: [cfg.password, cfg.keyPassphrase, cfg.jump && cfg.jump.password]
+        .filter(s => typeof s === 'string' && s.length >= 3),
       backupTimer: null, backupRunning: false, backupLast: null, _backupCap: null,
       sid: null, state: 'connecting', statusText: '连接中…',
       enabled: true, stopping: false, fatal: false,
@@ -796,6 +816,7 @@ class MonitorManager extends EventEmitter {
     job._backupCap = null;
     job._cycleActive = false;
     job._alertPending = [];
+    job._alertPendingChars = 0;
     this._closeLog(job);
     if (job.sid) { try { this.shell.close(job.sid); } catch (e) { /* ignore */ } }
     job.sid = null;
@@ -853,7 +874,10 @@ class MonitorManager extends EventEmitter {
     // 按天归档：同日内的连接/重连/滚动后复用同一文件继续追加，不重复生成
     if (!forceNew && job.logStream && job.logDate === date) return;
     this._closeLog(job);
-    const dir = path.join(this._deviceDir(job), date);
+    const devDir = this._deviceDir(job);
+    // 纵深：设备目录若已被同机攻击者替换为符号链接，跟随写入会把日志写到任意位置——拒绝写日志
+    try { if (fs.lstatSync(devDir).isSymbolicLink()) { job.logStream = null; return; } } catch (e) { /* 不存在则照常创建 */ }
+    const dir = path.join(devDir, date);
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
     // 文件名含主机地址：同一设备多个管理口各自独立日志，互不覆盖
     const safe = sanitizeFilename(job.name || job.deviceId);
@@ -869,6 +893,8 @@ class MonitorManager extends EventEmitter {
         seq++;
         fname = safe + '_' + safeHost + '_' + fmtDateTime() + '_' + seq + '.log';
       } while (fs.existsSync(path.join(dir, fname)));
+      // 滚动文件数封顶：恶意设备持续触发滚动时一天可产生数百个 32MB 文件，超限删最旧
+      this._pruneLogFiles(dir, MAX_LOG_FILES_PER_DAY);
     }
     job.logDate = date;
     job.logPath = path.join(dir, fname);
@@ -882,11 +908,34 @@ class MonitorManager extends EventEmitter {
       });
     }
   }
+  /** 滚动文件数封顶：目录内 .log 按 mtime 保留最新 keep 个，其余删除（lstat 拒符号链接） */
+  _pruneLogFiles(dir, keep) {
+    try {
+      const files = fs.readdirSync(dir)
+        .map(n => {
+          let st = null;
+          try { st = fs.lstatSync(path.join(dir, n)); } catch (e) { return null; }
+          return (st && st.isFile() && !st.isSymbolicLink() && n.endsWith('.log')) ? { n, t: st.mtimeMs } : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.t - a.t);
+      for (const f of files.slice(keep)) { try { fs.unlinkSync(path.join(dir, f.n)); } catch (e) { /* ignore */ } }
+    } catch (e) { /* ignore */ }
+  }
   _closeLog(job) {
     if (job.logStream) { try { job.logStream.end(); } catch (e) { /* ignore */ } job.logStream = null; }
   }
   _rollLogIfNeeded(job) {
     if (fmtDateDir() !== job.logDate) this._openLog(job);
+  }
+  /** 凭据打码：设备回显密码/私钥口令时（恶意服务端可故意回显），写日志前替换，防凭据落入日志文件 */
+  _maskSecrets(job, text) {
+    let out = String(text == null ? '' : text);
+    const masks = job && job.pwMasks;
+    if (masks && masks.length) {
+      for (const p of masks) { if (out.indexOf(p) >= 0) out = out.split(p).join('******'); }
+    }
+    return out;
   }
   _logLine(job, text) {
     // 写入前自查跨天滚动：仅读取/仅探测任务没有命令轮次（_runCycle/_runBackupShared 才调
@@ -896,7 +945,7 @@ class MonitorManager extends EventEmitter {
     // 单文件超过大小上限即滚动新文件（防高输出设备占满磁盘）
     if (job.logStream.bytesWritten > MAX_LOG_BYTES) this._openLog(job, true);
     if (!job.logStream) return;
-    try { job.logStream.write('[' + fmtTimestamp() + '] ' + text + '\n'); } catch (e) { /* ignore */ }
+    try { job.logStream.write('[' + fmtTimestamp() + '] ' + this._maskSecrets(job, text) + '\n'); } catch (e) { /* ignore */ }
   }
   _logCmd(job, cmd) {
     this._logLine(job, '>> ' + cmd);
@@ -1213,7 +1262,7 @@ class MonitorManager extends EventEmitter {
       job._cycleActive = false; // 中途退出（会话断开/停止）也必须释放互斥位，避免永久卡死
     }
     if (!job.enabled || gen !== job.gen) return;
-    this._checkAlerts(job);
+    this._checkAlerts(job).catch(() => { /* 告警检查失败不中断监控 */ });
     // 下一轮按「本轮开始时刻 + 间隔」调度：等命令全部执行完才计时会让实际周期持续
     // 正漂移（周期 = intervalSec + 每轮执行耗时），多命令大延迟任务采集间隔明显变长
     const nextDelay = Math.max(1000, job.intervalSec * 1000 - (Date.now() - cycleStart));
@@ -1256,25 +1305,41 @@ class MonitorManager extends EventEmitter {
     job.lineBuf = parts.pop(); // 保留半行
     const captured = [];
     for (const ln of parts) {
-      const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+      let t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
       if (t) {
+        // 凭据打码先行：日志、告警缓冲、备份捕获共用该行文本，恶意设备回显密码不得落到任何一处
+        t = this._maskSecrets(job, t);
         this._logLine(job, t);
         if (!job._ready && PROMPT_RE.test(t.trim())) job._ready = true; // 会话就绪：收到命令提示符行（banner 期拼接的底层报文不触发）
-        // 告警缓冲：周期循环、连接时执行命令、仅读取模式的设备主动输出，全部纳入关键字告警匹配
-        if (job.alerts.length && job._alertPending && job._alertPending.length < 20000) job._alertPending.push(t);
+        // 告警缓冲：周期循环、连接时执行命令、仅读取模式的设备主动输出，全部纳入关键字告警匹配。
+        // 字节上限 + 丢最旧：行数上限挡不住「行数少但单行极长」的组合，join 前内存必须有界
+        if (job.alerts.length && job._alertPending) {
+          job._alertPending.push(t);
+          job._alertPendingChars += t.length + 1;
+          while ((job._alertPending.length > 20000 || job._alertPendingChars > MAX_ALERT_PENDING_CHARS) && job._alertPending.length > 1) {
+            job._alertPendingChars -= job._alertPending[0].length + 1;
+            job._alertPending.shift();
+          }
+        }
+        // 备份捕获窗口内的行先入暂存（下面统一过滤命令回显）；字节封顶防撑爆内存
         if (job._backupCap) captured.push(t);
       }
     }
     // 仅读取模式：不跑周期循环，输出到达后去抖检查告警（避免高频输出逐行触发正则）
-    if (job.readOnly && job.alerts.length && job._alertPending && job._alertPending.length && !job._alertTimer) {
+    if (job.readOnly && job.alerts.length && job._alertPending && job._alertPending.length && !job._alertTimer && !job._alertChecking) {
       job._alertTimer = setTimeout(() => {
         job._alertTimer = null;
-        if (job.enabled && !job.stopping) this._checkAlerts(job);
+        if (job.enabled && !job.stopping) this._checkAlerts(job).catch(() => { /* 告警检查失败不中断监控 */ });
       }, 500);
     }
     // 备份捕获：过滤命令回显（多条命令集合，含「提示符+命令」整行）与提示符行
     if (job._backupCap && captured.length) {
-      for (const t of cleanBackupLines(captured, job._backupCap.commands)) job._backupCap.lines.push(t);
+      const cap = job._backupCap;
+      for (const t of cleanBackupLines(captured, cap.commands)) {
+        if (cap.chars + t.length + 1 > MAX_BACKUP_CAPTURE_CHARS) { cap.truncated = true; break; }
+        cap.lines.push(t);
+        cap.chars += t.length + 1;
+      }
     }
   }
 
@@ -1393,33 +1458,59 @@ class MonitorManager extends EventEmitter {
   }
 
   /* ---------------- 输出关键字告警（周期循环 / 连接时命令 / 仅读取输出均参与） ---------------- */
-  _checkAlerts(job) {
-    if (!job.alerts.length || !job._alertPending) return;
-    const lines = job._alertPending;
-    let text = lines.join('\n');
-    // 限制正则输入规模：既限内存也限灾难性回溯的最坏耗时
-    if (text.length > MAX_ALERT_TEXT_CHARS) text = text.slice(0, MAX_ALERT_TEXT_CHARS);
-    job._alertPending = [];
-    // 本轮命中的全部关键字（按配置顺序，去重）；告警解除需所有关键字同时不再命中
-    const hit = [];
-    if (text) {
-      for (const a of job.alerts) { if (a.re.test(text) && !hit.includes(a)) hit.push(a); }
-    }
-    const nowAlerting = hit.length > 0;
-    const patternJoined = hit.map(h => h.pattern).join('、');
-    // 状态翻转，或命中集合变化（多告警增/减）时更新状态与事件
-    const changed = nowAlerting !== job.alerting || (nowAlerting && (!job.alertInfo || job.alertInfo.pattern !== patternJoined));
-    if (changed) {
-      // 匹配到的具体行内容（取首个命中行，供事件时间线 / 系统通知展示）
-      let matchedText = '';
-      if (nowAlerting) {
-        for (const ln of lines) { for (const h of hit) { if (h.re.test(ln)) { matchedText = ln.trim().slice(0, 200); break; } } if (matchedText) break; }
+  /** 告警匹配经 RegexLab 工作线程执行：用户可配置正则 + 不可信设备输出，灾难性回溯在线程内
+   *  超时处决并拉黑该模式，主进程事件循环永不阻塞。异步执行 + _alertChecking 防重入。 */
+  async _checkAlerts(job) {
+    if (!job.alerts.length || !job._alertPending || job._alertChecking) return;
+    job._alertChecking = true;
+    try {
+      const lines = job._alertPending;
+      job._alertPending = [];
+      job._alertPendingChars = 0;
+      // 字节预算内从尾部保留（新输出更值得关注）：join 结果 ≤ MAX_ALERT_TEXT_CHARS，先算后拼
+      let total = 0, start = lines.length;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        total += lines[i].length + 1;
+        if (total > MAX_ALERT_TEXT_CHARS) { start = i + 1; break; }
       }
-      job.alerting = nowAlerting;
-      job.alertInfo = nowAlerting ? { pattern: patternJoined, note: hit.map(h => h.note).join('、'), at: Date.now(), matchedText, patterns: hit.map(h => h.pattern) } : null;
-      this._logLine(job, nowAlerting ? '【告警】输出匹配关键字「' + patternJoined + '」' + (matchedText ? '：' + matchedText : '') : '【告警解除】输出不再匹配任何告警关键字');
-      this.emit('alert', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, matched: nowAlerting, pattern: nowAlerting ? patternJoined : null, note: nowAlerting ? job.alertInfo.note : null, matchedText: nowAlerting ? matchedText : null, patterns: nowAlerting ? job.alertInfo.patterns : null });
-      this._emit(job);
+      const kept = start > 0 ? lines.slice(start) : lines;
+      const text = kept.join('\n');
+      // 本轮命中的全部关键字（按配置顺序）；告警解除需所有关键字同时不再命中
+      const hit = [];
+      let firstLineByPattern = [];
+      if (text) {
+        const items = job.alerts.map(a => ({ pattern: a.pattern, flags: 'i', op: 'test', text, lines: kept }));
+        const results = await this.regexLab.run(items);
+        results.forEach((r, i) => {
+          if (!r) return;
+          if (r.blocked && !job._blockedAlertWarned) {
+            job._blockedAlertWarned = true;
+            this._logLine(job, '警告：告警关键字「' + job.alerts[i].pattern + '」执行超时已禁用（疑似灾难性回溯），请修改为无嵌套量词的线性模式');
+          }
+          if (r.ok && r.hit) { hit.push(job.alerts[i]); firstLineByPattern[i] = r.line || ''; }
+        });
+      }
+      const nowAlerting = hit.length > 0;
+      const patternJoined = hit.map(h => h.pattern).join('、');
+      // 状态翻转，或命中集合变化（多告警增/减）时更新状态与事件
+      const changed = nowAlerting !== job.alerting || (nowAlerting && (!job.alertInfo || job.alertInfo.pattern !== patternJoined));
+      if (changed) {
+        // 匹配到的具体行内容（首个命中关键字的首个命中行，供事件时间线 / 系统通知展示）
+        let matchedText = '';
+        if (nowAlerting) {
+          for (const h of hit) {
+            const i = job.alerts.indexOf(h);
+            if (firstLineByPattern[i]) { matchedText = firstLineByPattern[i]; break; }
+          }
+        }
+        job.alerting = nowAlerting;
+        job.alertInfo = nowAlerting ? { pattern: patternJoined, note: hit.map(h => h.note).join('、'), at: Date.now(), matchedText, patterns: hit.map(h => h.pattern) } : null;
+        this._logLine(job, nowAlerting ? '【告警】输出匹配关键字「' + patternJoined + '」' + (matchedText ? '：' + matchedText : '') : '【告警解除】输出不再匹配任何告警关键字');
+        this.emit('alert', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, matched: nowAlerting, pattern: nowAlerting ? patternJoined : null, note: nowAlerting ? job.alertInfo.note : null, matchedText: nowAlerting ? matchedText : null, patterns: nowAlerting ? job.alertInfo.patterns : null });
+        this._emit(job);
+      }
+    } finally {
+      job._alertChecking = false;
     }
   }
 
@@ -1481,7 +1572,7 @@ class MonitorManager extends EventEmitter {
     await this._waitReady(job, gen, READY_TIMEOUT_MS); // 复用监控会话：等会话就绪再下发首条备份命令
     await this._drainForBackup(job, gen, 2000);        // 排空上一条监控命令的输出尾部，防混入备份
     // 过滤名单并入监控/连接时命令：排空超时的退化场景下，迟到的监控命令回显行同样不得混入备份
-    job._backupCap = { commands: job.backup.commands.concat(job.commands || [], job.onConnect || []), lines: [], startedAt: Date.now() };
+    job._backupCap = { commands: job.backup.commands.concat(job.commands || [], job.onConnect || []), lines: [], chars: 0, truncated: false, startedAt: Date.now() };
     const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
     for (const cmd of job.backup.commands) {
       if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) { job._backupCap = null; return; }
@@ -1492,6 +1583,7 @@ class MonitorManager extends EventEmitter {
     const cap = job._backupCap;
     job._backupCap = null;
     if (!job.enabled || job.stopping || gen !== job.gen || !cap) return;
+    if (cap.truncated) this._logLine(job, '警告：备份输出超出 ' + Math.floor(MAX_BACKUP_CAPTURE_CHARS / 1024 / 1024) + 'MB 上限，超出部分已丢弃');
     this._saveBackup(job, gen, cap.lines.join('\n'));
   }
 
@@ -1561,6 +1653,7 @@ class MonitorManager extends EventEmitter {
     return new Promise((resolveCmds) => {
       const lines = [];
       let lineBuf = '';
+      let lineChars = 0; // 独立备份输出字节上限：恶意服务端灌输出时按字节丢后续行（与 8MB 单份上限对齐）
       let ownReady = false; // 独立新会话的就绪标志（与监控会话 _ready 互不干扰）
       const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
       const onOut = (sid2, data) => {
@@ -1570,9 +1663,10 @@ class MonitorManager extends EventEmitter {
         const parts = lineBuf.split('\n');
         lineBuf = parts.pop(); // 半行留缓冲，等下个事件续拼成整行
         for (const ln of parts) {
-          const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          let t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
           if (!ownReady && PROMPT_RE.test(t.trim())) ownReady = true; // 独立会话就绪判据
-          if (t) lines.push(t);
+          if (t) t = this._maskSecrets(job, t); // 凭据打码：恶意服务端回显密码不得落入备份文件
+          if (t && lineChars + t.length + 1 <= MAX_BACKUP_CAPTURE_CHARS) { lines.push(t); lineChars += t.length + 1; }
         }
       };
       this.shell.on('output', onOut);
@@ -1588,6 +1682,7 @@ class MonitorManager extends EventEmitter {
         // 命令下发前的输出（登录横幅/提示/用户名回显）不属于配置内容：丢弃并重置组包缓冲，
         // 让首条命令回显从新行开始（残留在缓冲里的尾部提示符不会拼进回显行）
         lines.length = 0;
+        lineChars = 0;
         lineBuf = '';
         for (const cmd of job.backup.commands) {
           if (!job.enabled || job.stopping || gen !== job.gen) break;
@@ -1652,13 +1747,37 @@ class MonitorManager extends EventEmitter {
     job.backupLast = { name: r.name, at: Date.now(), changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null, first: !!r.first };
     this._logLine(job, '配置备份已保存：' + r.name + '（' + content.split('\n').length + ' 行）' + (r.first ? '（首份）' : (diffInfo ? (changed ? '，与上次差异 +' + diffInfo.added + '/-' + diffInfo.removed + ' 行' : '，与上次一致') : '')));
     this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, fileName: r.name, first: !!r.first, prev: r.prev, changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null });
-    this._runCompliance(job, gen, content);
+    this._runCompliance(job, gen, content).catch(() => { /* 合规巡检失败不中断备份 */ });
   }
-  /** 备份内容自动合规巡检（job.backup.compliance.enabled 时）：违规写入事件时间线并广播 */
-  _runCompliance(job, gen, content) {
+  /** 备份内容自动合规巡检（job.backup.compliance.enabled 时）：违规写入事件时间线并广播。
+   *  规则在 RegexLab 工作线程内逐行扫描（8MB 备份 × 用户正则，超时处决防回溯挂死主进程）。 */
+  async _runCompliance(job, gen, content) {
     const c = job.backup && job.backup.compliance;
-    if (!c || !c.enabled) return;
-    const rep = runCompliance(content, c.rules || []);
+    if (!c || !c.enabled || job.stopping || !job.enabled) return;
+    const lines = String(content == null ? '' : content).replace(/\r\n/g, '\n').split('\n')
+      .map(l => l.length > 10000 ? l.slice(0, 10000) : l);
+    const rules = (c.rules || []).filter(r => r && r.enabled);
+    const results = await this.regexLab.run(rules.map(r => ({ pattern: r.pattern, flags: 'i', op: 'scan', lines, maxHits: 20 })), 15000);
+    if (job.stopping || !job.enabled || gen !== job.gen) return;
+    const rep = { results: [], passed: 0, failed: 0 };
+    let blockedWarned = false;
+    rules.forEach((r, i) => {
+      const res = results[i];
+      if (!res || !res.ok) {
+        // 被超时拉黑/执行失败的规则按「无法评估」处理：不误报违规，仅告警提示修改
+        if (res && res.blocked && !blockedWarned) {
+          blockedWarned = true;
+          this._logLine(job, '警告：合规规则「' + r.name + '」执行超时已禁用（疑似灾难性回溯），请修改为无嵌套量词的线性模式');
+        }
+        rep.passed++;
+        rep.results.push({ id: r.id, name: r.name, negate: r.negate, pass: true, lines: [] });
+        return;
+      }
+      const hitLines = (res.hits || []).map(l => String(lines[l] || '').trim().slice(0, 200));
+      const pass = r.negate ? hitLines.length === 0 : hitLines.length > 0;
+      if (pass) rep.passed++; else rep.failed++;
+      rep.results.push({ id: r.id, name: r.name, negate: r.negate, pass, lines: hitLines });
+    });
     job.complianceLast = { at: Date.now(), failed: rep.failed, total: rep.passed + rep.failed };
     const items = rep.results.filter(r => !r.pass).slice(0, 8)
       .map(r => ({ name: r.name, negate: r.negate, line: (r.lines && r.lines[0]) || (r.negate ? '' : '未找到匹配行') }));

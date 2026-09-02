@@ -16,6 +16,19 @@ if (process.platform === 'linux' && typeof process.getuid === 'function' && proc
   app.commandLine.appendSwitch('no-sandbox');
 }
 
+/* ---- 主进程崩溃兜底：任何渲染层回调/定时器里的同步异常（如超大 join 抛 RangeError、
+ *   写流 error）此前都会直接整体崩溃，丢掉所有监控/备份状态——记录后降级继续运行 ---- */
+function logCrash(kind, err) {
+  try {
+    const fs = require('fs');
+    const line = '[' + new Date().toISOString() + '] ' + kind + ': ' + String((err && (err.stack || err.message)) || err) + '\n';
+    fs.appendFileSync(path.join(app.getPath('userData'), 'main-crash.log'), line.slice(0, 8000), 'utf8');
+  } catch (e) { /* 日志失败忽略 */ }
+  console.error('[main]', kind, err);
+}
+process.on('uncaughtException', (err) => logCrash('uncaughtException', err));
+process.on('unhandledRejection', (reason) => logCrash('unhandledRejection', reason));
+
 // 测试隔离：冒烟测试通过 NETTOPO_USERDATA 覆盖用户数据目录（临时目录），避免污染真实备份数据
 if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_USERDATA);
 
@@ -469,6 +482,26 @@ function isHttpUrl(u) {
   try { const p = new URL(u).protocol; return p === 'http:' || p === 'https:'; } catch (e) { return false; }
 }
 
+/* ---- 机密落盘（FTP 服务口令等 settings.json 内容）：safeStorage 加密，前缀 enc1: 标记密文。
+ *   加密不可用时保持原值落盘（行为与旧版一致）；解密失败返回空串（口令回退默认，需重新保存） ---- */
+const ENC_PREFIX = 'enc1:';
+function encryptSecretValue(text) {
+  try {
+    const { safeStorage } = require('electron');
+    if (!safeStorage || !safeStorage.isEncryptionAvailable()) return String(text);
+    return ENC_PREFIX + safeStorage.encryptString(String(text)).toString('base64');
+  } catch (e) { return String(text); }
+}
+function decryptSecretValue(value) {
+  const v = String(value == null ? '' : value);
+  if (v.indexOf(ENC_PREFIX) !== 0) return v;
+  try {
+    const { safeStorage } = require('electron');
+    if (!safeStorage || !safeStorage.isEncryptionAvailable()) return '';
+    return safeStorage.decryptString(Buffer.from(v.slice(ENC_PREFIX.length), 'base64')) || '';
+  } catch (e) { return ''; }
+}
+
 /* ---- Web Shell IPC ---- */
 /** Shell 相关 IPC 仅允许主窗口与 Shell 窗口调用（两窗口都加载同一 preload） */
 function shellSender(e) {
@@ -859,9 +892,18 @@ ipcMain.handle('netsvc:get', (e) => {
 ipcMain.handle('netsvc:set', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const cfg = (p && p.cfg && typeof p.cfg === 'object') ? p.cfg : {};
-  loadAppSettings().netSvc = cfg;
-  saveAppSettings();
   const status = await netSvc.applyConfig(cfg);
+  // 运行态用明文；落盘前把 FTP 口令密文化（与项目「密码经 safeStorage 落盘」惯例对齐，
+  // 此前明文写 settings.json，本机其他用户可读）
+  try {
+    const stored = JSON.parse(JSON.stringify(cfg));
+    if (stored.ftp && typeof stored.ftp === 'object' && typeof stored.ftp.password === 'string'
+      && stored.ftp.password && stored.ftp.password.indexOf(ENC_PREFIX) !== 0) {
+      stored.ftp.password = encryptSecretValue(stored.ftp.password);
+    }
+    loadAppSettings().netSvc = stored;
+    saveAppSettings();
+  } catch (err) { /* 落盘失败不影响运行态 */ }
   return { ok: true, cfg: netSvc.getConfig(), status };
 });
 ipcMain.handle('netsvc:files', (e) => monitorGuard(e) ? netSvc.listFiles() : { ok: false, error: 'forbidden' });
@@ -888,6 +930,11 @@ app.whenReady().then(() => {
   // 设备管理 Web 页兼容性：使用干净的 Chrome UA（去掉 Electron 标识，避免设备页面误判）
   // 弹窗抑制与 window.open 转标签由 webview 元素的 preload/allowpopups 处理
   session.fromPartition('persist:nettopo-web').setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+  // 设备管理页（webview 分区，远程不可信内容）权限默认拒绝：通知/地理位置/媒体等一律不授予
+  // （fullscreen 例外，设备控制台全屏查看属正常诉求）；同步权限检查同口径
+  const webPartition = session.fromPartition('persist:nettopo-web');
+  webPartition.setPermissionRequestHandler((wc, permission, callback) => callback(permission === 'fullscreen'));
+  webPartition.setPermissionCheckHandler((wc, permission) => permission === 'fullscreen');
   // 设备管理页（webview 分区，远程不可信内容）下载同样弹出「另存为」，避免静默写文件到下载目录
   session.fromPartition('persist:nettopo-web').on('will-download', (e, item) => {
     item.setSaveDialogOptions({
@@ -897,11 +944,29 @@ app.whenReady().then(() => {
   });
   createWindow();
   applyTray();
-  // 内置网络服务：上次启用的服务自动恢复（配置存 settings.netSvc）
+  // 内置网络服务：上次启用的服务自动恢复（配置存 settings.netSvc；FTP 口令为 enc1: 密文，恢复前解密）
   try {
     const saved = loadAppSettings().netSvc;
-    if (saved && typeof saved === 'object') netSvc.applyConfig(saved).catch(() => { /* 恢复失败由面板状态展示 */ });
+    if (saved && typeof saved === 'object') {
+      const restored = JSON.parse(JSON.stringify(saved));
+      if (restored.ftp && typeof restored.ftp === 'object' && typeof restored.ftp.password === 'string'
+        && restored.ftp.password.indexOf(ENC_PREFIX) === 0) {
+        restored.ftp.password = decryptSecretValue(restored.ftp.password);
+      }
+      netSvc.applyConfig(restored).catch(() => { /* 恢复失败由面板状态展示 */ });
+    }
   } catch (e) { /* ignore */ }
+  // Linux 无密钥环（gnome-keyring/kwallet）时 safeStorage 回退 basic_text（弱混淆非加密）：
+  // 工程文件内的设备密码近似明文，启动时明确提示一次，提醒注意文件访问权限
+  if (process.platform === 'linux') {
+    try {
+      const { safeStorage } = require('electron');
+      if (safeStorage.getSelectedStorageBackend && safeStorage.getSelectedStorageBackend() === 'basic_text') {
+        setTimeout(() => notifyUser('网络拓扑管理软件 · 凭据保护降级',
+          '未检测到系统密钥环（gnome-keyring/kwallet），设备密码仅以弱混淆方式保存在本机工程文件中，请注意文件访问权限'), 3000);
+      }
+    } catch (e) { /* ignore */ }
+  }
   // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
   app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
     if (webContents.getType() !== 'webview') return; // 仅处理设备管理页内嵌浏览器
@@ -924,6 +989,15 @@ app.whenReady().then(() => {
     contents.on('will-navigate', (ev, url) => {
       if (contents.getType() === 'webview') return; // 设备页内嵌 guest 自由导航（另有 popup 拦截）
       if (!/^file:/i.test(String(url))) ev.preventDefault();
+    });
+    // 纵深：guest 一律无 preload、无 Node；src 仅放行 http(s)（渲染层已校验，此处兜底）
+    contents.on('will-attach-webview', (ev, webPreferences, params) => {
+      try {
+        delete webPreferences.preload;
+        webPreferences.nodeIntegration = false;
+        webPreferences.contextIsolation = true;
+        if (!/^https?:\/\//i.test(String((params && params.src) || ''))) ev.preventDefault();
+      } catch (err) { /* ignore */ }
     });
     if (contents.getType() !== 'webview') {
       try { contents.setWindowOpenHandler(() => ({ action: 'deny' })); } catch (err) { /* ignore */ }

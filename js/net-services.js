@@ -195,7 +195,8 @@ class NetServices extends EventEmitter {
     if (!root) return null;
     const ip = String((p && p.ip) || '').trim();
     const name = String((p && p.name) || '').trim();
-    if (!name || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('..') >= 0 || name.length > 200) return null;
+    // 冒号一并拒收：Windows 上 "file.txt:ads" 形态会命中 NTFS 交替数据流（与全库清洗口径一致）
+    if (!name || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('..') >= 0 || name.indexOf(':') >= 0 || name.length > 200) return null;
     if (ip && (ip.indexOf('/') >= 0 || ip.indexOf('\\') >= 0 || ip.indexOf('..') >= 0 || ip.length > 80)) return null;
     const base = path.resolve(root) + path.sep;
     const full = path.resolve(root, ip || '.', name);

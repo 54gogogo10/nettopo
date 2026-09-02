@@ -23,6 +23,7 @@ const MAX_MSG_LEN = 8 * 1024;        // 单条消息长度上限（超长截断�
 const MAX_RING = 1000;               // 环形缓冲条数
 const TAIL_MAX = 300;                // 单次返回条数上限
 const MAX_LINE_SEARCH = 4 * 1024 * 1024; // 检索单文件读取上限
+const MAX_TCP_CONNS = 64;                // TCP 并发连接上限（内核层挂起超限 accept，防句柄耗尽）
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const pad3 = (n) => String(n).padStart(3, '0');
@@ -93,7 +94,9 @@ function parseSyslogMsg(text, peerHost) {
   // TAG 提取：sshd[123]: / %LINK-3-UPDOWN: / daemon.info 形态取首词（冒号留在分隔位不入 tag）
   const mt = msg.match(/^([A-Za-z0-9_.%\\/+\-#]+)(?:\[\d+\])?:?\s*/);
   if (mt && mt[1].length <= 32) tag = tag || mt[1];
-  msg = msg.replace(/[\r\n]+$/, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
+  // 剥尾部换行 → 剔其余控制字符 → 内嵌 CR/LF 折为空格：日志按行落盘，msg 内嵌换行会被
+  // 攻击者用来注入自带时间戳/级别的伪造日志行（TCP octet 帧内容允许原始 \n），破坏审计完整性
+  msg = msg.replace(/[\r\n]+$/, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').replace(/[\r\n]+/g, ' ');
   if (msg.length > MAX_MSG_LEN) msg = msg.slice(0, MAX_MSG_LEN);
   const facility = pri == null ? null : Math.floor(pri / 8);
   const severity = pri == null ? null : pri % 8;
@@ -202,7 +205,15 @@ class SyslogServer extends EventEmitter {
           if (settled) return;
           tcp.removeListener('error', failTcp);
           this.tcp = tcp;
-          tcp.on('error', (err) => { this.lastError = String(err && err.message || err); this.stop(); });
+          tcp.maxConnections = MAX_TCP_CONNS; // 内核层限流：连接洪泛超限时挂起 accept 而非耗尽句柄
+          tcp.on('error', (err) => {
+            this.lastError = String(err && err.message || err);
+            // EMFILE/ENFILE（句柄耗尽）不整站停摆：只记错误，等空闲超时回收连接后自愈——
+            // stop() 会连 UDP 一起关掉，且句柄是进程级的，一个服务停摆会连锁拖垮其它服务
+            const code = err && err.code;
+            if (code === 'EMFILE' || code === 'ENFILE') return;
+            this.stop();
+          });
           tcp.on('connection', (s) => this._onTcpConn(s));
           afterUdp();
         });
@@ -308,6 +319,8 @@ class SyslogServer extends EventEmitter {
     let st = this.streams.get(key);
     if (!st) {
       try {
+        // 纵深：主机目录若被同机攻击者替换为符号链接，跟随写入会把日志写到任意位置
+        try { if (fs.lstatSync(dir).isSymbolicLink()) return; } catch (e2) { /* 不存在则照常创建 */ }
         fs.mkdirSync(dir, { recursive: true });
         st = fs.createWriteStream(path.join(dir, day + '.log'), { flags: 'a' });
         st.on('error', () => { this.streams.delete(key); }); // 写失败：丢弃该流，下次重建
@@ -375,9 +388,24 @@ class SyslogServer extends EventEmitter {
         const full = path.join(hd, f);
         try { st = fs.lstatSync(full); } catch (e) { continue; }
         if (!st.isFile() || st.isSymbolicLink()) continue;
+        // 只读尾部 MAX_LINE_SEARCH 字节：文件大小由设备端灌包速度决定（可达数百 MB），
+        // 全量 readFileSync 会把主进程内存推到 OOM——原实现是「读全量再 slice 尾部」，语义一致但代价失控
         let content = '';
-        try { content = fs.readFileSync(full, 'utf8'); } catch (e) { continue; }
-        if (content.length > MAX_LINE_SEARCH) content = content.slice(-MAX_LINE_SEARCH);
+        try {
+          const fd = fs.openSync(full, 'r');
+          try {
+            const size = Math.min(st.size, MAX_LINE_SEARCH);
+            const buf = Buffer.alloc(size);
+            fs.readSync(fd, buf, 0, size, st.size - size);
+            content = buf.toString('utf8');
+            if (size < st.size) {
+              const nl = content.indexOf('\n'); // 从字节中间切开：丢弃首个可能残缺的半行
+              if (nl >= 0) content = content.slice(nl + 1);
+            }
+          } finally {
+            try { fs.closeSync(fd); } catch (e2) { /* ignore */ }
+          }
+        } catch (e) { continue; }
         const lines = content.split('\n');
         const matches = [];
         for (let i = 0; i < lines.length; i++) {

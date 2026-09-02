@@ -2736,7 +2736,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       });
       ok(rs.ok === true, '任务接受合规/SNMP 参数');
       const jobC = mm.jobs.get('d1@10.9.9.9');
-      mm._runCompliance(jobC, 1, 'telnet server enable\n#');
+      await mm._runCompliance(jobC, jobC.gen, 'telnet server enable\n#'); // 巡检经 RegexLab 工作线程执行（异步）
       ok(comps.length === 1 && comps[0].ok === false && comps[0].failed === 2 && comps[0].total === 2,
         '合规巡检违规触发事件（必须NTP 缺失 + 禁Telnet 命中，failed=2）');
       ok(comps[0].items[0].name === '必须NTP' && comps[0].items[0].line === '未找到匹配行'
@@ -3964,6 +3964,212 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     try { us.close(); } catch (e) { /* ignore */ }
     fs.rmSync(tmpBk, { recursive: true, force: true });
     fs.rmSync(tmpSvc, { recursive: true, force: true });
+  }
+
+  /* ================= 安全修复回归（安全审查 2026-09-02） ================= */
+  console.log('== 安全修复回归 ==');
+  {
+    const dgram = require('dgram');
+    const net = require('net');
+    const { RegexLab } = require(path.join(root, 'js', 'regex-lab.js'));
+    const { ShellManager } = require(path.join(root, 'js', 'shell.js'));
+    const { resolveWithin } = require(path.join(root, 'js', 'svc-ftp.js'));
+    const { FtpServer } = require(path.join(root, 'js', 'svc-ftp.js'));
+    const { SyslogServer, parseSyslogMsg } = require(path.join(root, 'js', 'svc-syslog.js'));
+    const { TftpServer } = require(path.join(root, 'js', 'svc-tftp.js'));
+    const { MonitorManager, compileComplianceRules, snmpGet, OID_SYSDESCR } = require(path.join(root, 'js', 'monitor.js'));
+    const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
+    const waitUntil = async (fn, ms = 3000, step = 60) => { const t0 = Date.now(); for (;;) { let v; try { v = fn(); } catch (e) { v = false; } if (v) return true; if (Date.now() - t0 > ms) return false; await waitMs(step); } };
+    const tmpSec = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-sec-'));
+    const tmpdir2 = (p) => path.join(tmpSec, p);
+
+    /* ---- M1 RegexLab：工作线程超时执行 + 拉黑 ---- */
+    {
+      const lab = new RegexLab({ timeoutMs: 900 });
+      const evil = '(a|aa)+$';
+      const res = await lab.run([
+        { pattern: evil, op: 'test', text: 'a'.repeat(40) + 'b' },
+        { pattern: 'ntp', op: 'test', text: 'ntp-service enable' },
+        { pattern: 'err', flags: 'i', op: 'scan', lines: ['ok', 'ERR line'], maxHits: 5 }
+      ]);
+      ok(res[0].blocked === true && res[0].hit === false, 'RegexLab：灾难回溯模式被超时处决并拉黑（主进程不阻塞）');
+      ok(res[1].ok === true && res[1].hit === true, 'RegexLab：正常模式正常执行');
+      ok(res[2].ok === true && res[2].hits.length === 1, 'RegexLab：scan 逐行扫描命中');
+      ok(lab.isBlocked(evil), 'RegexLab：黑名单记录该模式');
+      const res2 = await lab.run([{ pattern: evil, op: 'test', text: 'ab' }]);
+      ok(res2[0].blocked === true && res2[0].ok === false, 'RegexLab：已拉黑模式直接标记，不再执行');
+    }
+    /* ---- M1 扩展启发式：(a?)+ / (a|aa)* 形态编译期拒绝 ---- */
+    ok(compileComplianceRules([
+      { id: 'e1', name: 'evil1', pattern: '(a?)+x' },
+      { id: 'e2', name: 'evil2', pattern: '(a|aa)*b' },
+      { id: 'ok1', name: 'ok', pattern: '\\bntp\\b' }
+    ]).map(r => r.id).join(',') === 'ok1', '合规编译：可选/交替嵌套量词形态被拒');
+
+    /* ---- M2/L4 monitor：凭据打码 ---- */
+    {
+      const stubShell = new (require('events').EventEmitter)();
+      const mm3 = new MonitorManager(stubShell, tmpdir2('mlog'), tmpdir2('mtrust.json'));
+      const job3 = mm3._newJob({ key: 'k1@h', deviceId: 'k1', name: 'k1', protocol: 'ssh', host: 'h', port: 22, username: 'u', password: 'MYPASS3', commands: ['c'], alerts: [] });
+      ok(mm3._maskSecrets(job3, 'echo MYPASS3 done') === 'echo ****** done', '监控日志：设备回显密码写日志前打码');
+      ok(mm3._maskSecrets(job3, 'normal line') === 'normal line', '监控日志：无凭据行原样保留');
+    }
+
+    /* ---- M3 syslog：msg 内嵌换行折叠（防日志行注入） ---- */
+    {
+      const ent = parseSyslogMsg('<134>Sep  1 10:00:00 r1 admin login from 1.1.1.1\n2026-09-01 10:00:00 [info] FORGED LINE', '10.0.0.9');
+      ok(ent.msg.indexOf('\n') < 0 && ent.msg.indexOf('FORGED LINE') >= 0 && ent.msg.indexOf('\r') < 0, 'syslog：msg 内嵌 CR/LF 折叠为空格（无法注入第二行）');
+    }
+
+    /* ---- M5 syslog：超限大文件只读尾部仍可检索 ---- */
+    {
+      const sdir = tmpdir2('slog');
+      const ss2 = new SyslogServer({ baseDir: sdir });
+      const big = path.join(sdir, 'host1', '2026-09-03.log');
+      fs.mkdirSync(path.dirname(big), { recursive: true });
+      const pad = 'x'.repeat(100) + '\n';
+      const tail = 'Sep  1 10:00:00 r1 SPECIALNEEDLE found\n';
+      const body = pad.repeat(Math.ceil((4.5 * 1024 * 1024 - tail.length) / pad.length));
+      fs.writeFileSync(big, body + tail, 'utf8');
+      const r = ss2.search({ keyword: 'SPECIALNEEDLE' });
+      ok(r.ok && r.total === 1 && r.items.length === 1 && r.items[0].host === 'host1', 'syslog 检索：4.5MB 大文件尾部读取仍命中（不再全量读入内存）');
+      fs.rmSync(sdir, { recursive: true, force: true });
+    }
+
+    /* ---- M9 FTP：来源 IP 认证失败封禁 ---- */
+    {
+      const froot2 = tmpdir2('ftpban');
+      const fsrv2 = new FtpServer({ rootDir: froot2 });
+      for (let i = 0; i < 15; i++) fsrv2._noteAuthFail('10.6.6.6');
+      ok(fsrv2._isBanned('10.6.6.6') === true, 'FTP：认证失败窗口内累计 15 次封禁来源 IP');
+      ok(fsrv2._isBanned('10.6.6.7') === false, 'FTP：未达阈值的其它 IP 不受影响');
+      fsrv2.bans.set('10.6.6.8', Date.now() - 1000);
+      ok(fsrv2._isBanned('10.6.6.8') === false, 'FTP：封禁到期自动解除');
+      fs.rmSync(froot2, { recursive: true, force: true });
+    }
+
+    /* ---- L13 FTP：resolveWithin 控制字符 / 尾部点号 ---- */
+    {
+      const rwRoot = tmpdir2('rw');
+      fs.mkdirSync(rwRoot, { recursive: true });
+      ok(resolveWithin(rwRoot, 'a\rb.cfg') === null && resolveWithin(rwRoot, 'a\x01b.cfg') === null, 'FTP 路径：控制字符拒收（防 Linux 怪文件名 + LIST 注入裸 CR）');
+      const dotName = resolveWithin(rwRoot, 'file.cfg..');
+      ok(dotName != null && dotName.endsWith('file.cfg'), 'FTP 路径：尾部点号剥除（与 Win32 规范化一致防静默碰撞）');
+      ok(resolveWithin(rwRoot, '...') === null, 'FTP 路径：纯点号段拒收');
+      fs.rmSync(rwRoot, { recursive: true, force: true });
+    }
+
+    /* ---- L15 TFTP：单来源 IP 会话配额 ---- */
+    {
+      const troot2 = tmpdir2('tftpquota');
+      const tsrv2 = new TftpServer({ rootDir: troot2, maxSessions: 8, maxSessionsPerIp: 1 });
+      ok((await tsrv2.start(0)).ok, 'TFTP 启动（配额测试）');
+      const sendWrq = () => new Promise((res, rej) => {
+        const s = dgram.createSocket('udp4');
+        const t = setTimeout(() => rej(new Error('TFTP 应答超时')), 3000);
+        s.on('message', (m) => { clearTimeout(t); s.close(); res(m); });
+        s.bind(0, () => s.send(Buffer.concat([Buffer.from([0, 2]), Buffer.from('perip' + Math.random() + '.cfg\0octet\0')]), tsrv2.port, '127.0.0.1'));
+      });
+      const first = await sendWrq();
+      ok(first.length >= 4 && (first.readUInt16BE(0) === 4 || first.readUInt16BE(0) === 6), 'TFTP：首个 WRQ 正常应答');
+      const second = await sendWrq();
+      ok(second.length >= 5 && second.readUInt16BE(0) === 5 && second.readUInt16BE(2) === 4, 'TFTP：同源 IP 第二个会话被拒（ERROR 4 配额）');
+      await tsrv2.stop();
+      fs.rmSync(troot2, { recursive: true, force: true });
+    }
+
+    /* ---- M8 SNMP：响应来源校验 ---- */
+    {
+      const tlv = (tag, body) => Buffer.concat([Buffer.from([tag, body.length]), body]);
+      const val = Buffer.from('fake-agent', 'utf8');
+      const vb = tlv(0x30, Buffer.concat([tlv(0x06, Buffer.from([43, 6, 1, 2, 1, 1, 1, 0])), tlv(0x04, val)]));
+      const mkResp = (ridBytes, community) => tlv(0x30, Buffer.concat([
+        tlv(0x02, Buffer.from([1])),
+        tlv(0x04, Buffer.from(community, 'utf8')),
+        tlv(0xa2, Buffer.concat([tlv(0x02, ridBytes), tlv(0x02, Buffer.from([0])), tlv(0x02, Buffer.from([0])), tlv(0x30, vb)]))
+      ]));
+      const agent = dgram.createSocket('udp4');
+      const rd = (buf, p) => ({ body: buf.subarray(p + 2, p + 2 + buf[p + 1]), next: p + 2 + buf[p + 1] });
+      let spoofSock = null;
+      try {
+        spoofSock = dgram.createSocket('udp4');
+        await new Promise((res, rej) => { spoofSock.once('error', rej); spoofSock.bind(0, '127.0.0.2', res); });
+      } catch (e) { try { if (spoofSock) spoofSock.close(); } catch (e2) { /* ignore */ } spoofSock = null; }
+      agent.on('message', (msg, rinfo) => {
+        const top = rd(msg, 0);
+        const f2 = rd(top.body, rd(top.body, 0).next);
+        const reqRid = rd(rd(top.body, f2.next).body, 0).body;
+        const resp = mkResp(reqRid, 'public');
+        try {
+          if (agent.spoof && spoofSock) spoofSock.send(resp, rinfo.port, '127.0.0.1'); // 从绑定 127.0.0.2 的套接字发出：来源非请求目标
+          else agent.send(resp, rinfo.port, rinfo.address);
+        } catch (e) { /* 平台不支持 127.0.0.2 时忽略 */ }
+      });
+      await new Promise((res) => agent.bind(0, '127.0.0.1', res));
+      const aport = agent.address().port;
+      // 正向对照：来源正确的响应被采信
+      const rOk = await snmpGet('127.0.0.1', 'public', [OID_SYSDESCR], 2000, aport);
+      ok(rOk.ok === true, 'SNMP 来源校验：目标本体的响应被采信（正向对照）');
+      // 负向：rid/community 全部合法但来源非请求目标 → 拒收直至超时
+      if (spoofSock) {
+        agent.spoof = true;
+        const rSpoof = await snmpGet('127.0.0.1', 'public', [OID_SYSDESCR], 700, aport);
+        ok(rSpoof.ok === false, 'SNMP 来源校验：rid/community 合法但来源非目标 IP 的抢答包被拒收');
+      } else {
+        ok(true, 'SNMP 来源校验：平台不支持绑定 127.0.0.2，负向用例跳过');
+      }
+      agent.close();
+      if (spoofSock) spoofSock.close();
+    }
+
+    /* ---- L3/L4 shell：host 控制字符清洗 + 审计日志密码打码 ---- */
+    {
+      // L3：host 内嵌换行被剔除，审计日志头不再能注入伪造行
+      const logDir1 = tmpdir2('shlog1');
+      const sm1 = new ShellManager({ logDir: logDir1 });
+      sm1.connect({ protocol: 'telnet', host: 'host\nINJ', port: 1, username: 'op', timeout: 300 });
+      await waitUntil(() => sm1.sessions.size === 0, 3000); // 连接失败（拒连）即收尾
+      await waitMs(200);
+      const d1 = path.join(logDir1, fs.readdirSync(logDir1)[0]);
+      const day1 = path.join(d1, fs.readdirSync(d1)[0]);
+      const log1 = fs.readFileSync(path.join(day1, fs.readdirSync(day1)[0]), 'utf8');
+      ok(log1.indexOf('\nINJ') < 0 && log1.indexOf('hostINJ') >= 0, 'Shell 审计日志：host 内嵌换行已剔除（无法注入伪造审计行）');
+      // L4：设备回显密码写日志前打码
+      const logDir2 = tmpdir2('shlog2');
+      const fake = net.createServer((s) => {
+        s.write('Password: ');
+        s.on('data', (d) => { s.write('echo:' + d.toString()); });
+      });
+      await new Promise((res) => fake.listen(0, '127.0.0.1', res));
+      const sm2 = new ShellManager({ logDir: logDir2 });
+      sm2.connect({ protocol: 'telnet', host: '127.0.0.1', port: fake.address().port, username: 'op1', password: 'SECRETPW1', autoLogin: true, timeout: 3000 });
+      await waitMs(1000); // 等自动登录提交与设备回显写入日志
+      sm2.closeAll();
+      await waitMs(300);
+      const d2 = path.join(logDir2, fs.readdirSync(logDir2)[0]);
+      const day2 = path.join(d2, fs.readdirSync(d2)[0]);
+      const log2 = fs.readFileSync(path.join(day2, fs.readdirSync(day2)[0]), 'utf8');
+      ok(log2.indexOf('SECRETPW1') < 0 && log2.indexOf('******') >= 0, 'Shell 审计日志：设备回显的密码已打码（恶意服务端无法借日志扩散凭据）');
+      fake.close();
+      fs.rmSync(tmpSec, { recursive: true, force: true });
+    }
+
+    /* ---- L7/L10 util：类型数据原型键 + 工程字段限长 ---- */
+    {
+      // util.js 在 vm 沙箱内执行：原型断言用「in」判别（跨 realm 可比），不用宿主 Object.prototype 恒等比较
+      const rProto = U.sanitizeTypeData(JSON.parse('{"__proto__":{"c1":"#ff0000","c2":"#ff0000","stroke":"#ff0000"}}'), []);
+      ok(Object.keys(rProto.overrides).length === 0 && !('c1' in rProto.overrides), '类型清洗：__proto__ 键被丢弃（不再触发改写 overrides 原型）');
+      const rCt = U.sanitizeTypeData({}, [{ key: '__proto__', label: 'x', c1: '#ff0000' }, { key: 'ok1', label: 'y', c1: '#ff0000' }]);
+      ok(rCt.customTypes.length === 2 && rCt.customTypes.every(t => t.key !== '__proto__'), '类型清洗：自定义类型原型键名被拒（自动重生成为安全 key）');
+      const g = U.sanitizeGraph(
+        [{ id: 'n1', name: 'dev1', note: 'a'.repeat(3000) }],
+        [{ a: 'n1', b: 'n1', aIf: 'x'.repeat(100), note: 'n'.repeat(1000) }],
+        [{ id: 't1', text: 't'.repeat(20000) }]
+      );
+      ok(g.nodes[0].note.length === 2000, '工程清洗：设备备注限长 2000');
+      ok(g.links[0].aIf.length === 64 && g.links[0].note.length === 500, '工程清洗：接口名/连线备注限长');
+      ok(g.texts[0].text.length === 10000, '工程清洗：文本框限长 10000');
+    }
   }
 })().then(() => {
   console.log('');

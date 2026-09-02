@@ -19,10 +19,16 @@ const { EventEmitter } = require('events');
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const DATA_CONN_TIMEOUT_MS = 30000; // 数据通道建立等待上限
 const MAX_CMD_LEN = 2048;           // 单条命令长度上限（防滥用）
+const MAX_WRITE_BACKLOG = 1024 * 1024; // 控制通道写积压上限（客户端只发不读时防用户态缓冲无界膨胀）
+const MAX_CMD_PER_SEC = 300;        // 单连接命令速率上限（防命令洪泛以响应行放大内存）
+const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000; // 认证失败计数窗口
+const AUTH_FAIL_BAN_AFTER = 15;     // 窗口内失败达到该次数即封禁来源 IP
+const BAN_MS = 10 * 60 * 1000;      // 封禁时长
+const MAX_BANS = 500;               // 封禁表上限（防海量伪造源 IP 撑表）
 
 const pad2 = (n) => String(n).padStart(2, '0');
 
-/** 虚拟路径 → rootDir 内的真实路径。非法（穿越/盘符/分隔符注入）返回 null */
+/** 虚拟路径 → rootDir 内的真实路径。非法（穿越/盘符/分隔符注入/控制字符）返回 null */
 function resolveWithin(rootDir, vpath) {
   let p = String(vpath == null ? '' : vpath).trim();
   // RFC 959 允许 PWD/CWD 回复带引号，个别客户端 STOR 参数也可能带引号：剥掉
@@ -32,7 +38,12 @@ function resolveWithin(rootDir, vpath) {
     const s = raw.trim();
     if (!s || s === '.') continue;
     if (s === '..' || s.indexOf('\\') >= 0 || s.indexOf(':') >= 0 || s.indexOf('\0') >= 0) return null;
-    segs.push(s);
+    // 控制字符拒收（Windows CreateFileW 拒绝，Linux 下会创建出含 CR 等的怪文件名并经 LIST 注入裸 CR）；
+    // 尾部点/空格剥除（Win32 路径规范化会吞掉，导致与预期文件名静默碰撞）
+    if (/[\u0000-\u001f\u007f]/.test(s)) return null;
+    const clean = s.replace(/[. ]+$/, '');
+    if (!clean) return null;
+    segs.push(clean);
   }
   const root = path.resolve(rootDir);
   const full = segs.length ? path.resolve(root, ...segs) : root;
@@ -66,6 +77,8 @@ class FtpConnection {
     this.closed = false;
     this.idleTimer = null;
     this.lastCmdAt = Date.now();
+    this._rateWin = Date.now();    // 命令速率窗口
+    this._rateCount = 0;
   }
 
   reply(a, b) {
@@ -114,6 +127,12 @@ class FtpConnection {
       const line = this.buf.slice(0, idx).toString('utf8').replace(/\r$/, '');
       this.buf = this.buf.slice(idx + 1);
       if (line.length > MAX_CMD_LEN) { this.reply('500 命令过长。'); continue; }
+      // 命令洪泛防护：每条命令至少回一行（约 10 倍放大），客户端只发不读时内核缓冲满后
+      // Node 用户态写缓冲无界增长——写积压超限或速率超限直接断开，不给回复
+      if (this.sock.writableLength > MAX_WRITE_BACKLOG) { this.destroy(); return; }
+      const now = Date.now();
+      if (now - this._rateWin >= 1000) { this._rateWin = now; this._rateCount = 0; }
+      if (++this._rateCount > MAX_CMD_PER_SEC) { this.destroy(); return; }
       this._dispatch(line);
       if (this.closed) return;
     }
@@ -185,6 +204,9 @@ class FtpConnection {
       this.failCount = 0;
       this.reply('230 登录成功。');
     } else {
+      // 失败计数既按连接（5 次断开）也按来源 IP（窗口内累计 15 次封禁 10 分钟）：重连绕过连接级计数时仍有 IP 级防线
+      const peerIp = (this.sock.remoteAddress || '').replace(/^::ffff:/, '');
+      this.server._noteAuthFail(peerIp);
       if (++this.failCount >= 5) { this.reply('530 登录失败次数过多。'); this.destroy(); return; }
       this.reply('530 登录失败：用户名或密码错误。');
     }
@@ -227,7 +249,12 @@ class FtpConnection {
     const srv = net.createServer();
     this.pasvSrv = srv;
     this.pasvPending = { sock: null, resolve: null, timer: null }; // 对端连入 / STOR-RETR 消费，二者先到先得
+    const ctrlPeer = ((this.sock && this.sock.remoteAddress) || '').replace(/^::ffff:/, '');
     srv.on('connection', (s) => {
+      // 数据连接必须与控制连接同源：第三方在 PASV 窗口内（最长 30s）抢先连入可窃取下载内容
+      // 或顶替上传注入伪造配置。不符直接销毁并继续监听，等真实对端（直至超时/关闭）
+      const remote = ((s.remoteAddress || '')).replace(/^::ffff:/, '');
+      if (!ctrlPeer || !remote || remote !== ctrlPeer) { try { s.destroy(); } catch (e) { /* ignore */ } return; }
       try { srv.close(); } catch (e) { /* ignore */ }
       this.pasvSrv = null;
       const p = this.pasvPending;
@@ -378,6 +405,12 @@ class FtpConnection {
         if (hadErr) { bail(426, '数据连接异常关闭。'); return; }
         ws.end(() => {
           if (failed) return;
+          // 覆盖语义复核：存在性检查在 STOR 时执行，rename 无条件覆盖——传输窗口内被并发
+          // 创建的同名文件会被静默顶替。复核不能消除 TOCTOU，但把窗口缩到毫秒级
+          if (!this.server.overwrite) {
+            try { fs.lstatSync(full); bail(550, '文件已存在（未开启覆盖）。'); return; }
+            catch (e) { /* 不存在：继续 rename */ }
+          }
           try { fs.renameSync(tmp, full); } catch (e) { bail(451, '写入目标文件失败。'); return; }
           this.server.stats.rxFiles++;
           this.server.stats.rxBytes += size;
@@ -519,8 +552,35 @@ class FtpServer extends EventEmitter {
     this.running = false;
     this.lastError = '';
     this.conns = new Set();
+    this.fails = new Map(); // ip -> { count, first }（认证失败计数，窗口内累计）
+    this.bans = new Map();  // ip -> 封禁截止时间戳
     this.stats = { rxFiles: 0, rxBytes: 0, txFiles: 0, denied: 0 };
     try { fs.mkdirSync(this.rootDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
+  }
+
+  /** 认证失败按来源 IP 计数：窗口内累计达阈值即封禁一段时间（重连绕过单连接 5 次上限的防线） */
+  _noteAuthFail(ip) {
+    if (!ip) return;
+    const now = Date.now();
+    let rec = this.fails.get(ip);
+    if (!rec || now - rec.first > AUTH_FAIL_WINDOW_MS) { rec = { count: 0, first: now }; }
+    rec.count++;
+    this.fails.set(ip, rec);
+    if (rec.count >= AUTH_FAIL_BAN_AFTER) {
+      this.fails.delete(ip);
+      if (this.bans.size >= MAX_BANS) { // 防海量伪造源 IP 撑表：清掉最早的封禁
+        const firstKey = this.bans.keys().next().value;
+        if (firstKey != null) this.bans.delete(firstKey);
+      }
+      this.bans.set(ip, now + BAN_MS);
+    }
+  }
+  _isBanned(ip) {
+    if (!ip) return false;
+    const until = this.bans.get(ip);
+    if (until == null) return false;
+    if (until < Date.now()) { this.bans.delete(ip); return false; }
+    return true;
   }
 
   /** 认证与限制项热更新（不重启监听） */
@@ -554,6 +614,7 @@ class FtpServer extends EventEmitter {
         resolve({ ok: false, error: this._bindHint(this.lastError) });
       };
       srv.once('error', fail);
+      srv.maxConnections = Math.max(4, this.maxSessions + 16); // 内核层限流：超限连接排队而非耗尽句柄
       srv.listen(port || 0, '0.0.0.0', () => {
         if (settled) return;
         settled = true;
@@ -562,6 +623,12 @@ class FtpServer extends EventEmitter {
         this.running = true;
         this.lastError = '';
         srv.on('connection', (socket) => {
+          const peerIp = (socket.remoteAddress || '').replace(/^::ffff:/, '');
+          if (this._isBanned(peerIp)) {
+            this.stats.denied++;
+            try { socket.end('421 登录失败次数过多，来源已被临时拒绝。\r\n'); } catch (e) { /* ignore */ }
+            return;
+          }
           if (this.conns.size >= this.maxSessions) {
             this.stats.denied++;
             try { socket.end('421 连接数已达上限。\r\n'); } catch (e) { /* ignore */ }
@@ -571,7 +638,14 @@ class FtpServer extends EventEmitter {
           this.conns.add(conn);
           conn.start();
         });
-        srv.on('error', (err) => { this.lastError = String(err && err.message || err); this.stop(); });
+        // EMFILE/ENFILE（句柄耗尽）不整站停摆：句柄是进程级的，stop() 会拖垮使用方对其余
+        // 服务的管理；只记错误，等连接自然回收后自愈
+        srv.on('error', (err) => {
+          this.lastError = String(err && err.message || err);
+          const code = err && err.code;
+          if (code === 'EMFILE' || code === 'ENFILE') return;
+          this.stop();
+        });
         srv.on('close', () => { this.running = false; });
         resolve({ ok: true, port: this.port });
       });

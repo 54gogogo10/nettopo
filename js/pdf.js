@@ -44,9 +44,9 @@ function buildSvgImage(graph, opts) {
     const inside = nodes.filter(n =>
       n.x + n.w / 2 > r.x && n.x + n.w / 2 < r.x + r.w &&
       n.y + n.h / 2 > r.y && n.y + n.h / 2 < r.y + r.h).length;
-    parts.push(`<rect x="${X(r.x)}" y="${Y(r.y)}" width="${r.w}" height="${r.h}" rx="14" fill="${color}" fill-opacity="0.06"/>`);
-    parts.push(`<rect x="${X(r.x) + 0.5}" y="${Y(r.y) + 0.5}" width="${r.w - 1}" height="${r.h - 1}" rx="14" fill="none" stroke="${color}" stroke-width="1.6" stroke-dasharray="10 6"/>`);
-    parts.push(`<text x="${X(r.x) + 14}" y="${Y(r.y) + 30}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="13" font-weight="bold" fill="${color}" stroke="rgba(255,255,255,.55)" stroke-width="3" paint-order="stroke">${esc(r.name)}${inside ? ' · ' + inside + ' 台' : ''}</text>`);
+    parts.push(`<rect x="${X(r.x)}" y="${Y(r.y)}" width="${r.w}" height="${r.h}" rx="14" fill="${esc(color)}" fill-opacity="0.06"/>`);
+    parts.push(`<rect x="${X(r.x) + 0.5}" y="${Y(r.y) + 0.5}" width="${r.w - 1}" height="${r.h - 1}" rx="14" fill="none" stroke="${esc(color)}" stroke-width="1.6" stroke-dasharray="10 6"/>`);
+    parts.push(`<text x="${X(r.x) + 14}" y="${Y(r.y) + 30}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="13" font-weight="bold" fill="${esc(color)}" stroke="rgba(255,255,255,.55)" stroke-width="3" paint-order="stroke">${esc(r.name)}${inside ? ' · ' + inside + ' 台' : ''}</text>`);
   }
 
   // 连线（平行偏移；opts.ortho 时走直角折线）——坐标必须与节点一样经过 minX/minY 归一化！
@@ -56,9 +56,9 @@ function buildSvgImage(graph, opts) {
     if (!g) continue;
     if (g.pts) {
       const ptsAttr = g.pts.map(p => X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1)).join(' ');
-      parts.push(`<polyline points="${ptsAttr}" fill="none" stroke="${U.bwColor(l.bw)}" stroke-width="2"/>`);
+      parts.push(`<polyline points="${ptsAttr}" fill="none" stroke="${esc(U.bwColor(l.bw))}" stroke-width="2"/>`);
     } else {
-      parts.push(`<line x1="${X(g.x1).toFixed(1)}" y1="${Y(g.y1).toFixed(1)}" x2="${X(g.x2).toFixed(1)}" y2="${Y(g.y2).toFixed(1)}" stroke="${U.bwColor(l.bw)}" stroke-width="2"/>`);
+      parts.push(`<line x1="${X(g.x1).toFixed(1)}" y1="${Y(g.y1).toFixed(1)}" x2="${X(g.x2).toFixed(1)}" y2="${Y(g.y2).toFixed(1)}" stroke="${esc(U.bwColor(l.bw))}" stroke-width="2"/>`);
     }
   }
 
@@ -107,12 +107,12 @@ function buildSvgImage(graph, opts) {
   // 文本框（自定义字体样式）
   for (const t of (graph.texts || [])) {
     const x = X(t.x), y = Y(t.y), w = t.w || 160, h = t.h || 40;
-    if (t.bg) parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="${t.bg}"/>`);
+    if (t.bg) parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="${esc(t.bg)}"/>`);
     const anchor = t.align === 'center' ? 'middle' : (t.align === 'right' ? 'end' : 'start');
     const tx = t.align === 'center' ? x + w / 2 : (t.align === 'right' ? x + w : x + 8);
     const size = t.size || 16;
     String(t.text || '').split('\n').forEach((ln, i) => {
-      parts.push(`<text x="${tx}" y="${y + size + 6 + i * size * 1.25}" font-family="${esc(t.font || 'Microsoft YaHei')}" font-size="${size}" fill="${t.color || '#1e293b'}" font-weight="${t.bold ? '700' : '400'}" font-style="${t.italic ? 'italic' : 'normal'}" text-anchor="${anchor}">${esc(ln)}</text>`);
+      parts.push(`<text x="${tx}" y="${y + size + 6 + i * size * 1.25}" font-family="${esc(t.font || 'Microsoft YaHei')}" font-size="${size}" fill="${esc(t.color || '#1e293b')}" font-weight="${t.bold ? '700' : '400'}" font-style="${t.italic ? 'italic' : 'normal'}" text-anchor="${anchor}">${esc(ln)}</text>`);
     });
   }
 
@@ -120,7 +120,7 @@ function buildSvgImage(graph, opts) {
   for (const n of nodes) {
     const t = U.getType(n.type);
     const x = X(n.x), y = Y(n.y), w = n.w, h = n.h;
-    parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="${t.c1}" stroke="${t.stroke}" stroke-width="1.5"/>`);
+    parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="${esc(t.c1)}" stroke="${esc(t.stroke)}" stroke-width="1.5"/>`);
     const cx = x + w / 2, cy = y + h / 2;
     const hasMgmt = !!(n.mgmt || '').trim();
     // 超长设备名截断：SVG text 无裁剪直接溢出绘制，200 字符名会压盖相邻设备（画布上有 _fitName，导出同口径收敛）

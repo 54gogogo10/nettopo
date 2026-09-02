@@ -58,6 +58,12 @@ class ConfigBackupStore {
     if (!content.trim()) return { ok: false, error: '备份内容为空' };
     if (Buffer.byteLength(content, 'utf8') > MAX_BYTES) return { ok: false, error: '备份内容过大（超过 8MB）' };
     const dir = this._hostDir(device, host);
+    // 纵深：设备/主机目录若已被同机攻击者替换为符号链接，写入会跟随链接落到任意位置（读路径已查，写路径补齐）
+    const devDir = path.resolve(this.baseDir, sanitizeFilename(device));
+    for (const d of [devDir, dir]) {
+      try { if (fs.lstatSync(d).isSymbolicLink()) return { ok: false, error: '备份目录异常（符号链接）' }; }
+      catch (e) { /* 不存在则照常创建 */ }
+    }
     let tmpPath = '';
     try {
       fs.mkdirSync(dir, { recursive: true });

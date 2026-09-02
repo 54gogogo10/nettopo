@@ -2566,7 +2566,7 @@ function addNodeAt(wx, wy) {
         icon: v.icon || '',
         x: wx - U.nodeWidthForName(v.name) / 2, y: wy - U.NODE_H / 2,
         w: U.nodeWidthForName(v.name), h: U.NODE_H,
-        note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1), web: v.web.trim(),
+        note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1), web: U.normalizeWebUrl(v.web) || '',
         vlans: (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : []
       };
       node.h = U.nodeHeightFor(node);
@@ -2790,7 +2790,7 @@ function editNode(id) {
       n.type = v.type;
       n.vendor = v.vendor || '';
       n.icon = v.icon || '';
-      n.web = v.web.trim();
+      n.web = U.normalizeWebUrl(v.web) || '';
       n.model = (v.model || '').trim();
       n.osver = (v.osver || '').trim();
       n.note = v.note.trim();
@@ -4566,7 +4566,7 @@ function wire() {
         const n = state.nodes.find(x => x.id === did);
         if (!n) return;
         if (info.version && n.osver !== info.version) {
-          n.osver = info.version;
+          n.osver = String(info.version).slice(0, 64); // 钳制：恶意 SNMP 设备可回超长版本串污染图数据/localStorage
           refreshPanel();
           saveGraph();
           toast('已识别「' + n.name + '」软件版本：' + info.version);
@@ -4777,7 +4777,12 @@ function normalizeMonitorHosts(cfg) {
         probeType: h.probeType === 'icmp' ? 'icmp' : 'tcp',
         probeIntervalSec: h.probeIntervalSec != null ? h.probeIntervalSec : 30,
         probePort: h.probePort != null ? h.probePort : '',
-        alerts: Array.isArray(h.alerts) ? h.alerts.slice() : [],
+        // 告警关键字白名单重建：恶意工程可塞任意对象/超长串直通主进程正则编译——只保留字符串与 {pattern,note} 形态
+        alerts: (Array.isArray(h.alerts) ? h.alerts : []).map(a => {
+          if (typeof a === 'string') return a.slice(0, 300);
+          if (a && typeof a === 'object') return { pattern: String(a.pattern || '').slice(0, 300), note: String(a.note || '').slice(0, 300) };
+          return null;
+        }).filter(Boolean).slice(0, 32),
         backupEnabled: !!h.backupEnabled,
         complianceEnabled: !!h.complianceEnabled,
         snmpEnabled: !!h.snmpEnabled,
@@ -6401,7 +6406,7 @@ function openNetServices() {
             <div class="nsv-st" id="nsvFtpSt"></div>
             <div class="nsv-row"><label>端口</label><input type="number" id="nsvFtpPort" min="1" max="65535"/><span class="nsv-hint">标准 21</span></div>
             <div class="nsv-row"><label>用户名</label><input type="text" id="nsvFtpUser" maxlength="64" autocomplete="off"/></div>
-            <div class="nsv-row"><label>密码</label><input type="text" id="nsvFtpPass" maxlength="64" autocomplete="off"/><span class="nsv-hint">设备侧 copy 命令使用</span></div>
+            <div class="nsv-row"><label>密码</label><input type="text" id="nsvFtpPass" maxlength="64" autocomplete="off"/><span class="nsv-hint">设备侧 copy 命令使用；FTP 为明文协议，勿复用高权限口令</span></div>
             <div class="nsv-row"><label>被动端口</label><input type="text" id="nsvFtpPasv" placeholder="如 50000-50100，留空随机"/><label class="nsv-mini"><input type="checkbox" id="nsvFtpOverwrite"/>允许覆盖同名文件</label></div>
           </div>
           <div class="nsv-card">
@@ -6534,6 +6539,16 @@ function openNetServices() {
       });
     } catch (e) { /* ignore */ }
   }
+  /** 随机 FTP 口令（16 位无易混淆字符）：优先 crypto.getRandomValues */
+  function randomFtpPassword() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+    const rnd = new Uint32Array(16);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(rnd);
+    else for (let i = 0; i < rnd.length; i++) rnd[i] = Math.floor(Math.random() * 0x100000000);
+    let s = '';
+    for (const v of rnd) s += chars[v % chars.length];
+    return s;
+  }
   function buildCmdExample(ip) {
     return [
       '# 思科：推送配置到 TFTP / FTP',
@@ -6552,7 +6567,14 @@ function openNetServices() {
     const btn = ov.querySelector('[data-act=apply]');
     btn.disabled = true;
     try {
-      const r = await window.topoNetSvc.setConfig(readForm());
+      const form = readForm();
+      // 默认口令防线：FTP 面向全网段监听，开启服务仍用默认口令 nettopo（或空）时自动生成随机口令并回填表单
+      if (form.ftp.enabled && (!form.ftp.password || form.ftp.password === 'nettopo')) {
+        form.ftp.password = randomFtpPassword();
+        ov.querySelector('#nsvFtpPass').value = form.ftp.password;
+        toast('FTP 已自动生成随机口令，请在设备侧 copy 命令中使用新口令');
+      }
+      const r = await window.topoNetSvc.setConfig(form);
       if (r && r.ok) {
         st = r.status;
         renderStatus();

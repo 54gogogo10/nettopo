@@ -55,7 +55,9 @@ class ShellManager extends EventEmitter {
   connect(opts) {
     opts = opts || {};
     const protocol = String(opts.protocol || 'ssh').toLowerCase();
-    const host = String(opts.host || '').trim();
+    // host/username 会进审计日志头：剔除控制字符，防内嵌换行在日志中注入伪造的「会话开始/命令」行
+    const cleanLog = (s) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]/g, '');
+    const host = cleanLog(opts.host).trim();
     if (!host) return { ok: false, error: '未填写主机地址' };
     let port = parseInt(opts.port, 10);
     if (!(port >= 1)) port = protocol === 'telnet' ? 23 : 22;
@@ -69,9 +71,9 @@ class ShellManager extends EventEmitter {
       if (!(jPort > 0)) jPort = 22;
       if (!(jPort <= 65535)) jPort = 22;
       jump = {
-        host: String(opts.jump.host).trim(),
+        host: cleanLog(opts.jump.host).trim(),
         port: jPort,
-        username: String(opts.jump.username || '').trim() || 'admin',
+        username: cleanLog(opts.jump.username).trim() || 'admin',
         password: String(opts.jump.password || '').slice(0, 1024),
         privateKey: typeof opts.jump.privateKey === 'string' ? opts.jump.privateKey.trim() : '',
         keyPassphrase: typeof opts.jump.keyPassphrase === 'string' ? opts.jump.keyPassphrase.slice(0, 1024) : ''
@@ -82,7 +84,7 @@ class ShellManager extends EventEmitter {
       // 会话归属：'ui'（Web Shell 窗口，断开后可用 reconnect 复用 sid）或 'monitor'（监控/备份，
       // 断开后总是全新 connect 重建）。closeAll('monitor') 借此只关 UI 会话，不误杀后台监控连接
       owner: opts.owner === 'monitor' ? 'monitor' : 'ui',
-      username: String(opts.username || '').trim() || 'admin',
+      username: cleanLog(opts.username).trim().slice(0, 128) || 'admin',
       password: String(opts.password || ''),
       cols: Math.max(parseInt(opts.cols, 10) || 80, 10),
       rows: Math.max(parseInt(opts.rows, 10) || 24, 5),
@@ -168,7 +170,10 @@ class ShellManager extends EventEmitter {
       let fname = hostSan + '_' + base.port + '_' + logStamp() + '.log';
       let seq = 0;
       while (fs.existsSync(path.join(dateDir, fname))) { seq++; fname = hostSan + '_' + base.port + '_' + logStamp() + '_' + seq + '.log'; }
-      const rec = { stream: null, hostSan, port: base.port, bytes: 0, seq: 0 };
+      const rec = { stream: null, hostSan, port: base.port, bytes: 0, seq: 0,
+        // 凭据掩码：恶意服务端可在认证后回显密码，原样留痕会把凭据写进日志文件——写前打码
+        masks: [base.password, base.keyPassphrase, base.jump && base.jump.password]
+          .filter(s => typeof s === 'string' && s.length >= 3) };
       rec.stream = this._makeLogStream(rec, dateDir, fname);
       rec.stream.write('[' + logStamp() + '] ===== 会话开始 ' + String(base.protocol).toUpperCase() + ' ' + base.host + ':' + base.port + ' 用户名: ' + base.username + ' =====\r\n');
       return rec;
@@ -186,7 +191,11 @@ class ShellManager extends EventEmitter {
         rec.stream.end();
         rec.stream = this._makeLogStream(rec, dateDir, fname);
       }
-      rec.stream.write(typeof data === 'string' ? data : Buffer.from(data)); // 原样留痕（设备回显即含用户命令）
+      let out = data;
+      if (typeof out === 'string' && rec.masks && rec.masks.length) {
+        for (const p of rec.masks) { if (out.indexOf(p) >= 0) out = out.split(p).join('******'); }
+      }
+      rec.stream.write(typeof out === 'string' ? out : Buffer.from(out)); // 原样留痕（设备回显即含用户命令）
     } catch (e) { try { rec.stream = null; } catch (e2) { /* ignore */ } }
   }
   _closeSessionLog(rec, reason) {
