@@ -1532,6 +1532,9 @@ console.log('== 性能：复杂拓扑（核心-汇聚-接入-终端 分层网络
 
   let t, r;
   const report = [];
+  // CI 共享 runner 慢且受邻机噪声影响（本地 3.4s 的力导向布局在 windows runner 上可达 13.6s）：
+  // 时序断言只用于拦截灾难性性能回归，按环境放宽预算倍数，本地保持原始严格预算
+  const CI_FACTOR = process.env.GITHUB_ACTIONS === 'true' ? 4 : 1;
   const measure = (label, fn, minOk, okLabel, budget) => {
     const s = Date.now();
     let val;
@@ -1539,7 +1542,7 @@ console.log('== 性能：复杂拓扑（核心-汇聚-接入-终端 分层网络
     const cost = Date.now() - s;
     report.push(label + ' ' + cost + 'ms');
     ok(minOk(val), label + ' 结果有效（' + cost + 'ms）');
-    if (budget != null) ok(cost < budget, label + ' 耗时 < ' + budget + 'ms（实际 ' + cost + 'ms）');
+    if (budget != null) ok(cost < budget * CI_FACTOR, label + ' 耗时 < ' + (budget * CI_FACTOR) + 'ms（实际 ' + cost + 'ms）' + (CI_FACTOR > 1 ? '（CI 共享 runner 预算放宽 ×4）' : ''));
   };
 
   measure('子网分组', () => U.subnetGroups(nodes, links, {}), (v) => Array.isArray(v) && v.length >= 60, null, 5000);
