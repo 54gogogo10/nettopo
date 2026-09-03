@@ -199,5 +199,5 @@ python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备�
 - 桌面版内置在线升级（源：GitHub Releases `54gogogo10/nettopo`）：启动 30 秒后静默检查一次，或在「帮助 → 关于 → 检查更新」手动触发；检查/下载/SHA256 校验全部在主进程完成
 - 发现新版本后在弹窗中一键下载校验，确认后程序自动重启完成升级（便携版 exe 运行中允许改名换入，旧版保留为 `.old-<时间戳>` 供回退，新版启动后自动清理）；程序目录不可写时降级为「打开已下载的升级包位置」手动安装
 - 升级包必须通过随发布提供的 `.sha256` 清单校验才会被安装（防下载不完整/传输篡改）；版本号无法解析时不自动升级，只引导到发布页人工确认
-- 发布新版约定：`npm run build` 会自动升版本并生成 `dist/portable/*-portable.exe` 与同名 `.sha256`；在 GitHub 创建 Release，tag 使用 `v1.0.0-<YYYYMMDD><字母>`（与 package.json 版本一致），把 exe 与 `.sha256` 两个文件都上传为资产，客户端即可检测并升级
+- 发布新版约定：`npm run build` 会自动升版本并生成 `dist/portable/*-portable.exe` 与同名 `.sha256`；在 GitHub 创建 Release，tag 使用 `v1.0.0-<YYYYMMDD><字母>`（与 package.json 版本一致），把 exe 与 `.sha256` 两个文件都上传为资产，客户端即可检测并升级。注意 GitHub 会剥离资产名中的非 ASCII 字符（中文前缀会被去掉），上传前先把两个文件复制为 ASCII 前缀名（如 `NetTopo-1.0.0-<YYYYMMDD><字母>-portable.exe`）
 - 浏览器版无在线升级（`index.html` 直接打开使用）
