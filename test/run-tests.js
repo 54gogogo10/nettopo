@@ -40,6 +40,14 @@ function pythonHas(mods) {
 /** 缺依赖时的跳过断言（计通过，但名字注明原因，便于与本机全量校验区分） */
 const okSkip = (name, mods) => ok(true, name + '（跳过：缺 python 模块 ' + (Array.isArray(mods) ? mods.join('/') : mods) + '，CI 环境会安装后全量校验）');
 
+/** 测试临时目录清理：慷慨重试后尽力而为。Windows（尤其 CI runner 的 Defender 实时扫描）
+ *  会在写入后数秒内扣住文件句柄，unlink 报 EPERM/EBUSY/ENOTEMPTY——清理失败不代表测试
+ *  失败，剩余文件交由操作系统临时目录回收。 */
+function rmTmp(p) {
+  try { fs.rmSync(p, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
+  catch (e) { console.log('  （提示：临时目录延迟清理，交由系统回收：' + String(p).slice(-60) + '）'); }
+}
+
 console.log('== util ==');
 eq(U.escXml('a<b&c"d'), 'a&lt;b&amp;c&quot;d', 'XML 转义');
 eq(U.escXml('多\n行'), '多&#10;行', 'XML 换行转义');
@@ -1583,7 +1591,7 @@ console.log('== 备份管理（本地备份库） ==');
   const { BackupStore } = require(path.join(root, 'js', 'backup-store.js'));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-bk-'));
   const B = new BackupStore(tmp);
-  const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const cleanup = () => { try { rmTmp(tmp); } catch (e) { /* ignore */ } };
 
   ok(BackupStore.validName('自动备份_20260813_151020.nettopo'), '文件名白名单：合法中文名');
   ok(BackupStore.validName('备份_20260813_151020_1.nettopo'), '文件名白名单：同秒序号后缀');
@@ -1651,7 +1659,7 @@ console.log('== 备份管理（本地备份库） ==');
   ok(fs.existsSync(path.join(tmp, 'random.txt')), '清空不误删无关文件');
 
   cleanup();
-  try { fs.rmSync(tmp + '-small', { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  try { rmTmp(tmp + '-small'); } catch (e) { /* ignore */ }
 }
 
 /* ================= 回归测试（代码审查修复项） ================= */
@@ -2205,7 +2213,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const contentO = nameO ? storeO.read(devKey, jobO.host, nameO).content : '';
       eq(contentO, 'sysname SW1\nreturn', '分包回显组包整行剔除+登录横幅/用户名回显不落盘（实际：' + JSON.stringify(contentO) + '）');
       ok(writes.some(w => String(w).indexOf('display current-configuration') >= 0), '备份命令确实已下发');
-      fs.rmSync(tmpO, { recursive: true, force: true });
+      rmTmp(tmpO);
     }
     // 11) own 独立备份会话（SSH）：回显被 SSH 通道数据切碎/CRLF 跨块切断/MOTD 与提示符重印不落盘
     {
@@ -2260,7 +2268,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!!nameS, 'own 备份（SSH）已保存');
       const contentS = nameS ? storeS.read(devKeyS, jobS.host, nameS).content : '';
       eq(contentS, 'sysname R1\nreturn', 'SSH 碎片回显/CRLF 跨块切断组包整行剔除，MOTD/提示符重印不落盘（实际：' + JSON.stringify(contentS) + '）');
-      fs.rmSync(tmpS, { recursive: true, force: true });
+      rmTmp(tmpS);
     }
     // 12) shared 复用监控会话（SSH）：上一轮提示符残段 + 备份命令碎片回显不落盘
     {
@@ -2304,7 +2312,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!!nameH, 'shared 备份（SSH）已保存');
       const contentH = nameH ? storeH.read(devKeyH, jobH.host, nameH).content : '';
       eq(contentH, 'sysname R1\nreturn', 'SSH shared 会话：碎片回显组包剔除+上一轮提示符残段不落盘（实际：' + JSON.stringify(contentH) + '）');
-      fs.rmSync(tmpH, { recursive: true, force: true });
+      rmTmp(tmpH);
     }
     // 13) shared 备份排空：上一条监控命令输出仍在流动（More/尾部行）不混入；排空后迟到的监控/连接时命令回显行被过滤名单剔除
     {
@@ -2351,7 +2359,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!!nameD, 'shared 备份排空场景已保存');
       const contentD = nameD ? storeD.read(devKeyD, jobD.host, nameD).content : '';
       eq(contentD, 'sysname HW\nreturn', '监控输出尾部/More/迟到命令回显均不混入备份（实际：' + JSON.stringify(contentD) + '）');
-      fs.rmSync(tmpD, { recursive: true, force: true });
+      rmTmp(tmpD);
     }
 
     /* ================= 回归（R4 审查修复项·第二批） ================= */
@@ -2387,7 +2395,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const rma = store8.removeAll();
       ok(rma.ok === true && rma.removed === 2 && Array.isArray(rma.failed) && rma.failed.length === 0,
         'removeAll 成功路径返回 failed 明细数组（新增形状向后兼容）');
-      fs.rmSync(dir8, { recursive: true, force: true });
+      rmTmp(dir8);
     }
     {
       // 确定性失败模拟：合法备份名处放同位名目录 → unlink 必失败（Linux EISDIR / Windows EPERM），
@@ -2399,7 +2407,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const store9 = new BackupStore(dir9);
       const rr = store9.remove('备份_20990101_000000.nettopo');
       ok(rr.ok === false && !/不存在/.test(rr.error), '删除失败的错误如实上报而非「不存在」（' + rr.error + '）');
-      fs.rmSync(dir9, { recursive: true, force: true });
+      rmTmp(dir9);
     }
 
     /* ================= 回归（R4 审查修复项） ================= */
@@ -2420,7 +2428,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       // R5：保留设备名多级扩展名（词干判定）——修复前 mkdirSync('nul.a.b') 在 Windows 静默失败
       const rn = store.save('nul.a.b', '1.2.3.4', 'sysname R1\nreturn');
       ok(rn.ok === true && fs.existsSync(path.join(cbDir, '_nul.a.b', '1.2.3.4', rn.name || '#')), '保留名设备目录加下划线前缀后可正常落盘（nul.a.b → _nul.a.b）');
-      fs.rmSync(cbDir, { recursive: true, force: true });
+      rmTmp(cbDir);
     }
 
     console.log('== 回归：负数 timeout 与 SSH 多字节撕裂（R4/L-1、L-2） ==');
@@ -2598,7 +2606,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!('privateKey' in it) && !('password' in it) && !('keyPassphrase' in it),
         'status() 不输出 password/privateKey/keyPassphrase 字段');
       mm.stopAll();
-      fs.rmSync(tmpM, { recursive: true, force: true });
+      rmTmp(tmpM);
     }
 
     // 资产清单行构建（R4 新功能）
@@ -2769,7 +2777,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       await new Promise((res) => setTimeout(res, 300));
       ok(sys.length === 0, '无 SNMP agent 时识别静默不广播（不抛错）');
       mm.stopAll();
-      fs.rmSync(tmpC, { recursive: true, force: true });
+      rmTmp(tmpC);
     }
 
     // 配置合规基线引擎（新功能）
@@ -2957,7 +2965,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(mgrNoLog.logDir === '', '未配置 logDir 时不启用审计日志（兼容旧行为）');
       for (const s of socksL) s.destroy();
       await new Promise((res) => srvL.close(res));
-      fs.rmSync(tmpL, { recursive: true, force: true });
+      rmTmp(tmpL);
     }
 
     // 群发结果对比（纯函数）+ 合规报告行构建
@@ -3086,7 +3094,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         '指纹确认按事件携带的主机（跳板）放行');
       ok(mm.trusted.get('10.0.0.1') === 'SHA256:jumpfp', '跳板指纹按归属主机记录');
       mm.stopAll();
-      fs.rmSync(tmpJ, { recursive: true, force: true });
+      rmTmp(tmpJ);
     }
 
     console.log('== 回归：IP 子网计算器与拓扑快速搜索（新功能） ==');
@@ -3325,7 +3333,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(job.ifHist.length <= 120, '历史容量上限 120');
       mm.stopAll(); // 清理 snmp 定时器
       agent.close();
-      fs.rmSync(tmpIf, { recursive: true, force: true });
+      rmTmp(tmpIf);
     }
 
     console.log('== 回归：SNMP 重启检测与 CPU/内存采集（新功能） ==');
@@ -3468,10 +3476,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(st2.perf === true && st2.upCheck === true && st2.lastPerf && st2.lastPerf.cpu === 23, 'status 携带性能字段');
       mm2.stopAll();
       agent2.close();
-      fs.rmSync(tmpPf, { recursive: true, force: true });
+      rmTmp(tmpPf);
     }
 
-    fs.rmSync(tmpBase, { recursive: true, force: true });
+    rmTmp(tmpBase);
   }
 
   /* ================= 内置网络服务（TFTP / FTP / Syslog / 管理器） ================= */
@@ -3983,8 +3991,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     await tsrv.stop();
     await fsrv.stop();
     try { us.close(); } catch (e) { /* ignore */ }
-    fs.rmSync(tmpBk, { recursive: true, force: true });
-    fs.rmSync(tmpSvc, { recursive: true, force: true });
+    rmTmp(tmpBk);
+    rmTmp(tmpSvc);
   }
 
   /* ================= 安全修复回归（安全审查 2026-09-02） ================= */
@@ -4054,7 +4062,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       fs.writeFileSync(big, body + tail, 'utf8');
       const r = await ss2.search({ keyword: 'SPECIALNEEDLE' });
       ok(r.ok && r.total === 1 && r.items.length === 1 && r.items[0].host === 'host1', 'syslog 检索：4.5MB 大文件尾部读取仍命中（不再全量读入内存）');
-      fs.rmSync(sdir, { recursive: true, force: true });
+      rmTmp(sdir);
     }
 
     /* ---- M9 FTP：来源 IP 认证失败封禁 ---- */
@@ -4066,7 +4074,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(fsrv2._isBanned('10.6.6.7') === false, 'FTP：未达阈值的其它 IP 不受影响');
       fsrv2.bans.set('10.6.6.8', Date.now() - 1000);
       ok(fsrv2._isBanned('10.6.6.8') === false, 'FTP：封禁到期自动解除');
-      fs.rmSync(froot2, { recursive: true, force: true });
+      rmTmp(froot2);
     }
 
     /* ---- L13 FTP：resolveWithin 控制字符 / 尾部点号 ---- */
@@ -4077,7 +4085,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const dotName = resolveWithin(rwRoot, 'file.cfg..');
       ok(dotName != null && dotName.endsWith('file.cfg'), 'FTP 路径：尾部点号剥除（与 Win32 规范化一致防静默碰撞）');
       ok(resolveWithin(rwRoot, '...') === null, 'FTP 路径：纯点号段拒收');
-      fs.rmSync(rwRoot, { recursive: true, force: true });
+      rmTmp(rwRoot);
     }
 
     /* ---- L15 TFTP：单来源 IP 会话配额 ---- */
@@ -4096,7 +4104,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const second = await sendWrq();
       ok(second.length >= 5 && second.readUInt16BE(0) === 5 && second.readUInt16BE(2) === 4, 'TFTP：同源 IP 第二个会话被拒（ERROR 4 配额）');
       await tsrv2.stop();
-      fs.rmSync(troot2, { recursive: true, force: true });
+      rmTmp(troot2);
     }
 
     /* ---- M8 SNMP：响应来源校验 ---- */
@@ -4172,7 +4180,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const log2 = fs.readFileSync(path.join(day2, fs.readdirSync(day2)[0]), 'utf8');
       ok(log2.indexOf('SECRETPW1') < 0 && log2.indexOf('******') >= 0, 'Shell 审计日志：设备回显的密码已打码（恶意服务端无法借日志扩散凭据）');
       fake.close();
-      fs.rmSync(tmpSec, { recursive: true, force: true });
+      rmTmp(tmpSec);
     }
 
     /* ---- L7/L10 util：类型数据原型键 + 工程字段限长 ---- */
@@ -4221,8 +4229,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         && typeof rs1.items[0].matches[0] === 'string', '日志检索（syslog 布局，工作线程）：命中返回主机与行文本');
       const rs2 = await searchSyslogLogs(sysDir, 'link down', 'fw2');
       ok(rs2.ok && rs2.total === 0 && rs2.items.length === 0, '日志检索（syslog）：hostFilter 精确过滤');
-      fs.rmSync(monDir, { recursive: true, force: true });
-      fs.rmSync(sysDir, { recursive: true, force: true });
+      rmTmp(monDir);
+      rmTmp(sysDir);
     }
 
     /* ---- 已信任主机指纹管理（TOFU 信任库查看/撤销） ---- */
