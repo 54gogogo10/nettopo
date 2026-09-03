@@ -193,3 +193,11 @@ python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备�
 - 版本号唯一来源是 `js/util.js` 的 `U.APP_VERSION`（如 `v20260829i`），界面标题/状态栏同步显示；`npm run build` 会自动升版本并重建产物；package.json 的语义版本仅为 Electron 打包用途
 - 安全策略：三个页面均启用 CSP（script-src 仅 'self'，无 'unsafe-eval'——本地内置 SheetJS 与全部应用代码均不使用 eval，其余来源严格限定本地/data/blob）；所有本地文件/日志/备份路径走白名单式文件名清洗，杜绝路径穿越
 - 安全边界：设备密码加密强度与系统账户绑定（Windows DPAPI 与登录口令相关；Linux 无密钥环时会降级为弱混淆并启动时提示）；Telnet/FTP/SNMP v2c 为明文协议，凭据与配置可被同网段嗅探，建议仅在可信内网使用并避免复用高权限口令；内置 TFTP/FTP/Syslog 面向局域网开放（FTP 单账号认证+失败封禁、来源与数据通道校验），监控告警/合规正则在工作线程内限时执行，灾难性回溯的规则会被自动禁用
+
+## 在线升级
+
+- 桌面版内置在线升级（源：GitHub Releases `54gogogo10/nettopo`）：启动 30 秒后静默检查一次，或在「帮助 → 关于 → 检查更新」手动触发；检查/下载/SHA256 校验全部在主进程完成
+- 发现新版本后在弹窗中一键下载校验，确认后程序自动重启完成升级（便携版 exe 运行中允许改名换入，旧版保留为 `.old-<时间戳>` 供回退，新版启动后自动清理）；程序目录不可写时降级为「打开已下载的升级包位置」手动安装
+- 升级包必须通过随发布提供的 `.sha256` 清单校验才会被安装（防下载不完整/传输篡改）；版本号无法解析时不自动升级，只引导到发布页人工确认
+- 发布新版约定：`npm run build` 会自动升版本并生成 `dist/portable/*-portable.exe` 与同名 `.sha256`；在 GitHub 创建 Release，tag 使用 `v1.0.0-<YYYYMMDD><字母>`（与 package.json 版本一致），把 exe 与 `.sha256` 两个文件都上传为资产，客户端即可检测并升级
+- 浏览器版无在线升级（`index.html` 直接打开使用）

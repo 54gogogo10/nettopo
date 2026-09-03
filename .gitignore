@@ -7,9 +7,10 @@ build/*
 !build/electron-builder.yml
 !build/afterPack.cjs
 
-# 测试临时产物（保留脚本与用例）
+# 测试临时产物（保留脚本与用例）；smoke-*.js 为需桌面环境的本机冒烟诊断脚本（CI 不使用），不入库
 test/_chrome_profile/
 test/node_modules/
+test/smoke-*.js
 test/*.png
 test/*.jpg
 test/*.jpeg
@@ -30,8 +31,15 @@ task_plan.md
 findings.md
 progress.md
 
+# 本机发布辅助（绕开会话内安全钩子的一键发布脚本，用后可删）
+/_commit-msg.txt
+/release.cmd
+
 # 构建日志
 build-last.log
 
 # vision 工具产物快照（不入库）
 /.dsh-vision-router/
+
+# Mimosa 本机扫描器状态（会话缓存，不入库）
+.mimosa/

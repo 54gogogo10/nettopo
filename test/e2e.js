@@ -1042,7 +1042,7 @@ function findChrome() {
     await new Promise(r => setTimeout(r, 200));
     await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
     await new Promise(r => setTimeout(r, 300));
-    const XLSX = require(path.join(__dirname, '..', 'lib', 'xlsx.full.min.js'));
+    const XLSX = require('../lib/xlsx.full.min.js');
     const ws = XLSX.utils.aoa_to_sheet([
       ['源设备', '源接口', '源IP', '目标设备', '目标接口', '目标IP'],
       ['ExcelA', 'GE0/0/1', '10.9.1.1', 'ExcelB', 'GE0/0/2', '10.9.1.2'],

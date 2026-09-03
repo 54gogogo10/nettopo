@@ -108,6 +108,7 @@ class ConfigBackupStore {
   read(device, host, name) {
     if (!ConfigBackupStore.validName(name)) return { ok: false, error: '非法的备份文件名' };
     const full = path.join(this._hostDir(device, host), name);
+    if (!full.startsWith(this._hostDir(device, host) + path.sep)) return { ok: false, error: '非法的备份文件名' }; // 边界终判（name 已过 NAME_RE 白名单，纵深）
     try {
       const st = fs.lstatSync(full);
       if (!st.isFile() || st.isSymbolicLink()) return { ok: false, error: '备份不存在或读取失败' };

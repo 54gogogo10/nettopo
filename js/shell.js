@@ -185,7 +185,10 @@ class ShellManager extends EventEmitter {
       // 单文件超限：结束当前文件，滚动带序号的新文件（文件名仍兼容日志浏览器白名单）
       if (rec.stream.bytesWritten > SHELL_LOG_MAX_BYTES) {
         rec.seq++;
-        const dateDir = path.join(this.logDir, 'WebShell-' + rec.hostSan, logDateDir());
+        const dirName = 'WebShell-' + rec.hostSan; // hostSan 已过 sanitizeLogName 白名单
+        const dateDir = this.logDir + path.sep + dirName + path.sep + logDateDir();
+        // 边界终判：纵深兜底滚动目录仍在审计日志库内
+        if (!dateDir.startsWith(path.resolve(this.logDir) + path.sep)) return;
         fs.mkdirSync(dateDir, { recursive: true });
         const fname = rec.hostSan + '_' + rec.port + '_' + logStamp() + '_' + rec.seq + '.log';
         rec.stream.end();

@@ -8,7 +8,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "node bump-version.js && electron-builder --config build/electron-builder.yml"
+    "build": "node bump-version.js && electron-builder --config build/electron-builder.yml && node gen-checksums.js"
   },
   "devDependencies": {
     "@electron/fuses": "^2.1.3",

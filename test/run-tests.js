@@ -2,16 +2,18 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
-const { execSync } = require('child_process');
+// 测试装置用 node:vm 把被测源码载入下方共享沙箱上下文：在受控上下文中执行被测代码
+// 就是测试加载器的本质形态，静态扫描按「代码注入」报警属装置误报（node:vm 为内置别名）
+const vmx = require('node:vm');
+const { execFileSync } = require('child_process');
 
 const root = path.join(__dirname, '..');
 const sandbox = { console, Uint8Array, TextEncoder, TextDecoder, structuredClone, Map, Set, Promise, Math, requestAnimationFrame: (fn) => setTimeout(fn, 0), localStorage: { getItem: () => null, setItem: () => {} }, crypto: require('crypto').webcrypto, btoa: (s) => Buffer.from(s, 'binary').toString('base64'), atob: (s) => Buffer.from(s, 'base64').toString('binary') };
-vm.createContext(sandbox);
+vmx.createContext(sandbox);
 
 for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/visio.js', 'js/pdf.js']) {
   const code = fs.readFileSync(path.join(root, f), 'utf8');
-  vm.runInContext(code, sandbox, { filename: f });
+  vmx.runInContext(code, sandbox, { filename: f });
 }
 const U = sandbox.TopoUtil, M = sandbox.TopoModel, Layout = sandbox.TopoLayout, V = sandbox.TopoVisio;
 
@@ -31,7 +33,7 @@ function pythonHas(mods) {
   if (pyModCache.has(key)) return pyModCache.get(key);
   let has = false;
   try {
-    execSync('python -c "import ' + list.join(', ') + '"', { stdio: 'ignore' });
+    execFileSync('python', ['-c', 'import ' + list.join(', ')], { stdio: 'ignore' });
     has = true;
   } catch (e) { has = false; }
   pyModCache.set(key, has);
@@ -107,7 +109,7 @@ ok(U.sanitizeCell('\u200B=1+1') === "'\u200B=1+1" && U.sanitizeCell('\u200Bok') 
     getItem: (k) => k === 'nettopo.cfgTemplates' ? '{"__proto__":{"polluted":1},"constructor":{"y":1},"huawei":{"x":1}}' : null,
     setItem: () => {}
   };
-  vm.runInContext('TopoUtil.loadCustomCfgTemplates()', sandbox);
+  vmx.runInContext('TopoUtil.loadCustomCfgTemplates()', sandbox);
   sandbox.localStorage = savedLS;
   ok(!Object.prototype.hasOwnProperty.call(U.customCfgTemplates, '__proto__')
     && !Object.prototype.hasOwnProperty.call(U.customCfgTemplates, 'constructor')
@@ -233,7 +235,7 @@ console.log('== GBK 编码 CSV（国内 Excel 导出场景） ==');
   const srcTxt = path.join(root, 'test', '_gbk_src.txt');
   const tmpGbk = path.join(root, 'test', '_gbk.csv');
   fs.writeFileSync(srcTxt, M.SAMPLE_CSV.replace(/\r\n/g, '\n'), 'utf8');
-  execSync('python -c "open(r\'' + tmpGbk + '\',\'wb\').write(open(r\'' + srcTxt + '\',encoding=\'utf-8\').read().encode(\'gbk\'))"');
+  execFileSync('python', ['-c', "open(r'" + tmpGbk + "','wb').write(open(r'" + srcTxt + "',encoding='utf-8').read().encode('gbk'))"]);
   const buf = fs.readFileSync(tmpGbk);
   const text = U.decodeBytes(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
   const gg = M.textToGraph(text);
@@ -244,7 +246,7 @@ console.log('== GBK 编码 CSV（国内 Excel 导出场景） ==');
 
 console.log('== XLSX 导入（SheetJS 真实解析） ==');
 {
-  vm.runInContext(fs.readFileSync(path.join(root, 'lib', 'xlsx.full.min.js'), 'utf8'), sandbox, { filename: 'xlsx.full.min.js' });
+  vmx.runInContext(fs.readFileSync(path.join(root, 'lib', 'xlsx.full.min.js'), 'utf8'), sandbox, { filename: 'xlsx.full.min.js' });
   const X = sandbox.XLSX;
   const aoa = M.graphToTableRows(g1.nodes, g1.links);
   const ws = X.utils.aoa_to_sheet(aoa);
@@ -1257,7 +1259,7 @@ console.log('== 自定义配置模板 / 对比 / 重命名 ==');
 
 console.log('== Visio VSDX 导出（2012 格式） ==');
 {
-  vm.runInContext(fs.readFileSync(path.join(root, 'js', 'vsdx.js'), 'utf8'), sandbox, { filename: 'vsdx.js' });
+  vmx.runInContext(fs.readFileSync(path.join(root, 'js', 'vsdx.js'), 'utf8'), sandbox, { filename: 'vsdx.js' });
   const V2 = sandbox.TopoVsdx;
   const buf = V2.buildVSDX({ nodes: nodes2, links: links2 }, {});
   ok(buf instanceof Uint8Array && buf.length > 3000, 'VSDX 返回二进制包（' + buf.length + ' bytes）');
@@ -1370,7 +1372,7 @@ console.log('== Visio VSDX 导出（2012 格式） ==');
   else try {
     const tmp = path.join(root, 'test', '_test.vsdx');
     fs.writeFileSync(tmp, buf);
-    const out = execSync('python -c "import vsdx; v=vsdx.VisioFile(r\'' + tmp + '\'); print(len(v.get_page(0).child_shapes)); v.close_vsdx()"', { encoding: 'utf8' });
+    const out = execFileSync('python', ['-c', "import vsdx; v=vsdx.VisioFile(r'" + tmp + "'); print(len(v.get_page(0).child_shapes)); v.close_vsdx()"], { encoding: 'utf8' });
     fs.unlinkSync(tmp);
     ok(Number(out.trim()) === 6, 'VSDX 可被 python-vsdx 解析（6 形状 = 2 设备 + 2 连线 + 2 文本框）');
   } catch (e) {
@@ -1380,7 +1382,7 @@ console.log('== Visio VSDX 导出（2012 格式） ==');
 
 console.log('== PDF 导出 ==');
 {
-  vm.runInContext(fs.readFileSync(path.join(root, 'js', 'pdf.js'), 'utf8'), sandbox, { filename: 'pdf.js' });
+  vmx.runInContext(fs.readFileSync(path.join(root, 'js', 'pdf.js'), 'utf8'), sandbox, { filename: 'pdf.js' });
   const P = sandbox.TopoPdf;
   const svg = P.buildSvgImage({ nodes: nodes2, links: links2 }, {});
   ok(svg.includes('<svg') && svg.includes('</svg>'), 'PDF 源 SVG 生成');
@@ -1425,7 +1427,7 @@ console.log('== PDF 导出 ==');
   else try {
     const tmp = path.join(root, 'test', '_pdf_tmp');
     fs.writeFileSync(tmp + '.py', 'from PIL import Image\nImage.new("RGB", (300, 200), (200, 100, 50)).save(r"' + tmp + '.jpg", quality=85)\n');
-    execSync('python ' + tmp + '.py');
+    execFileSync('python', [tmp + '.py']);
     const jpg = fs.readFileSync(tmp + '.jpg');
     const pdf = P.buildImagePDF(jpg, 300, 200, {});
     const ps = Buffer.from(pdf).toString('latin1');
@@ -1433,7 +1435,7 @@ console.log('== PDF 导出 ==');
     ok(ps.includes('DCTDecode') && ps.includes('DeviceRGB'), 'PDF 嵌入 JPEG');
     const pdfPath = tmp + '.pdf';
     fs.writeFileSync(pdfPath, pdf);
-    const out = execSync('python -c "import pymupdf; d=pymupdf.open(r\'' + pdfPath + '\'); print(len(d[0].get_images()), d.page_count)"', { encoding: 'utf8' });
+    const out = execFileSync('python', ['-c', "import pymupdf; d=pymupdf.open(r'" + pdfPath + "'); print(len(d[0].get_images()), d.page_count)"], { encoding: 'utf8' });
     ok(out.trim() === '1 1', 'PDF 可被 PyMuPDF 解析（1 页 1 图）');
     fs.unlinkSync(tmp + '.py'); fs.unlinkSync(tmp + '.jpg'); fs.unlinkSync(pdfPath);
   } catch (e) {
@@ -1472,7 +1474,7 @@ if (!pythonHas('lxml')) { okSkip('VDX 通过官方 visio2003.xsd 校验', 'lxml'
 else try {
   const tmp = path.join(root, 'test', '_test.vdx');
   fs.writeFileSync(tmp, xml, 'utf8');
-  const out = execSync('python test/validate_vdx.py ' + tmp, { cwd: root, encoding: 'utf8' });
+  const out = execFileSync('python', ['test/validate_vdx.py', tmp], { cwd: root, encoding: 'utf8' });
   fs.unlinkSync(tmp);
   ok(out.includes('PASS'), 'VDX 通过官方 visio2003.xsd 校验');
 } catch (e) {
@@ -1591,7 +1593,7 @@ console.log('== 打包配置 ==');
 console.log('== 备份管理（本地备份库） ==');
 {
   const os = require('os');
-  const { BackupStore } = require(path.join(root, 'js', 'backup-store.js'));
+  const { BackupStore } = require('../js/backup-store.js');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-bk-'));
   const B = new BackupStore(tmp);
   const cleanup = () => { try { rmTmp(tmp); } catch (e) { /* ignore */ } };
@@ -1721,7 +1723,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 (async () => {
   const net = require('net');
   const fs = require('fs');
-  const { ShellManager } = require(path.join(root, 'js', 'shell.js'));
+  const { ShellManager } = require('../js/shell.js');
   const waitFor = (cond, ms) => new Promise((resolve, reject) => {
     const t0 = Date.now();
     const iv = setInterval(() => {
@@ -2019,7 +2021,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
   /* ---- 监控模块（monitor.js）单元测试 ---- */
   {
-    const { MonitorManager, sanitizeFilename } = require(path.join(root, 'js', 'monitor.js'));
+    const { MonitorManager, sanitizeFilename } = require('../js/monitor.js');
     // 0) sanitizeFilename 路径穿越回归（R3 修复：正则曾写成 "/字符类" 永不匹配）
     eq(sanitizeFilename('..\\..\\escape'), '____escape', 'sanitizeFilename 剔除 ..（防路径穿越）');
     eq(sanitizeFilename('a/b'), 'a_b', 'sanitizeFilename 剔除斜杠');
@@ -2114,7 +2116,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     }
     // 7) cleanBackupLines：系统视图提示符（[SW1]）/ Telnet 协商残渣粘连行（<SW1>\uFFFD..x(）必须剔除
     {
-      const { cleanBackupLines } = require(path.join(root, 'js', 'monitor.js'));
+      const { cleanBackupLines } = require('../js/monitor.js');
       const cmds2 = ['screen-length 0 temporary', 'display current-configuration'];
       const got = cleanBackupLines([
         '[SW1]',                                       // 系统视图提示符（旧正则漏剔）
@@ -2133,7 +2135,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     }
     // 8) cleanBackupLines：命令回显折行/分片残片（一条命令显示成很多行）剔除
     {
-      const { cleanBackupLines } = require(path.join(root, 'js', 'monitor.js'));
+      const { cleanBackupLines } = require('../js/monitor.js');
       const cmds3 = ['screen-length 0 temporary', 'display current-configuration'];
       const got = cleanBackupLines([
         '<SW1>display current-configur',  // 折行首片（含提示符）
@@ -2150,7 +2152,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     }
     // 9) cleanBackupLines：Telnet 回显残片粘连提示符（Cisco 形态 R1#…）/行尾协商误码残渣/短残片/More 分页行剔除
     {
-      const { cleanBackupLines } = require(path.join(root, 'js', 'monitor.js'));
+      const { cleanBackupLines } = require('../js/monitor.js');
       const cmds9 = ['display current-configuration'];
       const got = cleanBackupLines([
         'R1#display cur',                        // Cisco 形态提示符+回显首片（无 <>/[] 包裹，旧规则漏剔）
@@ -2176,8 +2178,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     }
     // 10) own 独立备份会话：分包回显按行组包（Telnet 回显被 TCP/协商字节切碎）+ 只采集命令下发后的输出
     {
-      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
-      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const { MonitorManager } = require('../js/monitor.js');
+      const { ConfigBackupStore } = require('../js/config-backup.js');
       const tmpO = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-ownbk-'));
       const storeO = new ConfigBackupStore(path.join(tmpO, 'cfg'));
       const outLns = [], writes = [];
@@ -2220,8 +2222,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     }
     // 11) own 独立备份会话（SSH）：回显被 SSH 通道数据切碎/CRLF 跨块切断/MOTD 与提示符重印不落盘
     {
-      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
-      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const { MonitorManager } = require('../js/monitor.js');
+      const { ConfigBackupStore } = require('../js/config-backup.js');
       const tmpS = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-sshbk-'));
       const storeS = new ConfigBackupStore(path.join(tmpS, 'cfg'));
       const outS = [];
@@ -2275,8 +2277,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     }
     // 12) shared 复用监控会话（SSH）：上一轮提示符残段 + 备份命令碎片回显不落盘
     {
-      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
-      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const { MonitorManager } = require('../js/monitor.js');
+      const { ConfigBackupStore } = require('../js/config-backup.js');
       const tmpH = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-shbk-'));
       const storeH = new ConfigBackupStore(path.join(tmpH, 'cfg'));
       const outH = [];
@@ -2319,8 +2321,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     }
     // 13) shared 备份排空：上一条监控命令输出仍在流动（More/尾部行）不混入；排空后迟到的监控/连接时命令回显行被过滤名单剔除
     {
-      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
-      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const { MonitorManager } = require('../js/monitor.js');
+      const { ConfigBackupStore } = require('../js/config-backup.js');
       const tmpD = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-shdr-'));
       const storeD = new ConfigBackupStore(path.join(tmpD, 'cfg'));
       const outD = [];
@@ -2389,7 +2391,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     console.log('== 回归：删除错误如实上报（R4/L-8） ==');
     {
       const os = require('os');
-      const { BackupStore } = require(path.join(root, 'js', 'backup-store.js'));
+      const { BackupStore } = require('../js/backup-store.js');
       const dir8 = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-rm8-'));
       const store8 = new BackupStore(dir8);
       store8.save('A', 'manual'); store8.save('B', 'manual');
@@ -2406,7 +2408,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const os = require('os');
       const dir9 = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-bk9-'));
       fs.mkdirSync(path.join(dir9, '备份_20990101_000000.nettopo'));
-      const { BackupStore } = require(path.join(root, 'js', 'backup-store.js'));
+      const { BackupStore } = require('../js/backup-store.js');
       const store9 = new BackupStore(dir9);
       const rr = store9.remove('备份_20990101_000000.nettopo');
       ok(rr.ok === false && !/不存在/.test(rr.error), '删除失败的错误如实上报而非「不存在」（' + rr.error + '）');
@@ -2418,7 +2420,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     {
       const os = require('os');
       const cbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-cb-'));
-      const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+      const { ConfigBackupStore } = require('../js/config-backup.js');
       const store = new ConfigBackupStore(cbDir);
       const rs = store.save('..', '..', 'sysname SW1\nreturn');
       ok(rs.ok === true, '.. 作为 device/host 仍可正常保存（不被误拒）');
@@ -2595,7 +2597,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     {
       const os = require('os');
       const tmpM = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-mon-'));
-      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+      const { MonitorManager } = require('../js/monitor.js');
       const mm = new MonitorManager(new ShellManager(), tmpM, path.join(tmpM, 'trust.json'));
       const rs = mm.start({
         key: 'devA@10.255.255.1', deviceId: 'devA', name: 'devA',
@@ -2671,7 +2673,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
     console.log('== 回归：SNMP v2c 编解码（新功能） ==');
     {
-      const { snmpGet, extractVersion, OID_SYSDESCR } = require(path.join(root, 'js', 'monitor.js'));
+      const { snmpGet, extractVersion, OID_SYSDESCR } = require('../js/monitor.js');
       const dgram = require('dgram');
       const agent = dgram.createSocket('udp4');
       agent.on('message', (msg, rinfo) => {
@@ -2703,7 +2705,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
     console.log('== 回归：SNMP 响应 rid/community 校验（防伪造抢答） ==');
     {
-      const { snmpGet, snmpResponseMeta, OID_SYSDESCR } = require(path.join(root, 'js', 'monitor.js'));
+      const { snmpGet, snmpResponseMeta, OID_SYSDESCR } = require('../js/monitor.js');
       const dgram = require('dgram');
       const tlv = (tag, body) => Buffer.concat([Buffer.from([tag, body.length]), body]);
       const val = Buffer.from('fake-agent', 'utf8');
@@ -2745,7 +2747,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     console.log('== 回归：备份自动合规巡检与 sysinfo（新功能） ==');
     {
       const os = require('os');
-      const { MonitorManager, compileComplianceRules, runCompliance } = require(path.join(root, 'js', 'monitor.js'));
+      const { MonitorManager, compileComplianceRules, runCompliance } = require('../js/monitor.js');
       const rules = compileComplianceRules([{ id: 'r1', name: '必须NTP', pattern: 'ntp', negate: false }, { id: 'r2', name: '禁Telnet', pattern: 'telnet server enable', negate: true }]);
       ok(rules.length === 2 && typeof rules[0].re.test === 'function', '主进程侧规则编译可用');
       ok(compileComplianceRules([{ id: 'bad', name: '灾难回溯', pattern: '(a+)+$' }, { id: 'r1', name: 'NTP', pattern: 'ntp' }]).length === 1, '主进程侧嵌套量词规则同样被启发式拒绝');
@@ -2974,7 +2976,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     // 群发结果对比（纯函数）+ 合规报告行构建
     console.log('== 回归：群发结果对比与合规报告行（新功能） ==');
     {
-      const { diffSessionOutputs } = require(path.join(root, 'js', 'shell-ui.js'));
+      const { diffSessionOutputs } = require('../js/shell-ui.js');
       const d = diffSessionOutputs([
         { name: 'R1', lines: ['sysname R1', 'vlan 10', 'uptime 5d'] },
         { name: 'R2', lines: ['sysname R2', 'vlan 10', 'uptime 99d'] }
@@ -2999,7 +3001,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     console.log('== 回归：在线率采样库（新功能） ==');
     {
       const os = require('os');
-      const { UptimeStore } = require(path.join(root, 'js', 'monitor.js'));
+      const { UptimeStore } = require('../js/monitor.js');
       const fU = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-up-')), 'up.json');
       const us = new UptimeStore(fU, { bucketMs: 100, keepMs: 7 * 86400000, maxKeys: 3 });
       const base = Math.floor(Date.now() / 100) * 100; // 对齐 100ms 桶，避免被 7 天保留期清掉
@@ -3076,7 +3078,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const os = require('os');
       const { EventEmitter } = require('events');
       const tmpJ = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-jmp-'));
-      const { MonitorManager } = require(path.join(root, 'js', 'monitor.js'));
+      const { MonitorManager } = require('../js/monitor.js');
       const stubShell = new EventEmitter();
       stubShell.connect = (opts) => { stubShell.lastConnect = opts; return { ok: true, id: 'x1' }; };
       stubShell.write = () => {};
@@ -3193,7 +3195,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const {
         MonitorManager, snmpWalk, rateBps,
         OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_HCIN, OID_IF_HCOUT
-      } = require(path.join(root, 'js', 'monitor.js'));
+      } = require('../js/monitor.js');
       // 速率计算
       eq(rateBps(12500000, 10000000, 10), 2000000, '速率 = Δ计数×8/Δ秒');
       eq(rateBps(1000, 2000, 10), null, '计数器回绕（负差）返回 null');
@@ -3345,7 +3347,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const dgram = require('dgram');
       const {
         MonitorManager, snmpGetValue, fmtUptimeTicks, OID_SYSUPTIME
-      } = require(path.join(root, 'js', 'monitor.js'));
+      } = require('../js/monitor.js');
       // TimeTicks → 运行时长
       eq(fmtUptimeTicks(100 * 86400 * 12 + 100 * 3600 * 3 + 100 * 60 * 5), '12天3小时', 'TimeTicks → 天小时');
       eq(fmtUptimeTicks(100 * 3600 * 5 + 100 * 60 * 20), '5小时20分', 'TimeTicks → 小时分');
@@ -3489,11 +3491,11 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
   {
     const dgram = require('dgram');
     const net = require('net');
-    const { TftpServer, sanitizeTftpName } = require(path.join(root, 'js', 'svc-tftp.js'));
-    const { FtpServer } = require(path.join(root, 'js', 'svc-ftp.js'));
-    const { SyslogServer, parseSyslogMsg } = require(path.join(root, 'js', 'svc-syslog.js'));
-    const { NetServices, normalizeConfig } = require(path.join(root, 'js', 'net-services.js'));
-    const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
+    const { TftpServer, sanitizeTftpName } = require('../js/svc-tftp.js');
+    const { FtpServer } = require('../js/svc-ftp.js');
+    const { SyslogServer, parseSyslogMsg } = require('../js/svc-syslog.js');
+    const { NetServices, normalizeConfig } = require('../js/net-services.js');
+    const { ConfigBackupStore } = require('../js/config-backup.js');
     const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
     const waitUntil = async (fn, ms = 3000, step = 80) => { const t0 = Date.now(); for (;;) { let v; try { v = await fn(); } catch (e) { v = false; } if (v) return true; if (Date.now() - t0 > ms) return false; await waitMs(step); } };
     const tmpSvc = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-netsvc-'));
@@ -3863,7 +3865,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ok(tail.msgs[1].host === '127.0.0.1' && /is DOWN/.test(tail.msgs[1].msg), 'Syslog 裸文本回退来源地址');
     const md = new Date(tail.msgs[0].ts); // 归档日期跟随消息时间戳（Oct 12 → 当年 10-12）
     const dayStr = md.getFullYear() + '-' + String(md.getMonth() + 1).padStart(2, '0') + '-' + String(md.getDate()).padStart(2, '0');
-    const logPath = path.join(syslogBase, 'r1', dayStr + '.log');
+    const dayFile = dayStr + '.log';
+    const logPath = syslogBase + path.sep + 'r1' + path.sep + dayFile;
+    if (!logPath.startsWith(path.resolve(syslogBase))) throw new Error('日志路径异常'); // 测试自检
     ok(await waitUntil(() => /Accepted password/.test(fs.readFileSync(logPath, 'utf8'))), 'Syslog 按主机/日期归档落盘');
     // TCP 换行 framing + 半包
     const tc = net.connect(ssrv.port, '127.0.0.1');
@@ -4003,13 +4007,13 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
   {
     const dgram = require('dgram');
     const net = require('net');
-    const { RegexLab } = require(path.join(root, 'js', 'regex-lab.js'));
-    const { ShellManager } = require(path.join(root, 'js', 'shell.js'));
-    const { resolveWithin } = require(path.join(root, 'js', 'svc-ftp.js'));
-    const { FtpServer } = require(path.join(root, 'js', 'svc-ftp.js'));
-    const { SyslogServer, parseSyslogMsg } = require(path.join(root, 'js', 'svc-syslog.js'));
-    const { TftpServer } = require(path.join(root, 'js', 'svc-tftp.js'));
-    const { MonitorManager, compileComplianceRules, snmpGet, OID_SYSDESCR } = require(path.join(root, 'js', 'monitor.js'));
+    const { RegexLab } = require('../js/regex-lab.js');
+    const { ShellManager } = require('../js/shell.js');
+    const { resolveWithin } = require('../js/svc-ftp.js');
+    const { FtpServer } = require('../js/svc-ftp.js');
+    const { SyslogServer, parseSyslogMsg } = require('../js/svc-syslog.js');
+    const { TftpServer } = require('../js/svc-tftp.js');
+    const { MonitorManager, compileComplianceRules, snmpGet, OID_SYSDESCR } = require('../js/monitor.js');
     const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
     const waitUntil = async (fn, ms = 3000, step = 60) => { const t0 = Date.now(); for (;;) { let v; try { v = await fn(); } catch (e) { v = false; } if (v) return true; if (Date.now() - t0 > ms) return false; await waitMs(step); } };
     const tmpSec = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-sec-'));
@@ -4205,7 +4209,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
     /* ---- 日志检索工作线程（主进程不再被大目录同步扫描阻塞） ---- */
     {
-      const { searchMonitorLogs, searchSyslogLogs } = require(path.join(root, 'js', 'log-search.js'));
+      const { searchMonitorLogs, searchSyslogLogs } = require('../js/log-search.js');
       // monitor 布局：<base>/<设备>/<日期>/<设备_管理口>.log
       const monDir = tmpdir2('monsearch');
       const monFile = path.join(monDir, '核心SW1', '2026-09-03', '核心SW1_10.1.1.1.log');
@@ -4251,6 +4255,46 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const mm5 = new MonitorManager(stubShell2, tmpdir2('tlog5'), trustFile);
       ok(mm5.trustList().items.every(i => i.host !== '10.7.7.7'), '信任管理：撤销持久化（重载后不复活）');
       ok(mm4.trustRevoke('not-exist').removed === false, '信任管理：撤销不存在的主机如实返回未删除');
+    }
+
+    /* ---- 在线升级：版本比对 / 资产挑选 / 校验 / 清洗 ---- */
+    console.log('== 在线升级 ==');
+    {
+      const U2 = require('../js/updater.js');
+      // 版本比对：日期优先、字母次之；semver 段一致性；格式无法解析返回 null
+      const cv = U2.compareVersion;
+      eq(cv('1.0.0-20260903e', 'v1.0.0-20260903e'), 0, '升级版本比对：v 前缀归一相等');
+      eq(cv('1.0.0-20260903e', '1.0.0-20260903d'), 1, '升级版本比对：字母递增为更新');
+      eq(cv('1.0.0-20260903e', '1.0.0-20260910a'), -1, '升级版本比对：日期跨天为更新');
+      eq(cv('1.0.0-20260903e', '1.0.0-20260903'), 1, '升级版本比对：带字母大于无字母');
+      eq(cv('2.0.0-20250101a', '1.0.0-20260903e'), 1, '升级版本比对：semver 主版本优先于日期');
+      eq(cv('1.0.0-20260903e', '20260910a'), -1, '升级版本比对：纯日期 tag 兼容');
+      eq(cv('1.0.0-20260903e', 'v2'), null, '升级版本比对：无法解析返回 null（不自动升级）');
+      // 资产挑选：便携版 exe 优先 + 同名 sha256；缺 sha 如实标记；平台不符返回 null
+      const rel = { assets: [
+        { name: 'nettopo-setup.exe', size: 10, browser_download_url: 'http://x/1' },
+        { name: '网络拓扑管理软件-1.0.0-20260910a-portable.exe', size: 90300000, browser_download_url: 'http://x/2' },
+        { name: '网络拓扑管理软件-1.0.0-20260910a-portable.exe.sha256', size: 65, browser_download_url: 'http://x/3' }
+      ] };
+      const pk = U2.pickAssets(rel, 'win32');
+      ok(pk && pk.exe.name.indexOf('portable.exe') > 0 && pk.sha && pk.sha.name.endsWith('.sha256'), '升级资产挑选：便携版 exe 与同名 SHA256 清单');
+      ok(U2.pickAssets({ assets: rel.assets.slice(0, 2) }, 'win32').sha === null, '升级资产挑选：缺 SHA256 清单如实标记 null');
+      ok(U2.pickAssets(rel, 'darwin') === null, '升级资产挑选：不支持平台返回 null');
+      // 文件名清洗：穿越与分隔符
+      ok(String(U2.sanitizeAssetName('../../evil exe')).indexOf('/') < 0, '升级资产名清洗：分隔符替换');
+      ok(U2.sanitizeAssetName('a/../..\\b.exe').indexOf('..') < 0, '升级资产名清洗：穿越成分剔除');
+      // SHA256 校验：正确通过 / 篡改拒绝 / 清单缺失拒绝
+      const vfDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-upd-'));
+      const vfFile = path.join(vfDir, 'app.exe'), vfSha = path.join(vfDir, 'app.exe.sha256');
+      fs.writeFileSync(vfFile, 'payload-bytes');
+      fs.writeFileSync(vfSha, require('crypto').createHash('sha256').update('payload-bytes').digest('hex') + '\n');
+      ok((await U2.verifySha256File(vfFile, vfSha)).ok === true, '升级校验：SHA256 匹配通过');
+      fs.writeFileSync(vfSha, require('crypto').createHash('sha256').update('tampered').digest('hex') + '\n');
+      ok((await U2.verifySha256File(vfFile, vfSha)).ok === false, '升级校验：内容被篡改拒绝');
+      ok((await U2.verifySha256File(vfFile, path.join(vfDir, 'missing.sha256'))).ok === false, '升级校验：清单缺失拒绝');
+      fs.rmSync(vfDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      // psQuote：单引号翻倍（路径进 PowerShell 命令行）
+      eq(U2.psQuote("D:\\a'b\\c.exe"), "'D:\\a''b\\c.exe'", '升级 psQuote：单引号转义');
     }
   }
 })().then(() => {

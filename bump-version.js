@@ -55,6 +55,7 @@ if (!changed) { console.log(`[bump-version] 未找到可替换的版本令牌（
 // 同步 package.json version → 构建产物文件名携带版本号（网络拓扑管理软件-1.0.0-<stamp>-portable.exe）
 (() => {
   const pkgPath = path.join(ROOT, PKG_FILE);
+  if (!pkgPath.startsWith(ROOT + path.sep)) throw new Error('路径异常：' + PKG_FILE); // 边界终判（PKG_FILE 为常量，纵深）
   let pkg;
   try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch (e) { console.warn('[bump-version] 读取 package.json 失败，跳过版本写入'); return; }
   const curPkgVer = (pkg && pkg.version) || '';

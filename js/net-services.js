@@ -199,8 +199,10 @@ class NetServices extends EventEmitter {
     if (!name || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('..') >= 0 || name.indexOf(':') >= 0 || name.length > 200) return null;
     if (ip && (ip.indexOf('/') >= 0 || ip.indexOf('\\') >= 0 || ip.indexOf('..') >= 0 || ip.length > 80)) return null;
     const base = path.resolve(root) + path.sep;
-    const full = path.resolve(root, ip || '.', name);
-    if (!full.startsWith(base)) return null;
+    const sub = ip || '.';                 // 来源 IP 子目录（已过分隔符/穿越白名单）或库根
+    const dir = path.resolve(root, sub);
+    const full = path.resolve(dir, name);  // name 已过白名单：两段 resolve 分步归一
+    if ((dir !== path.resolve(root) && !dir.startsWith(base)) || !full.startsWith(base)) return null; // 双重边界终判（dir 允许为库根本身）
     return full;
   }
 

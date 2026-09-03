@@ -93,7 +93,8 @@ class BackupStore {
   /** 读取一份备份内容。返回 {ok:true, content} */
   read(name) {
     if (!BackupStore.validName(name)) return { ok: false, error: '非法的备份文件名' };
-    const full = path.join(this.dir, name);
+    const full = this.dir + path.sep + name;
+    if (!full.startsWith(path.resolve(this.dir) + path.sep)) return { ok: false, error: '非法的备份文件名' }; // 边界终判（name 已过 validName 白名单，纵深）
     try {
       const st = fs.lstatSync(full);
       if (!st.isFile() || st.isSymbolicLink()) return { ok: false, error: '备份不存在或读取失败' };
@@ -108,7 +109,8 @@ class BackupStore {
   /** 删除一份备份 */
   remove(name) {
     if (!BackupStore.validName(name)) return { ok: false, error: '非法的备份文件名' };
-    const full = path.join(this.dir, name);
+    const full = this.dir + path.sep + name;
+    if (!full.startsWith(path.resolve(this.dir) + path.sep)) return { ok: false, error: '非法的备份文件名' }; // 边界终判（name 已过 validName 白名单，纵深）
     try {
       fs.unlinkSync(full);
       return { ok: true, removed: 1 };

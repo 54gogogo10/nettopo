@@ -4211,6 +4211,7 @@ function openAbout() {
     <div class="about-row"><b>许可</b><span>MIT License</span></div>
     <div class="about-row"><b>项目主页</b><span class="about-url">https://github.com/54gogogo10/nettopo</span></div>
     <div class="about-actions">
+      <button type="button" class="tb" id="aboutUpdate" hidden>检查更新</button>
       <button type="button" class="tb" id="aboutCopy">复制链接</button>
       <button type="button" class="tb primary" id="aboutOpen">在浏览器打开</button>
     </div>
@@ -4229,6 +4230,143 @@ function openAbout() {
     if (window.topoShell && window.topoShell.openExternal) window.topoShell.openExternal(ABOUT_URL);
     else window.open(ABOUT_URL, '_blank');
   };
+  const aboutUpdate = ov.querySelector('#aboutUpdate');
+  if (aboutUpdate && updateBridge()) {
+    aboutUpdate.hidden = false;
+    aboutUpdate.onclick = () => runUpdateCheck(aboutUpdate);
+  }
+}
+
+/* ================= 在线升级（桌面版；源：GitHub Releases 54gogogo10/nettopo） =================
+ * 检查/下载/SHA256 校验/换入全部在主进程完成，渲染层只发起与展示进度。
+ * 发布约定见 README「在线升级」节：tag 与 package.json 版本同为 1.0.0-<YYYYMMDD><字母>。 */
+const updateBridge = () => window.topoUpdate || null;
+let updateBarEl = null, updateTextEl = null; // 下载进度条当前引用（升级弹窗存活时非空）
+
+/** 检查更新（关于弹窗按钮入口） */
+async function runUpdateCheck(btn) {
+  const bridge = updateBridge();
+  if (!bridge) { toast('在线升级需要桌面版（Electron）环境'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+  let r = null;
+  try { r = await bridge.check(); } catch (e) { r = null; }
+  if (btn) { btn.disabled = false; btn.textContent = '检查更新'; }
+  if (!r || !r.ok) { toast((r && r.error) || '检查更新失败'); return; }
+  if (r.update) {
+    const aboutOv = $('#modalRoot').lastElementChild; // 关闭「关于」弹窗（如有）再展示升级弹窗
+    if (aboutOv) aboutOv.remove();
+    showUpdateDialog(r);
+    return;
+  }
+  if (r.reason === 'version-format') {
+    // 版本号无法解析（如发布改用其它命名）：不自动升级，引导到发布页人工确认
+    if (confirm('无法自动比对版本号（发布页最新：' + ((r.latest && r.latest.version) || '?') + '）。是否打开发布页确认？')) openReleasePage(r.latest && r.latest.url);
+  } else {
+    toast('已是最新版本（' + (r.current || '') + '）');
+  }
+}
+
+function openReleasePage(url) {
+  const u = String(url || 'https://github.com/54gogogo10/nettopo/releases');
+  if (window.topoShell && window.topoShell.openExternal) window.topoShell.openExternal(u);
+  else window.open(u, '_blank');
+}
+
+/** 「发现新版本」弹窗：展示版本与发布说明，一键下载校验后重启升级 */
+function showUpdateDialog(res) {
+  const latest = res.latest || {};
+  openModal({
+    title: '发现新版本',
+    submit: '稍后再说',
+    onSubmit: () => {},
+    fields: []
+  });
+  const ov = $('#modalRoot').lastElementChild;
+  const modal = ov.querySelector('.modal');
+  modal.style.width = '560px';
+  const form = ov.querySelector('form');
+  const body = document.createElement('div');
+  body.innerHTML = `
+  <div class="about-body">
+    <div class="about-title">新版本 ${U.escHtml(latest.version || '')} 可用（当前 ${U.escHtml(res.current || '')}）</div>
+    <pre class="about-license" style="max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word">${U.escHtml(String(latest.notes || '').slice(0, 2000)) || '（发布说明见发布页）'}</pre>
+    <div class="about-actions" id="updActions">
+      <button type="button" class="tb primary" id="updGo">立即升级</button>
+      <button type="button" class="tb" id="updPage">去发布页</button>
+    </div>
+    <div class="about-actions" id="updDone" hidden>
+      <button type="button" class="tb primary" id="updRestart">立即重启升级</button>
+      <button type="button" class="tb" id="updLater">稍后手动升级</button>
+    </div>
+    <div id="updProgressWrap" hidden style="margin-top:8px">
+      <div style="height:8px;border-radius:4px;background:var(--panel2,#e2e8f0);overflow:hidden"><div id="updBar" style="height:100%;width:0;background:#4f46e5;transition:width .2s"></div></div>
+      <div id="updText" style="font-size:12px;color:var(--muted,#64748b);margin-top:4px">准备下载…</div>
+    </div>
+    <div class="about-note">升级包经 SHA256 校验后才会安装；安装时程序会自动重启。</div>
+  </div>`;
+  form.insertBefore(body, form.querySelector('.m-actions'));
+  updateBarEl = ov.querySelector('#updBar');
+  updateTextEl = ov.querySelector('#updText');
+  const bridge = updateBridge();
+  const actions = ov.querySelector('#updActions'), done = ov.querySelector('#updDone'), wrap = ov.querySelector('#updProgressWrap');
+  const goBtn = ov.querySelector('#updGo');
+  if (goBtn) goBtn.onclick = async () => {
+    if (!bridge) return;
+    goBtn.disabled = true;
+    goBtn.textContent = '下载中…';
+    wrap.hidden = false;
+    let r = null;
+    try { r = await bridge.download(res.assets || null); } catch (e) { r = null; }
+    if (r && r.ok) {
+      actions.hidden = true;
+      done.hidden = false;
+      if (updateTextEl) updateTextEl.textContent = '升级包校验通过，可以重启升级';
+    } else {
+      goBtn.disabled = false;
+      goBtn.textContent = '重试升级';
+      if (updateTextEl) updateTextEl.textContent = (r && r.error) || '下载失败';
+      if (r && r.manual && bridge.reveal) { try { await bridge.reveal(); } catch (e) { /* ignore */ } }
+    }
+  };
+  const restartBtn = ov.querySelector('#updRestart');
+  if (restartBtn) restartBtn.onclick = async () => {
+    restartBtn.disabled = true;
+    let ar = null;
+    try { ar = await bridge.apply(); } catch (e) { ar = null; }
+    if (ar && ar.ok) {
+      toast(ar.warn || '即将重启完成升级…');
+      if (restartBtn) restartBtn.textContent = '正在重启…';
+    } else {
+      restartBtn.disabled = false;
+      toast((ar && ar.error) || '升级失败');
+      if (ar && ar.manual && bridge.reveal) { try { await bridge.reveal(); } catch (e) { /* ignore */ } }
+    }
+  };
+  const pageBtn = ov.querySelector('#updPage');
+  if (pageBtn) pageBtn.onclick = () => openReleasePage(latest.url);
+  const laterBtn = ov.querySelector('#updLater');
+  if (laterBtn) laterBtn.onclick = () => { if (bridge && bridge.reveal) { try { bridge.reveal(); } catch (e) { /* ignore */ } } toast('升级包已保留，可随时手动安装'); };
+}
+
+/* 下载进度推送（主进程 → 进度条）；弹窗关闭后引用失效自动静默 */
+if (window.topoUpdate && window.topoUpdate.onProgress) {
+  window.topoUpdate.onProgress((p) => {
+    if (!updateBarEl || !updateBarEl.isConnected) return;
+    const total = Math.max(0, (p && p.total) || 0), got = Math.max(0, (p && p.received) || 0);
+    const pct = total > 0 ? Math.min(100, Math.round(got / total * 100)) : 0;
+    updateBarEl.style.width = pct + '%';
+    if (updateTextEl && updateTextEl.isConnected) {
+      updateTextEl.textContent = total > 0
+        ? ('下载中 ' + pct + '%（' + U.fmtSize(got) + ' / ' + U.fmtSize(total) + '）')
+        : ('已下载 ' + U.fmtSize(got));
+    }
+  });
+}
+/* 启动静默检查发现新版本：轻提示（主进程启动 30s 后检查一次） */
+if (window.topoUpdate && window.topoUpdate.onAvailable) {
+  window.topoUpdate.onAvailable((info) => {
+    if (info && info.version) toast('发现新版本 ' + info.version + '，可在「帮助 → 关于」中升级');
+  });
 }
 
 

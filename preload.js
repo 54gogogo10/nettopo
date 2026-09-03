@@ -93,6 +93,17 @@ contextBridge.exposeInMainWorld('topoSecure', {
   decryptSecret: (cipher) => ipcRenderer.invoke('secure:decrypt', cipher)
 });
 
+/* 在线升级（仅主窗口可用）：检查 / 下载校验 / 应用重启；进度与发现新版本经事件推送 */
+contextBridge.exposeInMainWorld('topoUpdate', {
+  check: () => ipcRenderer.invoke('update:check'),
+  download: (assets) => ipcRenderer.invoke('update:download', { assets }),
+  apply: () => ipcRenderer.invoke('update:apply'),
+  reveal: () => ipcRenderer.invoke('update:reveal'),
+  onStatus: sub('update:status'),
+  onProgress: sub('update:progress'),
+  onAvailable: sub('update:available')
+});
+
 /* 内置网络服务（TFTP / FTP / Syslog）：接收设备配置文件与收集日志（仅主窗口可用） */
 contextBridge.exposeInMainWorld('topoNetSvc', {
   getConfig: () => ipcRenderer.invoke('netsvc:get'),

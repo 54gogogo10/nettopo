@@ -8,6 +8,7 @@ const { MonitorManager, UptimeStore, fmtUptimeTicks } = require('./js/monitor.js
 const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
+const { Updater } = require('./js/updater.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
  *   否则 SUID 沙箱初始化直接 fatal abort（"Running as root without --no-sandbox is not supported"）。
@@ -721,6 +722,61 @@ ipcMain.handle('monitor:tray', (e, p) => {
 ipcMain.handle('monitor:trust-list', (e) => monitorGuard(e) ? monitor.trustList() : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:trust-revoke', (e, p) => monitorGuard(e) ? monitor.trustRevoke(String((p && p.host) || '')) : { ok: false, error: 'forbidden' });
 
+/* ---- 在线升级（仅主窗口可调用）----
+ * 源为 GitHub Releases：检查/下载/校验/换入全部在主进程完成，渲染层只收进度与结果。
+ * apply 成功后延迟退出（trayQuitting 置位绕过「关窗到托盘」），由辅助进程拉起新版。 */
+let updater = null;
+function getUpdater() {
+  if (!updater) {
+    updater = new Updater({
+      repo: '54gogogo10/nettopo',
+      currentVersion: app.getVersion(),
+      platform: process.platform,
+      updateDir: app.getPath('userData') + path.sep + 'updates',
+      // 便携版运行时 exe 是启动器自身（PORTABLE_EXECUTABLE_FILE 由打包器注入）；开发态指向 node_modules 的 electron，apply 会拒绝
+      exePath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
+      isPackaged: app.isPackaged
+    });
+    const push = (ch, data) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(ch, data); };
+    updater.on('status', (s) => push('update:status', s));
+    updater.on('progress', (p) => push('update:progress', p));
+  }
+  return updater;
+}
+ipcMain.handle('update:check', (e) => monitorGuard(e) ? getUpdater().check() : { ok: false, error: 'forbidden' });
+ipcMain.handle('update:download', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const u = getUpdater();
+  let assets = p && p.assets;
+  if (!assets) {
+    // 渲染层未携带资产信息（如经启动通知进入的流程）：重新检查取最新资产
+    const c = await u.check();
+    if (!c.ok || !c.update || !c.assets) return { ok: false, error: (c && c.error) || '当前没有可下载的升级资产' };
+    assets = c.assets;
+  }
+  return u.downloadAndVerify(assets);
+});
+ipcMain.handle('update:apply', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const r = getUpdater().apply();
+  if (r && r.ok && r.restart) {
+    // 先让 invoke 应答送达渲染层再退出；trayQuitting 置位绕过「关闭即隐藏到托盘」
+    setTimeout(() => { trayQuitting = true; app.quit(); }, 600);
+  }
+  return r;
+});
+ipcMain.handle('update:reveal', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const fs = require('fs');
+  const u = getUpdater();
+  if (!u.pendingFile || !fs.existsSync(u.pendingFile)) return { ok: false, error: '尚无已下载的升级包' };
+  // 只允许打开本模块升级目录内的文件（防渲染层借 IPC 揭示任意路径）
+  const updatesRoot = u.updateDir.endsWith(path.sep) ? u.updateDir : u.updateDir + path.sep;
+  if (!u.pendingFile.startsWith(updatesRoot)) return { ok: false, error: 'forbidden' };
+  require('electron').shell.showItemInFolder(u.pendingFile);
+  return { ok: true };
+});
+
 /* ---- 监控日志浏览器：目录树 + 内容读取（路径逐级白名单校验） ---- */
 const LOG_DIR_RE = /^(\d{4}-\d{2}-\d{2})$/;
 function safeLogComponent(name, allowDate) {
@@ -776,7 +832,9 @@ ipcMain.handle('monitor:logs-read', (e, p) => {
   const file = safeLogComponent(p && p.file, false);
   if (!device || !date || !file || !/^[\u4e00-\u9fa5A-Za-z0-9_.-]+\.log$/.test(file)) return { ok: false, error: '非法的日志文件路径' };
   const fs = require('fs');
-  const full = path.join(monitor.logBaseDir, device, date, file);
+  const full = monitor.logBaseDir + path.sep + device + path.sep + date + path.sep + file;
+  // 边界终判：device/date/file 均已过 safeLogComponent 白名单，纵深兜底拼接结果仍在日志库内
+  if (!full.startsWith(path.resolve(monitor.logBaseDir) + path.sep)) return { ok: false, error: '非法的日志文件路径' };
   try {
     const st = fs.lstatSync(full);
     if (!st.isFile() || st.isSymbolicLink()) return { ok: false, error: '日志文件不存在' };
@@ -910,6 +968,16 @@ app.whenReady().then(() => {
   });
   createWindow();
   applyTray();
+  // 启动 30s 后静默检查一次在线升级：仅发现新版本时通知渲染层（检查失败完全静默，不打扰）
+  setTimeout(() => {
+    try {
+      getUpdater().check().then((r) => {
+        if (r && r.ok && r.update && mainWin && !mainWin.isDestroyed()) {
+          mainWin.webContents.send('update:available', { version: r.latest.version, notes: r.latest.notes, url: r.latest.url, reason: r.reason });
+        }
+      }).catch(() => { /* ignore */ });
+    } catch (e) { /* ignore */ }
+  }, 30 * 1000);
   // 内置网络服务：上次启用的服务自动恢复（配置存 settings.netSvc；FTP 口令为 enc1: 密文，恢复前解密）
   try {
     const saved = loadAppSettings().netSvc;
