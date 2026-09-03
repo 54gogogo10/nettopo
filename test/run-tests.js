@@ -22,6 +22,24 @@ const ok = (cond, name) => {
 };
 const eq = (a, b, name) => ok(a === b, `${name}（期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}）`);
 
+/** python 模块可用性探测（缓存结果）：缺依赖时二进制校验降级为跳过而非失败——
+ *  这些是导出产物的补充校验（本机开发环境已装齐，CI 由 workflow 安装），纯 JS 断言不受影响 */
+const pyModCache = new Map();
+function pythonHas(mods) {
+  const list = Array.isArray(mods) ? mods : [mods];
+  const key = list.join(',');
+  if (pyModCache.has(key)) return pyModCache.get(key);
+  let has = false;
+  try {
+    execSync('python -c "import ' + list.join(', ') + '"', { stdio: 'ignore' });
+    has = true;
+  } catch (e) { has = false; }
+  pyModCache.set(key, has);
+  return has;
+}
+/** 缺依赖时的跳过断言（计通过，但名字注明原因，便于与本机全量校验区分） */
+const okSkip = (name, mods) => ok(true, name + '（跳过：缺 python 模块 ' + (Array.isArray(mods) ? mods.join('/') : mods) + '，CI 环境会安装后全量校验）');
+
 console.log('== util ==');
 eq(U.escXml('a<b&c"d'), 'a&lt;b&amp;c&quot;d', 'XML 转义');
 eq(U.escXml('多\n行'), '多&#10;行', 'XML 换行转义');
@@ -1339,8 +1357,9 @@ console.log('== Visio VSDX 导出（2012 格式） ==');
   }
 
   }
-  // 写入文件 + python-vsdx 解析验证（有 python 时）
-  try {
+  // 写入文件 + python-vsdx 解析验证（有 python 且装了 vsdx 时）
+  if (!pythonHas('vsdx')) { okSkip('VSDX 可被 python-vsdx 解析', 'vsdx'); }
+  else try {
     const tmp = path.join(root, 'test', '_test.vsdx');
     fs.writeFileSync(tmp, buf);
     const out = execSync('python -c "import vsdx; v=vsdx.VisioFile(r\'' + tmp + '\'); print(len(v.get_page(0).child_shapes)); v.close_vsdx()"', { encoding: 'utf8' });
@@ -1393,8 +1412,9 @@ console.log('== PDF 导出 ==');
     const dx = Math.abs(labels[0].x - ocx), dy = Math.abs(labels[0].y - ocy);
     ok(!(dx < (80 + 100) / 2 + 4 && dy < (30 + 60) / 2 + 4), '防碰撞把标注推离节点（不压节点文字）');
   }
-  // 生成小 JPEG + PDF
-  try {
+  // 生成小 JPEG + PDF（需要 PIL 生成样图 + pymupdf 解析校验；缺失则跳过二进制校验）
+  if (!pythonHas(['PIL', 'pymupdf'])) { okSkip('PDF 二进制验证（PyMuPDF 解析）', ['PIL', 'pymupdf']); }
+  else try {
     const tmp = path.join(root, 'test', '_pdf_tmp');
     fs.writeFileSync(tmp + '.py', 'from PIL import Image\nImage.new("RGB", (300, 200), (200, 100, 50)).save(r"' + tmp + '.jpg", quality=85)\n');
     execSync('python ' + tmp + '.py');
@@ -1440,7 +1460,8 @@ const wmatch = xml.match(/<PageWidth[^>]*>([^<]+)</);
 ok(wmatch && parseFloat(wmatch[1]) > 5, 'VDX 页面宽度合理（' + (wmatch && wmatch[1]) + ' 英寸）');
 
 // 官方 2003 schema 校验（需要 python + lxml，不可用则跳过）
-try {
+if (!pythonHas('lxml')) { okSkip('VDX 通过官方 visio2003.xsd 校验', 'lxml'); }
+else try {
   const tmp = path.join(root, 'test', '_test.vdx');
   fs.writeFileSync(tmp, xml, 'utf8');
   const out = execSync('python test/validate_vdx.py ' + tmp, { cwd: root, encoding: 'utf8' });
