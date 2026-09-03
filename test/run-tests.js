@@ -3463,7 +3463,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const { NetServices, normalizeConfig } = require(path.join(root, 'js', 'net-services.js'));
     const { ConfigBackupStore } = require(path.join(root, 'js', 'config-backup.js'));
     const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
-    const waitUntil = async (fn, ms = 3000, step = 80) => { const t0 = Date.now(); for (;;) { let v; try { v = fn(); } catch (e) { v = false; } if (v) return true; if (Date.now() - t0 > ms) return false; await waitMs(step); } };
+    const waitUntil = async (fn, ms = 3000, step = 80) => { const t0 = Date.now(); for (;;) { let v; try { v = await fn(); } catch (e) { v = false; } if (v) return true; if (Date.now() - t0 > ms) return false; await waitMs(step); } };
     const tmpSvc = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-netsvc-'));
     const randPort = () => 20000 + Math.floor(Math.random() * 25000);
 
@@ -3857,9 +3857,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     await waitMs(120);
     const inc = ssrv.tail(seqBefore);
     ok(inc.msgs.length === 1 && /UNIQUE-KEY-XYZ/.test(inc.msgs[0].msg) && inc.msgs[0].severity === 5, 'Syslog 增量拉取（sinceSeq）');
-    ok(await waitUntil(() => { const r = ssrv.search({ keyword: 'unique-key-xyz' }); return r.ok && r.total >= 1 && r.items.some(i => i.host === 'fw1'); }), 'Syslog 关键字检索（大小写不敏感、含主机）');
-    ok(await waitUntil(() => { const r = ssrv.search({ keyword: 'down', host: 'sw2' }); return r.ok && r.total >= 1 && r.items.every(i => i.host === 'sw2'); }), 'Syslog 检索按主机过滤');
-    ok(ssrv.search({ keyword: '' }).ok === false, 'Syslog 检索空关键字拒绝');
+    ok(await waitUntil(async () => { const r = await ssrv.search({ keyword: 'unique-key-xyz' }); return r.ok && r.total >= 1 && r.items.some(i => i.host === 'fw1'); }), 'Syslog 关键字检索（大小写不敏感、含主机，工作线程执行）');
+    ok(await waitUntil(async () => { const r = await ssrv.search({ keyword: 'down', host: 'sw2' }); return r.ok && r.total >= 1 && r.items.every(i => i.host === 'sw2'); }), 'Syslog 检索按主机过滤');
+    ok((await ssrv.search({ keyword: '' })).ok === false, 'Syslog 检索空关键字拒绝');
     // 过期清理：伪造旧日期文件（注：消息时间戳 Oct 12 经跨年回退判为去年，其文件名日期早于
     // keepDays 窗口同样会被清理——这正是按文件名日期滚动清理的预期行为，不在此断言它）
     fs.mkdirSync(path.join(syslogBase, 'r1'), { recursive: true });
@@ -3979,7 +3979,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const { TftpServer } = require(path.join(root, 'js', 'svc-tftp.js'));
     const { MonitorManager, compileComplianceRules, snmpGet, OID_SYSDESCR } = require(path.join(root, 'js', 'monitor.js'));
     const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
-    const waitUntil = async (fn, ms = 3000, step = 60) => { const t0 = Date.now(); for (;;) { let v; try { v = fn(); } catch (e) { v = false; } if (v) return true; if (Date.now() - t0 > ms) return false; await waitMs(step); } };
+    const waitUntil = async (fn, ms = 3000, step = 60) => { const t0 = Date.now(); for (;;) { let v; try { v = await fn(); } catch (e) { v = false; } if (v) return true; if (Date.now() - t0 > ms) return false; await waitMs(step); } };
     const tmpSec = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-sec-'));
     const tmpdir2 = (p) => path.join(tmpSec, p);
 
@@ -4031,7 +4031,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const tail = 'Sep  1 10:00:00 r1 SPECIALNEEDLE found\n';
       const body = pad.repeat(Math.ceil((4.5 * 1024 * 1024 - tail.length) / pad.length));
       fs.writeFileSync(big, body + tail, 'utf8');
-      const r = ss2.search({ keyword: 'SPECIALNEEDLE' });
+      const r = await ss2.search({ keyword: 'SPECIALNEEDLE' });
       ok(r.ok && r.total === 1 && r.items.length === 1 && r.items[0].host === 'host1', 'syslog 检索：4.5MB 大文件尾部读取仍命中（不再全量读入内存）');
       fs.rmSync(sdir, { recursive: true, force: true });
     }
@@ -4169,6 +4169,56 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(g.nodes[0].note.length === 2000, '工程清洗：设备备注限长 2000');
       ok(g.links[0].aIf.length === 64 && g.links[0].note.length === 500, '工程清洗：接口名/连线备注限长');
       ok(g.texts[0].text.length === 10000, '工程清洗：文本框限长 10000');
+    }
+
+    /* ---- 日志检索工作线程（主进程不再被大目录同步扫描阻塞） ---- */
+    {
+      const { searchMonitorLogs, searchSyslogLogs } = require(path.join(root, 'js', 'log-search.js'));
+      // monitor 布局：<base>/<设备>/<日期>/<设备_管理口>.log
+      const monDir = tmpdir2('monsearch');
+      const monFile = path.join(monDir, '核心SW1', '2026-09-03', '核心SW1_10.1.1.1.log');
+      fs.mkdirSync(path.dirname(monFile), { recursive: true });
+      fs.writeFileSync(monFile, ['line one', 'Sep  3 10:00:00 CORESWITCH-MARKER down', 'line three', ''].join('\n'), 'utf8');
+      const rm1 = await searchMonitorLogs(monDir, 'coreswitch-marker');
+      ok(rm1.ok && rm1.total === 1 && rm1.items.length === 1 && rm1.items[0].device === '核心SW1'
+        && rm1.items[0].file === '核心SW1_10.1.1.1.log' && rm1.items[0].matches[0].line === 1,
+        '日志检索（monitor 布局，工作线程）：命中行携带设备/文件/行号');
+      // 与 logs-read 尾部截断口径一致：>4MB 文件行号仍可与 logs-read 内容对齐（同为尾部读取）
+      const bigFile = path.join(monDir, '核心SW1', '2026-09-03', '核心SW1_10.1.1.2.log');
+      fs.writeFileSync(bigFile, ('x'.repeat(100) + '\n').repeat(44000) + 'TAIL-MARKER-98765' + '\n', 'utf8'); // ~4.5MB
+      const rm2 = await searchMonitorLogs(monDir, 'tail-marker-98765');
+      ok(rm2.ok && rm2.total === 1, '日志检索（monitor）：超 4MB 文件只读尾部仍可命中');
+      const rm3 = await searchMonitorLogs(monDir, '');
+      ok(rm3.ok === false, '日志检索（monitor）：空关键字拒绝');
+      // syslog 布局：<base>/<主机>/<日期>.log（含 hostFilter 与大小写不敏感）
+      const sysDir = tmpdir2('syssearch');
+      const sysFile = path.join(sysDir, 'fw1', '2026-09-03.log');
+      fs.mkdirSync(path.dirname(sysFile), { recursive: true });
+      fs.writeFileSync(sysFile, ['Sep  3 10:00:00 fw1 ADMIN LOGIN SUCCESS', 'Sep  3 10:00:01 fw1 link down', ''].join('\n'), 'utf8');
+      const rs1 = await searchSyslogLogs(sysDir, 'admin login', '');
+      ok(rs1.ok && rs1.total === 1 && rs1.items.length === 1 && rs1.items[0].host === 'fw1'
+        && typeof rs1.items[0].matches[0] === 'string', '日志检索（syslog 布局，工作线程）：命中返回主机与行文本');
+      const rs2 = await searchSyslogLogs(sysDir, 'link down', 'fw2');
+      ok(rs2.ok && rs2.total === 0 && rs2.items.length === 0, '日志检索（syslog）：hostFilter 精确过滤');
+      fs.rmSync(monDir, { recursive: true, force: true });
+      fs.rmSync(sysDir, { recursive: true, force: true });
+    }
+
+    /* ---- 已信任主机指纹管理（TOFU 信任库查看/撤销） ---- */
+    {
+      const stubShell2 = new (require('events').EventEmitter)();
+      const trustFile = tmpdir2('trust.json');
+      const mm4 = new MonitorManager(stubShell2, tmpdir2('tlog4'), trustFile);
+      mm4.trusted.set('10.7.7.7', 'SHA256:AAAA');
+      mm4.trusted.set('core-sw.local', 'SHA256:BBBB');
+      const tl = mm4.trustList();
+      ok(tl.ok && tl.items.length === 2 && tl.items[0].host === '10.7.7.7', '信任管理：列表返回 host 与指纹（按主机排序）');
+      const rv = mm4.trustRevoke('10.7.7.7');
+      ok(rv.ok && rv.removed === true && mm4.trustList().items.length === 1, '信任管理：撤销后从信任库移除');
+      // 撤销落盘：重新加载信任库（新实例指向同一文件）不再包含已撤销主机
+      const mm5 = new MonitorManager(stubShell2, tmpdir2('tlog5'), trustFile);
+      ok(mm5.trustList().items.every(i => i.host !== '10.7.7.7'), '信任管理：撤销持久化（重载后不复活）');
+      ok(mm4.trustRevoke('not-exist').removed === false, '信任管理：撤销不存在的主机如实返回未删除');
     }
   }
 })().then(() => {

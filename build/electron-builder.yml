@@ -4,6 +4,8 @@ electronDist: node_modules/electron/dist
 directories:
   output: dist/portable
   buildResources: build
+# 打包后烧录 Electron fuses（关闭 runAsNode 等，见 build/afterPack.cjs）
+afterPack: ./afterPack.cjs
 files:
   - index.html
   - shell.html

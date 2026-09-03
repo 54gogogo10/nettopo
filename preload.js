@@ -72,7 +72,10 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   onIfTraffic: sub('monitor:iftraffic'),
   perfHistory: (key) => ipcRenderer.invoke('monitor:perfhistory', { key }),
   onPerf: sub('monitor:perf'),
-  onReboot: sub('monitor:reboot')
+  onReboot: sub('monitor:reboot'),
+  /* 已信任主机指纹（TOFU 信任库）的查看与撤销：设备换机/重装后可在此重置 */
+  trustList: () => ipcRenderer.invoke('monitor:trust-list'),
+  trustRevoke: (host) => ipcRenderer.invoke('monitor:trust-revoke', { host })
 });
 
 contextBridge.exposeInMainWorld('topoConfigBackup', {

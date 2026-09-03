@@ -800,6 +800,22 @@ class MonitorManager extends EventEmitter {
     return job ? path.join(this.logBaseDir, sanitizeFilename(job.name || job.deviceId)) : this.logBaseDir;
   }
 
+  /** 已信任主机指纹列表（TOFU 信任库，供界面查看/撤销） */
+  trustList() {
+    const items = [];
+    for (const [host, fp] of this.trusted) items.push({ host, fp });
+    items.sort((a, b) => (a.host < b.host ? -1 : 1));
+    return { ok: true, items };
+  }
+
+  /** 撤销某主机的信任指纹：后续连接按「首次连接」重新走 TOFU 信任流程 */
+  trustRevoke(host) {
+    host = String(host || '');
+    const removed = this.trusted.delete(host);
+    if (removed) this._saveTrust();
+    return { ok: true, removed };
+  }
+
   /* ---------------- 拆除 ---------------- */
   _teardown(job, mayReconnect) {
     job.enabled = false;

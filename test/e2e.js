@@ -1,12 +1,36 @@
 /* NetTopo e2e：无头 Chrome 加载页面、自动载入示例、截图并收集控制台错误 */
 'use strict';
 const path = require('path');
+const fs = require('fs');
 const puppeteer = require('puppeteer-core');
 
+/* Chrome 探测：优先环境变量 NETTOPO_CHROME / CHROME_BIN，再按平台找常见安装位置
+ * （兼容本机 Windows 与 Linux CI runner） */
+function findChrome() {
+  if (process.env.NETTOPO_CHROME) return process.env.NETTOPO_CHROME;
+  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
+  const candidates = process.platform === 'win32' ? [
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe')
+  ] : process.platform === 'darwin' ? [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+  ] : [
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium'
+  ];
+  for (const c of candidates) { try { if (c && fs.existsSync(c)) return c; } catch (e) { /* ignore */ } }
+  return null;
+}
+
 (async () => {
+  const chrome = findChrome();
+  if (!chrome) { console.error('未找到 Chrome：请安装或用 NETTOPO_CHROME 环境变量指定路径'); process.exit(1); }
   const browser = await puppeteer.launch({
-    executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    headless: 'new',
+    executablePath: chrome,
+    headless: true,
     args: ['--disable-gpu', '--no-sandbox', '--window-size=1680,950']
   });
   const page = await browser.newPage();

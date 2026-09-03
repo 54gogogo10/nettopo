@@ -1,0 +1,46 @@
+# NetTopo CI：每次 push/PR 自动回归
+# - unit：纯 Node 单元测试（991+ 项，含 SSH/TFTP/FTP/Syslog mock server），双平台
+# - e2e：无头 Chrome 跑 34 段界面回归（ubuntu runner 预装 google-chrome-stable）
+# 冒烟测试（smoke-*.js，需 Electron 桌面环境）不进 CI。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1' # 单测不需要 Electron 二进制，跳过下载提速
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 安装依赖
+        run: npm ci
+      - name: 单元测试
+        run: node test/run-tests.js
+
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 安装依赖
+        run: npm ci
+      - name: 安装 e2e 依赖
+        run: npm ci
+        working-directory: test
+      - name: e2e 集成测试
+        run: node test/e2e.js

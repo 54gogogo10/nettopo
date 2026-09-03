@@ -7,6 +7,7 @@ const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
+const { searchMonitorLogs } = require('./js/log-search.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
  *   否则 SUID 沙箱初始化直接 fatal abort（"Running as root without --no-sandbox is not supported"）。
@@ -716,6 +717,10 @@ ipcMain.handle('monitor:tray', (e, p) => {
   return { ok: true, enabled: trayEnabled() };
 });
 
+/* ---- 已信任主机指纹管理（TOFU 信任库的查看/撤销） ---- */
+ipcMain.handle('monitor:trust-list', (e) => monitorGuard(e) ? monitor.trustList() : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:trust-revoke', (e, p) => monitorGuard(e) ? monitor.trustRevoke(String((p && p.host) || '')) : { ok: false, error: 'forbidden' });
+
 /* ---- 监控日志浏览器：目录树 + 内容读取（路径逐级白名单校验） ---- */
 const LOG_DIR_RE = /^(\d{4}-\d{2}-\d{2})$/;
 function safeLogComponent(name, allowDate) {
@@ -775,75 +780,36 @@ ipcMain.handle('monitor:logs-read', (e, p) => {
   try {
     const st = fs.lstatSync(full);
     if (!st.isFile() || st.isSymbolicLink()) return { ok: false, error: '日志文件不存在' };
-    if (st.size > 4 * 1024 * 1024) return { ok: false, error: '日志文件过大（超过 4MB），请打开目录查看' };
-    return { ok: true, content: fs.readFileSync(full, 'utf8'), size: st.size };
+    // 超 4MB 只读尾部（丢弃首个残缺半行）：与 logs-search 的尾部读取同口径，命中行号保持可对齐；
+    // 渲染层按 truncated 标记提示「仅显示末尾 4MB」
+    let content = '', truncated = false;
+    if (st.size > 4 * 1024 * 1024) {
+      truncated = true;
+      const fd = fs.openSync(full, 'r');
+      try {
+        const buf = Buffer.alloc(4 * 1024 * 1024);
+        fs.readSync(fd, buf, 0, buf.length, st.size - buf.length);
+        content = buf.toString('utf8');
+        const nl = content.indexOf('\n');
+        if (nl >= 0) content = content.slice(nl + 1);
+      } finally {
+        try { fs.closeSync(fd); } catch (err2) { /* ignore */ }
+      }
+    } else {
+      content = fs.readFileSync(full, 'utf8');
+    }
+    return { ok: true, content, size: st.size, truncated };
   } catch (err) {
     return { ok: false, error: '读取日志失败' };
   }
 });
 
 ipcMain.handle('monitor:logs-search', (e, p) => {
-  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
-  const fs = require('fs');
+  if (!monitorGuard(e)) return Promise.resolve({ ok: false, error: 'forbidden' });
   const keyword = String((p && p.keyword) || '').trim().slice(0, 200);
-  if (!keyword) return { ok: false, error: '关键字为空' };
-  const lower = keyword.toLowerCase();
-  // 防护上限：防目录爆炸 / 超大文件 / 命中过多拖慢界面
-  const MAX_FILES = 300;                     // 最多扫描的日志文件数
-  const MAX_PER_FILE = 4 * 1024 * 1024;      // 单文件最多读取 4MB
-  const MAX_TOTAL_HITS = 500;                // 总命中行数上限
-  const FILE_RE = /^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)(?:_\d{8}_\d{6}(?:_\d+)?)?\.log$/;
-  const items = [];
-  let total = 0, scanned = 0;
-  let devs = [];
-  try { devs = fs.readdirSync(monitor.logBaseDir); } catch (err) { devs = []; }
-  outer:
-  for (const dev of devs) {
-    const devDir = path.join(monitor.logBaseDir, dev);
-    let st;
-    try { st = fs.lstatSync(devDir); } catch (err) { continue; }
-    if (!st.isDirectory() || st.isSymbolicLink()) continue;
-    let ds = [];
-    try { ds = fs.readdirSync(devDir); } catch (err) { ds = []; }
-    for (const d of ds) {
-      if (!LOG_DIR_RE.test(d)) continue;
-      const dDir = path.join(devDir, d);
-      try { st = fs.lstatSync(dDir); } catch (err) { continue; }
-      if (!st.isDirectory() || st.isSymbolicLink()) continue;
-      let fnames = [];
-      try { fnames = fs.readdirSync(dDir); } catch (err) { fnames = []; }
-      for (const f of fnames) {
-        if (!FILE_RE.test(f)) continue;
-        const full = path.join(dDir, f);
-        try { st = fs.lstatSync(full); } catch (err) { continue; }
-        if (!st.isFile() || st.isSymbolicLink()) continue;
-        if (++scanned > MAX_FILES) break outer;
-        let content = '';
-        try {
-          const fd = fs.openSync(full, 'r');
-          try {
-            const buf = Buffer.alloc(Math.min(st.size, MAX_PER_FILE));
-            fs.readSync(fd, buf, 0, buf.length, 0);
-            content = buf.toString('utf8');
-          } finally {
-            // readSync 抛错（文件在 lstat 与读取之间被删/锁定）也必须关 fd，否则反复检索耗尽句柄
-            try { fs.closeSync(fd); } catch (err2) { /* ignore */ }
-          }
-        } catch (err) { continue; }
-        const lines = content.split(/\r?\n/);
-        const matches = [];
-        for (let i = 0; i < lines.length; i++) {
-          if (total >= MAX_TOTAL_HITS) break outer;
-          if (lines[i].toLowerCase().indexOf(lower) >= 0) {
-            matches.push({ line: i, text: lines[i].slice(0, 300) });
-            total++;
-          }
-        }
-        if (matches.length) items.push({ device: dev, date: d, file: f, size: st.size, matches });
-      }
-    }
-  }
-  return { ok: true, keyword, total, items: items.slice(0, 200) };
+  if (!keyword) return Promise.resolve({ ok: false, error: '关键字为空' });
+  // 检索在工作线程内执行：大目录（300 文件 × 4MB）的同步扫描不再冻结主进程
+  return searchMonitorLogs(monitor.logBaseDir, keyword);
 });
 
 /* ---- 设备配置备份 IPC（复用 monitorGuard 防越权） ---- */

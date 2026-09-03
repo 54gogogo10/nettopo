@@ -5,6 +5,7 @@ dist/
 # 构建/诊断产物（保留打包配置）
 build/*
 !build/electron-builder.yml
+!build/afterPack.cjs
 
 # 测试临时产物（保留脚本与用例）
 test/_chrome_profile/

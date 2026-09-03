@@ -5561,6 +5561,7 @@ function openMonitorCenter() {
         </div>
       </div>
       <div class="m-actions">
+        <button type="button" class="tb" data-act="trust" title="查看已自动信任的 SSH 主机指纹，可撤销（后续连接按首次连接重新确认）">信任的主机</button>
         <button type="button" class="tb" data-act="refresh">刷新</button>
         <button type="button" class="tb primary" data-act="close">关闭</button>
       </div>
@@ -5573,6 +5574,52 @@ function openMonitorCenter() {
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
   ov.querySelector('[data-act=refresh]').onclick = load;
+  // 已信任主机指纹管理：列出 TOFU 信任库（host → SHA256 指纹），支持撤销
+  if (bridge.trustList) {
+    ov.querySelector('[data-act=trust]').onclick = async () => {
+      let r = null;
+      try { r = await bridge.trustList(); } catch (e) { r = null; }
+      const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+      const tRoot = $('#modalRoot');
+      const tOv = document.createElement('div');
+      tOv.className = 'overlay';
+      tOv.innerHTML = `
+        <div class="modal" role="dialog" style="width:640px">
+          <h3>已信任的主机指纹</h3>
+          <div class="m-sub">SSH 首次连接时自动信任并钉扎的主机指纹（TOFU）。设备更换硬件或重装系统导致指纹变化被拒连时，可在此撤销后重新连接确认。</div>
+          <div class="lb-files" id="trustList" style="max-height:50vh;overflow:auto">${items.length ? '' : '<div class="lb-empty">暂无已信任的主机</div>'}</div>
+          <div class="m-actions">
+            <button type="button" class="tb primary" data-act="tclose">关闭</button>
+          </div>
+        </div>`;
+      tRoot.appendChild(tOv);
+      const tClose = () => tOv.remove();
+      tOv.addEventListener('pointerdown', (e2) => { if (e2.target === tOv) tClose(); });
+      tOv.addEventListener('keydown', (e2) => { if (e2.key === 'Escape') { e2.stopPropagation(); tClose(); } });
+      tOv.querySelector('[data-act=tclose]').onclick = tClose;
+      const listEl = tOv.querySelector('#trustList');
+      if (items.length) {
+        listEl.innerHTML = items.map(it => `
+          <div class="lb-file" style="cursor:default">
+            <span class="nm">${U.escHtml(it.host)}</span>
+            <span class="sub" style="font:11px/1.4 Consolas,monospace;word-break:break-all;max-width:360px">${U.escHtml(it.fp || '')}</span>
+            <button type="button" class="tb trust-del" data-host="${U.escHtml(it.host)}" title="撤销该主机的信任指纹">撤销</button>
+          </div>`).join('');
+        listEl.querySelectorAll('.trust-del').forEach(btn => {
+          btn.onclick = async () => {
+            const host = btn.dataset.host;
+            btn.disabled = true;
+            try {
+              await bridge.trustRevoke(host);
+              btn.closest('.lb-file').remove();
+              if (!listEl.querySelector('.lb-file')) listEl.innerHTML = '<div class="lb-empty">暂无已信任的主机</div>';
+              toast('已撤销 ' + host + ' 的信任，下次连接将重新确认指纹');
+            } catch (e) { toast('撤销失败'); btn.disabled = false; }
+          };
+        });
+      }
+    };
+  }
   const jobsEl = ov.querySelector('#mcJobs');
   const evsEl = ov.querySelector('#mcEvents');
   const baksEl = ov.querySelector('#mcBaks');
@@ -6015,6 +6062,7 @@ function openMonitorLogs(devicePreset) {
   const contentEl = ov.querySelector('#lbContent');
   const searchEl = ov.querySelector('#lbSearch');
   let rawContent = '';
+  let rawTruncated = false; // 主进程只回传尾部 4MB 时为 true（渲染提示）
   let matches = [];   // {line, idx}
   let matchPos = -1;
   let globalHits = []; // 全局跨文件搜索扁平命中：{device,date,file,line,text}
@@ -6031,9 +6079,10 @@ function openMonitorLogs(devicePreset) {
         cur.file = el.dataset.name;
         renderFiles();
         rawContent = '';
+        rawTruncated = false;
         try {
           const r = await bridge.logsRead(cur.device, cur.date, cur.file);
-          if (r && r.ok) rawContent = r.content;
+          if (r && r.ok) { rawContent = r.content; rawTruncated = !!r.truncated; }
           else rawContent = '（读取失败：' + ((r && r.error) || '未知错误') + '）';
         } catch (e) { rawContent = '（读取失败）'; }
         // 点击具体文件：退出全局搜索态，直接浏览该文件
@@ -6068,7 +6117,8 @@ function openMonitorLogs(devicePreset) {
       }
     }
     const targetIdx = targetLine >= 0 ? targetLine : (matches.length ? matches[0] : -1);
-    contentEl.innerHTML = lines.map((ln, i) => {
+    const headNote = rawTruncated ? '<div class="lb-note" style="color:var(--muted,#64748b)">（文件超过 4MB，仅显示末尾 4MB；完整内容请用「打开目录」查看）</div>' : '';
+    contentEl.innerHTML = headNote + lines.map((ln, i) => {
       let html = U.escHtml(ln);
       if (kw) {
         const idx = ln.toLowerCase().indexOf(lower);
@@ -6128,7 +6178,7 @@ function openMonitorLogs(devicePreset) {
     dateSel.value = h.date;
     renderNav();
     rawContent = '';
-    try { const r = await bridge.logsRead(h.device, h.date, h.file); if (r && r.ok) rawContent = r.content; } catch (e) { rawContent = ''; }
+    try { const r = await bridge.logsRead(h.device, h.date, h.file); if (r && r.ok) { rawContent = r.content; rawTruncated = !!r.truncated; } } catch (e) { rawContent = ''; }
     renderFileWithTarget(h.line);
   };
   const jumpTo = (pos) => {
@@ -6182,7 +6232,7 @@ function openMonitorLogs(devicePreset) {
     renderNav();
     if (cur.file) {
       bridge.logsRead(cur.device, cur.date, cur.file).then((r2) => {
-        if (r2 && r2.ok) rawContent = r2.content;
+        if (r2 && r2.ok) { rawContent = r2.content; rawTruncated = !!r2.truncated; }
         applySearch();
       }).catch(() => applySearch());
     } else applySearch();

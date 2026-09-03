@@ -15,6 +15,7 @@ const path = require('path');
 const net = require('net');
 const dgram = require('dgram');
 const { EventEmitter } = require('events');
+const { searchSyslogLogs } = require('./log-search.js');
 
 const SEV_NAMES = ['emerg', 'alert', 'crit', 'err', 'warning', 'notice', 'info', 'debug'];
 const FAC_NAMES = ['kernel', 'user', 'mail', 'daemon', 'auth', 'syslog', 'lpr', 'news', 'uucp', 'cron', 'authpriv', 'ftp', 'ntp', 'audit', 'alert', 'clock', 'local0', 'local1', 'local2', 'local3', 'local4', 'local5', 'local6', 'local7'];
@@ -22,8 +23,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const MAX_MSG_LEN = 8 * 1024;        // 单条消息长度上限（超长截断）
 const MAX_RING = 1000;               // 环形缓冲条数
 const TAIL_MAX = 300;                // 单次返回条数上限
-const MAX_LINE_SEARCH = 4 * 1024 * 1024; // 检索单文件读取上限
-const MAX_TCP_CONNS = 64;                // TCP 并发连接上限（内核层挂起超限 accept，防句柄耗尽）
+const MAX_TCP_CONNS = 64;            // TCP 并发连接上限（内核层挂起超限 accept，防句柄耗尽）
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const pad3 = (n) => String(n).padStart(3, '0');
@@ -364,62 +364,13 @@ class SyslogServer extends EventEmitter {
     return { msgs, last: this.seq, dropped: this.stats.dropped };
   }
 
-  /** 跨文件关键字检索：keyword 必填；host 可选过滤（目录名精确匹配） */
-  search(q) {
+  /** 跨文件关键字检索（工作线程内执行：目录遍历 + 逐文件尾部读取不再阻塞主进程）。
+   *  keyword 必填；host 可选过滤（目录名精确匹配，先经 sanitizeHostDir 清洗）。 */
+  async search(q) {
     const keyword = String((q && q.keyword) || '').trim().slice(0, 200);
     if (!keyword) return { ok: false, error: '关键字为空' };
     const hostFilter = String((q && q.host) || '').trim() ? sanitizeHostDir(String(q.host).trim()) : '';
-    const lower = keyword.toLowerCase();
-    const items = [];
-    let total = 0;
-    let hosts = [];
-    try { hosts = fs.readdirSync(this.baseDir); } catch (e) { hosts = []; }
-    outer:
-    for (const host of hosts) {
-      if (hostFilter && host !== hostFilter) continue;
-      const hd = path.join(this.baseDir, host);
-      let st;
-      try { st = fs.lstatSync(hd); } catch (e) { continue; }
-      if (!st.isDirectory() || st.isSymbolicLink()) continue;
-      let files = [];
-      try { files = fs.readdirSync(hd).sort().reverse(); } catch (e) { continue; }
-      for (const f of files) {
-        if (!/^\d{4}-\d{2}-\d{2}\.log$/.test(f)) continue;
-        const full = path.join(hd, f);
-        try { st = fs.lstatSync(full); } catch (e) { continue; }
-        if (!st.isFile() || st.isSymbolicLink()) continue;
-        // 只读尾部 MAX_LINE_SEARCH 字节：文件大小由设备端灌包速度决定（可达数百 MB），
-        // 全量 readFileSync 会把主进程内存推到 OOM——原实现是「读全量再 slice 尾部」，语义一致但代价失控
-        let content = '';
-        try {
-          const fd = fs.openSync(full, 'r');
-          try {
-            const size = Math.min(st.size, MAX_LINE_SEARCH);
-            const buf = Buffer.alloc(size);
-            fs.readSync(fd, buf, 0, size, st.size - size);
-            content = buf.toString('utf8');
-            if (size < st.size) {
-              const nl = content.indexOf('\n'); // 从字节中间切开：丢弃首个可能残缺的半行
-              if (nl >= 0) content = content.slice(nl + 1);
-            }
-          } finally {
-            try { fs.closeSync(fd); } catch (e2) { /* ignore */ }
-          }
-        } catch (e) { continue; }
-        const lines = content.split('\n');
-        const matches = [];
-        for (let i = 0; i < lines.length; i++) {
-          if (total >= 500) break outer;
-          if (lines[i] && lines[i].toLowerCase().indexOf(lower) >= 0) {
-            matches.push(lines[i].slice(0, 400));
-            total++;
-          }
-        }
-        if (matches.length) items.push({ host, date: f.slice(0, 10), matches });
-        if (items.length >= 100) break outer;
-      }
-    }
-    return { ok: true, keyword, total, items };
+    return searchSyslogLogs(this.baseDir, keyword, hostFilter);
   }
 
   status() {
