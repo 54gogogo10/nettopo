@@ -4,7 +4,8 @@
  *    杜绝同机用户借环境变量注入绕过渲染层全部防线（CSP / contextIsolation / IPC 校验）；
  *  - OnlyLoadAppFromAsar + EnableEmbeddedAsarIntegrityValidation：应用只能从 app.asar 加载，
  *    且校验 electron-builder 写入 exe 资源段的 asar 完整性（防篡改应用代码）；
- *  - GrantFileProtocolExtraPrivileges 关闭：file:// 不获得额外的特权读取。
+ *  - GrantFileProtocolExtraPrivileges 保持开启（Electron 默认）：file 协议读取 asar 内资源
+ *    （loadFile 加载渲染页）依赖该特权，关闭会让打包版渲染页 ERR_FILE_NOT_FOUND 白屏。
  * Linux 交叉打包（electron-builder-linux.yml）复用同一钩子（ELF 同样支持烧录）。 */
 const path = require('path');
 const { flipFuses, FuseV1Options, FuseVersion } = require('@electron/fuses');
@@ -15,7 +16,7 @@ exports.default = async function afterPack(context) {
   const exePath = path.join(context.appOutDir, exeName);
   console.log('  • afterPack: 烧录 Electron fuses →', exeName);
   await flipFuses(exePath, {
-    version: FuseVersion.v1,
+    version: FuseVersion.V1,
     [FuseV1Options.RunAsNode]: false,
     [FuseV1Options.EnableCookieEncryption]: true,
     [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
@@ -23,6 +24,6 @@ exports.default = async function afterPack(context) {
     [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
     [FuseV1Options.OnlyLoadAppFromAsar]: true,
     [FuseV1Options.LoadBrowserProcessSpecificV8Snapshot]: false,
-    [FuseV1Options.GrantFileProtocolExtraPrivileges]: false
+    [FuseV1Options.GrantFileProtocolExtraPrivileges]: true
   });
 };
