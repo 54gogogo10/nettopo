@@ -757,7 +757,7 @@ html[data-theme="dark"] .lb-content .lb-sres:hover { border-color: var(--accent2
 .bk-file .nm { word-break: break-all; }
 .bk-file .sub { color: var(--muted); font-size: 10px; display: block; }
 .bk-dialog .bk-body { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.bk-dialog .bk-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.bk-dialog .bk-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
 .bk-dialog .bk-diffinfo { flex: 1; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bk-content { flex: 1; overflow: auto; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font: 11.5px/1.65 Consolas, 'Courier New', monospace; margin: 0; white-space: pre-wrap; word-break: break-all; }
 .bk-content .dl-ctx { color: var(--text); white-space: pre-wrap; }
@@ -1086,7 +1086,7 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 /* ============ 网络服务（TFTP / FTP / Syslog）面板 ============ */
 .nsv-dialog { display: flex; flex-direction: column; }
 .nsv-top { display: flex; gap: 10px; margin-bottom: 10px; }
-.nsv-cards { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.nsv-cards { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .nsv-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--panel2); display: flex; flex-direction: column; gap: 6px; }
 .nsv-card-h { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .nsv-card-h b { font-size: 12.5px; white-space: nowrap; }
@@ -1098,10 +1098,10 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .nsv-dot.err { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .2); }
 .nsv-sw { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text); cursor: pointer; }
 .nsv-sw input { accent-color: var(--accent); }
-.nsv-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+.nsv-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; flex-wrap: wrap; }
 .nsv-row > label:first-child { color: var(--muted); flex: 0 0 auto; }
 .nsv-row input[type=number] { width: 74px; }
-.nsv-row input[type=text] { flex: 1; min-width: 0; }
+.nsv-row input[type=text] { flex: 1; min-width: 90px; }
 .nsv-row input[type=number], .nsv-row input[type=text] {
   height: 24px; padding: 0 7px; font-size: 11.5px;
   background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; outline: none;
@@ -1109,7 +1109,7 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .nsv-row input[type=number]:focus, .nsv-row input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .nsv-mini { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .nsv-mini input { accent-color: var(--accent); }
-.nsv-hint { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.nsv-hint { font-size: 10.5px; color: var(--muted); white-space: normal; }
 .nsv-note { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
 .nsv-aside { flex: 0 0 250px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--panel2); display: flex; flex-direction: column; gap: 6px; overflow: auto; }
 .nsv-h { font-size: 11px; font-weight: 600; color: var(--muted); }
