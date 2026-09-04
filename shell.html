@@ -20,6 +20,7 @@
     <button id="shFontInc" class="sh-font-btn" title="增大字号 (Ctrl+=)">A+</button>
   </div>
   <button id="shCastBtn" class="sh-cast-btn" title="多标签命令广播（SecureCRT Chat Window 模式）：勾选标签后，一条命令同时下发">⇉ 群发</button>
+  <button id="shAiBtn" class="sh-cast-btn" title="AI 命令助手：输入自然语言需求，由 AI 生成命令并按所选权限模式在当前连接的终端上执行">✦ AI 助手</button>
   <button id="shNew" class="sh-new" title="新建连接（SSH / Telnet）">＋ 新建连接</button>
 </header>
 
@@ -33,6 +34,19 @@
   <button id="shCastSend" class="sh-cast-send" title="发送到勾选的标签（Enter）">发送</button>
   <button id="shCastDiff" class="sh-cast-send sh-cast-diff" title="汇总勾选标签的终端输出并标记差异行">对比</button>
 </div>
+
+<div id="shAi" class="sh-ai hidden" title="AI 命令助手：输入自然语言需求，AI 生成命令后按所选权限模式执行（需先在主窗口「AI 设置」中配置 AI 服务）">
+  <span class="sh-cast-tag">AI</span>
+  <select id="shAiMode" class="sh-ai-mode" title="执行权限模式：确认后执行——生成命令先展示，人工确认再下发；仅填入不执行——命令填入终端但不回车，人工检查后手动执行；直接执行——生成后立即下发到终端">
+    <option value="confirm">确认后执行</option>
+    <option value="fill">仅填入不执行</option>
+    <option value="auto">直接执行</option>
+  </select>
+  <input id="shAiInput" type="text" placeholder="用自然语言描述要在当前终端执行的操作，例如：查看所有接口的 IP 地址和路由表" autocomplete="off" spellcheck="false"/>
+  <label class="sh-ai-ctx" title="把当前标签终端的最近输出一并发给 AI 作为上下文（命令语法更贴合设备；内容会发送到「AI 设置」中配置的服务）"><input id="shAiCtx" type="checkbox" checked/>带终端输出</label>
+  <button id="shAiSend" class="sh-cast-send" title="生成命令并按所选权限模式处理（Enter）">生成</button>
+</div>
+<div id="shAiResult" class="sh-ai-result hidden"></div>
 
 <div id="shBbar" class="sh-bbar" title="右键管理快捷按钮">
   <div id="shBBtnWrap" class="sh-bbar-btns"></div>

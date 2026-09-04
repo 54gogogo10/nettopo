@@ -380,6 +380,174 @@ function diffSessionOutputs(outputs) {
     } catch (e) { /* ignore */ }
   };
 
+  /* ---- AI 命令助手：自然语言需求 → 生成命令 → 按权限模式执行 ----
+   * 权限模式（执行方式）：confirm 确认后执行（默认，生成先展示、人工确认再下发）|
+   * fill 仅填入不执行（命令填入终端不回车，人工检查后手动执行）| auto 直接执行（生成即下发） */
+  const AI_MODE_KEY = 'topoShellAiMode';
+  const AI_MODES = ['confirm', 'fill', 'auto'];
+  const aiBtnEl = $('#shAiBtn'), aiEl = $('#shAi'), aiModeEl = $('#shAiMode'),
+        aiInputEl = $('#shAiInput'), aiCtxEl = $('#shAiCtx'), aiSendEl = $('#shAiSend'),
+        aiResultEl = $('#shAiResult');
+  let aiMode = (() => {
+    try { const v = localStorage.getItem(AI_MODE_KEY); return AI_MODES.indexOf(v) >= 0 ? v : 'confirm'; }
+    catch (e) { return 'confirm'; }
+  })();
+  if (aiModeEl) aiModeEl.value = aiMode;
+  let aiBusy = false;   // 命令生成进行中（窗口级单飞，防竞态下发）
+  let aiRunSeq = 0;     // 生成轮次：取消/重发后忽略过期响应
+  const setAiMode = (m) => {
+    if (AI_MODES.indexOf(m) < 0) m = 'confirm';
+    aiMode = m;
+    try { localStorage.setItem(AI_MODE_KEY, m); } catch (e) { /* ignore */ }
+    if (aiModeEl) aiModeEl.value = m;
+  };
+  const setAiBar = (on) => {
+    if (aiBtnEl) aiBtnEl.classList.toggle('on', on);
+    if (aiEl) aiEl.classList.toggle('hidden', !on);
+    if (!on) hideAiResult();
+    if (on && aiInputEl) aiInputEl.focus();
+    // 底部条展开/收起改变终端可用高度：主动重算 fit，防 xterm 画布溢出压住条
+    const a = activeSession();
+    if (a) requestAnimationFrame(() => {
+      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
+      try { window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows); } catch (e) { /* ignore */ }
+    });
+  };
+  const hideAiResult = () => { if (!aiResultEl) return; aiResultEl.classList.add('hidden'); aiResultEl.innerHTML = ''; };
+  /** 结果条渲染：notes 为 {text, err} 段落；cmds 为命令 chips（点击复制）；acts 为 {label, primary, act} 按钮 */
+  const showAiResult = (notes, cmds, acts) => {
+    if (!aiResultEl) return;
+    aiResultEl.innerHTML = '';
+    const noteEl = document.createElement('div');
+    noteEl.className = 'sh-ai-note';
+    for (const n of (notes || [])) {
+      const seg = document.createElement('div');
+      if (n.err) seg.classList.add('err');
+      seg.textContent = n.text;
+      noteEl.appendChild(seg);
+    }
+    aiResultEl.appendChild(noteEl);
+    if (cmds && cmds.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'sh-ai-cmds';
+      for (const c of cmds) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'sh-ai-cmd' + (c.done ? ' done' : '');
+        b.title = '点击复制：' + c.text;
+        b.textContent = c.text;
+        b.onclick = () => { try { window.topoShell.copyText(c.text); toast('命令已复制'); } catch (e) { /* ignore */ } };
+        wrap.appendChild(b);
+      }
+      aiResultEl.appendChild(wrap);
+    }
+    if (acts && acts.length) {
+      const bar = document.createElement('div');
+      bar.className = 'sh-ai-acts';
+      for (const a of acts) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'sh-ai-act' + (a.primary ? ' primary' : '');
+        b.textContent = a.label;
+        b.onclick = () => { hideAiResult(); a.act && a.act(); };
+        bar.appendChild(b);
+      }
+      aiResultEl.appendChild(bar);
+    }
+    aiResultEl.classList.remove('hidden');
+  };
+  /** 逐条下发命令到指定会话：每条追加回车，间隔 400ms 给设备处理时间；中途断开即中止 */
+  const sendCommandsToSession = async (sid, cmds) => {
+    let sent = 0;
+    for (const c of cmds) {
+      const s = sessions.get(sid);
+      if (!s || s.ended) { toast('会话已断开，剩余命令未下发'); break; }
+      window.topoShell.sendData(sid, c + '\r');
+      sent++;
+      if (sent < cmds.length) await new Promise((r) => setTimeout(r, 400));
+    }
+    return sent;
+  };
+  const tabName = (sid) => {
+    const s = sessions.get(sid);
+    const tt = s && (s.tabEl.querySelector('.tt') || {});
+    return (tt.textContent || sid);
+  };
+  const sendAi = async () => {
+    if (aiBusy) { toast('AI 正在生成命令，请等待完成或先停止'); return; }
+    if (!window.topoAI || !window.topoAI.shellChat) { toast('AI 助手需要桌面版（Electron）环境'); return; }
+    const a = activeSession();
+    if (!a) { toast('请先连接并选中一个终端标签'); return; }
+    if (a.s.ended) { toast('当前会话已断开，请先重新连接'); return; }
+    const req = aiInputEl ? aiInputEl.value.trim() : '';
+    if (!req) { toast('请先输入需求描述'); return; }
+    const sid = a.id;
+    const target = tabName(sid);
+    aiBusy = true;
+    const seq = ++aiRunSeq;
+    if (aiSendEl) { aiSendEl.disabled = true; aiSendEl.textContent = '生成中…'; }
+    // busy 结果条：带「停止」按钮（取消主进程进行中的生成请求）
+    showAiResult([{ text: 'AI 正在生成命令（目标：' + target + '）…' }], [], [
+      { label: '停止', act: () => { try { window.topoAI.cancel(); } catch (e) { /* ignore */ } } }
+    ]);
+    const ctx = (aiCtxEl && aiCtxEl.checked && a.s.term) ? readTermLines(a.s, 60).join('\n') : '';
+    let r;
+    try { r = await window.topoAI.shellChat({ requirement: req, termContext: ctx }); }
+    catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+    if (seq !== aiRunSeq) return; // 已被新一轮生成作废
+    aiBusy = false;
+    if (aiSendEl) { aiSendEl.disabled = false; aiSendEl.textContent = '生成'; }
+    if (r && r.refused) {
+      // 拒绝语义先于 !ok 判断：主进程对拒绝返回 ok:false + refused 标记
+      showAiResult([{ text: 'AI 拒绝生成：' + (r.reason || '该需求无法安全执行'), err: true }], [], [
+        { label: '关闭', act: () => {} }
+      ]);
+      return;
+    }
+    if (!r || !r.ok) {
+      const cancelled = r && r.cancelled;
+      const msg = (r && r.error) || '未知错误';
+      showAiResult([{ text: cancelled ? '已取消生成' : '生成失败：' + msg, err: !cancelled }], [], [
+        { label: '关闭', act: () => {} }
+      ]);
+      return;
+    }
+    const cmds = (r.commands || []).map((c) => ({ text: c }));
+    if (!cmds.length) {
+      showAiResult([{ text: '未能从回复中提取命令', err: true }], [], [{ label: '关闭', act: () => {} }]);
+      return;
+    }
+    if (aiMode === 'auto') {
+      const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
+      showAiResult([{ text: '已直接下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」（模式：直接执行）' }], cmds, [{ label: '关闭', act: () => {} }]);
+      return;
+    }
+    if (aiMode === 'fill') {
+      // 仅填入：只把第一条粘贴进终端（不回车）；其余命令点击复制，避免多行粘贴直接触发执行
+      const s = sessions.get(sid);
+      if (!s || s.ended) { toast('会话已断开'); return; }
+      try { s.term.paste(cmds[0].text); } catch (e) { /* ignore */ }
+      cmds[0].done = true;
+      const notes = [{ text: '已把第 1 条命令填入「' + target + '」终端（未回车，检查后手动执行）' }];
+      if (cmds.length > 1) notes.push({ text: '其余 ' + (cmds.length - 1) + ' 条点击复制后手动执行（多行粘贴会逐行回车，故不直接填入）：' });
+      showAiResult(notes, cmds, [{ label: '复制全部', act: () => { try { window.topoShell.copyText(cmds.map((c) => c.text).join('\n')); toast('命令已复制'); } catch (e) { /* ignore */ } } }]);
+      return;
+    }
+    // confirm（默认）：展示命令人工确认
+    showAiResult(
+      [{ text: 'AI 生成了 ' + cmds.length + ' 条命令（目标：' + target + '），请确认后执行：' }],
+      cmds,
+      [
+        { label: '执行全部', primary: true, act: async () => {
+            const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
+            toast('已下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」');
+          } },
+        { label: '复制全部', act: () => { try { window.topoShell.copyText(cmds.map((c) => c.text).join('\n')); toast('命令已复制'); } catch (e) { /* ignore */ } } },
+        { label: '放弃', act: () => {} }
+      ]
+    );
+  };
+
   /* ---- 通用右键菜单（items 缺省时显示终端菜单） ---- */
   function showCtx(x, y, items) {
     if (!items) {
@@ -662,6 +830,14 @@ function diffSessionOutputs(outputs) {
     if (castDiffEl) castDiffEl.onclick = openCastDiff;
     if (castInputEl) castInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); sendCast(); }
+    });
+
+    // AI 命令助手
+    if (aiBtnEl) aiBtnEl.onclick = () => setAiBar(aiEl.classList.contains('hidden'));
+    if (aiModeEl) aiModeEl.addEventListener('change', () => setAiMode(aiModeEl.value));
+    if (aiSendEl) aiSendEl.onclick = sendAi;
+    if (aiInputEl) aiInputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); sendAi(); }
     });
 
     // 终端区域右键菜单（不拦截弹窗内输入）
