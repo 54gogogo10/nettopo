@@ -1134,13 +1134,15 @@ ipcMain.handle('ai:shell-chat', async (e, p) => {
   if (!client.ready) return { ok: false, error: '请先在主窗口菜单「AI 设置」中配置 API 地址与模型名' };
   // 终端上下文保尾部截断（提示词注入面收敛：内容在提示词中声明为不可信数据）
   const cut = truncateText(String((p && p.termContext) == null ? '' : p.termContext), 32 * 1024, 'tail');
-  // 设备类型注入（SHELL_DEVICE_TYPES 白名单键，非法值回落 auto 不注入）
-  const messages = buildShellPrompt(requirement, cut.text, String((p && p.deviceType) || ''));
+  // 设备类型注入（SHELL_DEVICE_TYPES 白名单键，非法值回落 auto 不注入）；生成类型 cmd/config
+  const kind = (p && p.kind === 'config') ? 'config' : 'cmd';
+  const messages = buildShellPrompt(requirement, cut.text, String((p && p.deviceType) || ''), kind);
   aiShellClients.add(client);
   try {
-    const r = await client.chat({ messages, maxTokens: 1024 });
+    const r = await client.chat({ messages, maxTokens: kind === 'config' ? 4096 : 1024 });
     if (!r.ok) return r;
-    const parsed = parseShellCommands(r.text);
+    // 配置段行数放宽到 40（配置变更序列较长）
+    const parsed = parseShellCommands(r.text, kind === 'config' ? 40 : 10);
     return {
       ok: parsed.ok, commands: parsed.commands, refused: parsed.refused, reason: parsed.reason,
       reply: r.text, model: r.model || client.model, ms: r.ms
