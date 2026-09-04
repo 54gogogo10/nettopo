@@ -7222,15 +7222,11 @@ async function openAiSettings() {
         : 'OpenAI 兼容服务地址，例如 https://api.deepseek.com/v1';
     }
   });
-  // 模型名旁追加「拉取模型」：按当前表单的地址/Key/协议取服务端模型列表，经 datalist 下拉选择（保留手填）
+  // 模型名旁追加「拉取模型」：按当前表单的地址/Key/协议取服务端模型列表，
+  // 结果显示在下方显式 <select> 下拉中（datalist 原生弹层在深色弹窗下不可靠），点选即填入，输入框保留手填
   const modelInput = form.elements.model;
-  const modelList = document.createElement('datalist');
-  modelList.id = 'aiModelList' + Date.now();
-  form.appendChild(modelList);
-  modelInput.setAttribute('list', modelList.id);
-  modelInput.setAttribute('autocomplete', 'off');
   const modelWrap = document.createElement('div');
-  modelWrap.style.cssText = 'display:flex;gap:6px;width:100%';
+  modelWrap.style.cssText = 'display:flex;gap:6px;width:100%;flex-wrap:wrap;align-items:center';
   modelInput.replaceWith(modelWrap);
   modelInput.style.flex = '1';
   modelInput.style.minWidth = '0';
@@ -7240,6 +7236,7 @@ async function openAiSettings() {
   fetchBtn.type = 'button'; fetchBtn.className = 'tb'; fetchBtn.textContent = '拉取模型';
   fetchBtn.title = '按当前 API 地址与 Key 拉取该服务支持的模型列表';
   modelWrap.appendChild(fetchBtn);
+  let modelSel = null;
   fetchBtn.onclick = async () => {
     fetchBtn.disabled = true; fetchBtn.textContent = '拉取中…';
     const r = await ai.listModels({
@@ -7248,12 +7245,20 @@ async function openAiSettings() {
       protocol
     }).catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
     fetchBtn.disabled = false; fetchBtn.textContent = '拉取模型';
-    if (r && r.ok && Array.isArray(r.models) && r.models.length) {
-      modelList.innerHTML = r.models.map(m => `<option value="${U.escHtml(m)}"></option>`).join('');
-      toast('已获取 ' + r.models.length + ' 个模型：点击模型名输入框在下拉中选择');
-    } else {
+    if (!(r && r.ok && Array.isArray(r.models) && r.models.length)) {
       toast('拉取失败：' + ((r && r.error) || '服务未返回模型列表，请手动填写'));
+      return;
     }
+    if (!modelSel) {
+      modelSel = document.createElement('select');
+      modelSel.style.width = '100%';
+      modelSel.addEventListener('change', () => { if (modelSel.value) modelInput.value = modelSel.value; });
+      modelWrap.appendChild(modelSel); // flex-wrap 自动换行到输入框下方
+    }
+    modelSel.innerHTML = '<option value="">— 从服务返回的 ' + r.models.length + ' 个模型中选择 —</option>'
+      + r.models.map(m => `<option value="${U.escHtml(m)}">${U.escHtml(m)}</option>`).join('');
+    if (r.models.length === 1) modelInput.value = r.models[0];
+    toast('已获取 ' + r.models.length + ' 个模型：在下方下拉中选择，或直接手填');
   };
   // 在操作区追加「保存并测试连接」：先保存当前表单值再发连通性测试请求
   const actions = ov.querySelector('.m-actions');
