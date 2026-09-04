@@ -7222,6 +7222,39 @@ async function openAiSettings() {
         : 'OpenAI 兼容服务地址，例如 https://api.deepseek.com/v1';
     }
   });
+  // 模型名旁追加「拉取模型」：按当前表单的地址/Key/协议取服务端模型列表，经 datalist 下拉选择（保留手填）
+  const modelInput = form.elements.model;
+  const modelList = document.createElement('datalist');
+  modelList.id = 'aiModelList' + Date.now();
+  form.appendChild(modelList);
+  modelInput.setAttribute('list', modelList.id);
+  modelInput.setAttribute('autocomplete', 'off');
+  const modelWrap = document.createElement('div');
+  modelWrap.style.cssText = 'display:flex;gap:6px;width:100%';
+  modelInput.replaceWith(modelWrap);
+  modelInput.style.flex = '1';
+  modelInput.style.minWidth = '0';
+  modelInput.style.width = 'auto';
+  modelWrap.appendChild(modelInput);
+  const fetchBtn = document.createElement('button');
+  fetchBtn.type = 'button'; fetchBtn.className = 'tb'; fetchBtn.textContent = '拉取模型';
+  fetchBtn.title = '按当前 API 地址与 Key 拉取该服务支持的模型列表';
+  modelWrap.appendChild(fetchBtn);
+  fetchBtn.onclick = async () => {
+    fetchBtn.disabled = true; fetchBtn.textContent = '拉取中…';
+    const r = await ai.listModels({
+      baseUrl: form.elements.baseUrl.value.trim(),
+      apiKey: form.elements.apiKey.value,
+      protocol
+    }).catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
+    fetchBtn.disabled = false; fetchBtn.textContent = '拉取模型';
+    if (r && r.ok && Array.isArray(r.models) && r.models.length) {
+      modelList.innerHTML = r.models.map(m => `<option value="${U.escHtml(m)}"></option>`).join('');
+      toast('已获取 ' + r.models.length + ' 个模型：点击模型名输入框在下拉中选择');
+    } else {
+      toast('拉取失败：' + ((r && r.error) || '服务未返回模型列表，请手动填写'));
+    }
+  };
   // 在操作区追加「保存并测试连接」：先保存当前表单值再发连通性测试请求
   const actions = ov.querySelector('.m-actions');
   if (!actions) return;

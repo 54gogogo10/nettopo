@@ -64,6 +64,32 @@ function claudeEndpoint(baseUrl) {
   return b.replace(/\/v1\/?$/i, '') + '/v1/messages';
 }
 
+/** 模型列表端点：OpenAI 兼容 GET {base}/models；Claude GET {base}/v1/models */
+function modelsEndpoint(baseUrl, protocol) {
+  if (validateProtocol(protocol) === 'claude') return claudeEndpoint(baseUrl).replace(/\/messages\/?$/i, '/models');
+  const b = validateBaseUrl(baseUrl);
+  if (!b) return '';
+  if (/\/models\/?$/i.test(b)) return b;
+  return b + '/models';
+}
+
+/** 归一各供应商模型列表响应为 id 数组（OpenAI {data:[{id}]} / Claude {data:[{id,display_name}]} / 裸数组）。
+ *  去重并按字母序排序；无法识别的结构返回 null */
+function parseModelsResponse(j) {
+  const arr = Array.isArray(j) ? j : (j && Array.isArray(j.data) ? j.data : null);
+  if (!arr) return null;
+  const out = [];
+  const seen = new Set();
+  for (const it of arr) {
+    const id = it && (it.id || it.name || it.model);
+    if (typeof id !== 'string' || !id.trim() || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  out.sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1));
+  return out;
+}
+
 /** API Key 脱敏展示（前 4 + **** + 后 4；短 Key 只留前 2） */
 function maskKey(k) {
   const s = String(k == null ? '' : k).trim();
@@ -347,6 +373,89 @@ class AiClient extends EventEmitter {
       this._wasCancelled = true;
       try { this._req.destroy(); } catch (e) { /* ignore */ }
     }
+  }
+
+  /** 拉取服务端支持的模型列表（OpenAI 兼容 GET {base}/models；Claude GET {base}/v1/models）。
+   *  返回 { ok, models:[id] } | { ok:false, error } */
+  listModels() {
+    if (!this.baseUrl) return Promise.resolve({ ok: false, error: '请先填写 API 地址' });
+    const ep = modelsEndpoint(this.baseUrl, this.protocol);
+    if (!ep) return Promise.resolve({ ok: false, error: 'API 地址无效：需以 http:// 或 https:// 开头' });
+    return new Promise((resolve, reject) => {
+      let u;
+      try { u = new URL(ep); } catch (e) { return resolve({ ok: false, error: 'API 地址无效' }); }
+      const isHttps = u.protocol === 'https:';
+      const mod = isHttps ? https : http;
+      const headers = {};
+      if (this.protocol === 'claude') {
+        if (this.apiKey) headers['x-api-key'] = this.apiKey;
+        headers['anthropic-version'] = CLAUDE_VERSION;
+      } else if (this.apiKey) {
+        headers['Authorization'] = 'Bearer ' + this.apiKey;
+      }
+      let settled = false;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(connectTimer);
+        clearTimeout(idleTimer);
+        resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      };
+      const nfHint = this.protocol === 'claude'
+        ? '该服务未提供 /v1/models 模型列表接口，请手动填写模型名'
+        : '该服务未提供 /models 模型列表接口，请手动填写模型名';
+      let connectTimer = setTimeout(() => {
+        try { req.destroy(); } catch (e) { /* ignore */ }
+        fail(new Error('连接超时（' + Math.round(this.connectTimeoutMs / 1000) + 's 无响应）'));
+      }, this.connectTimeoutMs);
+      const req = mod.request({
+        hostname: u.hostname,
+        port: u.port || (isHttps ? 443 : 80),
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers
+      }, (res) => {
+        clearTimeout(connectTimer);
+        let idleTimer = setTimeout(() => {
+          try { req.destroy(); } catch (e) { /* ignore */ }
+          fail(new Error('请求超时（服务器无数据）'));
+        }, this.idleTimeoutMs);
+        const done = () => { if (!settled) { settled = true; clearTimeout(idleTimer); } };
+        if (res.statusCode !== 200) {
+          const chunks = [];
+          let size = 0;
+          res.on('data', (d) => { size += d.length; if (size <= 64 * 1024) chunks.push(d); });
+          res.on('end', () => { done(); resolve({ ok: false, error: httpErrorMessage(res.statusCode, Buffer.concat(chunks).toString('utf8'), nfHint) }); });
+          res.on('error', () => { done(); resolve({ ok: false, error: httpErrorMessage(res.statusCode, '', nfHint) }); });
+          return;
+        }
+        const chunks = [];
+        let received = 0;
+        res.setEncoding('utf8');
+        res.on('data', (d) => {
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            try { req.destroy(); } catch (e) { /* ignore */ }
+            fail(new Error('请求超时（服务器无数据）'));
+          }, this.idleTimeoutMs);
+          received += d.length;
+          if (received > 2 * 1024 * 1024) { try { req.destroy(); } catch (e) { /* ignore */ } return fail(new Error('模型列表响应过大')); }
+          chunks.push(d);
+        });
+        res.on('end', () => {
+          done();
+          let j = null;
+          try { j = JSON.parse(chunks.join('')); } catch (e) { return resolve({ ok: false, error: '模型列表响应解析失败（非 JSON）' }); }
+          const models = parseModelsResponse(j);
+          if (!models) return resolve({ ok: false, error: '无法识别模型列表响应结构，请手动填写模型名' });
+          resolve({ ok: true, models });
+        });
+        res.on('error', () => fail(new Error('响应中断')));
+        res.on('aborted', () => fail(new Error('响应中断')));
+      });
+      req.on('error', (e) => fail(new Error('网络错误：' + e.message)));
+      req.end();
+    });
   }
 
   /** 按协议解析端点 URL */
@@ -633,9 +742,9 @@ class AiHistoryStore {
 
 module.exports = {
   AiClient, AiHistoryStore,
-  validateBaseUrl, chatEndpoint, claudeEndpoint, validateProtocol, maskKey, truncateText,
+  validateBaseUrl, chatEndpoint, claudeEndpoint, modelsEndpoint, validateProtocol, maskKey, truncateText,
   buildConfigPrompt, buildLogPrompt, buildRequestBody, buildClaudeRequestBody,
-  parseSseChunk, parseChatResponse, parseClaudeResponse, httpErrorMessage,
+  parseSseChunk, parseChatResponse, parseClaudeResponse, parseModelsResponse, httpErrorMessage,
   DATA_BEGIN, DATA_END, UNTRUSTED_NOTE, CFG_SYSTEM_PROMPT, LOG_SYSTEM_PROMPT,
   CONNECT_TIMEOUT_MS, IDLE_TIMEOUT_MS, MAX_RESPONSE_BYTES, DEFAULT_MAX_INPUT_KB,
   CLAUDE_VERSION, DEFAULT_CLAUDE_MAX_TOKENS, MAX_KEEP, MAX_BYTES

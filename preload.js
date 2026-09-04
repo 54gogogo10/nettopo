@@ -127,6 +127,7 @@ contextBridge.exposeInMainWorld('topoAI', {
   getConfig: () => ipcRenderer.invoke('ai:get-config'),
   setConfig: (p) => ipcRenderer.invoke('ai:set-config', p),
   test: () => ipcRenderer.invoke('ai:test'),
+  listModels: (p) => ipcRenderer.invoke('ai:list-models', p),
   analyze: (p) => ipcRenderer.invoke('ai:analyze', p),
   cancel: () => ipcRenderer.invoke('ai:cancel'),
   historyList: () => ipcRenderer.invoke('ai:history-list'),
