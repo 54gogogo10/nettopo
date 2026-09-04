@@ -110,6 +110,73 @@ function psQuote(s) {
   return "'" + String(s == null ? '' : s).replace(/'/g, "''") + "'";
 }
 
+/** 启动新版的重试段：换入完成即启动可能撞上杀软对新包的实时扫描（创建进程被拒），
+ *  首试延后 2s、失败每秒重试，最多 10 次。 */
+function _psStartRetry(exePath) {
+  return [
+    'Start-Sleep -Seconds 2',
+    'foreach ($j in 1..10) {',
+    '  try { Start-Process -FilePath ' + psQuote(exePath) + ' -ErrorAction Stop; break }',
+    '  catch { Start-Sleep -Seconds 1 }',
+    '}'
+  ];
+}
+
+/** 拼装「改名换入」辅助脚本（apply 快路径：运行中 exe 已改名成功，新 exe 已复制回原路径）。
+ *  等待方式为轮询旧映像文件锁：不用 Wait-Process——目标进程退出后 PID 可能被系统立即复用，
+ *  Wait-Process 会一直等错对象（真机实测挂死）；旧 exe 运行中其映像文件无法以读写独占打开，
+ *  退出即解锁，天然覆盖「主进程 + 便携启动器」全部退出时机。 */
+function buildRestartScript(exePath, oldPath) {
+  return [
+    '$ErrorActionPreference = "SilentlyContinue"',
+    '$ready = $false',
+    'foreach ($i in 1..360) {',
+    '  try {',
+    '    $fs = [System.IO.File]::Open(' + psQuote(oldPath) + ", 'Open', 'ReadWrite', 'None'); $fs.Close(); $ready = $true; break",
+    '  } catch { Start-Sleep -Milliseconds 500 }',
+    '}',
+    'if ($ready) {',
+    ..._psStartRetry(exePath),
+    '  Start-Sleep -Seconds 8',
+    '  Remove-Item -LiteralPath ' + psQuote(oldPath) + ' -Force',
+    '}'
+  ].join('\n');
+}
+
+/** 拼装「退出后换入」辅助脚本（apply 慢路径：运行中的便携版启动器锁住自身映像无法改名，
+ *  新包已预置为同目录 .new-<ts>）。换入前先轮询**双文件独占预检**（.new 包可能正被杀软
+ *  实时扫描长时间锁住；原路径被运行中的应用锁住）：两者都能独占打开才执行两次 Move
+ *  （旧版先入 oldPath 保留回退）→ 启动新版 → 清理备份。3 分钟超时则放弃并清理预置包，
+ *  旧版原样保留。 */
+function buildSwapScript(exePath, newPath, oldPath) {
+  return [
+    '$ErrorActionPreference = "SilentlyContinue"',
+    '$ready = $false',
+    'foreach ($i in 1..360) {',
+    '  $ok = $false',
+    '  try {',
+    '    $fs1 = [System.IO.File]::Open(' + psQuote(newPath) + ", 'Open', 'ReadWrite', 'None'); $fs1.Close()",
+    '    $fs2 = [System.IO.File]::Open(' + psQuote(exePath) + ", 'Open', 'ReadWrite', 'None'); $fs2.Close()",
+    '    $ok = $true',
+    '  } catch { Start-Sleep -Milliseconds 500 }',
+    '  if ($ok) { $ready = $true; break }',
+    '}',
+    'if ($ready) {',
+    '  Move-Item -LiteralPath ' + psQuote(exePath) + ' -Destination ' + psQuote(oldPath) + ' -Force -ErrorAction Stop',
+    '  try {',
+    '    Move-Item -LiteralPath ' + psQuote(newPath) + ' -Destination ' + psQuote(exePath) + ' -Force -ErrorAction Stop',
+    '  } catch {',
+    '    Move-Item -LiteralPath ' + psQuote(oldPath) + ' -Destination ' + psQuote(exePath) + ' -Force -ErrorAction SilentlyContinue',
+    '  }',
+    ..._psStartRetry(exePath),
+    '  Start-Sleep -Seconds 8',
+    '  Remove-Item -LiteralPath ' + psQuote(oldPath) + ' -Force -ErrorAction SilentlyContinue',
+    '} else {',
+    '  Remove-Item -LiteralPath ' + psQuote(newPath) + ' -Force -ErrorAction SilentlyContinue',
+    '}'
+  ].join('\n');
+}
+
 class Updater extends EventEmitter {
   /** @param opts { repo, currentVersion, platform, updateDir, exePath, isPackaged } */
   constructor(opts) {
@@ -269,47 +336,64 @@ class Updater extends EventEmitter {
   }
 
   /** 应用升级（仅限本模块下载且已通过校验的包）。
-   *  portable exe 运行中允许改名：旧 exe → .old-<stamp>，新 exe 复制到原路径，
-   *  辅助 PowerShell 进程等本进程退出后启动新版并清理备份。
-   *  返回 {ok, restart:true} 或 {ok:false, manual:true}（目标目录不可写时降级手动安装）。 */
+   *  快路径：运行中 exe 允许改名（win-unpacked 等普通映像）→ 旧 exe 改名 .old-<stamp>，
+   *  新 exe 复制回原路径，辅助 PowerShell 等本进程退出后启动新版并清理备份。
+   *  慢路径：改名失败（便携版启动器锁住自身映像，EBUSY）→ 新 exe 预置为同目录 .new-<stamp>，
+   *  辅助脚本等本进程退出、启动器随之退出后轮询文件锁，旧版移到 .old、新版换入原路径并启动。
+   *  返回 {ok, restart:true, warn?} 或 {ok:false, manual:true}（目标目录不可写时降级手动安装）。 */
   apply() {
     if (!this.isPackaged) return { ok: false, error: '开发环境不支持在线升级（npm start）', manual: false };
     if (!this.pendingFile || !fs.existsSync(this.pendingFile)) return { ok: false, error: '尚未下载升级包' };
     if (this.platform !== 'win32') return { ok: false, error: '当前平台请到发布页手动下载', manual: true };
     const exePath = this.exePath;
     if (!exePath || !fs.existsSync(exePath)) return { ok: false, error: '未找到当前程序文件', manual: true };
-    const oldPath = exePath + '.old-' + Date.now();
+    const stamp = Date.now();
+    const oldPath = exePath + '.old-' + stamp;
+    // 快路径：Windows 允许改名普通运行中映像（句柄随文件名）；便携版启动器会锁自身映像（EBUSY）
+    let renamed = false;
     try {
-      fs.renameSync(exePath, oldPath); // Windows 允许改名运行中的 exe（句柄随文件名，不随路径）
+      fs.renameSync(exePath, oldPath);
+      renamed = true;
+    } catch (e) { /* 转慢路径 */ }
+    if (renamed) {
+      try {
+        fs.copyFileSync(this.pendingFile, exePath);
+      } catch (e) {
+        // 复制失败必须回滚改名，否则当前 exe“消失”
+        try { fs.renameSync(oldPath, exePath); } catch (e2) { /* ignore */ }
+        return { ok: false, error: '升级包复制失败：' + String((e && e.code) || e), manual: true };
+      }
+      try {
+        // 不用 detached：CREATE_NEW_PROCESS_GROUP 会让 powershell -Command 静默秒退（真机实测）；
+        // Windows 上子进程本就不随父退出被杀，windowsHide 防止闪现控制台窗口
+        const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', buildRestartScript(exePath, oldPath)],
+          { windowsHide: true, stdio: 'ignore' });
+        child.unref();
+      } catch (e) {
+        // 辅助进程启动失败：新版已就位，用户手动启动即可；保留 .old 供回退
+        return { ok: true, restart: true, warn: '升级包已就位，请手动重新启动程序完成升级' };
+      }
+      return { ok: true, restart: true };
+    }
+    // 慢路径：新包预置为同目录 .new-<stamp>（不触碰运行中的文件），退出后由辅助脚本换入
+    const newPath = exePath + '.new-' + stamp;
+    try {
+      fs.copyFileSync(this.pendingFile, newPath);
     } catch (e) {
       return { ok: false, error: '程序目录不可写（' + String((e && e.code) || e) + '），请到发布页手动安装', manual: true };
     }
     try {
-      fs.copyFileSync(this.pendingFile, exePath);
-    } catch (e) {
-      // 复制失败必须回滚改名，否则当前 exe“消失”
-      try { fs.renameSync(oldPath, exePath); } catch (e2) { /* ignore */ }
-      return { ok: false, error: '升级包复制失败：' + String((e && e.code) || e), manual: true };
-    }
-    // 辅助进程：等本进程退出（单实例锁随之释放）→ 启动新版 → 延迟清理备份
-    const ps = [
-      '$ErrorActionPreference = "SilentlyContinue"',
-      'Wait-Process -Id ' + process.pid,
-      'Start-Sleep -Milliseconds 800',
-      'Start-Process -FilePath ' + psQuote(exePath),
-      'Start-Sleep -Seconds 8',
-      'Remove-Item -LiteralPath ' + psQuote(oldPath) + ' -Force'
-    ].join('; ');
-    try {
-      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps],
-        { detached: true, stdio: 'ignore', windowsHide: true });
+      // 同快路径：不用 detached（见上），防止辅助脚本静默秒退
+      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', buildSwapScript(exePath, newPath, oldPath)],
+        { windowsHide: true, stdio: 'ignore' });
       child.unref();
     } catch (e) {
-      // 辅助进程启动失败：新版已就位，用户手动启动即可；保留 .old 供回退
-      return { ok: true, restart: true, warn: '升级包已就位，请手动重新启动程序完成升级' };
+      // 辅助进程启动失败：清理预置文件，旧版未动，降级手动安装
+      try { fs.unlinkSync(newPath); } catch (e2) { /* ignore */ }
+      return { ok: false, error: '升级辅助进程启动失败，请到发布页手动安装', manual: true };
     }
     return { ok: true, restart: true };
   }
 }
 
-module.exports = { Updater, parseVersion, compareVersion, pickAssets, sanitizeAssetName, verifySha256File, psQuote, MAX_ASSET_BYTES };
+module.exports = { Updater, parseVersion, compareVersion, pickAssets, sanitizeAssetName, verifySha256File, psQuote, buildRestartScript, buildSwapScript, MAX_ASSET_BYTES };
