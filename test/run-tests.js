@@ -4369,6 +4369,34 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(A.httpErrorMessage(404, '').indexOf('/v1') >= 0, 'AI 错误：404 提示地址');
       ok(A.httpErrorMessage(429, '').indexOf('限流') >= 0, 'AI 错误：429 提示限流');
       ok(A.httpErrorMessage(503, 'upstream down').indexOf('upstream down') >= 0, 'AI 错误：5xx 附服务端详情');
+      // Claude（Anthropic Messages）协议：协议归一 / 端点归一 / 请求体 / 响应 / SSE 事件
+      eq(A.validateProtocol('claude'), 'claude', 'AI 协议：claude 归一');
+      eq(A.validateProtocol('OPENAI'), 'openai', 'AI 协议：大小写归一');
+      eq(A.validateProtocol('bogus'), 'openai', 'AI 协议：未知值回落 openai');
+      eq(A.claudeEndpoint('https://api.anthropic.com'), 'https://api.anthropic.com/v1/messages', 'AI Claude 端点：基础地址追加 /v1/messages');
+      eq(A.claudeEndpoint('https://gw.example.com/v1/'), 'https://gw.example.com/v1/messages', 'AI Claude 端点：/v1 归一不重复');
+      eq(A.claudeEndpoint('https://x.com/v1/messages/'), 'https://x.com/v1/messages', 'AI Claude 端点：已带则保持（尾部斜杠归一）');
+      eq(A.claudeEndpoint('bad'), '', 'AI Claude 端点：非法地址返回空');
+      const cbody = JSON.parse(A.buildClaudeRequestBody('claude-sonnet-4-5', [
+        { role: 'system', content: '系统提示一' },
+        { role: 'system', content: '系统提示二' },
+        { role: 'user', content: '分析' },
+        { role: 'assistant', content: '好的' },
+        { role: 'user', content: '继续' }
+      ], { stream: true }));
+      eq(cbody.model, 'claude-sonnet-4-5', 'AI Claude 请求体：模型名');
+      eq(cbody.max_tokens, 4096, 'AI Claude 请求体：max_tokens 必填（缺省 4096）');
+      eq(cbody.system, '系统提示一\n\n系统提示二', 'AI Claude 请求体：system 提升顶层字段');
+      ok(!cbody.messages.some(m => m.role === 'system'), 'AI Claude 请求体：消息数组不含 system');
+      eq(cbody.messages.length, 3, 'AI Claude 请求体：user/assistant 保留');
+      eq(cbody.stream, true, 'AI Claude 请求体：流式开关');
+      const cresp = A.parseClaudeResponse({ type: 'message', content: [{ type: 'text', text: '第一段' }, { type: 'thinking', text: '思考过程' }, { type: 'text', text: '第二段' }], usage: { input_tokens: 9, output_tokens: 2 }, model: 'claude-x' });
+      ok(cresp.ok && cresp.text === '第一段第二段' && cresp.usage.prompt_tokens === 9 && cresp.usage.completion_tokens === 2, 'AI Claude 响应：文本块拼接 + 用量归一为 OpenAI 口径');
+      ok(!A.parseClaudeResponse({ type: 'error', error: { message: 'overloaded' } }).ok, 'AI Claude 响应：错误透出');
+      ok(!A.parseClaudeResponse({ type: 'message' }).ok, 'AI Claude 响应：缺 content 拒绝');
+      const csse = A.parseSseChunk('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\nevent: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"增量"}}\n\n');
+      ok(csse.deltas.join('') === '增量', 'AI SSE：Claude content_block_delta 增量');
+      ok(A.parseSseChunk('event: ping\ndata: {"type":"ping"}\n\n').deltas.length === 0, 'AI SSE：Claude ping 事件忽略');
       // 历史库：增删查清 + 白名单 + 滚动清理
       const hDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-ai-'));
       const hs = new A.AiHistoryStore(hDir);
@@ -4477,6 +4505,52 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         // 请求头：API Key 以 Bearer 携带（由 401 分支隐式覆盖：sk-test 通过、sk-wrong 拒绝）
       } finally {
         srv.close();
+      }
+
+      /* -- 本地回环假 Claude 服务：x-api-key 鉴权 / SSE event 行（无 [DONE]）/ 非流式 -- */
+      const csrv = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (d) => { body += d; });
+        req.on('end', () => {
+          if (req.url !== '/v1/messages') {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end('{"type":"error","error":{"type":"not_found_error","message":"unknown url"}}');
+            return;
+          }
+          if ((req.headers['x-api-key'] || '') !== 'sk-claude' || (req.headers['anthropic-version'] || '') !== A.CLAUDE_VERSION) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end('{"type":"error","error":{"type":"authentication_error","message":"bad key"}}');
+            return;
+          }
+          let parsed = {};
+          try { parsed = JSON.parse(body || '{}'); } catch (e) { /* ignore */ }
+          if (parsed.stream) {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            res.write('event: message_start\ndata: {"type":"message_start","message":{"model":"claude-test"}}\n\n');
+            res.write('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"第一段"}}\n\n');
+            res.write('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"第二段，中文。"}}\n\n');
+            res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+            res.end();
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ type: 'message', content: [{ type: 'text', text: 'Claude 回复' }], usage: { input_tokens: 6, output_tokens: 2 }, model: 'claude-test' }));
+          }
+        });
+      });
+      await new Promise((res) => csrv.listen(0, '127.0.0.1', res));
+      try {
+        const claudeBase = 'http://127.0.0.1:' + csrv.address().port;
+        const cc = new A.AiClient({ baseUrl: claudeBase, apiKey: 'sk-claude', model: 'claude-sonnet-4-5', protocol: 'claude' });
+        const ct = await cc.test();
+        ok(ct.ok && ct.reply === 'Claude 回复', 'AI 客户端：Claude 非流式（x-api-key + anthropic-version 头）');
+        let cgot = '';
+        const cchat = await cc.chat({ messages: cfgMsgs, onDelta: (d) => { cgot += d; } });
+        ok(cchat.ok && cchat.text === '第一段第二段，中文。' && cchat.text === cgot, 'AI 客户端：Claude 流式增量与最终文本一致');
+        const c404 = await (new A.AiClient({ baseUrl: claudeBase + '/wrongpath', apiKey: 'sk-claude', model: 'm', protocol: 'claude' }))
+          .chat({ messages: [{ role: 'user', content: 'x' }] });
+        ok(c404.ok === false && c404.error.indexOf('/v1/messages') >= 0, 'AI 客户端：Claude 404 提示接口路径');
+      } finally {
+        csrv.close();
       }
     }
   }

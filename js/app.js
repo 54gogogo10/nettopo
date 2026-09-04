@@ -7148,6 +7148,21 @@ function aiBridge() {
 }
 const AI_KIND_LB = { config: '配置解析', syslog: 'Syslog 日志', monlog: '监控采集日志' };
 
+/** 知名 AI 供应商预设：下拉选择后自动填充 API 地址与模型名（均可再手改） */
+const AI_PROVIDERS = [
+  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o', protocol: 'openai' },
+  { id: 'claude', label: 'Anthropic Claude', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', protocol: 'claude' },
+  { id: 'deepseek', label: 'DeepSeek（深度求索）', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', protocol: 'openai' },
+  { id: 'zhipu', label: '智谱 GLM（bigmodel.cn）', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.6', protocol: 'openai' },
+  { id: 'qwen', label: '通义千问（阿里云百炼）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', protocol: 'openai' },
+  { id: 'kimi', label: 'Kimi（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-k2', protocol: 'openai' },
+  { id: 'siliconflow', label: '硅基流动 SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3', protocol: 'openai' },
+  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.5', protocol: 'openai' },
+  { id: 'ollama', label: 'Ollama（本机）', baseUrl: 'http://127.0.0.1:11434/v1', model: 'llama3', protocol: 'openai' },
+  { id: 'custom', label: '自定义（OpenAI 兼容）', baseUrl: '', model: '', protocol: 'openai' },
+  { id: 'custom-claude', label: '自定义（Claude 协议）', baseUrl: '', model: '', protocol: 'claude' }
+];
+
 async function saveAiSettings(ai, v) {
   const maxKb = Math.floor(Number(v.maxInputKB));
   try {
@@ -7155,46 +7170,70 @@ async function saveAiSettings(ai, v) {
       baseUrl: String(v.baseUrl || '').trim(),
       model: String(v.model || '').trim(),
       apiKey: String(v.apiKey || ''),
-      maxInputKB: Number.isFinite(maxKb) && maxKb > 0 ? maxKb : 100
+      maxInputKB: Number.isFinite(maxKb) && maxKb > 0 ? maxKb : 100,
+      protocol: v.protocol
     });
   } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 }
 
-/** AI 设置：API 地址 / API Key（只填不读，回显脱敏）/ 模型名 / 输入上限 + 连通性测试 */
+/** AI 设置：供应商预设下拉 / API 地址 / API Key（只填不读，回显脱敏）/ 模型名 / 输入上限 + 连通性测试 */
 async function openAiSettings() {
   const ai = aiBridge(); if (!ai) return;
-  let cfg = { baseUrl: '', model: '', maxInputKB: 100, apiKeySet: false, apiKeyMasked: '' };
+  let cfg = { baseUrl: '', model: '', maxInputKB: 100, protocol: 'openai', apiKeySet: false, apiKeyMasked: '' };
   try { const r = await ai.getConfig(); if (r && r.ok) cfg = r; } catch (e) { /* 首次使用无配置 */ }
+  // 预设匹配：API 地址与某预设一致 → 选中该预设；否则按协议落到自定义项
+  const normBase = (s) => String(s || '').trim().replace(/\/+$/, '').toLowerCase();
+  let matched = AI_PROVIDERS.find(p => p.baseUrl && normBase(p.baseUrl) === normBase(cfg.baseUrl))
+    || AI_PROVIDERS.find(p => p.id === (cfg.protocol === 'claude' ? 'custom-claude' : 'custom'));
+  let protocol = matched.protocol; // 协议由选中的预设决定（选择后可自由改地址/模型，协议保持）
   openModal({
     title: 'AI 设置',
-    sub: '兼容 OpenAI Chat Completions 接口的大模型服务（OpenAI / DeepSeek / 智谱 GLM / 通义千问 / Ollama 本地模型等）。'
-      + 'API Key 经系统加密保存在本机 settings.json，界面只显示脱敏形式；使用 http:// 地址（本地/内网服务）时数据明文传输，请注意。',
+    sub: '支持 OpenAI 兼容接口与 Anthropic Claude 协议的大模型服务：下拉选择知名供应商自动填充地址与模型名（均可手改），'
+      + '也可选「自定义」接入任意兼容服务或本机 Ollama。API Key 经系统加密保存在本机 settings.json，界面只显示脱敏形式；使用 http:// 地址时数据明文传输，请注意。',
     width: 560,
     fields: [
+      { name: 'provider', label: '服务商预设', type: 'select', options: AI_PROVIDERS.map(p => [p.id, p.label]), value: matched.id },
       { name: 'baseUrl', label: 'API 地址', type: 'text', required: true, value: cfg.baseUrl, ph: '例如 https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1' },
       { name: 'apiKey', label: 'API Key', type: 'password', value: '', ph: cfg.apiKeySet ? '已保存（' + cfg.apiKeyMasked + '），留空表示保持不变' : 'sk-…（本地服务可留空）' },
-      { name: 'model', label: '模型名', type: 'text', required: true, value: cfg.model, ph: '例如 deepseek-chat / glm-4.5 / qwen-plus / llama3' },
+      { name: 'model', label: '模型名', type: 'text', required: true, value: cfg.model, ph: '例如 deepseek-chat / claude-sonnet-4-5 / glm-4.6' },
       { name: 'maxInputKB', label: '单次发送上限（KB，超出部分自动截断）', type: 'text', value: String(cfg.maxInputKB || 100) }
     ],
     submit: '保存',
     onSubmit: async (v) => {
-      const r = await saveAiSettings(ai, v);
+      const r = await saveAiSettings(ai, Object.assign(v, { protocol }));
       toast(r && r.ok ? 'AI 设置已保存' : '保存失败：' + ((r && r.error) || '未知错误'));
     }
   });
-  // 在操作区追加「保存并测试连接」：先保存当前表单值再发连通性测试请求
+  // 预设联动：切换供应商自动填充地址与模型（自定义项不覆盖已填内容，仅切换协议）
   const ov = $('#modalRoot').lastElementChild;
-  const actions = ov && ov.querySelector('.m-actions');
+  const form = ov && ov.querySelector('form');
+  if (!form) return;
+  const provSel = form.elements.provider;
+  provSel.addEventListener('change', () => {
+    const p = AI_PROVIDERS.find(x => x.id === provSel.value);
+    if (!p) return;
+    protocol = p.protocol;
+    if (p.baseUrl) form.elements.baseUrl.value = p.baseUrl;
+    if (p.model) form.elements.model.value = p.model;
+    if (!p.baseUrl && !p.model) {
+      form.elements.baseUrl.value = '';
+      form.elements.baseUrl.placeholder = p.protocol === 'claude'
+        ? 'Claude 协议服务地址，例如 https://api.anthropic.com'
+        : 'OpenAI 兼容服务地址，例如 https://api.deepseek.com/v1';
+    }
+  });
+  // 在操作区追加「保存并测试连接」：先保存当前表单值再发连通性测试请求
+  const actions = ov.querySelector('.m-actions');
   if (!actions) return;
   const btn = document.createElement('button');
   btn.type = 'button'; btn.className = 'tb'; btn.textContent = '保存并测试连接';
   btn.onclick = async () => {
-    const form = ov.querySelector('form');
     const v = {
       baseUrl: form.elements.baseUrl.value,
       apiKey: form.elements.apiKey.value,
       model: form.elements.model.value,
-      maxInputKB: form.elements.maxInputKB.value
+      maxInputKB: form.elements.maxInputKB.value,
+      protocol
     };
     btn.disabled = true; btn.textContent = '测试中…';
     const saved = await saveAiSettings(ai, v);

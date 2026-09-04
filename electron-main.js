@@ -9,7 +9,7 @@ const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
-const { AiClient, AiHistoryStore, validateBaseUrl, buildConfigPrompt, buildLogPrompt, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
+const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
  *   否则 SUID 沙箱初始化直接 fatal abort（"Running as root without --no-sandbox is not supported"）。
@@ -1020,7 +1020,8 @@ function aiCfgFromSettings() {
     baseUrl: typeof s.baseUrl === 'string' ? s.baseUrl : '',
     model: typeof s.model === 'string' ? s.model : '',
     apiKey: s.apiKeyEnc ? decryptSecretValue(s.apiKeyEnc) : '',
-    maxInputKB: Number(s.maxInputKB) > 0 ? Math.min(2048, Math.floor(Number(s.maxInputKB))) : DEFAULT_MAX_INPUT_KB
+    maxInputKB: Number(s.maxInputKB) > 0 ? Math.min(2048, Math.floor(Number(s.maxInputKB))) : DEFAULT_MAX_INPUT_KB,
+    protocol: validateProtocol(s.protocol)
   };
 }
 /** 分析记录库（惰性单例，库存 userData/ai-analysis） */
@@ -1034,12 +1035,13 @@ let aiActiveClient = null;
 ipcMain.handle('ai:get-config', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const c = aiCfgFromSettings();
-  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
+  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
 });
 ipcMain.handle('ai:set-config', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const s = loadAppSettings();
   if (!s.ai || typeof s.ai !== 'object') s.ai = {};
+  if (p && 'protocol' in p) s.ai.protocol = validateProtocol(p.protocol);
   if (p && 'baseUrl' in p) {
     const base = validateBaseUrl(p.baseUrl); // 空值合法（表示未配置）；非法格式直接拒绝并提示
     if (!base && String(p.baseUrl || '').trim()) return { ok: false, error: 'API 地址无效：需以 http:// 或 https:// 开头' };
@@ -1054,7 +1056,7 @@ ipcMain.handle('ai:set-config', (e, p) => {
   else if (p && typeof p.apiKey === 'string' && p.apiKey) s.ai.apiKeyEnc = encryptSecretValue(p.apiKey); // 空串=保持不变
   saveAppSettings();
   const c = aiCfgFromSettings();
-  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
+  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
 });
 ipcMain.handle('ai:test', async (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
