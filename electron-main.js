@@ -9,7 +9,7 @@ const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
-const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
+const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, buildShellPrompt, parseShellCommands, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
  *   否则 SUID 沙箱初始化直接 fatal abort（"Running as root without --no-sandbox is not supported"）。
@@ -1111,16 +1111,43 @@ ipcMain.handle('ai:analyze', async (e, p) => {
   }
   return r;
 });
+/* ---- Web Shell AI 命令助手：自然语言需求 → 终端命令（主窗口与 Shell 窗口均可发起） ---- */
+const aiShellClients = new Set(); // 进行中的命令生成客户端（ai:cancel 一并取消）
 ipcMain.handle('ai:cancel', (e) => {
-  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  // 取消属无害操作：主窗口（分析/命令生成）与 Shell 窗口（命令生成）均可发起
+  if (!monitorGuard(e) && !shellSender(e)) return { ok: false, error: 'forbidden' };
   // 客户端按次新建（防重入），进行中的请求挂在最近一次分析上：用模块级引用兜底取消
   if (aiActiveClient) aiActiveClient.cancel();
+  for (const c of aiShellClients) c.cancel();
   return { ok: true };
 });
 ipcMain.handle('ai:history-list', (e) => monitorGuard(e) ? getAiHistory().list() : { ok: false, error: 'forbidden' });
 ipcMain.handle('ai:history-read', (e, p) => monitorGuard(e) ? getAiHistory().read(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
 ipcMain.handle('ai:history-remove', (e, p) => monitorGuard(e) ? getAiHistory().remove(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
 ipcMain.handle('ai:history-clear', (e) => monitorGuard(e) ? getAiHistory().clear() : { ok: false, error: 'forbidden' });
+ipcMain.handle('ai:shell-chat', async (e, p) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  const requirement = String((p && p.requirement) || '').trim();
+  if (!requirement) return { ok: false, error: '需求描述为空' };
+  if (requirement.length > 4000) return { ok: false, error: '需求描述过长（上限 4000 字符）' };
+  const client = new AiClient(aiCfgFromSettings());
+  if (!client.ready) return { ok: false, error: '请先在主窗口菜单「AI 设置」中配置 API 地址与模型名' };
+  // 终端上下文保尾部截断（提示词注入面收敛：内容在提示词中声明为不可信数据）
+  const cut = truncateText(String((p && p.termContext) == null ? '' : p.termContext), 32 * 1024, 'tail');
+  const messages = buildShellPrompt(requirement, cut.text);
+  aiShellClients.add(client);
+  try {
+    const r = await client.chat({ messages, maxTokens: 1024 });
+    if (!r.ok) return r;
+    const parsed = parseShellCommands(r.text);
+    return {
+      ok: parsed.ok, commands: parsed.commands, refused: parsed.refused, reason: parsed.reason,
+      reply: r.text, model: r.model || client.model, ms: r.ms
+    };
+  } finally {
+    aiShellClients.delete(client);
+  }
+});
 
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框
