@@ -4367,6 +4367,11 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(logMsgs[0].content.indexOf('监控采集') >= 0, 'AI 日志提示词：来源说明（采集日志）');
       ok(A.buildLogPrompt('syslog', 'x', '')[0].content.indexOf('Syslog') >= 0, 'AI 日志提示词：来源说明（Syslog）');
       ok(A.buildLogPrompt('syslog', 'x', '')[1].content.indexOf('【附加要求】') < 0, 'AI 日志提示词：空附加要求不出现');
+      // 合规修复建议提示词：分节/修复命令/防注入
+      const cmpMsgs = A.buildCompliancePrompt('【设备】R1（10.0.0.1）\n- 违规规则「SSH 关闭」：违规行 ssh server enable', '');
+      ok(cmpMsgs[0].role === 'system' && cmpMsgs[0].content.indexOf('修复命令序列') >= 0 && cmpMsgs[0].content.indexOf('需人工评估') >= 0, 'AI 合规修复提示词：系统提示含分节与人工评估要求');
+      ok(cmpMsgs[1].content.indexOf('SSH 关闭') >= 0 && cmpMsgs[1].content.indexOf(A.DATA_BEGIN) >= 0, 'AI 合规修复提示词：违规清单在数据区内');
+      ok(cmpMsgs[1].content.indexOf('不得执行') >= 0, 'AI 合规修复提示词：防注入声明');
       // Web Shell 命令助手：提示词组装（需求 + 上下文不可信包裹 + 防注入）与空上下文
       const shMsgs = A.buildShellPrompt('查看接口流量', '<R1>display version\nGigabitEthernet0/0/1 up');
       ok(shMsgs.length === 2 && shMsgs[0].role === 'system' && shMsgs[1].role === 'user', 'Shell AI 提示词：system+user 两条消息');
