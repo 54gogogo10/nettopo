@@ -204,7 +204,8 @@ function diffSessionOutputs(outputs) {
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(termEl);
-    const rec = { tabEl, wrapEl, term, fit, dotEl: tabEl.querySelector('.dot'), castEl: tabEl.querySelector('.cast'), ended: false, buf: [], rcBar, rcReason, rcBtn };
+    const rec = { tabEl, wrapEl, term, fit, dotEl: tabEl.querySelector('.dot'), castEl: tabEl.querySelector('.cast'), ended: false, buf: [], rcBar, rcReason, rcBtn,
+      meta: { host: info.host || '', port: info.port || '', username: info.username || '', deviceName: info.deviceName || '', protocol: info.protocol || '' } };
     rcBtn.addEventListener('click', (e) => { e.stopPropagation(); reconnectNow(rec); });
     sessions.set(sid, rec);
     term.write('\x1b[33m正在连接 ' + bannerText(info.title || sid) + ' …\r\n\x1b[0m');
@@ -305,18 +306,31 @@ function diffSessionOutputs(outputs) {
     if (castSel.has(sid)) castSel.delete(sid); else castSel.add(sid);
     refreshCastCount();
   };
+  /** 变量替换：{ip}/{hostname}/{port}/{user}/{protocol} 按会话元数据替换（hostname 缺省回落 ip）。
+   *  群发按各标签实际值替换；快捷按钮按当前会话替换。 */
+  const substituteVars = (text, meta) => String(text == null ? '' : text).replace(/\{(ip|hostname|port|user|protocol)\}/gi, (m, k) => {
+    if (!meta) return m;
+    const key = String(k).toLowerCase();
+    if (key === 'ip') return meta.host || m;
+    if (key === 'hostname') return meta.deviceName || meta.host || m;
+    if (key === 'port') return meta.port || m;
+    if (key === 'user') return meta.username || m;
+    if (key === 'protocol') return meta.protocol || m;
+    return m;
+  });
   const sendCast = () => {
     const targets = [...castSel].filter((id) => { const s = sessions.get(id); return s && !s.ended; });
     if (!targets.length) { toast('请先勾选要群发的标签'); return; }
     const text = castInputEl ? castInputEl.value : '';
     if (!text.trim()) { toast('请输入要群发的内容'); return; }
-    const parts = parseSendText(text);
-    if (castEnterEl && castEnterEl.checked) parts.push({ type: 'text', data: '\r' });
     for (const id of targets) {
       (async () => {
+        const s = sessions.get(id);
+        const parts = parseSendText(substituteVars(text, s && s.meta)); // 按各标签设备变量替换
+        if (castEnterEl && castEnterEl.checked) parts.push({ type: 'text', data: '\r' });
         for (const p of parts) {
-          const s = sessions.get(id);
-          if (!s || s.ended) return;
+          const s2 = sessions.get(id);
+          if (!s2 || s2.ended) return;
           if (p.type === 'pause') await new Promise((r) => setTimeout(r, p.ms));
           else window.topoShell.sendData(id, p.data);
         }

@@ -29,7 +29,7 @@
 <div id="shCast" class="sh-cast hidden" title="多标签命令广播：勾选标签后，这里输入的命令同时发送到全部勾选的标签">
   <span class="sh-cast-tag">群发</span>
   <span id="shCastCount" class="sh-cast-count">已选 0 / 0</span>
-  <input id="shCastInput" type="text" placeholder="输入命令，回车同时发送到勾选的标签（支持 \n 回车、\t 制表、\p 暂停 1 秒）" autocomplete="off" spellcheck="false"/>
+  <input id="shCastInput" type="text" placeholder="输入命令，回车同时发送到勾选的标签（支持 \n 回车、\t 制表、\p 暂停；变量 {ip} {hostname} {port} {user} 按各标签实际值替换）" autocomplete="off" spellcheck="false"/>
   <label class="sh-cast-enter" title="发送后在命令末尾追加回车"><input id="shCastEnter" type="checkbox" checked/>回车</label>
   <button id="shCastSend" class="sh-cast-send" title="发送到勾选的标签（Enter）">发送</button>
   <button id="shCastDiff" class="sh-cast-send sh-cast-diff" title="汇总勾选标签的终端输出并标记差异行">对比</button>
