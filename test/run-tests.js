@@ -4406,6 +4406,25 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const pcCfg = A.parseShellCommands(Array.from({ length: 40 }, (_, i) => 'line ' + i).join('\n'), 40);
       ok(pcCfg.ok && pcCfg.commands.length === 40, 'Shell AI 命令提取：config 模式放宽到 40 行');
       ok(A.parseShellCommands(Array.from({ length: 40 }, (_, i) => 'line ' + i).join('\n')).commands.length === 10, 'Shell AI 命令提取：默认仍为 10 行上限');
+      // IP 地址管理：地址清单去重 / 网段利用率 / 跨设备冲突
+      const ipNodes = [
+        { id: 'n1', name: 'R1', type: 'router', mgmts: ['10.0.0.1'] },
+        { id: 'n2', name: 'R2', type: 'router', mgmts: ['10.0.0.2'] },
+        { id: 'n3', name: 'SW1', type: 'switch', mgmts: ['10.0.0.1'] }
+      ];
+      const ipLinks = [
+        { id: 'l1', a: 'n1', b: 'n2', aIf: 'GE0/0/1', bIf: 'GE0/0/1', aIp: '192.168.12.1', aMask: '24', bIp: '192.168.12.2', bMask: '24' },
+        { id: 'l2', a: 'n1', b: 'n3', aIf: 'GE0/0/2', bIf: 'GE0/0/1', aIp: '10.0.0.1', aMask: '24', bIp: '', bMask: '', bL2: true }
+      ];
+      const ipam = U.buildIpamData(ipNodes, ipLinks);
+      ok(ipam.addrs.length >= 5, 'IP 地址管理：管理口 + 接口地址入清单（' + ipam.addrs.length + ' 条）');
+      ok(ipam.addrs.filter(a => a.device === 'R1' && a.ip === '10.0.0.1').length === 1, 'IP 地址管理：同设备管理口与接口同 IP 去重');
+      ok(ipam.conflicts.some(c => c.ip === '10.0.0.1' && c.crossDevice), 'IP 地址管理：跨设备同 IP 记入冲突');
+      const snet = ipam.subnets.find(s => s.network === '192.168.12.0' && s.bits === 24);
+      ok(snet && snet.used === 2 && snet.usable === 254 && snet.utilization === 1 && snet.deviceCount === 2, 'IP 地址管理：网段聚合利用率（/24 用 2/254）');
+      ok(ipam.subnets.every(s => s.utilization >= 0 && s.utilization <= 100), 'IP 地址管理：利用率钳制 0-100');
+      const ipamL2 = U.buildIpamData([{ id: 'n', name: 'S', type: 'switch', mgmts: [] }], [{ id: 'l', a: 'n', b: 'n', aIf: 'GE0/1', aL2: true, aIp: '10.1.1.1', aMask: '24' }]);
+      ok(!ipamL2.addrs.some(a => a.ip === '10.1.1.1'), 'IP 地址管理：二层接口 IP 不入清单');
       // 命令提取：围栏 / 裸命令 / 序号 / 提示符 / 拒绝语义 / 纯解释 / 注释行 / 条数上限
       const pc1 = A.parseShellCommands('```\nshow version\n```');
       ok(pc1.ok && pc1.commands.length === 1 && pc1.commands[0] === 'show version', 'Shell AI 命令提取：围栏内单条');

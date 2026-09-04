@@ -366,6 +366,90 @@ function openNeighborImport() {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#nbText').focus(); }, 250);
 }
 
+/* ================= IP 地址管理（地址清单 / 网段汇总 / 冲突检测） =================
+ * 从管理口与接口总表聚合全部 IPv4 地址：按网段汇总容量与利用率，检测跨设备同 IP 冲突。
+ * 只读视图 + CSV 导出，不修改拓扑数据。 */
+function openIpam() {
+  const data = U.buildIpamData(state.nodes, state.links);
+  if (!data.addrs.length) { toast('当前没有可管理的 IP 地址：先为设备配置管理口或接口 IP'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const conflictN = data.conflicts.length;
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1040px;height:82vh;display:flex;flex-direction:column">
+      <h3>IP 地址管理</h3>
+      <div class="m-sub">共 <b>${data.addrs.length}</b> 个地址（管理口 + 接口，去重后）、<b>${data.subnets.length}</b> 个网段；<b style="color:${conflictN ? 'var(--danger)' : 'inherit'}">${conflictN} 个 IP 存在多处使用</b>（同设备同 IP 已自动去重）。利用率 = 已用地址 / 网段可用容量。</div>
+      <div id="ipamConflicts" style="margin:4px 0">${conflictN ? `
+        <div class="ipam-conflict"><b>⚠ IP 冲突：</b>${data.conflicts.map(c =>
+          `<span class="ipam-cip" title="${U.escHtml(c.entries.map(e => e.device + '（' + e.source + ' ' + (e.iface || '—') + '）').join('，'))}">${U.escHtml(c.ip)}${c.crossDevice ? '（跨设备）' : ''}</span>`).join(' ')}</div>` : ''}
+      </div>
+      <div class="frow" style="display:flex;gap:10px;align-items:center;margin-bottom:6px">
+        <div class="mc-tabs" style="margin:0">
+          <button type="button" class="mc-tab on" data-pane="subnets">网段汇总</button>
+          <button type="button" class="mc-tab" data-pane="addrs">地址清单</button>
+        </div>
+        <input id="ipamFilter" type="text" placeholder="筛选：网段 / 设备 / IP / 接口…" style="flex:1"/>
+      </div>
+      <div id="ipamBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="csv">导出 CSV</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const bodyEl = ov.querySelector('#ipamBody');
+  const filterEl = ov.querySelector('#ipamFilter');
+  let pane = 'subnets';
+  const bar = (pct) => {
+    const color = pct >= 90 ? 'var(--danger)' : pct >= 75 ? '#f59e0b' : 'var(--ok, #22c55e)';
+    return `<span class="ipam-bar" title="利用率 ${pct}%"><span style="width:${pct}%;background:${color}"></span></span> ${pct}%`;
+  };
+  const render = () => {
+    const kw = (filterEl.value || '').trim().toLowerCase();
+    const hit = (s) => !kw || String(s).toLowerCase().includes(kw);
+    if (pane === 'subnets') {
+      const rows = data.subnets.filter(s => hit(s.network + '/' + s.bits));
+      bodyEl.innerHTML = rows.length ? `<table class="ipam-t"><thead><tr><th>网段</th><th>可用容量</th><th>已用</th><th>设备数</th><th style="width:180px">利用率</th></tr></thead><tbody>`
+        + rows.map(s => `<tr><td><code>${U.escHtml(s.network)}/${s.bits}</code></td><td>${s.usable}</td><td>${s.used}</td><td>${s.deviceCount}</td><td>${bar(s.utilization)}</td></tr>`).join('')
+        + '</tbody></table>' : '<div class="bk-empty">无匹配网段</div>';
+    } else {
+      const conflictMap = new Map(data.conflicts.map(c => [c.ip, c]));
+      const rows = data.addrs.filter(a => hit(a.device + ' ' + a.ip + ' ' + a.iface + ' ' + a.network + '/' + a.bits + ' ' + a.source));
+      bodyEl.innerHTML = rows.length ? `<table class="ipam-t"><thead><tr><th>设备</th><th>来源</th><th>接口</th><th>IP</th><th>掩码</th><th>网段</th></tr></thead><tbody>`
+        + rows.map(a => {
+          const cf = conflictMap.get(a.ip);
+          return `<tr${cf ? ' style="background:rgba(220,38,38,.08)"' : ''}><td>${U.escHtml(a.device)}</td><td>${U.escHtml(a.source)}</td><td>${U.escHtml(a.iface || '—')}</td><td><code>${U.escHtml(a.ip)}</code>${cf ? ' ⚠' : ''}</td><td>/${a.bits}</td><td><code>${U.escHtml(a.network)}</code></td></tr>`;
+        }).join('')
+        + '</tbody></table>' : '<div class="bk-empty">无匹配地址</div>';
+    }
+  };
+  ov.querySelectorAll('.mc-tab').forEach(tab => {
+    tab.onclick = () => {
+      ov.querySelectorAll('.mc-tab').forEach(x => x.classList.remove('on'));
+      tab.classList.add('on');
+      pane = tab.dataset.pane;
+      render();
+    };
+  });
+  filterEl.addEventListener('input', render);
+  ov.querySelector('[data-act=csv]').onclick = () => {
+    const rows = [['类型', '网段', '掩码位', '可用容量', '已用', '设备数', '设备', '来源', '接口', 'IP', '冲突']];
+    for (const s of data.subnets) rows.push(['网段汇总', s.network, '/' + s.bits, s.usable, s.used, s.deviceCount, '', '', '', '', '']);
+    for (const a of data.addrs) rows.push(['地址清单', a.network, '/' + a.bits, '', '', '', a.device, a.source, a.iface, a.ip, conflictMapOf(data).has(a.ip) ? '是' : '']);
+    U.download(`IP地址管理_${U.fmtDate()}.csv`, new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出 IP 地址管理 CSV');
+  };
+  const conflictMapOf = (d) => new Map(d.conflicts.map(c => [c.ip, c]));
+  render();
+}
+
 /* ================= 接口总表（全部链路两端接口集中编辑） =================
  * 一张可筛选的表格集中查看/修改所有接口：接口名、IP、掩码位、VLAN、二层、聚合组；
  * 修改在「应用修改」时一次性写入（单个撤销步骤），与画布标注/校验/导出实时一致。 */
@@ -4407,6 +4491,7 @@ function wire() {
     { ic: 'edit', label: 'IP 批量改段…', act: openIpRenumber },
     { ic: 'wand', label: 'IP 子网计算器…', act: openSubnetCalc },
     { ic: 'list', label: '接口总表…', act: openIfTable },
+    { ic: 'grid', label: 'IP 地址管理…', act: openIpam },
     { sep: true },
     { ic: 'tag', label: '类型管理…', act: openTypeManager },
     { ic: 'trash', label: '删除选中', danger: true, act: () => deleteSelection() }
