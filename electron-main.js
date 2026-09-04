@@ -381,6 +381,72 @@ monitor.on('backup', (info) => {
   }
 });
 
+/* ---- Web Shell 会话录制（JSONL 录像：{t, dir, d} 每行一条；渲染层缓冲批量追加） ---- */
+const SHELL_REC_RE = /^rec_\d{8}_\d{6}(?:_\d+)?\.ntrec\.jsonl$/;
+let shellRecFile = null; // 当前录制文件全路径（null = 未在录制；全局单文件）
+function shellRecDir() { return path.join(app.getPath('userData'), 'shell-recordings'); }
+ipcMain.handle('shell:record-start', (e) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  if (shellRecFile) return { ok: true, name: path.basename(shellRecFile), existed: true };
+  try {
+    fs.mkdirSync(shellRecDir(), { recursive: true });
+    const d = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    const base = 'rec_' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '_' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
+    let name = base + '.ntrec.jsonl';
+    for (let i = 2; fs.existsSync(path.join(shellRecDir(), name)); i++) name = base + '_' + i + '.ntrec.jsonl';
+    shellRecFile = path.join(shellRecDir(), name);
+    fs.writeFileSync(shellRecFile, JSON.stringify({ t: 0, dir: 'meta', d: { startedAt: Date.now() } }) + '\n', 'utf8');
+    return { ok: true, name };
+  } catch (err) { shellRecFile = null; return { ok: false, error: String((err && err.message) || err) }; }
+});
+ipcMain.handle('shell:record-append', (e, p) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  if (!shellRecFile) return { ok: false, error: '未在录制中' };
+  const lines = String((p && p.lines) || '');
+  if (!lines || lines.length > 1024 * 1024) return { ok: false, error: '录制数据为空或过大' };
+  try { fs.appendFileSync(shellRecFile, lines.endsWith('\n') ? lines : lines + '\n', 'utf8'); return { ok: true }; }
+  catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
+});
+ipcMain.handle('shell:record-stop', (e) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  const f = shellRecFile;
+  shellRecFile = null;
+  return { ok: true, name: f ? path.basename(f) : null };
+});
+ipcMain.handle('shell:record-list', (e) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  try {
+    const dir = shellRecDir();
+    const items = (fs.readdirSync(dir) || [])
+      .filter(n => SHELL_REC_RE.test(n))
+      .map(n => { const st = fs.statSync(path.join(dir, n)); return { name: n, size: st.size, at: st.mtimeMs }; })
+      .sort((a, b) => b.at - a.at);
+    return { ok: true, items };
+  } catch (err) { return { ok: true, items: [] }; }
+});
+ipcMain.handle('shell:record-read', (e, p) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  const name = String((p && p.name) || '');
+  if (!SHELL_REC_RE.test(name)) return { ok: false, error: '非法的录像文件名' };
+  const full = path.join(shellRecDir(), name);
+  if (!full.startsWith(path.resolve(shellRecDir()) + path.sep)) return { ok: false, error: 'forbidden' };
+  try {
+    const st = fs.statSync(full);
+    if (!st.isFile() || st.size > 32 * 1024 * 1024) return { ok: false, error: '录像文件过大' };
+    return { ok: true, content: fs.readFileSync(full, 'utf8') };
+  } catch (err) { return { ok: false, error: '录像读取失败' }; }
+});
+ipcMain.handle('shell:record-delete', (e, p) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  const name = String((p && p.name) || '');
+  if (!SHELL_REC_RE.test(name)) return { ok: false, error: '非法的录像文件名' };
+  const full = path.join(shellRecDir(), name);
+  if (!full.startsWith(path.resolve(shellRecDir()) + path.sep)) return { ok: false, error: 'forbidden' };
+  try { fs.unlinkSync(full); return { ok: true }; }
+  catch (err) { return { ok: false, error: String((err && err.code) || err) }; }
+});
+
 function createWindow() {
   mainWin = new BrowserWindow({
     width: 1600,

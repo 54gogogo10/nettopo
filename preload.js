@@ -25,7 +25,14 @@ contextBridge.exposeInMainWorld('topoShell', {
   onOutput: sub('shell:output'),
   onStatus: sub('shell:status'),
   onEnd: sub('shell:end'),
-  onNewTab: sub('shell:newtab')
+  onNewTab: sub('shell:newtab'),
+  /* 会话录制（JSONL 录像，文件由主进程白名单管理） */
+  recordStart: () => ipcRenderer.invoke('shell:record-start'),
+  recordAppend: (p) => ipcRenderer.invoke('shell:record-append', p),
+  recordStop: () => ipcRenderer.invoke('shell:record-stop'),
+  recordList: () => ipcRenderer.invoke('shell:record-list'),
+  recordRead: (p) => ipcRenderer.invoke('shell:record-read', p),
+  recordDelete: (p) => ipcRenderer.invoke('shell:record-delete', p)
 });
 
 contextBridge.exposeInMainWorld('topoWeb', {
