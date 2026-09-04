@@ -540,7 +540,16 @@ ipcMain.handle('shell:connect', (e, opts) => {
   if (r.ok) {
     const host = String(opts.host || '').trim();
     const proto = String(opts.protocol || 'ssh').toUpperCase();
-    openShellTab({ sid: r.id, title: (opts.title || host) + ' · ' + proto + ' ' + host + ':' + (opts.port || (proto === 'TELNET' ? 23 : 22)) });
+    // 会话元数据随标签下发：群发/快捷按钮的 {ip}/{hostname}/{port}/{user} 变量替换用
+    openShellTab({
+      sid: r.id,
+      title: (opts.title || host) + ' · ' + proto + ' ' + host + ':' + (opts.port || (proto === 'TELNET' ? 23 : 22)),
+      host,
+      port: String(opts.port || (proto === 'TELNET' ? 23 : 22)),
+      protocol: proto.toLowerCase(),
+      username: String(opts.username || ''),
+      deviceName: String(opts.title || '')
+    });
   }
   return r;
 });
