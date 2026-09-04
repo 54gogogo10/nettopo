@@ -5489,6 +5489,7 @@ function openComplianceCheck() {
         <button type="button" class="tb" data-act="addrule">＋ 添加规则</button>
         <button type="button" class="tb" data-act="reset">恢复默认规则</button>
         <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="aifix" title="调用大模型为违规项生成修复命令序列（发送到「AI 设置」中配置的服务；执行前请人工核对）">AI 修复建议</button>
         <button type="button" class="tb" data-act="export" disabled title="将最近一次扫描结果导出为 Excel/CSV">导出报告</button>
         <button type="button" class="tb primary" data-act="run">保存规则并扫描备份库</button>
         <button type="button" class="tb" data-act="close">关闭</button>
@@ -5614,7 +5615,32 @@ function openComplianceCheck() {
   };
   ov.querySelector('[data-act=close]').onclick = close;
   const exportBtn = ov.querySelector('[data-act=export]');
+  const aiFixBtn = ov.querySelector('[data-act=aifix]');
   let lastScan = null; // 最近一次扫描结果（[{device, host, time, rep}]），供导出
+  /** 汇总违规清单文本（AI 修复建议用）：按设备列出违规规则与定位行 */
+  const buildViolationsText = () => {
+    if (!lastScan || !lastScan.length) return null;
+    const parts = [];
+    let count = 0;
+    for (const { device, host, time, rep } of lastScan) {
+      if (!rep || !rep.failed) continue;
+      const fails = (rep.results || []).filter(r => !r.pass);
+      if (!fails.length) continue;
+      parts.push('【设备】' + device + '（' + host + '） 备份时间：' + time);
+      for (const f of fails) {
+        count++;
+        parts.push('- 违规规则「' + f.name + '」（' + (f.negate ? '禁止出现' : '必须存在') + '）：'
+          + (f.negate ? ('违规行：' + (f.lines[0] || '')) : ('未找到匹配行' + (f.note ? '；' + f.note : ''))));
+      }
+    }
+    return count ? { text: parts.join('\n'), count } : null;
+  };
+  aiFixBtn.onclick = () => {
+    const v = buildViolationsText();
+    if (!v) { toast('请先执行扫描，且需存在违规项'); return; }
+    if (!window.topoAI || !window.topoAI.analyze) { toast('AI 功能需要桌面版（Electron）环境'); return; }
+    openAiAnalysis('compliance', { title: v.count + ' 条违规 · ' + U.fmtDate(), load: async () => v.text });
+  };
   exportBtn.onclick = () => {
     if (!lastScan || !lastScan.length) { toast('请先执行一次扫描'); return; }
     const rows = U.buildComplianceReportRows(lastScan).map(r => r.map(U.sanitizeCell));
@@ -7288,20 +7314,24 @@ async function openAiSettings() {
   actions.insertBefore(btn, actions.firstChild);
 }
 
-/** AI 解析主弹窗。kind: 'config'（配置备份）| 'logs'（设备日志）。
+/** AI 解析主弹窗。kind: 'config'（配置备份）| 'logs'（设备日志）| 'compliance'（合规修复建议，仅 preset 直开）。
  *  preset: { title, load } 可选——从备份/日志浏览器带文件直开（隐藏左侧选择区）。 */
 async function openAiAnalysis(kind, preset) {
   const ai = aiBridge(); if (!ai) return;
-  if (kind !== 'config' && kind !== 'logs') kind = 'config';
+  if (kind !== 'config' && kind !== 'logs' && kind !== 'compliance') kind = 'config';
+  if (kind === 'compliance' && !(preset && typeof preset.load === 'function')) return; // 合规修复仅支持 preset 直开
   const isCfg = kind === 'config';
+  const isComp = kind === 'compliance';
   const root = $('#modalRoot');
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.innerHTML = `
     <div class="modal ai-dialog" role="dialog" style="width:1080px;height:82vh">
-      <h3>${isCfg ? 'AI 解析设备配置' : 'AI 解析设备日志'}</h3>
+      <h3>${isCfg ? 'AI 解析设备配置' : isComp ? 'AI 合规修复建议' : 'AI 解析设备日志'}</h3>
       <div class="m-sub">${isCfg
         ? '调用大模型解读设备配置备份，输出中文分析报告（设备概况 / 接口与 IP / 路由交换 / 安全配置 / 风险 / 优化建议）。分析内容会发送到「AI 设置」中配置的服务。'
+        : isComp
+        ? '调用大模型为合规违规项生成修复命令序列（含进入/退出配置模式命令，无法自动修复的项会标注需人工评估）。违规清单会发送到「AI 设置」中配置的服务；修复命令执行前请人工核对。'
         : '调用大模型解读设备日志（监控采集日志 / Syslog 服务日志），输出中文分析报告（概况 / 级别统计 / 关键事件 / 异常迹象 / 根因推测）。分析内容会发送到「AI 设置」中配置的服务。'}</div>
       <div class="ai-main">
         <div class="ai-side" id="aiSide">
@@ -7436,10 +7466,10 @@ async function openAiAnalysis(kind, preset) {
     updateBtns();
   };
   if (preset && typeof preset.load === 'function') {
-    // 快捷入口：从备份中心 / 日志浏览器带入当前文件，隐藏左侧选择区
+    // 快捷入口：从备份中心 / 日志浏览器 / 合规报告带入当前内容，隐藏左侧选择区
     ov.querySelector('#aiSide').style.display = 'none';
-    ov.querySelector('h3').textContent = (isCfg ? 'AI 解析设备配置 · ' : 'AI 解析设备日志 · ') + (preset.title || '');
-    setSource({ kind: isCfg ? 'config' : 'monlog', title: preset.title || '当前内容', load: preset.load },
+    ov.querySelector('h3').textContent = (isCfg ? 'AI 解析设备配置 · ' : isComp ? 'AI 合规修复建议 · ' : 'AI 解析设备日志 · ') + (preset.title || '');
+    setSource({ kind: isCfg ? 'config' : isComp ? 'compliance' : 'monlog', title: preset.title || '当前内容', load: preset.load },
       '已选择：' + (preset.title || '当前内容') + '，点击「开始解析」');
     return;
   }
