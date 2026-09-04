@@ -642,7 +642,7 @@ function diffSessionOutputs(outputs) {
     const a = activeSession();
     if (!a) { toast('当前没有活动会话'); return; }
     if (a.s.ended) { toast('会话已结束'); return; }
-    const parts = parseSendText(b.text);
+    const parts = parseSendText(substituteVars(b.text, a.s.meta)); // 按当前会话设备变量替换
     if (b.enter) parts.push({ type: 'text', data: '\r' });
     for (const p of parts) {
       if (a.s.ended) return;
@@ -678,7 +678,7 @@ function diffSessionOutputs(outputs) {
     ov.innerHTML = `
       <div class="modal sh-dialog" role="dialog">
         <h3>${editing ? '编辑快捷按钮' : '新建快捷按钮'}</h3>
-        <div class="m-sub">点击按钮把内容发送到当前会话；内容支持 \\n 回车、\\t 制表、\\p 暂停 1 秒。</div>
+        <div class="m-sub">点击按钮把内容发送到当前会话；内容支持 \\n 回车、\\t 制表、\\p 暂停 1 秒；变量 {ip} {hostname} {port} {user} 按当前会话实际值替换。</div>
         <div class="frow"><label>按钮名称</label><input id="bbLabel" type="text" value="${escAttr(b.label)}" placeholder="例如：查看版本"/></div>
         <div class="frow"><label>发送内容</label><textarea id="bbText" style="height:80px" placeholder="例如：show version\\n">${escAttr(b.text)}</textarea></div>
         <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="bbEnter" type="checkbox" ${b.enter ? 'checked' : ''}/> 发送后追加回车（Enter）</label></div>
