@@ -2976,7 +2976,23 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     // 群发结果对比（纯函数）+ 合规报告行构建
     console.log('== 回归：群发结果对比与合规报告行（新功能） ==');
     {
-      const { diffSessionOutputs } = require('../js/shell-ui.js');
+      const { diffSessionOutputs, parseRecording } = require('../js/shell-ui.js');
+      // 会话录像解析：meta / 只保留 out / 坏行跳过 / 时间排序 / 时长 / in 条目剔除
+      const recLines = [
+        JSON.stringify({ t: 0, dir: 'meta', d: JSON.stringify({ startedAt: 123 }) }),
+        JSON.stringify({ t: 300, dir: 'out', d: '欢迎' }),
+        'not-json-line',
+        JSON.stringify({ t: 100, dir: 'out', d: '登录提示' }),
+        JSON.stringify({ t: 700, dir: 'in', d: 'secret\r' }),
+        '',
+        JSON.stringify({ t: 'bad', dir: 'out', d: 'x' })
+      ].join('\n');
+      const rec = parseRecording(recLines);
+      ok(rec.meta && rec.meta.startedAt === 123, 'Shell 录像解析：meta 行提取');
+      ok(rec.entries.length === 2 && rec.entries[0].d === '登录提示' && rec.entries[1].d === '欢迎', 'Shell 录像解析：只保留 out 并按时间排序');
+      ok(rec.duration === 300, 'Shell 录像解析：时长取最后一条时间');
+      ok(parseRecording('').entries.length === 0 && parseRecording(null).entries.length === 0, 'Shell 录像解析：空内容安全');
+      ok(rec.entries.every(e => e.d.indexOf('secret') < 0), 'Shell 录像解析：不回放敏感输入（in 条目剔除）');
       const d = diffSessionOutputs([
         { name: 'R1', lines: ['sysname R1', 'vlan 10', 'uptime 5d'] },
         { name: 'R2', lines: ['sysname R2', 'vlan 10', 'uptime 99d'] }

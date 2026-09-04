@@ -1,5 +1,23 @@
 /* NetTopo Web Shell 窗口 —— 多标签 SSH/Telnet 终端管理 */
 'use strict';
+/** 会话录像解析（纯函数，Node 测试可 require）：JSONL 每行 {t, dir, d}；
+ *  只保留 dir='out' 条目并按 t 升序，meta 行解析为对象；返回 { meta, entries, duration } */
+function parseRecording(content) {
+  const entries = [];
+  let meta = null;
+  for (const line of String(content == null ? '' : content).split(/\r?\n/)) {
+    const s = line.trim();
+    if (!s) continue;
+    let j;
+    try { j = JSON.parse(s); } catch (e) { continue; } // 坏行宽容跳过
+    if (!j || typeof j !== 'object' || !Number.isFinite(j.t) || typeof j.d !== 'string') continue;
+    if (j.dir === 'meta') { try { meta = JSON.parse(j.d); } catch (e2) { meta = null; } continue; }
+    if (j.dir !== 'out') continue; // 回放只呈现终端输出（用户输入的回显已包含在输出流中）
+    entries.push({ t: Math.max(0, Math.floor(j.t)), d: j.d });
+  }
+  entries.sort((a, b) => a.t - b.t);
+  return { meta, entries, duration: entries.length ? entries[entries.length - 1].t : 0 };
+}
 /** 群发结果对比（纯函数，Node 测试可 require）：行在全部输出中都存在视为共有，否则标记差异 */
 function diffSessionOutputs(outputs) {
   const arr = (Array.isArray(outputs) ? outputs : []).map(o => ({
@@ -14,7 +32,7 @@ function diffSessionOutputs(outputs) {
   };
 }
 (function () {
-  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs }; return; } // Node 测试直取纯函数
+  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs, parseRecording }; return; } // Node 测试直取纯函数
   if (!window.topoShell) {
     // 浏览器直接打开本页：给出明确提示（否则空状态不显示、按钮无响应，整页死白）
     const e = document.getElementById('shEmpty');
@@ -123,6 +141,7 @@ function diffSessionOutputs(outputs) {
     window.topoShell.onOutput((sid, data) => {
       const s = sessions.get(sid);
       if (!s) return;
+      recPush(data); // 会话录制：输出进入录像缓冲
       if (s.term) s.term.write(data); else s.buf.push(['out', data]);
     });
     window.topoShell.onStatus((sid, info) => {
@@ -381,6 +400,168 @@ function diffSessionOutputs(outputs) {
     ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
     ov.querySelector('[data-act=close]').onclick = close;
     ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  };
+
+  /* ---- 会话录制 / 回放 ----
+   * 录制：开启后所有标签的终端输出按时间戳缓冲成 JSONL 行（{t, dir:'out', d}），每 800ms 批量
+   * 追加到主进程 userData/shell-recordings/rec_<时间戳>.ntrec.jsonl（文件名与路径由主进程白名单管理）。
+   * 回放：读取录像 → 只读 xterm 按时间轴回放，支持 0.5~8 倍速 / 暂停 / 重播。 */
+  const recBtnEl = $('#shRecBtn'), recPlayBtnEl = $('#shRecPlayBtn');
+  let recActive = false, recFile = null, recStart = 0, recBuf = [], recTimer = null;
+  const recPush = (data) => { if (recActive && recBuf.length < 20000) recBuf.push({ t: Date.now() - recStart, dir: 'out', d: data }); };
+  const recFlush = async () => {
+    if (!recActive || !recBuf.length) return;
+    const lines = recBuf.map(e => JSON.stringify(e)).join('\n');
+    recBuf = [];
+    try {
+      const r = await window.topoShell.recordAppend({ lines });
+      if (!r || !r.ok) throw new Error((r && r.error) || '写入失败');
+    } catch (e) {
+      stopRecording(true);
+      toast('录制写入失败，已停止录制：' + String((e && e.message) || e));
+    }
+  };
+  const startRecording = async () => {
+    if (recActive) return;
+    let r;
+    try { r = await window.topoShell.recordStart(); } catch (e) { r = null; }
+    if (!r || !r.ok) { toast('录制启动失败：' + ((r && r.error) || '未知错误')); return; }
+    recActive = true; recFile = r.name; recStart = Date.now(); recBuf = [];
+    recTimer = setInterval(recFlush, 800);
+    if (recBtnEl) { recBtnEl.classList.add('on'); recBtnEl.textContent = '⏺ 录制中…'; }
+    toast('开始录制会话输出（再次点击停止）：' + r.name);
+  };
+  const stopRecording = async (silent) => {
+    if (!recActive) return;
+    recActive = false;
+    if (recTimer) { clearInterval(recTimer); recTimer = null; }
+    await recFlush();
+    let r;
+    try { r = await window.topoShell.recordStop(); } catch (e) { r = null; }
+    if (recBtnEl) { recBtnEl.classList.remove('on'); recBtnEl.textContent = '⏺ 录制'; }
+    if (!silent) toast('录制完成：' + ((r && r.name) || recFile || ''));
+    recFile = null;
+  };
+  if (recBtnEl) recBtnEl.onclick = () => { recActive ? stopRecording() : startRecording(); };
+  const rpSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  /** 回放器：只读 xterm 按时间轴写入，速度倍率 / 暂停 / 重播；关闭即终止 */
+  const openReplayPlayer = async (item) => {
+    let r;
+    try { r = await window.topoShell.recordRead({ name: item.name }); } catch (e) { r = null; }
+    if (!r || !r.ok) { toast((r && r.error) || '读取录像失败'); return; }
+    const rec = parseRecording(r.content);
+    if (!rec.entries.length) { toast('该录像没有可回放的内容'); return; }
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal sh-dialog" role="dialog" style="width:920px;height:82vh;display:flex;flex-direction:column">
+        <h3>回放录像 · ${escAttr(item.name)}</h3>
+        <div class="m-sub">${rec.entries.length} 条输出 · 录制时长约 ${Math.round(rec.duration / 1000)} 秒。回放为只读终端，输入已禁用。</div>
+        <div id="rpTerm" style="flex:1;overflow:hidden;background:#0b1220;border-radius:8px;padding:6px 0 6px 8px"></div>
+        <div class="m-actions" style="justify-content:flex-start">
+          <select id="rpSpeed" class="sh-ai-mode" title="回放速度">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+            <option value="8">8×</option>
+          </select>
+          <button type="button" class="tb primary" id="rpPlay">播放</button>
+          <button type="button" class="tb" id="rpRestart">重播</button>
+          <span id="rpProg" style="font-size:11.5px;color:var(--muted);flex:1"></span>
+          <button type="button" class="tb" data-act="close">关闭</button>
+        </div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    let runId = 0, playing = false, paused = false, idx = 0;
+    const term = new Terminal({ cursorBlink: false, fontSize: 12, fontFamily: 'Consolas, "Cascadia Mono", "Microsoft YaHei", monospace', theme: { background: '#0b1220', foreground: '#e2e8f0' }, scrollback: 5000, disableStdin: true });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(ov.querySelector('#rpTerm'));
+    try { fit.fit(); } catch (e) { /* ignore */ }
+    const prog = ov.querySelector('#rpProg');
+    const playBtn = ov.querySelector('#rpPlay');
+    const speedEl = ov.querySelector('#rpSpeed');
+    const close = () => { runId++; try { term.dispose(); } catch (e) { /* ignore */ } ov.remove(); };
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    ov.querySelector('[data-act=close]').onclick = close;
+    playBtn.onclick = () => { paused = !paused; playBtn.textContent = paused ? '▶ 继续' : '⏸ 暂停'; };
+    ov.querySelector('#rpRestart').onclick = () => { paused = false; playBtn.textContent = '⏸ 暂停'; play(); };
+    speedEl.onchange = () => { /* 速度即时生效，无需重启 */ };
+    const play = async () => {
+      const my = ++runId;
+      playing = true; paused = false; idx = 0;
+      try { term.reset(); } catch (e) { /* ignore */ }
+      playBtn.textContent = '⏸ 暂停';
+      let prevT = 0;
+      while (idx < rec.entries.length) {
+        if (my !== runId) return;
+        if (paused) { await rpSleep(120); continue; }
+        const e = rec.entries[idx];
+        let delay = idx === 0 ? 0 : Math.max(0, (e.t - prevT)) / Number(speedEl.value || 1);
+        prevT = e.t;
+        let waited = 0;
+        while (waited < delay) {
+          if (my !== runId) return;
+          if (paused) { await rpSleep(120); continue; }
+          const step = Math.min(80, delay - waited);
+          await rpSleep(step); waited += step;
+        }
+        if (my !== runId) return;
+        term.write(e.d);
+        idx++;
+        if (idx % 25 === 0) prog.textContent = '进度 ' + idx + '/' + rec.entries.length + '（录制时间轴 ' + Math.round(e.t / 1000) + 's）';
+      }
+      if (my === runId) { playing = false; playBtn.textContent = '▶ 已完成，重播'; prog.textContent = '回放完成（' + rec.entries.length + ' 条）'; }
+    };
+    play();
+  };
+  if (recPlayBtnEl) recPlayBtnEl.onclick = async () => {
+    let items = [];
+    try { const r = await window.topoShell.recordList(); items = (r && r.items) || []; } catch (e) { /* ignore */ }
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal sh-dialog" role="dialog" style="width:620px">
+        <h3>回放录像</h3>
+        <div class="m-sub">选择要回放的会话录像（${items.length} 个）。录像保存在本机 shell-recordings 目录。</div>
+        <div id="rpList" style="max-height:46vh;overflow:auto">${items.length ? '' : '<div class="bk-empty">暂无录像：点击顶栏「⏺ 录制」开始录制会话输出</div>'}</div>
+        <div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    ov.querySelector('[data-act=close]').onclick = close;
+    const listEl = ov.querySelector('#rpList');
+    const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+    if (items.length) {
+      listEl.innerHTML = items.map(it => `
+        <div class="lb-file" data-name="${escAttr(it.name)}" style="cursor:pointer">
+          <span class="nm">${escAttr(it.name)}</span>
+          <span class="sub">${fmtSize(it.size)} · ${new Date(it.at).toLocaleString()}</span>
+          <button type="button" class="tb trust-del rp-del" title="删除该录像">删除</button>
+        </div>`).join('');
+      listEl.querySelectorAll('.lb-file').forEach(el => {
+        el.onclick = (e) => {
+          if (e.target.closest('.rp-del')) return;
+          close();
+          openReplayPlayer({ name: el.dataset.name });
+        };
+      });
+      listEl.querySelectorAll('.rp-del').forEach(btn => {
+        btn.onclick = async (e) => {
+          e.stopPropagation();
+          const name = btn.closest('.lb-file').dataset.name;
+          try { await window.topoShell.recordDelete({ name }); btn.closest('.lb-file').remove(); toast('已删除录像'); } catch (err) { toast('删除失败'); }
+        };
+      });
+    }
   };
 
   /* ---- 复制 / 粘贴 ---- */
