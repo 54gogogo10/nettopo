@@ -1165,3 +1165,13 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .mon-dot.pending { fill: #f59e0b; }
 .mon-dot.alert { fill: var(--danger); animation: monPulse 1.2s ease-in-out infinite; }
 @keyframes monPulse { 50% { opacity: .3; } }
+
+/* ---- IP 地址管理视图 ---- */
+.ipam-t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ipam-t th, .ipam-t td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.ipam-t th { color: var(--muted); font-weight: 600; position: sticky; top: -6px; background: var(--panel); }
+.ipam-t code { font: 12px/1.4 Consolas, monospace; }
+.ipam-bar { display: inline-block; width: 110px; height: 8px; border-radius: 4px; background: var(--panel2); overflow: hidden; vertical-align: middle; margin-right: 6px; }
+.ipam-bar > span { display: block; height: 100%; border-radius: 4px; }
+.ipam-conflict { font-size: 12.5px; background: rgba(220,38,38,.06); border: 1px solid rgba(220,38,38,.25); border-radius: 8px; padding: 6px 10px; }
+.ipam-cip { display: inline-block; font: 12px/1.6 Consolas, monospace; color: var(--danger); font-weight: 600; margin-right: 8px; }

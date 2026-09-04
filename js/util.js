@@ -2121,6 +2121,61 @@ U.buildIfTableRows = (nodes, links) => {
   return rows;
 };
 
+/* ---------- IP 地址管理（地址清单 / 网段汇总 / 冲突检测） ----------
+ * 数据源：设备管理口 + 接口总表（跳过二层接口）。同设备同 IP 去重（管理口与接口重合为同一条目）；
+ * 跨设备同 IP 记入冲突。网段按「网络地址/掩码位」聚合，利用率 = 已用 / 可用（subnetCalc 口径）。 */
+U.buildIpamData = (nodes, links) => {
+  const addrs = [];
+  const seen = new Map();   // ip → [{device, source, iface}]
+  const dedupe = new Set(); // device|ip 去重（管理口与接口重合）
+  const subMap = new Map(); // netKey → 聚合
+  const pushAddr = (device, source, iface, ip, maskBits) => {
+    const n = U.ipv4ToInt(ip);
+    if (n == null) return;
+    device = String(device || '?');
+    const dk = device + '|' + ip;
+    if (dedupe.has(dk)) return;
+    dedupe.add(dk);
+    let bits = parseInt(maskBits, 10);
+    if (!(bits >= 0 && bits <= 32)) bits = 24;
+    const calc = U.subnetCalc(ip, bits);
+    if (!calc) return;
+    const network = calc.network;
+    addrs.push({ device, source, iface: String(iface || ''), ip, bits, network });
+    const arr = seen.get(ip) || [];
+    arr.push({ device, source, iface: String(iface || '') });
+    seen.set(ip, arr);
+    const sk = network + '/' + bits;
+    let sm = subMap.get(sk);
+    if (!sm) { sm = { network, bits, usable: calc.usable, ips: [], devices: new Set() }; subMap.set(sk, sm); }
+    sm.ips.push(ip);
+    sm.devices.add(device);
+  };
+  for (const n of (Array.isArray(nodes) ? nodes : [])) {
+    U.nodeMgmts(n).forEach((ip, i) => pushAddr(n.name, '管理', i === 0 ? '管理口' : '管理口' + (i + 1), ip, 24));
+  }
+  for (const r of U.buildIfTableRows(nodes, links)) {
+    if (r.l2) continue;
+    pushAddr(r.nodeName, '接口', r.ifn, r.ip, r.mask);
+  }
+  const conflicts = [];
+  for (const [ip, arr] of seen) {
+    if (arr.length > 1) {
+      const devs = new Set(arr.map(a => a.device));
+      conflicts.push({ ip, entries: arr, crossDevice: devs.size > 1 });
+    }
+  }
+  conflicts.sort((a, b) => (b.crossDevice - a.crossDevice) || a.ip.localeCompare(b.ip, 'zh', { numeric: true }));
+  const subnets = [...subMap.values()].map(sm => ({
+    network: sm.network, bits: sm.bits,
+    usable: sm.usable, used: sm.ips.length,
+    utilization: sm.usable > 0 ? Math.min(100, Math.round(sm.ips.length / sm.usable * 100)) : 100,
+    deviceCount: sm.devices.size
+  })).sort((a, b) => b.utilization - a.utilization || a.network.localeCompare(b.network, 'zh', { numeric: true }));
+  addrs.sort((a, b) => a.device.localeCompare(b.device, 'zh') || a.network.localeCompare(b.network, 'zh', { numeric: true }) || a.ip.localeCompare(b.ip, 'zh', { numeric: true }));
+  return { addrs, subnets, conflicts };
+};
+
 /* ---------- 设备批量重命名 ---------- */
 U.renameNodes = (nodes, opts) => {
   opts = opts || {};
