@@ -1134,7 +1134,8 @@ ipcMain.handle('ai:shell-chat', async (e, p) => {
   if (!client.ready) return { ok: false, error: '请先在主窗口菜单「AI 设置」中配置 API 地址与模型名' };
   // 终端上下文保尾部截断（提示词注入面收敛：内容在提示词中声明为不可信数据）
   const cut = truncateText(String((p && p.termContext) == null ? '' : p.termContext), 32 * 1024, 'tail');
-  const messages = buildShellPrompt(requirement, cut.text);
+  // 设备类型注入（SHELL_DEVICE_TYPES 白名单键，非法值回落 auto 不注入）
+  const messages = buildShellPrompt(requirement, cut.text, String((p && p.deviceType) || ''));
   aiShellClients.add(client);
   try {
     const r = await client.chat({ messages, maxTokens: 1024 });
