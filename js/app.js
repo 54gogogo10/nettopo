@@ -7332,7 +7332,7 @@ async function openAiAnalysis(kind, preset) {
     const r = await ai.analyze({ kind: source.kind, title: source.title, content, extra })
       .catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
     if (unsub) { unsub(); unsub = null; }
-    running = false; updateBtns();
+    running = false;
     if (r && r.ok) {
       lastResult = r;
       resultEl.textContent = r.text;
@@ -7347,6 +7347,7 @@ async function openAiAnalysis(kind, preset) {
       setStatus('解析失败');
       resultEl.textContent = '解析失败：' + ((r && r.error) || '未知错误') + '\n\n请检查「AI 设置」中的 API 地址 / Key / 模型名，以及服务是否可用。';
     }
+    updateBtns();
   };
   runBtn.onclick = runAnalyze;
   stopBtn.onclick = () => { if (running) { setStatus('正在停止…', true); ai.cancel().catch(() => {}); } };
