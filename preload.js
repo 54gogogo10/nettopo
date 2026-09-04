@@ -114,7 +114,25 @@ contextBridge.exposeInMainWorld('topoNetSvc', {
   importBackup: (p) => ipcRenderer.invoke('netsvc:import', p),
   syslogTail: (since) => ipcRenderer.invoke('netsvc:syslog-tail', { since }),
   syslogSearch: (p) => ipcRenderer.invoke('netsvc:syslog-search', p),
+  syslogFiles: () => ipcRenderer.invoke('netsvc:syslog-files'),
+  syslogRead: (host, date) => ipcRenderer.invoke('netsvc:syslog-read', { host, date }),
   openFolder: (svc) => ipcRenderer.invoke('netsvc:open-folder', { svc }),
   onFile: sub('netsvc:file'),
   onStatus: sub('netsvc:status')
+});
+
+/* AI 解析（LLM，仅主窗口可用）：配置/分析经主进程发起（渲染层 CSP 禁止直连外网）；
+ * API Key 明文只填不读（回显为脱敏形式），流式增量经 ai:chunk 事件推送 */
+contextBridge.exposeInMainWorld('topoAI', {
+  getConfig: () => ipcRenderer.invoke('ai:get-config'),
+  setConfig: (p) => ipcRenderer.invoke('ai:set-config', p),
+  test: () => ipcRenderer.invoke('ai:test'),
+  analyze: (p) => ipcRenderer.invoke('ai:analyze', p),
+  cancel: () => ipcRenderer.invoke('ai:cancel'),
+  historyList: () => ipcRenderer.invoke('ai:history-list'),
+  historyRead: (name) => ipcRenderer.invoke('ai:history-read', { name }),
+  historyRemove: (name) => ipcRenderer.invoke('ai:history-remove', { name }),
+  historyClear: () => ipcRenderer.invoke('ai:history-clear'),
+  onChunk: sub('ai:chunk'),
+  onStatus: sub('ai:status')
 });

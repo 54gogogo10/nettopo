@@ -9,6 +9,7 @@ const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
+const { AiClient, AiHistoryStore, validateBaseUrl, buildConfigPrompt, buildLogPrompt, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
  *   否则 SUID 沙箱初始化直接 fatal abort（"Running as root without --no-sandbox is not supported"）。
@@ -942,6 +943,171 @@ ipcMain.handle('netsvc:open-folder', (e, p) => {
   if (!dir) return { ok: false, error: '未知的服务' };
   return require('electron').shell.openPath(dir).then(() => ({ ok: true, dir }), (err) => ({ ok: false, error: String(err && err.message || err) }));
 });
+
+/* ---- Syslog 历史日志文件只读通道（AI 解析日志的取数口；仅主窗口可调用）----
+ * 目录结构：<netSvc.syslogDir>/<主机目录>/<YYYY-MM-DD>.log，逐级白名单校验（与 monitor:logs-read 同口径） */
+ipcMain.handle('netsvc:syslog-files', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const fs = require('fs');
+  const base = netSvc.syslogDir;
+  const hosts = [];
+  let names = [];
+  try { names = fs.readdirSync(base); } catch (err) { names = []; }
+  for (const host of names) {
+    const hDir = path.join(base, host);
+    let st;
+    try { st = fs.lstatSync(hDir); } catch (err) { continue; }
+    if (!st.isDirectory() || st.isSymbolicLink()) continue;
+    const dates = [];
+    let ds = [];
+    try { ds = fs.readdirSync(hDir); } catch (err) { ds = []; }
+    for (const d of ds) {
+      const m = d.match(/^(\d{4}-\d{2}-\d{2})\.log$/);
+      if (!m) continue;
+      const full = path.join(hDir, d);
+      let fst;
+      try { fst = fs.lstatSync(full); } catch (err) { continue; }
+      if (!fst.isFile() || fst.isSymbolicLink()) continue;
+      dates.push({ date: m[1], name: d, size: fst.size, time: fst.mtimeMs });
+    }
+    dates.sort((a, b) => (a.date < b.date ? 1 : -1));
+    if (dates.length) hosts.push({ host, dates: dates.slice(0, 120) });
+  }
+  hosts.sort((a, b) => (a.host < b.host ? 1 : -1));
+  return { ok: true, hosts };
+});
+ipcMain.handle('netsvc:syslog-read', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const host = safeLogComponent(p && p.host, false);
+  const date = safeLogComponent(p && p.date, true);
+  if (!host || !date) return { ok: false, error: '非法的日志文件路径' };
+  const fs = require('fs');
+  const full = netSvc.syslogDir + path.sep + host + path.sep + date + '.log';
+  // 边界终判：host/date 均已过 safeLogComponent 白名单，纵深兜底拼接结果仍在 syslog 库内
+  if (!full.startsWith(path.resolve(netSvc.syslogDir) + path.sep)) return { ok: false, error: '非法的日志文件路径' };
+  try {
+    const st = fs.lstatSync(full);
+    if (!st.isFile() || st.isSymbolicLink()) return { ok: false, error: '日志文件不存在' };
+    // 超 4MB 只读尾部（丢弃首个残缺半行）：与 monitor:logs-read 同口径
+    let content = '', truncated = false;
+    if (st.size > 4 * 1024 * 1024) {
+      truncated = true;
+      const fd = fs.openSync(full, 'r');
+      try {
+        const buf = Buffer.alloc(4 * 1024 * 1024);
+        fs.readSync(fd, buf, 0, buf.length, st.size - buf.length);
+        content = buf.toString('utf8');
+        const nl = content.indexOf('\n');
+        if (nl >= 0) content = content.slice(nl + 1);
+      } finally {
+        try { fs.closeSync(fd); } catch (err2) { /* ignore */ }
+      }
+    } else {
+      content = fs.readFileSync(full, 'utf8');
+    }
+    return { ok: true, content, size: st.size, truncated };
+  } catch (err) {
+    return { ok: false, error: '读取日志失败' };
+  }
+});
+
+/* ---- AI 解析（LLM，仅主窗口可调用）----
+ * OpenAI 兼容接口的调用全部在主进程完成（渲染层 CSP 禁止直连外网）；
+ * API Key 经 safeStorage 密文存 settings.json 的 ai 键，明文只在主进程内存中出现、不回传渲染层。 */
+function aiCfgFromSettings() {
+  const s = loadAppSettings().ai || {};
+  return {
+    baseUrl: typeof s.baseUrl === 'string' ? s.baseUrl : '',
+    model: typeof s.model === 'string' ? s.model : '',
+    apiKey: s.apiKeyEnc ? decryptSecretValue(s.apiKeyEnc) : '',
+    maxInputKB: Number(s.maxInputKB) > 0 ? Math.min(2048, Math.floor(Number(s.maxInputKB))) : DEFAULT_MAX_INPUT_KB
+  };
+}
+/** 分析记录库（惰性单例，库存 userData/ai-analysis） */
+let aiHistory = null;
+function getAiHistory() {
+  if (!aiHistory) aiHistory = new AiHistoryStore(path.join(app.getPath('userData'), 'ai-analysis'));
+  return aiHistory;
+}
+/** 进行中的分析客户端（ai:cancel 的取消目标；客户端按次新建，结束即清空） */
+let aiActiveClient = null;
+ipcMain.handle('ai:get-config', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const c = aiCfgFromSettings();
+  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
+});
+ipcMain.handle('ai:set-config', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const s = loadAppSettings();
+  if (!s.ai || typeof s.ai !== 'object') s.ai = {};
+  if (p && 'baseUrl' in p) {
+    const base = validateBaseUrl(p.baseUrl); // 空值合法（表示未配置）；非法格式直接拒绝并提示
+    if (!base && String(p.baseUrl || '').trim()) return { ok: false, error: 'API 地址无效：需以 http:// 或 https:// 开头' };
+    s.ai.baseUrl = base;
+  }
+  if (p && 'model' in p) s.ai.model = String(p.model || '').trim().slice(0, 200);
+  if (p && 'maxInputKB' in p) {
+    const n = Math.floor(Number(p.maxInputKB));
+    s.ai.maxInputKB = (n >= 4 && n <= 2048) ? n : DEFAULT_MAX_INPUT_KB;
+  }
+  if (p && p.clearApiKey) delete s.ai.apiKeyEnc;
+  else if (p && typeof p.apiKey === 'string' && p.apiKey) s.ai.apiKeyEnc = encryptSecretValue(p.apiKey); // 空串=保持不变
+  saveAppSettings();
+  const c = aiCfgFromSettings();
+  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
+});
+ipcMain.handle('ai:test', async (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const client = new AiClient(aiCfgFromSettings());
+  return client.test();
+});
+ipcMain.handle('ai:analyze', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const kind = String((p && p.kind) || '');
+  if (kind !== 'config' && kind !== 'syslog' && kind !== 'monlog') return { ok: false, error: '未知的分析类型' };
+  const content = String((p && p.content) == null ? '' : p.content);
+  if (!content.trim()) return { ok: false, error: '分析内容为空' };
+  if (Buffer.byteLength(content, 'utf8') > 32 * 1024 * 1024) return { ok: false, error: '分析内容过大' };
+  const client = new AiClient(aiCfgFromSettings());
+  if (!client.ready) return { ok: false, error: !client.baseUrl ? '请先在 AI 设置中配置 API 地址' : '请先在 AI 设置中配置模型名' };
+  // 输入按设置上限截断（配置保头部、日志保尾部），再组装提示词
+  const cut = truncateText(content, (aiCfgFromSettings().maxInputKB || DEFAULT_MAX_INPUT_KB) * 1024, kind === 'config' ? 'head' : 'tail');
+  const messages = (kind === 'config' ? buildConfigPrompt(cut.text, p && p.extra) : buildLogPrompt(kind, cut.text, p && p.extra));
+  const title = String((p && p.title) || '').slice(0, 200);
+  // 流式增量批量转发主窗口（120ms 合批，避免高频 IPC 淹没渲染层）
+  const push = (ch, data) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(ch, data); };
+  let pend = '';
+  let lastFlush = Date.now();
+  const onDelta = (d) => {
+    pend += d;
+    const now = Date.now();
+    if (now - lastFlush >= 120) { lastFlush = now; if (pend) { push('ai:chunk', { text: pend }); pend = ''; } }
+  };
+  client.on('chunk', (c) => { if (c && c.text) onDelta(c.text); });
+  aiActiveClient = client;
+  const r = await client.chat({ messages, onDelta });
+  aiActiveClient = null;
+  if (pend) push('ai:chunk', { text: pend });
+  if (r && r.ok) {
+    // 成功的分析落历史库（含截断标注），供「分析记录」回看/导出
+    const hist = getAiHistory().add({
+      kind, title, model: r.model || client.model, ms: r.ms, usage: r.usage,
+      content: (cut.truncated ? '【输入已截断：原文共 ' + cut.totalBytes + ' 字节】\n\n' : '') + r.text
+    });
+    if (!hist.ok) console.warn('[ai] 分析记录保存失败：' + hist.error);
+  }
+  return r;
+});
+ipcMain.handle('ai:cancel', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  // 客户端按次新建（防重入），进行中的请求挂在最近一次分析上：用模块级引用兜底取消
+  if (aiActiveClient) aiActiveClient.cancel();
+  return { ok: true };
+});
+ipcMain.handle('ai:history-list', (e) => monitorGuard(e) ? getAiHistory().list() : { ok: false, error: 'forbidden' });
+ipcMain.handle('ai:history-read', (e, p) => monitorGuard(e) ? getAiHistory().read(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
+ipcMain.handle('ai:history-remove', (e, p) => monitorGuard(e) ? getAiHistory().remove(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
+ipcMain.handle('ai:history-clear', (e) => monitorGuard(e) ? getAiHistory().clear() : { ok: false, error: 'forbidden' });
 
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框

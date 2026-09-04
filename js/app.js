@@ -3298,6 +3298,8 @@ function openModal(opts) {
       setTimeout(() => U.fillIcons(), 0);
     } else if (f.type === 'textarea') {
       ctrl = `<textarea name="${f.name}" placeholder="${U.escHtml(f.ph || '')}">${U.escHtml(f.value || '')}</textarea>`;
+    } else if (f.type === 'password') {
+      ctrl = `<input name="${f.name}" type="password" value="${U.escHtml(f.value || '')}" placeholder="${U.escHtml(f.ph || '')}" autocomplete="off"/>`;
     } else {
       ctrl = `<input name="${f.name}" type="text" value="${U.escHtml(f.value || '')}" placeholder="${U.escHtml(f.ph || '')}"/>`;
     }
@@ -4457,6 +4459,13 @@ function wire() {
       const r = await window.topoMonitor.setTray(!cur);
       toast(r && r.ok ? (r.enabled ? '已启用托盘常驻：关闭窗口后监控在后台继续，点击托盘图标恢复' : '已关闭托盘常驻') : '设置失败');
     } }
+  ]);
+  $('#btnDropAI').onclick = (e) => openDrop(e.currentTarget, [
+    { ic: 'wand', label: '解析设备配置…', act: () => openAiAnalysis('config') },
+    { ic: 'list', label: '解析设备日志…', act: () => openAiAnalysis('logs') },
+    { sep: true },
+    { ic: 'clock', label: '分析记录…', act: openAiHistory },
+    { ic: 'cloud', label: 'AI 设置…', act: openAiSettings }
   ]);
   $('#btnDropView').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'eye', label: '链路标注', active: state.showLabels, act: toggleLabels },
@@ -6180,6 +6189,7 @@ function openMonitorLogs(devicePreset) {
             <span id="lbCount" class="lb-count"></span>
             <button type="button" class="tb" id="lbPrev" title="上一个匹配">↑</button>
             <button type="button" class="tb" id="lbNext" title="下一个匹配">↓</button>
+            <button type="button" class="tb" data-act="ai">AI 解析</button>
             <button type="button" class="tb" data-act="openfolder">打开目录</button>
             <button type="button" class="tb primary" data-act="close">关闭</button>
           </div>
@@ -6354,6 +6364,18 @@ function openMonitorLogs(devicePreset) {
   ov.querySelector('#lbPrev').onclick = () => stepHit(-1);
   ov.querySelector('#lbNext').onclick = () => stepHit(1);
   ov.querySelector('[data-act=openfolder]').onclick = async () => { try { await bridge.openLogs(cur.device || ''); } catch (e) {} };
+  ov.querySelector('[data-act=ai]').onclick = () => {
+    if (!cur.device || !cur.date || !cur.file) { toast('请先在左侧选择一个日志文件再进行 AI 解析'); return; }
+    const device = cur.device, date = cur.date, file = cur.file;
+    openAiAnalysis('logs', {
+      title: device + '/' + date + '/' + file,
+      load: async () => {
+        const r = await bridge.logsRead(device, date, file);
+        if (!r || !r.ok) throw new Error((r && r.error) || '读取日志失败');
+        return r.content;
+      }
+    });
+  };
   ov.querySelector('[data-act=close]').onclick = close;
 
   bridge.logsTree().then((r) => {
@@ -6398,6 +6420,7 @@ function openConfigBackups(devicePreset) {
             <button type="button" class="tb" id="bkDiff" disabled>对比选中（旧 → 新）</button>
             <button type="button" class="tb" id="bkDelete" disabled>删除选中</button>
             <button type="button" class="tb" id="bkComp">合规检查…</button>
+            <button type="button" class="tb" id="bkAi">AI 解析…</button>
             <button type="button" class="tb" id="bkNow">立即备份当前地址</button>
             <button type="button" class="tb" data-act="openfolder">打开目录</button>
             <button type="button" class="tb primary" data-act="close">关闭</button>
@@ -6524,6 +6547,19 @@ function openConfigBackups(devicePreset) {
     } catch (e) { contentEl.textContent = '（对比失败）'; }
   };
   ov.querySelector('#bkComp').onclick = () => { close(); openComplianceCheck(); };
+  ov.querySelector('#bkAi').onclick = () => {
+    if (sel.size !== 1) { toast('请先勾选一份备份再进行 AI 解析'); return; }
+    const name = [...sel][0];
+    const device = cur.device, host = cur.host;
+    openAiAnalysis('config', {
+      title: device + '/' + host + '/' + name,
+      load: async () => {
+        const r = await window.topoConfigBackup.read(device, host, name);
+        if (!r || !r.ok) throw new Error((r && r.error) || '读取备份失败');
+        return r.content;
+      }
+    });
+  };
   ov.querySelector('#bkNow').onclick = async () => {
     if (!cur.host) { toast('请先选择一个管理地址'); return; }
     if (!window.topoMonitor || !window.topoMonitor.runBackup) { toast('立即备份需要监控任务在运行'); return; }
@@ -7104,6 +7140,461 @@ function openWebShell(id) {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#wsHost').focus(); }, 250);
 }
 
+/* ================= AI 解析（LLM 解析设备配置 / 日志） ================= */
+/** 桌面桥探测：AI 调用全部经主进程发起（渲染层 CSP 禁止直连外网），浏览器环境降级提示 */
+function aiBridge() {
+  if (!window.topoAI || !window.topoAI.analyze) { toast('AI 功能需要桌面版（Electron）环境'); return null; }
+  return window.topoAI;
+}
+const AI_KIND_LB = { config: '配置解析', syslog: 'Syslog 日志', monlog: '监控采集日志' };
+
+async function saveAiSettings(ai, v) {
+  const maxKb = Math.floor(Number(v.maxInputKB));
+  try {
+    return await ai.setConfig({
+      baseUrl: String(v.baseUrl || '').trim(),
+      model: String(v.model || '').trim(),
+      apiKey: String(v.apiKey || ''),
+      maxInputKB: Number.isFinite(maxKb) && maxKb > 0 ? maxKb : 100
+    });
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+
+/** AI 设置：API 地址 / API Key（只填不读，回显脱敏）/ 模型名 / 输入上限 + 连通性测试 */
+async function openAiSettings() {
+  const ai = aiBridge(); if (!ai) return;
+  let cfg = { baseUrl: '', model: '', maxInputKB: 100, apiKeySet: false, apiKeyMasked: '' };
+  try { const r = await ai.getConfig(); if (r && r.ok) cfg = r; } catch (e) { /* 首次使用无配置 */ }
+  openModal({
+    title: 'AI 设置',
+    sub: '兼容 OpenAI Chat Completions 接口的大模型服务（OpenAI / DeepSeek / 智谱 GLM / 通义千问 / Ollama 本地模型等）。'
+      + 'API Key 经系统加密保存在本机 settings.json，界面只显示脱敏形式；使用 http:// 地址（本地/内网服务）时数据明文传输，请注意。',
+    width: 560,
+    fields: [
+      { name: 'baseUrl', label: 'API 地址', type: 'text', required: true, value: cfg.baseUrl, ph: '例如 https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1' },
+      { name: 'apiKey', label: 'API Key', type: 'password', value: '', ph: cfg.apiKeySet ? '已保存（' + cfg.apiKeyMasked + '），留空表示保持不变' : 'sk-…（本地服务可留空）' },
+      { name: 'model', label: '模型名', type: 'text', required: true, value: cfg.model, ph: '例如 deepseek-chat / glm-4.5 / qwen-plus / llama3' },
+      { name: 'maxInputKB', label: '单次发送上限（KB，超出部分自动截断）', type: 'text', value: String(cfg.maxInputKB || 100) }
+    ],
+    submit: '保存',
+    onSubmit: async (v) => {
+      const r = await saveAiSettings(ai, v);
+      toast(r && r.ok ? 'AI 设置已保存' : '保存失败：' + ((r && r.error) || '未知错误'));
+    }
+  });
+  // 在操作区追加「保存并测试连接」：先保存当前表单值再发连通性测试请求
+  const ov = $('#modalRoot').lastElementChild;
+  const actions = ov && ov.querySelector('.m-actions');
+  if (!actions) return;
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'tb'; btn.textContent = '保存并测试连接';
+  btn.onclick = async () => {
+    const form = ov.querySelector('form');
+    const v = {
+      baseUrl: form.elements.baseUrl.value,
+      apiKey: form.elements.apiKey.value,
+      model: form.elements.model.value,
+      maxInputKB: form.elements.maxInputKB.value
+    };
+    btn.disabled = true; btn.textContent = '测试中…';
+    const saved = await saveAiSettings(ai, v);
+    if (!saved || !saved.ok) {
+      btn.disabled = false; btn.textContent = '保存并测试连接';
+      toast('保存失败：' + ((saved && saved.error) || '未知错误'));
+      return;
+    }
+    const r = await ai.test().catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
+    btn.disabled = false; btn.textContent = '保存并测试连接';
+    if (r && r.ok) toast('连接成功（' + r.ms + 'ms）· 模型 ' + (r.model || '') + ' · 回复：' + (r.reply || 'OK'));
+    else toast('连接失败：' + ((r && r.error) || '未知错误'));
+  };
+  actions.insertBefore(btn, actions.firstChild);
+}
+
+/** AI 解析主弹窗。kind: 'config'（配置备份）| 'logs'（设备日志）。
+ *  preset: { title, load } 可选——从备份/日志浏览器带文件直开（隐藏左侧选择区）。 */
+async function openAiAnalysis(kind, preset) {
+  const ai = aiBridge(); if (!ai) return;
+  if (kind !== 'config' && kind !== 'logs') kind = 'config';
+  const isCfg = kind === 'config';
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ai-dialog" role="dialog" style="width:1080px;height:82vh">
+      <h3>${isCfg ? 'AI 解析设备配置' : 'AI 解析设备日志'}</h3>
+      <div class="m-sub">${isCfg
+        ? '调用大模型解读设备配置备份，输出中文分析报告（设备概况 / 接口与 IP / 路由交换 / 安全配置 / 风险 / 优化建议）。分析内容会发送到「AI 设置」中配置的服务。'
+        : '调用大模型解读设备日志（监控采集日志 / Syslog 服务日志），输出中文分析报告（概况 / 级别统计 / 关键事件 / 异常迹象 / 根因推测）。分析内容会发送到「AI 设置」中配置的服务。'}</div>
+      <div class="ai-main">
+        <div class="ai-side" id="aiSide">
+          ${isCfg ? `
+          <div class="ai-nav"><label>设备（配置备份）</label><select id="aiDevice"></select></div>
+          <div class="ai-list" id="aiFiles"></div>
+          ` : `
+          <div class="ai-nav"><label>日志来源</label><select id="aiSource">
+            <option value="monlog">监控采集日志（SSH / Telnet）</option>
+            <option value="syslog">Syslog 服务日志</option>
+          </select></div>
+          <div class="ai-nav"><label>主机</label><select id="aiHost"></select></div>
+          <div class="ai-nav"><label>日期</label><select id="aiDate"></select></div>
+          <div class="ai-list" id="aiFiles"></div>
+          `}
+          <div class="ai-extra"><label>附加要求（可选）</label><textarea id="aiExtra" placeholder="例如：重点检查 ACL 与口令加密 / 关注凌晨的异常登录"></textarea></div>
+        </div>
+        <div class="ai-body">
+          <div class="ai-toolbar">
+            <span id="aiStatus" class="ai-status">请选择内容后点击「开始解析」</span>
+            <button type="button" class="tb primary" id="aiRun">开始解析</button>
+            <button type="button" class="tb" id="aiStop" disabled>停止</button>
+            <button type="button" class="tb" id="aiCopy" disabled>复制结果</button>
+            <button type="button" class="tb" id="aiExport" disabled>导出 Markdown</button>
+            <button type="button" class="tb" data-act="close">关闭</button>
+          </div>
+          <pre class="ai-result" id="aiResult" spellcheck="false">（尚未解析）</pre>
+          <div class="ai-meta" id="aiMeta"></div>
+        </div>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const statusEl = ov.querySelector('#aiStatus');
+  const resultEl = ov.querySelector('#aiResult');
+  const metaEl = ov.querySelector('#aiMeta');
+  const runBtn = ov.querySelector('#aiRun');
+  const stopBtn = ov.querySelector('#aiStop');
+  const copyBtn = ov.querySelector('#aiCopy');
+  const exportBtn = ov.querySelector('#aiExport');
+  const filesEl = ov.querySelector('#aiFiles');
+  let running = false;
+  let unsub = null;
+  let lastResult = null;  // { text, ms, usage, model }
+  let source = null;      // { kind:'config'|'syslog'|'monlog', title, load(): Promise<string> }
+  const setStatus = (msg, isRun) => { statusEl.textContent = msg; statusEl.classList.toggle('run', !!isRun); };
+  const updateBtns = () => {
+    runBtn.disabled = running || !source;
+    stopBtn.disabled = !running;
+    copyBtn.disabled = running || !lastResult;
+    exportBtn.disabled = running || !lastResult;
+  };
+  const copyText = (text) => {
+    if (window.topoShell && window.topoShell.copyText) { window.topoShell.copyText(text); toast('已复制到剪贴板'); return; }
+    navigator.clipboard.writeText(text).then(() => toast('已复制到剪贴板'), () => toast('复制失败'));
+  };
+  const exportMd = () => {
+    if (!lastResult) return;
+    const name = 'AI解析-' + String(source ? source.title : '结果').replace(/[\\/:*?"<>|]/g, '_') + '.md';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([lastResult.text], { type: 'text/markdown' }));
+    a.download = name;
+    a.click();
+    setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (e) { /* ignore */ } }, 5000);
+  };
+  const close = () => {
+    if (running && ai.cancel) ai.cancel().catch(() => {});
+    if (unsub) { unsub(); unsub = null; }
+    ov.remove();
+  };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  copyBtn.onclick = () => { if (lastResult) copyText(lastResult.text); };
+  exportBtn.onclick = exportMd;
+
+  /* ---- 开始解析：读内容 → 检查配置 → 流式接收 ---- */
+  const runAnalyze = async () => {
+    if (running || !source) return;
+    let cfg = null;
+    try { cfg = await ai.getConfig(); } catch (e) { /* ignore */ }
+    if (!cfg || !cfg.ok || !cfg.baseUrl || !cfg.model) {
+      toast('请先在「AI 设置」中配置 API 地址与模型名');
+      openAiSettings();
+      return;
+    }
+    let content = '';
+    setStatus('正在读取内容…', true);
+    try { content = source.load ? await source.load() : String(source.content || ''); }
+    catch (e) { setStatus('读取内容失败：' + String((e && e.message) || e)); updateBtns(); return; }
+    if (!String(content).trim()) { setStatus('内容为空，无法解析'); updateBtns(); return; }
+    running = true; updateBtns();
+    lastResult = null;
+    resultEl.textContent = '';
+    metaEl.textContent = '';
+    setStatus('解析中…（长文本可能需要数十秒，可随时「停止」）', true);
+    unsub = ai.onChunk((d) => {
+      if (d && d.text) {
+        resultEl.textContent += d.text;
+        resultEl.scrollTop = resultEl.scrollHeight;
+      }
+    });
+    const extraEl = ov.querySelector('#aiExtra');
+    const extra = extraEl ? extraEl.value.trim() : '';
+    const r = await ai.analyze({ kind: source.kind, title: source.title, content, extra })
+      .catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
+    if (unsub) { unsub(); unsub = null; }
+    running = false; updateBtns();
+    if (r && r.ok) {
+      lastResult = r;
+      resultEl.textContent = r.text;
+      setStatus('解析完成');
+      metaEl.textContent = '用时 ' + Math.round((r.ms || 0) / 1000) + ' 秒 · 模型 ' + (r.model || '')
+        + (r.usage ? ' · 输入 ' + (r.usage.prompt_tokens || 0) + ' / 输出 ' + (r.usage.completion_tokens || 0) + ' tokens' : '')
+        + ' · 结果已保存到「分析记录」';
+    } else if (r && r.cancelled) {
+      setStatus('已取消');
+      resultEl.textContent = (resultEl.textContent ? resultEl.textContent + '\n\n' : '') + '（已取消）';
+    } else {
+      setStatus('解析失败');
+      resultEl.textContent = '解析失败：' + ((r && r.error) || '未知错误') + '\n\n请检查「AI 设置」中的 API 地址 / Key / 模型名，以及服务是否可用。';
+    }
+  };
+  runBtn.onclick = runAnalyze;
+  stopBtn.onclick = () => { if (running) { setStatus('正在停止…', true); ai.cancel().catch(() => {}); } };
+
+  /* ---- 内容选择（preset 直开 / 配置备份 / 设备日志） ---- */
+  const setSource = (src, tip) => {
+    source = src;
+    setStatus(tip);
+    updateBtns();
+  };
+  if (preset && typeof preset.load === 'function') {
+    // 快捷入口：从备份中心 / 日志浏览器带入当前文件，隐藏左侧选择区
+    ov.querySelector('#aiSide').style.display = 'none';
+    ov.querySelector('h3').textContent = (isCfg ? 'AI 解析设备配置 · ' : 'AI 解析设备日志 · ') + (preset.title || '');
+    setSource({ kind: isCfg ? 'config' : 'monlog', title: preset.title || '当前内容', load: preset.load },
+      '已选择：' + (preset.title || '当前内容') + '，点击「开始解析」');
+    return;
+  }
+
+  if (isCfg) {
+    // 配置备份：设备(主机)下拉 + 备份文件列表（数据口 topoConfigBackup，与备份中心一致）
+    const devSel = ov.querySelector('#aiDevice');
+    let hostsItems = [];
+    let curCfg = { device: '', host: '' };
+    const loadFiles = async () => {
+      if (!curCfg.device) { filesEl.innerHTML = '<div class="ai-empty">暂无配置备份（在监控中开启「自动备份」后生成）</div>'; setSource(null, '暂无可用配置备份'); return; }
+      let items = [];
+      try { const r = await window.topoConfigBackup.list(curCfg.device, curCfg.host); items = (r && r.ok && r.items) || []; } catch (e) { /* ignore */ }
+      filesEl.innerHTML = items.map(f =>
+        `<div class="ai-item" data-name="${U.escHtml(f.name)}"><span class="nm">${U.escHtml(f.name)}</span><span class="sub">${U.fmtDateTime(new Date(f.time))} · ${U.fmtSize(f.size)}</span></div>`
+      ).join('') || '<div class="ai-empty">该地址暂无备份</div>';
+      filesEl.querySelectorAll('.ai-item').forEach(el => {
+        el.onclick = () => {
+          filesEl.querySelectorAll('.ai-item').forEach(x => x.classList.remove('sel'));
+          el.classList.add('sel');
+          const device = curCfg.device, host = curCfg.host, name = el.dataset.name;
+          setSource({
+            kind: 'config', title: device + '/' + host + '/' + name,
+            load: async () => {
+              const r = await window.topoConfigBackup.read(device, host, name);
+              if (!r || !r.ok) throw new Error((r && r.error) || '读取备份失败');
+              return r.content;
+            }
+          }, '已选择：' + name + '，点击「开始解析」');
+        };
+      });
+      if (!items.length) setSource(null, '该地址暂无配置备份');
+    };
+    try {
+      const r = await window.topoConfigBackup.hosts();
+      hostsItems = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+    } catch (e) { /* ignore */ }
+    if (hostsItems.length) curCfg = { device: hostsItems[0].device, host: hostsItems[0].host };
+    devSel.innerHTML = hostsItems.map(h =>
+      `<option value="${U.escHtml(h.device + '@' + h.host)}"${h.device === curCfg.device && h.host === curCfg.host ? ' selected' : ''}>${U.escHtml(h.device)}（${U.escHtml(h.host)}）</option>`
+    ).join('') || '<option value="">（暂无配置备份）</option>';
+    devSel.onchange = () => {
+      const it = hostsItems.find(h => h.device + '@' + h.host === devSel.value);
+      if (it) { curCfg = { device: it.device, host: it.host }; loadFiles(); }
+    };
+    loadFiles();
+  } else {
+    // 设备日志：来源（监控采集 / Syslog）+ 主机 + 日期 + 文件列表
+    const srcSel = ov.querySelector('#aiSource');
+    const hostSel = ov.querySelector('#aiHost');
+    const dateSel = ov.querySelector('#aiDate');
+    let tree = []; // [{ host, dates: [{ date, files: [{name,size}] }] }]
+    const curLog = { kind: 'monlog', host: '', date: '', file: '' };
+    const loadTree = async () => {
+      curLog.kind = srcSel.value;
+      curLog.host = ''; curLog.date = ''; curLog.file = '';
+      try {
+        if (curLog.kind === 'monlog') {
+          if (!window.topoMonitor || !window.topoMonitor.logsTree) throw new Error('监控日志不可用');
+          const r = await window.topoMonitor.logsTree();
+          tree = (r && r.ok && Array.isArray(r.devices) ? r.devices : []).map(d => ({ host: d.device, dates: d.dates || [] }));
+        } else {
+          if (!window.topoNetSvc || !window.topoNetSvc.syslogFiles) throw new Error('Syslog 日志不可用');
+          const r = await window.topoNetSvc.syslogFiles();
+          tree = (r && r.ok && Array.isArray(r.hosts) ? r.hosts : []).map(h => ({
+            host: h.host,
+            dates: (h.dates || []).map(x => ({ date: x.date, files: [{ name: x.name, size: x.size }] }))
+          }));
+        }
+      } catch (e) { tree = []; }
+      if (tree.length) { curLog.host = tree[0].host; curLog.date = tree[0].dates[0] ? tree[0].dates[0].date : ''; }
+      renderLogNav();
+    };
+    const renderLogNav = () => {
+      const curTree = tree.find(t => t.host === curLog.host);
+      hostSel.innerHTML = tree.map(t => `<option value="${U.escHtml(t.host)}"${t.host === curLog.host ? ' selected' : ''}>${U.escHtml(t.host)}</option>`).join('') || '<option value="">（无日志）</option>';
+      dateSel.innerHTML = (curTree ? curTree.dates : []).map(d => `<option value="${U.escHtml(d.date)}"${d.date === curLog.date ? ' selected' : ''}>${U.escHtml(d.date)}</option>`).join('') || '<option value="">（无日期）</option>';
+      const dt = curTree && curTree.dates.find(x => x.date === curLog.date);
+      const files = dt ? dt.files : [];
+      filesEl.innerHTML = files.map(f =>
+        `<div class="ai-item" data-name="${U.escHtml(f.name)}"><span class="nm">${U.escHtml(f.name)}</span><span class="sub">${U.fmtSize(f.size)}</span></div>`
+      ).join('') || '<div class="ai-empty">该日期暂无日志文件</div>';
+      filesEl.querySelectorAll('.ai-item').forEach(el => {
+        el.onclick = () => {
+          filesEl.querySelectorAll('.ai-item').forEach(x => x.classList.remove('sel'));
+          el.classList.add('sel');
+          const kind = curLog.kind, host = curLog.host, date = curLog.date, file = el.dataset.name;
+          const load = kind === 'monlog'
+            ? async () => {
+              const r = await window.topoMonitor.logsRead(host, date, file);
+              if (!r || !r.ok) throw new Error((r && r.error) || '读取日志失败');
+              return r.content;
+            }
+            : async () => {
+              const r = await window.topoNetSvc.syslogRead(host, date);
+              if (!r || !r.ok) throw new Error((r && r.error) || '读取日志失败');
+              return r.content;
+            };
+          setSource({ kind, title: host + '/' + date + '/' + file, load }, '已选择：' + host + '/' + date + '/' + file + '，点击「开始解析」');
+        };
+      });
+      if (!files.length) setSource(null, '该日期暂无日志文件');
+    };
+    srcSel.onchange = loadTree;
+    hostSel.onchange = () => {
+      curLog.host = hostSel.value;
+      const t = tree.find(x => x.host === curLog.host);
+      curLog.date = t && t.dates[0] ? t.dates[0].date : '';
+      renderLogNav();
+    };
+    dateSel.onchange = () => { curLog.date = dateSel.value; renderLogNav(); };
+    loadTree();
+  }
+}
+
+/** AI 分析记录：历史结果列表 + 查看 / 导出 / 删除 / 清空 */
+async function openAiHistory() {
+  const ai = aiBridge(); if (!ai) return;
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ai-dialog" role="dialog" style="width:1080px;height:80vh">
+      <h3>AI 分析记录</h3>
+      <div class="m-sub">历次 AI 解析结果（存于本机 &lt;userData&gt;\\ai-analysis，最多保留 200 条），可回看、导出或删除。</div>
+      <div class="ai-main">
+        <div class="ai-side">
+          <div class="ai-list" id="ahList"></div>
+          <div class="ai-toolbar" style="margin:0">
+            <button type="button" class="tb" id="ahRefresh">刷新</button>
+            <button type="button" class="tb" id="ahClear">清空全部</button>
+          </div>
+        </div>
+        <div class="ai-body">
+          <div class="ai-toolbar">
+            <span id="ahStatus" class="ai-status"></span>
+            <button type="button" class="tb" id="ahCopy" disabled>复制</button>
+            <button type="button" class="tb" id="ahExport" disabled>导出 Markdown</button>
+            <button type="button" class="tb" id="ahDelete" disabled>删除此条</button>
+            <button type="button" class="tb primary" data-act="close">关闭</button>
+          </div>
+          <pre class="ai-result" id="ahResult" spellcheck="false">（选择左侧记录查看）</pre>
+          <div class="ai-meta" id="ahMeta"></div>
+        </div>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const listEl = ov.querySelector('#ahList');
+  const resultEl = ov.querySelector('#ahResult');
+  const metaEl = ov.querySelector('#ahMeta');
+  const statusEl = ov.querySelector('#ahStatus');
+  const copyBtn = ov.querySelector('#ahCopy');
+  const exportBtn = ov.querySelector('#ahExport');
+  const delBtn = ov.querySelector('#ahDelete');
+  let items = [];
+  let curName = '';
+  let curText = '';
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  ov.querySelector('#ahRefresh').onclick = load;
+  ov.querySelector('#ahClear').onclick = async () => {
+    if (!items.length) { toast('暂无记录'); return; }
+    if (!(await confirmBox('确定清空全部 ' + items.length + ' 条分析记录？此操作不可恢复。'))) return;
+    const r = await ai.historyClear().catch(() => null);
+    if (r && r.ok) { curName = ''; curText = ''; resultEl.textContent = '（选择左侧记录查看）'; metaEl.textContent = ''; statusEl.textContent = ''; copyBtn.disabled = exportBtn.disabled = delBtn.disabled = true; toast('已清空'); }
+    else toast('清空失败：' + ((r && r.error) || '未知错误'));
+    load();
+  };
+  const copyText = (text) => {
+    if (window.topoShell && window.topoShell.copyText) { window.topoShell.copyText(text); toast('已复制到剪贴板'); return; }
+    navigator.clipboard.writeText(text).then(() => toast('已复制到剪贴板'), () => toast('复制失败'));
+  };
+  copyBtn.onclick = () => { if (curText) copyText(curText); };
+  exportBtn.onclick = () => {
+    if (!curText) return;
+    const meta = items.find(i => i.name === curName);
+    const label = meta ? (meta.title || meta.name) : curName;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([curText], { type: 'text/markdown' }));
+    a.download = 'AI解析-' + String(label).replace(/[\\/:*?"<>|]/g, '_') + '.md';
+    a.click();
+    setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (e) { /* ignore */ } }, 5000);
+  };
+  delBtn.onclick = async () => {
+    if (!curName) return;
+    const r = await ai.historyRemove(curName).catch(() => null);
+    if (r && r.ok) {
+      curName = ''; curText = '';
+      resultEl.textContent = '（选择左侧记录查看）';
+      metaEl.textContent = ''; statusEl.textContent = '';
+      copyBtn.disabled = exportBtn.disabled = delBtn.disabled = true;
+      toast('已删除');
+    } else toast('删除失败：' + ((r && r.error) || '未知错误'));
+    load();
+  };
+  const view = async (name) => {
+    curName = name;
+    const r = await ai.historyRead(name).catch(() => null);
+    if (r && r.ok) {
+      curText = r.content;
+      resultEl.textContent = r.content;
+      copyBtn.disabled = exportBtn.disabled = delBtn.disabled = false;
+    } else {
+      curText = '';
+      resultEl.textContent = '（读取失败：' + ((r && r.error) || '未知错误') + '）';
+      copyBtn.disabled = exportBtn.disabled = delBtn.disabled = true;
+    }
+    const meta = items.find(i => i.name === name);
+    statusEl.textContent = name;
+    metaEl.textContent = meta
+      ? [AI_KIND_LB[meta.kind] || meta.kind || '解析', meta.title, meta.model, meta.ms ? Math.round(meta.ms / 1000) + ' 秒' : '',
+        (meta.inTokens || meta.outTokens) ? 'tokens ' + meta.inTokens + '/' + meta.outTokens : '', U.fmtSize(meta.bytes || 0)].filter(Boolean).join(' · ')
+      : '';
+    renderList();
+  };
+  const renderList = () => {
+    listEl.innerHTML = items.map(it =>
+      `<div class="ai-item${it.name === curName ? ' sel' : ''}" data-name="${U.escHtml(it.name)}"><span class="nm">${U.fmtDateTime(new Date(it.at))} · ${U.escHtml(AI_KIND_LB[it.kind] || it.kind || '解析')}</span><span class="sub">${U.escHtml(it.title || '（无标题）')}${it.model ? ' · ' + U.escHtml(it.model) : ''}</span></div>`
+    ).join('') || '<div class="ai-empty">暂无分析记录（完成一次 AI 解析后自动保存）</div>';
+    listEl.querySelectorAll('.ai-item').forEach(el => { el.onclick = () => view(el.dataset.name); });
+  };
+  async function load() {
+    const r = await ai.historyList().catch(() => null);
+    items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+    if (curName && !items.some(i => i.name === curName)) { curName = ''; curText = ''; resultEl.textContent = '（选择左侧记录查看）'; }
+    renderList();
+  }
+  load();
+}
+
 /* ================= 启动 ================= */
 // 版本号统一取自 U.APP_VERSION（唯一来源），并同步到界面显示
 console.log('[网络拓扑管理软件] 版本 ' + U.APP_VERSION);
@@ -7157,6 +7648,9 @@ if (typeof globalThis !== 'undefined') {
     openMonitorLogs,
     openConfigBackups,
     openNetServices,
+    openAiSettings,
+    openAiAnalysis,
+    openAiHistory,
     applyMonitor,
     reconcileMonitors,
     monitorStatus: state.monitorStatus,
