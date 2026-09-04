@@ -385,14 +385,22 @@ function diffSessionOutputs(outputs) {
    * fill 仅填入不执行（命令填入终端不回车，人工检查后手动执行）| auto 直接执行（生成即下发） */
   const AI_MODE_KEY = 'topoShellAiMode';
   const AI_MODES = ['confirm', 'fill', 'auto'];
+  const AI_DEV_KEY = 'topoShellAiDev';
   const aiBtnEl = $('#shAiBtn'), aiEl = $('#shAi'), aiModeEl = $('#shAiMode'),
-        aiInputEl = $('#shAiInput'), aiCtxEl = $('#shAiCtx'), aiSendEl = $('#shAiSend'),
-        aiResultEl = $('#shAiResult');
+        aiDevEl = $('#shAiDev'), aiInputEl = $('#shAiInput'), aiCtxEl = $('#shAiCtx'),
+        aiSendEl = $('#shAiSend'), aiResultEl = $('#shAiResult');
   let aiMode = (() => {
     try { const v = localStorage.getItem(AI_MODE_KEY); return AI_MODES.indexOf(v) >= 0 ? v : 'confirm'; }
     catch (e) { return 'confirm'; }
   })();
   if (aiModeEl) aiModeEl.value = aiMode;
+  if (aiDevEl) {
+    // 设备类型下拉：注入提示词生成对应 CLI 语法的命令；记忆上次选择（非法值回落自动识别）
+    let dev = 'auto';
+    try { dev = localStorage.getItem(AI_DEV_KEY) || 'auto'; } catch (e) { /* ignore */ }
+    if (!aiDevEl.querySelector('option[value="' + dev + '"]')) dev = 'auto';
+    aiDevEl.value = dev;
+  }
   let aiBusy = false;   // 命令生成进行中（窗口级单飞，防竞态下发）
   let aiRunSeq = 0;     // 生成轮次：取消/重发后忽略过期响应
   const setAiMode = (m) => {
@@ -491,8 +499,9 @@ function diffSessionOutputs(outputs) {
       { label: '停止', act: () => { try { window.topoAI.cancel(); } catch (e) { /* ignore */ } } }
     ]);
     const ctx = (aiCtxEl && aiCtxEl.checked && a.s.term) ? readTermLines(a.s, 60).join('\n') : '';
+    const deviceType = aiDevEl ? aiDevEl.value : 'auto';
     let r;
-    try { r = await window.topoAI.shellChat({ requirement: req, termContext: ctx }); }
+    try { r = await window.topoAI.shellChat({ requirement: req, termContext: ctx, deviceType }); }
     catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
     if (seq !== aiRunSeq) return; // 已被新一轮生成作废
     aiBusy = false;
@@ -835,6 +844,7 @@ function diffSessionOutputs(outputs) {
     // AI 命令助手
     if (aiBtnEl) aiBtnEl.onclick = () => setAiBar(aiEl.classList.contains('hidden'));
     if (aiModeEl) aiModeEl.addEventListener('change', () => setAiMode(aiModeEl.value));
+    if (aiDevEl) aiDevEl.addEventListener('change', () => { try { localStorage.setItem(AI_DEV_KEY, aiDevEl.value); } catch (e) { /* ignore */ } });
     if (aiSendEl) aiSendEl.onclick = sendAi;
     if (aiInputEl) aiInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); sendAi(); }

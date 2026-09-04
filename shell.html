@@ -37,6 +37,15 @@
 
 <div id="shAi" class="sh-ai hidden" title="AI 命令助手：输入自然语言需求，AI 生成命令后按所选权限模式执行（需先在主窗口「AI 设置」中配置 AI 服务）">
   <span class="sh-cast-tag">AI</span>
+  <select id="shAiDev" class="sh-ai-mode" title="设备类型：注入提示词让生成的命令贴合对应 CLI 语法；「自动识别」依据终端上下文判断">
+    <option value="auto">自动识别设备类型</option>
+    <option value="huawei">华为 VRP</option>
+    <option value="h3c">H3C Comware</option>
+    <option value="cisco">思科 IOS</option>
+    <option value="juniper">Juniper Junos</option>
+    <option value="linux">Linux Shell</option>
+    <option value="windows">Windows 命令行</option>
+  </select>
   <select id="shAiMode" class="sh-ai-mode" title="执行权限模式：确认后执行——生成命令先展示，人工确认再下发；仅填入不执行——命令填入终端但不回车，人工检查后手动执行；直接执行——生成后立即下发到终端">
     <option value="confirm">确认后执行</option>
     <option value="fill">仅填入不执行</option>
