@@ -1158,3 +1158,10 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .nsv-lg.s-dbg .sev, .nsv-lg.s-dbg .m { color: var(--muted); }
 .nsv-lg.s-found .dt { flex: 0 0 84px; color: var(--muted); }
 .nsv-lg.s-srchhead { color: var(--muted); padding: 3px 0; font-family: inherit; }
+
+/* ---- 拓扑画布监控状态叠加角标（监控 ▾ 监控状态叠加） ---- */
+.mon-dot { stroke: var(--panel); stroke-width: 2; pointer-events: none; }
+.mon-dot.ok { fill: #22c55e; }
+.mon-dot.pending { fill: #f59e0b; }
+.mon-dot.alert { fill: var(--danger); animation: monPulse 1.2s ease-in-out infinite; }
+@keyframes monPulse { 50% { opacity: .3; } }

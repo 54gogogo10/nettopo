@@ -4436,6 +4436,12 @@ function wire() {
   ]);
   $('#btnDropMonitor').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'grid', label: '监控中心…', act: () => openMonitorCenter() },
+    { ic: 'pulse', label: (monOverlayOn() ? '✓ ' : '') + '监控状态叠加（节点角标）', act: () => {
+      const on = !monOverlayOn();
+      try { localStorage.setItem(MON_OVERLAY_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+      if (on) seedMonOverlay(); else syncMonOverlay();
+      toast(on ? '已开启监控状态叠加：节点右上角显示状态圆点' : '已关闭监控状态叠加');
+    } },
     { ic: 'archive', label: '配置合规检查…', act: () => openComplianceCheck() },
     { ic: 'pulse', label: '设备监控（静默采集）…', act: () => {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds && renderer.selIds.size ? [...renderer.selIds][0] : '');
@@ -4634,6 +4640,63 @@ function wire() {
   });
 
   // ---- 后台监控实时状态（侧栏标记；任务 key 为 deviceId@host，按设备聚合） ----
+  /* ---- 拓扑画布监控状态叠加（监控 ▾「监控状态叠加」开关，localStorage 记忆）：
+     节点右上角状态圆点（绿=在线 / 红=离线·告警 / 橙=连接中，无任务不显示），数据复用 state.monitorStatus ---- */
+  const MON_OVERLAY_KEY = 'nettopo.monOverlay';
+  const monOverlayOn = () => { try { return localStorage.getItem(MON_OVERLAY_KEY) === '1'; } catch (e) { return false; } };
+  let monOverlayRaf = 0;
+  const syncMonOverlay = () => {
+    if (monOverlayRaf || !window.topoMonitor) return;
+    monOverlayRaf = requestAnimationFrame(() => {
+      monOverlayRaf = 0;
+      const on = monOverlayOn();
+      const NS = 'http://www.w3.org/2000/svg';
+      for (const n of state.nodes) {
+        const g = renderer.nodeEls && renderer.nodeEls.get(n.id);
+        if (!g || !g.isConnected) continue;
+        const old = g.querySelector('.mon-dot');
+        const ms = on ? state.monitorStatus[n.id] : null;
+        const st = ms && ms.state;
+        if (!st) { if (old) old.remove(); continue; }
+        const cls = st === 'alert' || st === 'offline' || st === 'error' ? 'alert'
+          : (st === 'connecting' || st === 'reconnecting') ? 'pending' : 'ok';
+        if (old) {
+          if (old.getAttribute('class') === 'mon-dot ' + cls) continue;
+          old.remove();
+        }
+        const dot = document.createElementNS(NS, 'circle');
+        dot.setAttribute('class', 'mon-dot ' + cls);
+        dot.setAttribute('cx', String((Number(n.w) || U.NODE_W) - 2));
+        dot.setAttribute('cy', '-2');
+        dot.setAttribute('r', '6');
+        g.appendChild(dot);
+      }
+    });
+  };
+  const seedMonOverlay = async () => {
+    if (!window.topoMonitor || !window.topoMonitor.overview) return;
+    try {
+      const o = await window.topoMonitor.overview();
+      if (!o || !o.ok) return;
+      for (const j of (o.jobs || [])) {
+        const did = j.deviceId || deviceIdFromMonitorKey(j.key);
+        if (!did) continue;
+        const ms = { state: null, text: '', perHost: {} };
+        ms.perHost[j.host || ''] = { state: j.state, text: j.statusText || '', since: j.since, probeOk: j.probeOk, alert: j.alert, backup: j.backup };
+        ms.state = aggregateMonitorState(ms.perHost);
+        state.monitorStatus[did] = ms;
+      }
+      syncMonOverlay();
+      refreshPanel();
+    } catch (e) { /* ignore */ }
+  };
+  if (monOverlayOn()) seedMonOverlay();
+  // 供 __topo 顶层导出桥接（函数为 wire 作用域私有，顶层无法直接引用）
+  globalThis.__monOverlay = { sync: () => syncMonOverlay(), seed: () => seedMonOverlay() };
+  // 节点随画布操作重建后自动补挂角标（监听节点层子树变化，rAF 去抖）
+  if (renderer.nodeLayer && typeof MutationObserver !== 'undefined') {
+    new MutationObserver(() => syncMonOverlay()).observe(renderer.nodeLayer, { childList: true });
+  }
   if (window.topoMonitor && window.topoMonitor.onStatus) {
     window.topoMonitor.onStatus((info) => {
       if (!info || !info.key) return;
@@ -4656,6 +4719,7 @@ function wire() {
       }
       refreshPanel();
       renderSelCard();
+      syncMonOverlay();
     });
   }
   // 探测/告警/备份状态（独立通道，合并进 perHost 明细）
@@ -4673,6 +4737,7 @@ function wire() {
       ms.text = aggregateMonitorText(ms.perHost);
       refreshPanel();
       renderSelCard();
+      syncMonOverlay();
     });
   }
   if (window.topoMonitor && window.topoMonitor.onAlert) {
@@ -4688,6 +4753,7 @@ function wire() {
       ms.text = aggregateMonitorText(ms.perHost);
       refreshPanel();
       renderSelCard();
+      syncMonOverlay();
     });
   }
   if (window.topoMonitor && window.topoMonitor.onBackup) {
@@ -4704,6 +4770,7 @@ function wire() {
       }
       refreshPanel();
       renderSelCard();
+      syncMonOverlay();
     });
     // SNMP 识别结果自动回填设备「软件版本」（只读，不覆盖手填值——仅当原值为空或与上次识别不同）
     if (window.topoMonitor.onSysinfo) {
@@ -7831,6 +7898,8 @@ if (typeof globalThis !== 'undefined') {
     openAiSettings,
     openAiAnalysis,
     openAiHistory,
+    syncMonOverlay: () => { try { globalThis.__monOverlay && globalThis.__monOverlay.sync(); } catch (e) { /* ignore */ } },
+    seedMonOverlay: () => { try { globalThis.__monOverlay && globalThis.__monOverlay.seed(); } catch (e) { /* ignore */ } },
     applyMonitor,
     reconcileMonitors,
     monitorStatus: state.monitorStatus,
