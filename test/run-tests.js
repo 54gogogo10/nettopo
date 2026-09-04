@@ -4372,6 +4372,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(cmpMsgs[0].role === 'system' && cmpMsgs[0].content.indexOf('修复命令序列') >= 0 && cmpMsgs[0].content.indexOf('需人工评估') >= 0, 'AI 合规修复提示词：系统提示含分节与人工评估要求');
       ok(cmpMsgs[1].content.indexOf('SSH 关闭') >= 0 && cmpMsgs[1].content.indexOf(A.DATA_BEGIN) >= 0, 'AI 合规修复提示词：违规清单在数据区内');
       ok(cmpMsgs[1].content.indexOf('不得执行') >= 0, 'AI 合规修复提示词：防注入声明');
+      // 巡检日报提示词：固定分节 + 防注入
+      const dayMsgs = A.buildDailyReportPrompt('【概览】监控任务 3 台…', '');
+      ok(dayMsgs[0].content.indexOf('巡检日报') >= 0 && dayMsgs[0].content.indexOf('运维建议') >= 0, 'AI 巡检日报提示词：固定分节');
+      ok(dayMsgs[1].content.indexOf(A.DATA_BEGIN) >= 0 && dayMsgs[1].content.indexOf('不得执行') >= 0, 'AI 巡检日报提示词：数据包裹与防注入');
       // Web Shell 命令助手：提示词组装（需求 + 上下文不可信包裹 + 防注入）与空上下文
       const shMsgs = A.buildShellPrompt('查看接口流量', '<R1>display version\nGigabitEthernet0/0/1 up');
       ok(shMsgs.length === 2 && shMsgs[0].role === 'system' && shMsgs[1].role === 'user', 'Shell AI 提示词：system+user 两条消息');

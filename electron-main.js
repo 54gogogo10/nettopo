@@ -9,7 +9,7 @@ const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
-const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, buildShellPrompt, buildCompliancePrompt, parseShellCommands, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
+const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, buildShellPrompt, buildCompliancePrompt, buildDailyReportPrompt, parseShellCommands, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
 
 /* ---- Linux 沙箱兜底：以 root 运行（sudo / 容器 / 麒麟等受限环境）时，Chromium 强制要求 --no-sandbox，
  *   否则 SUID 沙箱初始化直接 fatal abort（"Running as root without --no-sandbox is not supported"）。
@@ -1077,16 +1077,17 @@ ipcMain.handle('ai:list-models', async (e, p) => {
 ipcMain.handle('ai:analyze', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const kind = String((p && p.kind) || '');
-  if (kind !== 'config' && kind !== 'syslog' && kind !== 'monlog' && kind !== 'compliance') return { ok: false, error: '未知的分析类型' };
+  if (kind !== 'config' && kind !== 'syslog' && kind !== 'monlog' && kind !== 'compliance' && kind !== 'daily') return { ok: false, error: '未知的分析类型' };
   const content = String((p && p.content) == null ? '' : p.content);
   if (!content.trim()) return { ok: false, error: '分析内容为空' };
   if (Buffer.byteLength(content, 'utf8') > 32 * 1024 * 1024) return { ok: false, error: '分析内容过大' };
   const client = new AiClient(aiCfgFromSettings());
   if (!client.ready) return { ok: false, error: !client.baseUrl ? '请先在 AI 设置中配置 API 地址' : '请先在 AI 设置中配置模型名' };
-  // 输入按设置上限截断（配置保头部、日志保尾部、合规清单保头部），再组装提示词
+  // 输入按设置上限截断（日志保尾部，其余保头部），再组装提示词
   const cut = truncateText(content, (aiCfgFromSettings().maxInputKB || DEFAULT_MAX_INPUT_KB) * 1024, kind === 'syslog' || kind === 'monlog' ? 'tail' : 'head');
   const messages = kind === 'config' ? buildConfigPrompt(cut.text, p && p.extra)
     : kind === 'compliance' ? buildCompliancePrompt(cut.text, p && p.extra)
+    : kind === 'daily' ? buildDailyReportPrompt(cut.text, p && p.extra)
     : buildLogPrompt(kind, cut.text, p && p.extra);
   const title = String((p && p.title) || '').slice(0, 200);
   // 流式增量批量转发主窗口（120ms 合批，避免高频 IPC 淹没渲染层）

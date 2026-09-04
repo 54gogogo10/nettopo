@@ -5734,6 +5734,7 @@ function openMonitorCenter() {
         </div>
       </div>
       <div class="m-actions">
+        <button type="button" class="tb" data-act="daily" title="汇总当前监控状态、近期事件与在线率，交大模型生成中文巡检日报（数据发送到「AI 设置」中配置的服务）">AI 巡检日报</button>
         <button type="button" class="tb" data-act="trust" title="查看已自动信任的 SSH 主机指纹，可撤销（后续连接按首次连接重新确认）">信任的主机</button>
         <button type="button" class="tb" data-act="refresh">刷新</button>
         <button type="button" class="tb primary" data-act="close">关闭</button>
@@ -5747,6 +5748,72 @@ function openMonitorCenter() {
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
   ov.querySelector('[data-act=refresh]').onclick = load;
+  // AI 巡检日报：聚合监控快照 → AI 生成中文日报（复用 AI 解析弹窗，结果入「分析记录」）
+  ov.querySelector('[data-act=daily]').onclick = async () => {
+    if (!window.topoAI || !window.topoAI.analyze) { toast('AI 功能需要桌面版（Electron）环境'); return; }
+    let text = '';
+    try { text = await buildDailySnapshot(); } catch (e) { toast('采集巡检数据失败：' + String((e && e.message) || e)); return; }
+    openAiAnalysis('daily', { title: U.fmtDateTime(new Date()), load: async () => text });
+  };
+  /** 组装巡检数据快照文本：概览统计 + 设备明细 + 近期事件 + 近 7 天在线率 */
+  const buildDailySnapshot = async () => {
+    const o = await bridge.overview();
+    if (!o || !o.ok) throw new Error((o && o.error) || '获取监控数据失败');
+    const jobs = o.jobs || [];
+    const evs = o.events || [];
+    const lines = [];
+    const statOk = jobs.filter(j => !j.alert && j.probeOk !== false && j.state === 'monitoring').length;
+    const off = jobs.filter(j => j.probeOk === false);
+    const alerting = jobs.filter(j => !!j.alert);
+    lines.push('【概览】巡检时间：' + U.fmtDateTime(new Date()));
+    lines.push('监控任务 ' + jobs.length + ' 台：在线 ' + statOk + '，离线 ' + off.length + '，告警中 ' + alerting.length
+      + '，配置备份覆盖 ' + jobs.filter(j => j.backupEnabled).length + ' 台，启用自动合规 ' + jobs.filter(j => j.complianceLast).length + ' 台。');
+    lines.push('');
+    lines.push('【设备明细】');
+    if (!jobs.length) lines.push('（无监控任务）');
+    for (const j of jobs) {
+      const bits = [];
+      bits.push(j.probeOk === false ? '离线' : (j.alert ? '告警中' : (j.state === 'monitoring' ? '在线' : (j.state || '未知'))));
+      if (j.probeLatency != null) bits.push('探测时延 ' + j.probeLatency + 'ms');
+      if (j.alert) bits.push('命中告警关键字「' + j.alert + '」');
+      if (j.backupEnabled) {
+        bits.push('最近备份 ' + (j.backupLast && j.backupLast.at ? U.fmtDateTime(new Date(j.backupLast.at)) : '无')
+          + (j.backupLast && j.backupLast.error ? '（失败：' + j.backupLast.error + '）' : (j.backupLast && j.backupLast.changed ? '（有变化）' : '')));
+      } else bits.push('未启用自动备份');
+      if (j.complianceLast) bits.push('合规 ' + (j.complianceLast.total - j.complianceLast.failed) + '/' + j.complianceLast.total + ' 项通过');
+      if (j.lastPerf && (j.lastPerf.cpu != null || j.lastPerf.mem != null)) {
+        bits.push('CPU ' + (j.lastPerf.cpu == null ? '—' : j.lastPerf.cpu + '%') + ' / 内存 ' + (j.lastPerf.mem == null ? '—' : j.lastPerf.mem + '%'));
+      }
+      lines.push('- ' + (j.name || j.deviceId || '?') + '（' + j.host + '）：' + bits.join('；'));
+    }
+    lines.push('');
+    const byType = {};
+    for (const e of evs) byType[e.type] = (byType[e.type] || 0) + 1;
+    lines.push('【近期事件】共 ' + evs.length + ' 条，按类型：' + (Object.entries(byType).map(([t, n]) => (evTypeLabel[t] || t) + ' ' + n).join('、') || '无'));
+    for (const e of evs.slice(0, 20)) {
+      lines.push('- ' + U.fmtDateTime(new Date(e.ts)) + ' [' + (e.name || e.deviceId || '?') + '] ' + (evTypeLabel[e.type] || e.type || '事件') + '：' + (e.detail || ''));
+    }
+    lines.push('');
+    lines.push('【近 7 天在线率】');
+    try {
+      const up = await bridge.uptime();
+      const series = (up && up.ok && up.series) || {};
+      const keys = Object.keys(series);
+      if (!keys.length) { lines.push('-（暂无在线率采样数据）'); }
+      else {
+        const jobByKey = {};
+        for (const j of jobs) jobByKey[j.key] = j;
+        for (const key of keys) {
+          const arr = series[key] || [];
+          if (!arr.length) continue;
+          const okPts = arr.filter(p => p[1] === 1).length;
+          const j = jobByKey[key];
+          lines.push('- ' + ((j && (j.name || j.host)) || key) + '：' + Math.round(okPts / arr.length * 100) + '%（' + arr.length + ' 个采样）');
+        }
+      }
+    } catch (e) { lines.push('-（在线率数据不可用）'); }
+    return lines.join('\n');
+  };
   // 已信任主机指纹管理：列出 TOFU 信任库（host → SHA256 指纹），支持撤销
   if (bridge.trustList) {
     ov.querySelector('[data-act=trust]').onclick = async () => {
@@ -7314,25 +7381,30 @@ async function openAiSettings() {
   actions.insertBefore(btn, actions.firstChild);
 }
 
-/** AI 解析主弹窗。kind: 'config'（配置备份）| 'logs'（设备日志）| 'compliance'（合规修复建议，仅 preset 直开）。
- *  preset: { title, load } 可选——从备份/日志浏览器带文件直开（隐藏左侧选择区）。 */
+/** AI 解析主弹窗。kind: 'config'（配置备份）| 'logs'（设备日志）| 'compliance'（合规修复建议）| 'daily'（巡检日报）。
+ *  compliance/daily 仅支持 preset 直开。preset: { title, load }——从备份/日志浏览器/合规报告/监控中心带入内容。 */
 async function openAiAnalysis(kind, preset) {
   const ai = aiBridge(); if (!ai) return;
-  if (kind !== 'config' && kind !== 'logs' && kind !== 'compliance') kind = 'config';
-  if (kind === 'compliance' && !(preset && typeof preset.load === 'function')) return; // 合规修复仅支持 preset 直开
+  if (kind !== 'config' && kind !== 'logs' && kind !== 'compliance' && kind !== 'daily') kind = 'config';
+  if ((kind === 'compliance' || kind === 'daily') && !(preset && typeof preset.load === 'function')) return;
   const isCfg = kind === 'config';
   const isComp = kind === 'compliance';
+  const isDaily = kind === 'daily';
+  const headTitle = isCfg ? 'AI 解析设备配置' : isComp ? 'AI 合规修复建议' : isDaily ? 'AI 巡检日报' : 'AI 解析设备日志';
+  const headSub = isCfg
+    ? '调用大模型解读设备配置备份，输出中文分析报告（设备概况 / 接口与 IP / 路由交换 / 安全配置 / 风险 / 优化建议）。分析内容会发送到「AI 设置」中配置的服务。'
+    : isComp
+    ? '调用大模型为合规违规项生成修复命令序列（含进入/退出配置模式命令，无法自动修复的项会标注需人工评估）。违规清单会发送到「AI 设置」中配置的服务；修复命令执行前请人工核对。'
+    : isDaily
+    ? '调用大模型解读监控巡检数据快照（设备状态 / 近期事件 / 在线率），输出中文巡检日报（总体状况 / 需重点关注设备 / 事件分析 / 运维建议）。巡检数据会发送到「AI 设置」中配置的服务。'
+    : '调用大模型解读设备日志（监控采集日志 / Syslog 服务日志），输出中文分析报告（概况 / 级别统计 / 关键事件 / 异常迹象 / 根因推测）。分析内容会发送到「AI 设置」中配置的服务。';
   const root = $('#modalRoot');
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.innerHTML = `
     <div class="modal ai-dialog" role="dialog" style="width:1080px;height:82vh">
-      <h3>${isCfg ? 'AI 解析设备配置' : isComp ? 'AI 合规修复建议' : 'AI 解析设备日志'}</h3>
-      <div class="m-sub">${isCfg
-        ? '调用大模型解读设备配置备份，输出中文分析报告（设备概况 / 接口与 IP / 路由交换 / 安全配置 / 风险 / 优化建议）。分析内容会发送到「AI 设置」中配置的服务。'
-        : isComp
-        ? '调用大模型为合规违规项生成修复命令序列（含进入/退出配置模式命令，无法自动修复的项会标注需人工评估）。违规清单会发送到「AI 设置」中配置的服务；修复命令执行前请人工核对。'
-        : '调用大模型解读设备日志（监控采集日志 / Syslog 服务日志），输出中文分析报告（概况 / 级别统计 / 关键事件 / 异常迹象 / 根因推测）。分析内容会发送到「AI 设置」中配置的服务。'}</div>
+      <h3>${headTitle}</h3>
+      <div class="m-sub">${headSub}</div>
       <div class="ai-main">
         <div class="ai-side" id="aiSide">
           ${isCfg ? `
@@ -7468,8 +7540,8 @@ async function openAiAnalysis(kind, preset) {
   if (preset && typeof preset.load === 'function') {
     // 快捷入口：从备份中心 / 日志浏览器 / 合规报告带入当前内容，隐藏左侧选择区
     ov.querySelector('#aiSide').style.display = 'none';
-    ov.querySelector('h3').textContent = (isCfg ? 'AI 解析设备配置 · ' : isComp ? 'AI 合规修复建议 · ' : 'AI 解析设备日志 · ') + (preset.title || '');
-    setSource({ kind: isCfg ? 'config' : isComp ? 'compliance' : 'monlog', title: preset.title || '当前内容', load: preset.load },
+    ov.querySelector('h3').textContent = headTitle + ' · ' + (preset.title || '');
+    setSource({ kind: isCfg ? 'config' : isComp ? 'compliance' : isDaily ? 'daily' : 'monlog', title: preset.title || '当前内容', load: preset.load },
       '已选择：' + (preset.title || '当前内容') + '，点击「开始解析」');
     return;
   }
