@@ -4295,6 +4295,34 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       fs.rmSync(vfDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       // psQuote：单引号翻倍（路径进 PowerShell 命令行）
       eq(U2.psQuote("D:\\a'b\\c.exe"), "'D:\\a''b\\c.exe'", '升级 psQuote：单引号转义');
+      // 辅助脚本拼装：快路径（改名换入）与慢路径（退出后换入，便携版启动器锁映像 EBUSY 的降级）。
+      // 等待方式必须为文件锁轮询——Wait-Process 在目标退出后 PID 复用时永远等错对象（真机实测挂死）
+      const rs = U2.buildRestartScript("D:\\app\\NetTopo.exe", "D:\\app\\NetTopo.exe.old-1");
+      ok(rs.indexOf('[System.IO.File]::Open(\'D:\\app\\NetTopo.exe.old-1\', \'Open\', \'ReadWrite\', \'None\')') >= 0
+        && rs.indexOf('foreach ($i in 1..360)') >= 0, '升级辅助脚本：快路径轮询旧映像文件锁');
+      ok(rs.indexOf("Start-Process -FilePath 'D:\\app\\NetTopo.exe'") >= 0
+        && rs.indexOf("Remove-Item -LiteralPath 'D:\\app\\NetTopo.exe.old-1' -Force") >= 0
+        && rs.indexOf('foreach ($j in 1..10)') >= 0, '升级辅助脚本：快路径启动新版（带扫描重试）并清理备份');
+      ok(rs.indexOf('Wait-Process') < 0, '升级辅助脚本：不再使用 Wait-Process（PID 复用挂死风险）');
+      const ss = U2.buildSwapScript('D:\\app\\NetTopo.exe', 'D:\\app\\NetTopo.exe.new-7', 'D:\\app\\NetTopo.exe.old-7');
+      ok(ss.indexOf("Move-Item -LiteralPath 'D:\\app\\NetTopo.exe' -Destination 'D:\\app\\NetTopo.exe.old-7' -Force") >= 0
+        && ss.indexOf("Move-Item -LiteralPath 'D:\\app\\NetTopo.exe.new-7' -Destination 'D:\\app\\NetTopo.exe' -Force") >= 0, '升级辅助脚本：慢路径两次换入（旧版先入 .old）');
+      ok(ss.indexOf("Move-Item -LiteralPath 'D:\\app\\NetTopo.exe.old-7' -Destination 'D:\\app\\NetTopo.exe'") >= 0, '升级辅助脚本：换入失败回滚旧版');
+      ok(ss.indexOf("Start-Process -FilePath 'D:\\app\\NetTopo.exe'") >= 0 && ss.indexOf("Remove-Item -LiteralPath 'D:\\app\\NetTopo.exe.old-7' -Force") >= 0
+        && ss.indexOf('foreach ($j in 1..10)') >= 0, '升级辅助脚本：换入成功启动新版（带扫描重试）并清理备份');
+      ok(ss.indexOf("Remove-Item -LiteralPath 'D:\\app\\NetTopo.exe.new-7' -Force") >= 0 && ss.indexOf('foreach ($i in 1..360)') >= 0, '升级辅助脚本：超时保留旧版并清理预置包');
+      ok(ss.indexOf('Wait-Process') < 0, '升级辅助脚本：慢路径同样不使用 Wait-Process');
+      // apply 拒绝语义：未打包/未下载/非 Windows
+      const upd = new U2.Updater({ isPackaged: false });
+      const ap1 = upd.apply();
+      ok(ap1.ok === false && ap1.error.indexOf('开发环境') >= 0, '升级 apply：开发环境拒绝');
+      const upd2 = new U2.Updater({ isPackaged: true, platform: 'win32', updateDir: vfDir });
+      const ap2 = upd2.apply();
+      ok(ap2.ok === false && ap2.error.indexOf('尚未下载') >= 0, '升级 apply：无已下载包拒绝');
+      const upd3 = new U2.Updater({ isPackaged: true, platform: 'linux', updateDir: vfDir });
+      upd3.pendingFile = __filename; // 任意存在中的文件即可触发平台分支
+      const ap3 = upd3.apply();
+      ok(ap3.ok === false && ap3.manual === true, '升级 apply：非 Windows 降级手动');
     }
 
     /* ---- AI 解析（LLM）：地址校验 / 提示词 / SSE / 历史库 / 本地假服务全链路 ---- */
