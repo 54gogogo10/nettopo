@@ -4552,6 +4552,50 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       } finally {
         csrv.close();
       }
+
+      /* -- 模型列表：端点归一 / 响应归一 / 本地假服务（OpenAI 与 Claude 鉴权头） -- */
+      eq(A.modelsEndpoint('https://api.deepseek.com/v1', 'openai'), 'https://api.deepseek.com/v1/models', 'AI 模型列表端点：OpenAI 追加 /models');
+      eq(A.modelsEndpoint('https://api.deepseek.com/v1/models', 'openai'), 'https://api.deepseek.com/v1/models', 'AI 模型列表端点：已带不重复');
+      eq(A.modelsEndpoint('https://api.anthropic.com', 'claude'), 'https://api.anthropic.com/v1/models', 'AI 模型列表端点：Claude 追加 /v1/models');
+      eq(A.modelsEndpoint('https://api.anthropic.com/v1/messages', 'claude'), 'https://api.anthropic.com/v1/models', 'AI 模型列表端点：Claude messages 归一为 models');
+      eq(A.modelsEndpoint('bad', 'openai'), '', 'AI 模型列表端点：非法地址返回空');
+      const mOpenai = A.parseModelsResponse({ data: [{ id: 'b-model' }, { id: 'a-model' }, { id: 'a-model' }, { id: '' }] });
+      ok(mOpenai && mOpenai.join(',') === 'a-model,b-model', 'AI 模型列表归一：OpenAI data.id 去重排序');
+      const mClaude = A.parseModelsResponse({ data: [{ id: 'claude-sonnet-4-5', display_name: 'Claude Sonnet 4.5' }, { id: 'claude-opus-4-1', display_name: 'Claude Opus 4.1' }] });
+      ok(mClaude && mClaude[0] === 'claude-opus-4-1' && mClaude.length === 2, 'AI 模型列表归一：Claude data.id');
+      const mBare = A.parseModelsResponse([{ name: 'm2' }, { model: 'm1' }]);
+      ok(mBare && mBare.join(',') === 'm1,m2', 'AI 模型列表归一：裸数组 name/model 兼容');
+      eq(A.parseModelsResponse({ models: [] }), null, 'AI 模型列表归一：未知结构返回 null');
+      const msrv = http.createServer((req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
+        if (req.url === '/v1/models') {
+          if ((req.headers['authorization'] || '') !== 'Bearer sk-openai') { res.writeHead(401); res.end('{"error":{"message":"bad key"}}'); return; }
+          res.end(JSON.stringify({ data: [{ id: 'deepseek-chat' }, { id: 'deepseek-reasoner' }] }));
+        } else if (req.url === '/claude/v1/models') {
+          if ((req.headers['x-api-key'] || '') !== 'sk-claude') { res.writeHead(401); res.end('{"type":"error","error":{"message":"bad key"}}'); return; }
+          res.end(JSON.stringify({ data: [{ id: 'claude-sonnet-4-5' }] }));
+        } else {
+          res.writeHead(404);
+          res.end('{"error":{"message":"no route"}}');
+        }
+      });
+      await new Promise((res) => msrv.listen(0, '127.0.0.1', res));
+      try {
+        const mBase = 'http://127.0.0.1:' + msrv.address().port;
+        const mo = await (new A.AiClient({ baseUrl: mBase + '/v1', apiKey: 'sk-openai', model: 'm', protocol: 'openai' })).listModels();
+        ok(mo.ok && mo.models.join(',') === 'deepseek-chat,deepseek-reasoner', 'AI 拉取模型：OpenAI 兼容 /models');
+        const mc = await (new A.AiClient({ baseUrl: mBase + '/claude', apiKey: 'sk-claude', model: 'm', protocol: 'claude' })).listModels();
+        ok(mc.ok && mc.models.join(',') === 'claude-sonnet-4-5', 'AI 拉取模型：Claude /v1/models（x-api-key）');
+        const m401 = await (new A.AiClient({ baseUrl: mBase + '/v1', apiKey: 'sk-wrong', model: 'm', protocol: 'openai' })).listModels();
+        ok(m401.ok === false && m401.error.indexOf('认证失败') >= 0, 'AI 拉取模型：401 中文认证错误');
+        const m404 = await (new A.AiClient({ baseUrl: mBase + '/none', apiKey: 'sk-openai', model: 'm', protocol: 'openai' })).listModels();
+        ok(m404.ok === false && m404.error.indexOf('模型列表') >= 0, 'AI 拉取模型：404 提示手动填写');
+        const mNoBase = await (new A.AiClient({ model: 'm' })).listModels();
+        ok(mNoBase.ok === false, 'AI 拉取模型：未填地址拒绝');
+      } finally {
+        msrv.close();
+      }
     }
   }
 })().then(() => {

@@ -1063,6 +1063,17 @@ ipcMain.handle('ai:test', async (e) => {
   const client = new AiClient(aiCfgFromSettings());
   return client.test();
 });
+ipcMain.handle('ai:list-models', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const protocol = validateProtocol(p && p.protocol);
+  const baseUrl = String((p && p.baseUrl) || '');
+  if (!validateBaseUrl(baseUrl)) return { ok: false, error: '请先填写有效的 API 地址（http:// 或 https:// 开头）' };
+  // 表单未填 Key 时回退已保存的 Key（编辑已配置服务时不必重复输入）
+  let apiKey = String((p && p.apiKey) || '');
+  if (!apiKey) apiKey = aiCfgFromSettings().apiKey;
+  const client = new AiClient({ baseUrl, apiKey, protocol });
+  return client.listModels();
+});
 ipcMain.handle('ai:analyze', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const kind = String((p && p.kind) || '');
