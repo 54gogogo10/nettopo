@@ -178,13 +178,20 @@ const SHELL_DEVICE_TYPES = {
   windows: 'Windows 命令行（CMD / PowerShell：ipconfig / Get-NetIPAddress 等）'
 };
 
+/** Web Shell 生成类型：cmd 逐条命令（默认）；config 配置段（完整配置变更序列，含进入/退出配置模式） */
+const SHELL_KINDS = { cmd: '', config: '本次任务为生成配置变更：输出完整的配置命令序列，包含进入与退出配置模式的命令（如 system-view 与 return、configure terminal 与 end），按执行顺序每行一条；配置行数可以较多，但不要输出任何解释。' };
+
 /** Web Shell 命令生成消息：需求 + 可选终端最近输出（不可信数据，分隔符包裹）+
- *  可选设备类型注入（SHELL_DEVICE_TYPES 键，非法值回落 auto 不注入） */
-function buildShellPrompt(requirement, termContext, deviceType) {
+ *  可选设备类型注入（SHELL_DEVICE_TYPES 键，非法值回落 auto 不注入）+
+ *  可选生成类型（SHELL_KINDS 键，非法值回落 cmd） */
+function buildShellPrompt(requirement, termContext, deviceType, kind) {
   const dt = SHELL_DEVICE_TYPES[deviceType] ? String(deviceType) : 'auto';
-  const sys = dt === 'auto' ? SHELL_SYSTEM_PROMPT
-    : SHELL_SYSTEM_PROMPT + '\n6. 用户已指定目标设备类型：' + SHELL_DEVICE_TYPES[dt]
-      + '。命令必须严格符合该类型的语法与关键词；若终端上下文与指定类型矛盾，以指定类型为准，确实无法给出命令时按第 4 条输出「!无法生成：」。';
+  const kd = SHELL_KINDS[kind] ? String(kind) : 'cmd';
+  const extra = [];
+  if (dt !== 'auto') extra.push('6. 用户已指定目标设备类型：' + SHELL_DEVICE_TYPES[dt]
+    + '。命令必须严格符合该类型的语法与关键词；若终端上下文与指定类型矛盾，以指定类型为准，确实无法给出命令时按第 4 条输出「!无法生成：」。');
+  if (kd !== 'cmd') extra.push('7. ' + SHELL_KINDS[kd]);
+  const sys = extra.length ? SHELL_SYSTEM_PROMPT + '\n' + extra.join('\n') : SHELL_SYSTEM_PROMPT;
   const user = ['【需求】' + String(requirement == null ? '' : requirement).trim()];
   const ctx = String(termContext == null ? '' : termContext).trim();
   if (ctx) {
@@ -202,8 +209,11 @@ function buildShellPrompt(requirement, termContext, deviceType) {
 
 /** 从命令生成回复中提取待执行命令。返回 { ok, commands:[string], reason, refused }：
  *  「!拒绝：」/「!无法生成：」→ ok:false + refused:true + reason；剥围栏/列表符/提示符前缀/解释行；
- *  一条都提不出来 → ok:false + reason。命令条数上限 10（防失控循环下发）。 */
-function parseShellCommands(text) {
+ *  一条都提不出来 → ok:false + reason。命令条数上限 maxLines（默认 10，配置段可放宽，防失控循环下发）。 */
+function parseShellCommands(text, maxLines) {
+  let cap = Math.floor(Number(maxLines));
+  if (!(cap >= 1)) cap = 10;
+  cap = Math.min(cap, 100);
   const s = String(text == null ? '' : text);
   const rej = s.match(/!\s*拒绝[：:]\s*(.+)/) || s.match(/!\s*无法生成[：:]\s*(.+)/);
   if (rej) return { ok: false, commands: [], reason: rej[1].trim().slice(0, 300), refused: true };
@@ -222,9 +232,9 @@ function parseShellCommands(text) {
     if (!line || /^```/.test(line) || /^#|^\/\//.test(line)) continue; // 空行/围栏残留/注释
     if (line.length > 200) continue;                        // 超长视为说明文字
     if (!fence && /[\u4e00-\u9fff]/.test(line)) continue;   // 围栏外含中文 → 解释行
-    if (cmds.length === 0 && /^[（(]?(?:命令|执行|输出)[:：]/.test(line)) continue; // 「命令：」引导行
+    if (cmds.length === 0 && /^[（(]?(?:命令|执行|输出|配置)[:：]/.test(line)) continue; // 引导行
     cmds.push(line);
-    if (cmds.length >= 10) break;
+    if (cmds.length >= cap) break;
   }
   if (!cmds.length) return { ok: false, commands: [], reason: '未能从回复中提取命令：' + s.trim().slice(0, 160), refused: false };
   return { ok: true, commands: cmds, reason: '', refused: false };
@@ -818,7 +828,7 @@ module.exports = {
   validateBaseUrl, chatEndpoint, claudeEndpoint, modelsEndpoint, validateProtocol, maskKey, truncateText,
   buildConfigPrompt, buildLogPrompt, buildShellPrompt, parseShellCommands, buildRequestBody, buildClaudeRequestBody,
   parseSseChunk, parseChatResponse, parseClaudeResponse, parseModelsResponse, httpErrorMessage,
-  DATA_BEGIN, DATA_END, UNTRUSTED_NOTE, CFG_SYSTEM_PROMPT, LOG_SYSTEM_PROMPT, SHELL_SYSTEM_PROMPT, SHELL_DEVICE_TYPES,
+  DATA_BEGIN, DATA_END, UNTRUSTED_NOTE, CFG_SYSTEM_PROMPT, LOG_SYSTEM_PROMPT, SHELL_SYSTEM_PROMPT, SHELL_DEVICE_TYPES, SHELL_KINDS,
   CONNECT_TIMEOUT_MS, IDLE_TIMEOUT_MS, MAX_RESPONSE_BYTES, DEFAULT_MAX_INPUT_KB,
   CLAUDE_VERSION, DEFAULT_CLAUDE_MAX_TOKENS, MAX_KEEP, MAX_BYTES
 };

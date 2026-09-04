@@ -46,6 +46,10 @@
     <option value="linux">Linux Shell</option>
     <option value="windows">Windows 命令行</option>
   </select>
+  <select id="shAiKind" class="sh-ai-mode" title="生成类型：逐条命令——生成查看/操作类命令；配置段——生成完整配置变更序列（含进入/退出配置模式命令）">
+    <option value="cmd">逐条命令</option>
+    <option value="config">配置段</option>
+  </select>
   <select id="shAiMode" class="sh-ai-mode" title="执行权限模式：确认后执行——生成命令先展示，人工确认再下发；仅填入不执行——命令填入终端但不回车，人工检查后手动执行；直接执行——生成后立即下发到终端">
     <option value="confirm">确认后执行</option>
     <option value="fill">仅填入不执行</option>

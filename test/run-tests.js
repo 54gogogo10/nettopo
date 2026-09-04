@@ -4387,6 +4387,16 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(A.buildShellPrompt('x', '', 'not-a-type')[0].content.indexOf('用户已指定目标设备类型') < 0, 'Shell AI 提示词：非法设备类型回落自动');
       ok(A.buildShellPrompt('x', '', '')[0].content.indexOf('用户已指定目标设备类型') < 0, 'Shell AI 提示词：缺省不注入');
       ok(Object.keys(A.SHELL_DEVICE_TYPES).length === 7, 'Shell AI 设备类型：预设 7 项');
+      // 生成类型：config 配置段（含进入/退出配置模式指令）与解析行数放宽
+      const shCfg = A.buildShellPrompt('给 GE0/0/1 配置 VLAN10', '', 'huawei', 'config');
+      ok(shCfg[0].content.indexOf('配置变更') >= 0 && shCfg[0].content.indexOf('system-view') >= 0, 'Shell AI 生成类型：config 注入配置段指令');
+      ok(shCfg[0].content.indexOf('华为 VRP') >= 0, 'Shell AI 生成类型：config 与设备类型可叠加');
+      ok(A.buildShellPrompt('x', '', '', 'cmd')[0].content.indexOf('配置变更') < 0, 'Shell AI 生成类型：cmd 不注入配置指令');
+      ok(A.buildShellPrompt('x', '', '', 'bogus')[0].content.indexOf('配置变更') < 0, 'Shell AI 生成类型：非法 kind 回落 cmd');
+      ok(Object.keys(A.SHELL_KINDS).length === 2, 'Shell AI 生成类型：预设 2 项');
+      const pcCfg = A.parseShellCommands(Array.from({ length: 40 }, (_, i) => 'line ' + i).join('\n'), 40);
+      ok(pcCfg.ok && pcCfg.commands.length === 40, 'Shell AI 命令提取：config 模式放宽到 40 行');
+      ok(A.parseShellCommands(Array.from({ length: 40 }, (_, i) => 'line ' + i).join('\n')).commands.length === 10, 'Shell AI 命令提取：默认仍为 10 行上限');
       // 命令提取：围栏 / 裸命令 / 序号 / 提示符 / 拒绝语义 / 纯解释 / 注释行 / 条数上限
       const pc1 = A.parseShellCommands('```\nshow version\n```');
       ok(pc1.ok && pc1.commands.length === 1 && pc1.commands[0] === 'show version', 'Shell AI 命令提取：围栏内单条');

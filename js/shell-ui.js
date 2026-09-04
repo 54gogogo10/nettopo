@@ -386,8 +386,10 @@ function diffSessionOutputs(outputs) {
   const AI_MODE_KEY = 'topoShellAiMode';
   const AI_MODES = ['confirm', 'fill', 'auto'];
   const AI_DEV_KEY = 'topoShellAiDev';
+  const AI_KIND_KEY = 'topoShellAiKind';
+  const AI_KINDS = ['cmd', 'config'];
   const aiBtnEl = $('#shAiBtn'), aiEl = $('#shAi'), aiModeEl = $('#shAiMode'),
-        aiDevEl = $('#shAiDev'), aiInputEl = $('#shAiInput'), aiCtxEl = $('#shAiCtx'),
+        aiDevEl = $('#shAiDev'), aiKindEl = $('#shAiKind'), aiInputEl = $('#shAiInput'), aiCtxEl = $('#shAiCtx'),
         aiSendEl = $('#shAiSend'), aiResultEl = $('#shAiResult');
   let aiMode = (() => {
     try { const v = localStorage.getItem(AI_MODE_KEY); return AI_MODES.indexOf(v) >= 0 ? v : 'confirm'; }
@@ -400,6 +402,13 @@ function diffSessionOutputs(outputs) {
     try { dev = localStorage.getItem(AI_DEV_KEY) || 'auto'; } catch (e) { /* ignore */ }
     if (!aiDevEl.querySelector('option[value="' + dev + '"]')) dev = 'auto';
     aiDevEl.value = dev;
+  }
+  if (aiKindEl) {
+    // 生成类型：逐条命令 / 配置段（完整配置变更序列）；记忆上次选择
+    let kind = 'cmd';
+    try { kind = localStorage.getItem(AI_KIND_KEY) || 'cmd'; } catch (e) { /* ignore */ }
+    if (AI_KINDS.indexOf(kind) < 0) kind = 'cmd';
+    aiKindEl.value = kind;
   }
   let aiBusy = false;   // 命令生成进行中（窗口级单飞，防竞态下发）
   let aiRunSeq = 0;     // 生成轮次：取消/重发后忽略过期响应
@@ -500,8 +509,9 @@ function diffSessionOutputs(outputs) {
     ]);
     const ctx = (aiCtxEl && aiCtxEl.checked && a.s.term) ? readTermLines(a.s, 60).join('\n') : '';
     const deviceType = aiDevEl ? aiDevEl.value : 'auto';
+    const kind = aiKindEl ? aiKindEl.value : 'cmd';
     let r;
-    try { r = await window.topoAI.shellChat({ requirement: req, termContext: ctx, deviceType }); }
+    try { r = await window.topoAI.shellChat({ requirement: req, termContext: ctx, deviceType, kind }); }
     catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
     if (seq !== aiRunSeq) return; // 已被新一轮生成作废
     aiBusy = false;
@@ -845,6 +855,7 @@ function diffSessionOutputs(outputs) {
     if (aiBtnEl) aiBtnEl.onclick = () => setAiBar(aiEl.classList.contains('hidden'));
     if (aiModeEl) aiModeEl.addEventListener('change', () => setAiMode(aiModeEl.value));
     if (aiDevEl) aiDevEl.addEventListener('change', () => { try { localStorage.setItem(AI_DEV_KEY, aiDevEl.value); } catch (e) { /* ignore */ } });
+    if (aiKindEl) aiKindEl.addEventListener('change', () => { try { localStorage.setItem(AI_KIND_KEY, aiKindEl.value); } catch (e) { /* ignore */ } });
     if (aiSendEl) aiSendEl.onclick = sendAi;
     if (aiInputEl) aiInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); sendAi(); }
