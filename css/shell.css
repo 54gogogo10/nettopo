@@ -217,3 +217,64 @@
 .sh-rc.hide { display: none; }
 .sh-rc .sh-rc-reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 .sh-rc .sh-rc-btn { height: 28px; padding: 0 14px; flex: none; }
+
+/* ---- SFTP 文件面板（右侧浮层，随当前 SSH 标签浏览远程目录） ---- */
+.sh-sftp {
+  position: fixed; right: 8px; top: 54px; bottom: 8px; width: 344px; z-index: 60;
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 10px; overflow: hidden;
+}
+.sh-sftp.hidden { display: none; }
+body.sh-sftp-on #shTerms { margin-right: 352px; }
+.sh-sftp-head { display: flex; align-items: center; gap: 8px; flex: none; }
+.sh-sftp-head b { font-size: 12.5px; }
+.sh-sftp-host { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-sftp-x {
+  flex: none; width: 20px; height: 20px; border-radius: 6px; font-size: 12px;
+  background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+}
+.sh-sftp-x:hover { color: var(--danger); border-color: var(--danger); }
+.sh-sftp-path { display: flex; align-items: center; gap: 4px; flex: none; }
+.sh-sftp-path input {
+  flex: 1; min-width: 0; height: 26px; padding: 0 8px;
+  font: 11.5px/1.4 Consolas, "Courier New", monospace; color: var(--text);
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 7px; outline: none;
+}
+.sh-sftp-path input:focus { border-color: var(--accent); }
+.sh-sftp-ib {
+  flex: none; height: 26px; padding: 0 8px; border-radius: 7px;
+  background: var(--panel2); border: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text); transition: all .15s;
+}
+.sh-sftp-ib:hover { border-color: var(--accent); color: var(--accent); }
+.sh-sftp-acts { display: flex; align-items: center; gap: 4px; flex: none; flex-wrap: wrap; }
+.sh-sftp-ab {
+  flex: 1 1 auto; height: 25px; padding: 0 6px; border-radius: 7px;
+  background: var(--panel2); border: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text); white-space: nowrap; transition: all .15s;
+}
+.sh-sftp-ab:hover { border-color: var(--accent); color: var(--accent); }
+.sh-sftp-ab.warn:hover { border-color: var(--danger); color: var(--danger); }
+.sh-sftp-list {
+  flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 9px;
+  user-select: none;
+}
+.sh-sftp-list .sf-row {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 5px 9px; font-size: 12px; color: var(--text); text-align: left;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.sh-sftp-list .sf-row:hover { background: var(--accent-soft); }
+.sh-sftp-list .sf-row.sel { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.sh-sftp-list .sf-ic { flex: none; width: 15px; text-align: center; }
+.sh-sftp-list .sf-nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: break-all; }
+.sh-sftp-list .sf-nm.is-dir { color: var(--accent); font-weight: 600; }
+.sh-sftp-list .sf-sz { flex: none; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sh-sftp-list .sf-empty { padding: 18px 12px; font-size: 11.5px; color: var(--muted); text-align: center; line-height: 1.8; }
+.sh-sftp-status {
+  flex: none; min-height: 16px; font-size: 11px; color: var(--muted);
+  line-height: 1.5; word-break: break-all;
+}
+.sh-sftp-status.err { color: var(--danger); }

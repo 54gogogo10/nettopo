@@ -2192,6 +2192,48 @@ U.renameNodes = (nodes, opts) => {
   });
 };
 
+/* ---------- 巡检数据导出（监控中心 CSV） ---------- */
+/** SSH 指标采样 + HTTP 探测/证书历史合并为一张扁平表（按「类别」列区分指标行与 HTTP 行），
+ *  配合 U.buildCSV 导出。指标行的磁盘按挂载点展开（每采样每挂载点一行）。
+ *  @param jobs 监控任务数组（monitor.status()，用 key/name/deviceId/host 标识）
+ *  @param histByJob key -> {metric:{hist:[{ts,disks,mem,swap,load}]}, http:{hist:[{ts,ok,status,latency,certDays}]}}
+ *  @return {header, rows} rows 为字符串二维数组 */
+U.buildInspectionExport = (jobs, histByJob) => {
+  const header = ['类别', '时间', '设备', '管理地址', '挂载点', '磁盘使用率%', '内存%', '交换区%', '负载1', '负载5', '负载15', 'HTTP状态码', 'HTTP延迟ms', 'HTTP结果', '证书剩余天'];
+  const rows = [];
+  const fmtTs = (ts) => (Number.isFinite(Number(ts)) ? U.fmtDateTime(new Date(Number(ts))) : '');
+  const num = (v) => (v == null || !Number.isFinite(Number(v))) ? '' : String(v);
+  for (const j of (Array.isArray(jobs) ? jobs : [])) {
+    if (!j || !j.key) continue;
+    const d = (histByJob && typeof histByJob === 'object' ? histByJob[j.key] : null) || {};
+    const dev = String(j.name || j.deviceId || '');
+    const host = String(j.host || '');
+    const metric = (d.metric && Array.isArray(d.metric.hist)) ? d.metric.hist : [];
+    for (const s of metric) {
+      if (!s || !Number.isFinite(Number(s.ts))) continue;
+      const disks = (Array.isArray(s.disks) && s.disks.length) ? s.disks : [{ mount: '', pct: null }];
+      for (const dk of disks) {
+        rows.push([
+          '指标', fmtTs(s.ts), dev, host,
+          String((dk && dk.mount) || ''), num(dk && dk.pct), num(s.mem), num(s.swap),
+          num(s.load && s.load.l1), num(s.load && s.load.l5), num(s.load && s.load.l15),
+          '', '', '', ''
+        ]);
+      }
+    }
+    const http = (d.http && Array.isArray(d.http.hist)) ? d.http.hist : [];
+    for (const s of http) {
+      if (!s || !Number.isFinite(Number(s.ts))) continue;
+      rows.push([
+        'HTTP', fmtTs(s.ts), dev, host,
+        '', '', '', '', '', '', '',
+        num(s.status), num(s.latency), s.ok ? '成功' : '失败', num(s.certDays)
+      ]);
+    }
+  }
+  return { header, rows };
+};
+
 /* ---------- IP 规划清单（设备/接口/网段） ---------- */
 U.ipPlan = (nodes, links) => {
   const byId = new Map(nodes.map(n => [n.id, n]));

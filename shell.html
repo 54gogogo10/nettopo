@@ -20,6 +20,8 @@
     <button id="shFontInc" class="sh-font-btn" title="增大字号 (Ctrl+=)">A+</button>
   </div>
   <button id="shCastBtn" class="sh-cast-btn" title="多标签命令广播（SecureCRT Chat Window 模式）：勾选标签后，一条命令同时下发">⇉ 群发</button>
+  <button id="shSftpBtn" class="sh-cast-btn" title="文件（SFTP）：浏览当前 SSH 会话的远程目录，上传 / 下载 / 重命名 / 删除（Telnet 会话不支持）">⇅ 文件</button>
+  <button id="shBmBtn" class="sh-cast-btn" title="连接书签：保存的常用连接，双击即连（协议/地址/账号/编码，可记住密码）">☆ 书签</button>
   <button id="shRecBtn" class="sh-cast-btn" title="会话录制：把当前所有标签的终端输出录制成 JSONL 录像（含时间戳，可回放）">⏺ 录制</button>
   <button id="shRecPlayBtn" class="sh-cast-btn" title="回放录像：选择已录制的会话录像，按原速/倍速回放">▶ 回放</button>
   <button id="shAiBtn" class="sh-cast-btn" title="AI 命令助手：输入自然语言需求，由 AI 生成命令并按所选权限模式在当前连接的终端上执行">✦ AI 助手</button>
@@ -62,6 +64,30 @@
   <button id="shAiSend" class="sh-cast-send" title="生成命令并按所选权限模式处理（Enter）">生成</button>
 </div>
 <div id="shAiResult" class="sh-ai-result hidden"></div>
+
+<aside id="shSftp" class="sh-sftp hidden" title="SFTP 文件面板：基于当前 SSH 会话的远程文件浏览（Telnet 会话不支持）">
+  <div class="sh-sftp-head">
+    <b>文件（SFTP）</b>
+    <span id="shSftpHost" class="sh-sftp-host"></span>
+    <button id="shSftpClose" class="sh-sftp-x" title="关闭文件面板">✕</button>
+  </div>
+  <div class="sh-sftp-path">
+    <button id="shSftpUp" class="sh-sftp-ib" title="上一级目录">↑</button>
+    <button id="shSftpHome" class="sh-sftp-ib" title="回到主目录">~</button>
+    <input id="shSftpPath" type="text" placeholder="远程路径，如 /var/log" spellcheck="false" autocomplete="off"/>
+    <button id="shSftpGo" class="sh-sftp-ib" title="前往该目录">前往</button>
+    <button id="shSftpRefresh" class="sh-sftp-ib" title="刷新目录">⟳</button>
+  </div>
+  <div class="sh-sftp-acts">
+    <button id="shSftpMkdir" class="sh-sftp-ab">新建目录</button>
+    <button id="shSftpUpload" class="sh-sftp-ab">上传…</button>
+    <button id="shSftpDownload" class="sh-sftp-ab">下载</button>
+    <button id="shSftpRename" class="sh-sftp-ab">重命名</button>
+    <button id="shSftpDelete" class="sh-sftp-ab warn">删除</button>
+  </div>
+  <div id="shSftpList" class="sh-sftp-list"></div>
+  <div id="shSftpStatus" class="sh-sftp-status">选择左侧 SSH 标签后自动浏览</div>
+</aside>
 
 <div id="shBbar" class="sh-bbar" title="右键管理快捷按钮">
   <div id="shBBtnWrap" class="sh-bbar-btns"></div>

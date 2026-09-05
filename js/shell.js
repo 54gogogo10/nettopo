@@ -37,6 +37,53 @@ function logDateDir(d) {
   return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
 }
 
+/* ---------- SFTP 辅助 ---------- */
+/** 远程路径白名单校验：非空、无 NUL、限长 4096（SFTP 服务端自带权限体系，本地只挡明显异常）。
+ *  空串按当前目录（'.'）处理由调用方决定；返回规范化后的字符串或空串（表示无效）。 */
+function cleanSftpRemotePath(p, allowEmpty) {
+  let s = String(p == null ? '' : p);
+  if (!s.trim() && allowEmpty) s = '.';
+  if (!s || s.length > 4096 || s.indexOf('\0') >= 0) return '';
+  return s;
+}
+/** 远程 POSIX 路径拼接（浏览面板导航 / 上传目标文件名用）：
+ *  SFTP 服务端几乎都为 POSIX 路径语义（Windows OpenSSH 同样接受 /），统一按 / 拼接。 */
+function sftpRemoteJoin(dir, name) {
+  dir = String(dir == null ? '.' : dir).trim() || '.';
+  name = String(name == null ? '' : name).trim().replace(/[\r\n\0]/g, '');
+  if (!name || name === '.' || name === '..' || name.indexOf('/') >= 0) return '';
+  if (dir === '.' || dir === '' || dir === '~') return name;
+  return (dir.endsWith('/') ? dir : dir + '/') + name;
+}
+/** 字节数人性化（1 位小数 KB/MB/GB；B 原样） */
+function fmtSftpSize(n) {
+  if (!Number.isFinite(Number(n)) || n < 0) return '';
+  if (n < 1024) return n + ' B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n;
+  for (const u of units) { v /= 1024; if (v < 1024 || u === 'TB') return v.toFixed(v >= 100 ? 0 : 1) + ' ' + u; }
+  return '';
+}
+
+/* ---------- 终端输出解码（编码可选：utf8 / gbk） ---------- */
+/** 流式解码器：缓存跨包的多字节半字符。utf8 用 StringDecoder（零依赖）；
+ *  gbk 用 TextDecoder（Node/Electron 均为全量 ICU，small-icu 环境不支持 gbk 时回落 utf8）。
+ *  仅输出方向解码：输入（键入）方向统一 UTF-8 写入，老设备中文输入请用 ASCII 命令名。 */
+function makeDecoder(encoding) {
+  if (encoding === 'gbk') {
+    try {
+      const dec = new TextDecoder('gbk');
+      return {
+        encoding: 'gbk',
+        write: (buf) => dec.decode(buf, { stream: true }),
+        end: () => { try { return dec.decode(); } catch (e) { return ''; } }
+      };
+    } catch (e) { /* small-icu 构建：无 gbk 支持回落 utf8 */ }
+  }
+  const dec = new StringDecoder('utf8');
+  return { encoding: 'utf8', write: (buf) => dec.write(buf), end: () => dec.end() };
+}
+
 class ShellManager extends EventEmitter {
   /** @param {object} [opts] opts.logDir：会话审计日志根目录（通常为 userData/monitor-logs，
    *  按天归档为 <logDir>/WebShell-<主机>/<日期>/<主机>_<端口>_<时间>.log，与监控日志共用浏览/搜索） */
@@ -95,7 +142,9 @@ class ShellManager extends EventEmitter {
       jump,
       // SSH 公钥认证（可选）：私钥内容 + 私钥口令；缺省仍走密码/keyboard-interactive
       privateKey: typeof opts.privateKey === 'string' ? opts.privateKey.trim() : '',
-      keyPassphrase: typeof opts.keyPassphrase === 'string' ? opts.keyPassphrase.slice(0, 1024) : ''
+      keyPassphrase: typeof opts.keyPassphrase === 'string' ? opts.keyPassphrase.slice(0, 1024) : '',
+      // 输出编码（utf8 | gbk）：老设备/中文环境常为 GBK，其余回落 utf8
+      encoding: opts.encoding === 'gbk' ? 'gbk' : 'utf8'
     };
     let session;
     try {
@@ -244,10 +293,179 @@ class ShellManager extends EventEmitter {
     return true;
   }
 
+  /* ---------- SFTP（复用已建立的 SSH 会话，同连接按需开 SFTP 通道；Telnet 会话不支持） ---------- */
+  /** 取会话的 SFTP 通道。每次操作新开一条通道（open 延迟约 1 个 RTT，可接受），
+   *  不做通道缓存：会话关闭/重连时无失效状态需要追踪，实现更简单可靠。 */
+  _sftpOf(id) {
+    const s = this.sessions.get(String(id || ''));
+    if (!s) return Promise.reject(new Error('会话不存在或已断开'));
+    const client = s._client;
+    if (!client || typeof client.sftp !== 'function') {
+      return Promise.reject(new Error('该会话不支持 SFTP（仅 SSH 会话可用，Telnet 无文件通道）'));
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        client.sftp((err, ch) => {
+          if (err) reject(new Error('SFTP 通道打开失败：' + (err && err.message || err)));
+          else resolve(ch);
+        });
+      } catch (e) { reject(new Error('SFTP 通道打开失败：' + ((e && e.message) || e))); }
+    });
+  }
+  /** 目录列表：{ok, path(规范绝对路径), items:[{name, dir, size, mtime}], error} */
+  async sftpList(id, dirPath) {
+    const p = cleanSftpRemotePath(dirPath, true);
+    if (!p) return { ok: false, error: '远程路径无效' };
+    let sftp = null;
+    try {
+      sftp = await this._sftpOf(id);
+      const resolved = await new Promise((resolve, reject) => {
+        sftp.realpath(p, (err, rp) => { try { err ? reject(err) : resolve(String(rp || p)); } catch (e) { reject(e); } });
+      });
+      const list = await new Promise((resolve, reject) => {
+        sftp.readdir(resolved, (err, list) => { try { err ? reject(err) : resolve(list || []); } catch (e) { reject(e); } });
+      });
+      const items = list.map((it) => {
+        const a = it.attrs || {};
+        const isDir = typeof a.isDirectory === 'function' && a.isDirectory();
+        const isLink = typeof a.isSymbolicLink === 'function' && a.isSymbolicLink();
+        return {
+          name: String(it.filename || ''),
+          dir: isDir || isLink, // 符号链接按可进入处理（指向文件时由服务端报错兜底）
+          size: Number.isFinite(a.size) ? a.size : null,
+          mtime: Number.isFinite(a.mtime) ? a.mtime * 1000 : null
+        };
+      }).filter(it => it.name && it.name !== '.');
+      // 目录在前、隐藏文件其次、名称不分大小写排序（与常见文件管理器口径一致）
+      items.sort((a, b) => (a.dir !== b.dir) ? (a.dir ? -1 : 1)
+        : (a.name.startsWith('.') !== b.name.startsWith('.')) ? (a.name.startsWith('.') ? -1 : 1)
+        : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      return { ok: true, path: resolved, items };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    } finally {
+      if (sftp) { try { sftp.end(); } catch (e) { /* ignore */ } }
+    }
+  }
+  async sftpMkdir(id, dirPath) {
+    const p = cleanSftpRemotePath(dirPath, false);
+    if (!p) return { ok: false, error: '目录名无效' };
+    let sftp = null;
+    try {
+      sftp = await this._sftpOf(id);
+      await new Promise((resolve, reject) => { sftp.mkdir(p, (err) => { try { err ? reject(err) : resolve(); } catch (e) { reject(e); } }); });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    } finally {
+      if (sftp) { try { sftp.end(); } catch (e) { /* ignore */ } }
+    }
+  }
+  /** 删除远程文件或空目录（isDir=true 走 rmdir；目录需先清空，防一键误删整树） */
+  async sftpRemove(id, targetPath, isDir) {
+    const p = cleanSftpRemotePath(targetPath, false);
+    if (!p) return { ok: false, error: '远程路径无效' };
+    let sftp = null;
+    try {
+      sftp = await this._sftpOf(id);
+      await new Promise((resolve, reject) => {
+        const done = (err) => { try { err ? reject(err) : resolve(); } catch (e) { reject(e); } };
+        if (isDir) sftp.rmdir(p, done); else sftp.unlink(p, done);
+      });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    } finally {
+      if (sftp) { try { sftp.end(); } catch (e) { /* ignore */ } }
+    }
+  }
+  async sftpRename(id, fromPath, toPath) {
+    const from = cleanSftpRemotePath(fromPath, false);
+    const to = cleanSftpRemotePath(toPath, false);
+    if (!from || !to) return { ok: false, error: '远程路径无效' };
+    if (from === to) return { ok: false, error: '新路径与原路径相同' };
+    let sftp = null;
+    try {
+      sftp = await this._sftpOf(id);
+      await new Promise((resolve, reject) => { sftp.rename(from, to, (err) => { try { err ? reject(err) : resolve(); } catch (e) { reject(e); } }); });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    } finally {
+      if (sftp) { try { sftp.end(); } catch (e) { /* ignore */ } }
+    }
+  }
+  /** 下载远程文件到本地路径（localPath 由主进程「另存为」对话框产生，渲染层不传本地路径）。
+   *  onProgress(info: {op:'download', id, name, transferred, total}) 节流 400ms 回调。 */
+  async sftpDownload(id, remotePath, localPath, onProgress) {
+    const p = cleanSftpRemotePath(remotePath, false);
+    if (!p) return { ok: false, error: '远程路径无效' };
+    const local = String(localPath == null ? '' : localPath).trim();
+    if (!local) return { ok: false, error: '本地保存路径无效' };
+    let sftp = null;
+    try {
+      sftp = await this._sftpOf(id);
+      const total = await new Promise((resolve) => {
+        sftp.stat(p, (err, st) => { try { resolve((!err && st && Number.isFinite(st.size)) ? st.size : null); } catch (e) { resolve(null); } });
+      });
+      await new Promise((resolve, reject) => {
+        let lastEmit = 0;
+        sftp.fastGet(p, local, {
+          step: (transferred) => {
+            if (typeof onProgress !== 'function') return;
+            const now = Date.now();
+            if (now - lastEmit < 400) return;
+            lastEmit = now;
+            try { onProgress({ op: 'download', id: String(id), name: p, transferred: transferred, total }); } catch (e) { /* ignore */ }
+          }
+        }, (err) => { try { err ? reject(err) : resolve(); } catch (e) { reject(e); } });
+      });
+      if (typeof onProgress === 'function') { try { onProgress({ op: 'download', id: String(id), name: p, transferred: total, total }); } catch (e) { /* ignore */ } }
+      return { ok: true, path: local, size: total };
+    } catch (e) {
+      // 失败时清理半成品文件，不留损坏产物
+      try { fs.unlinkSync(local); } catch (e2) { /* ignore */ }
+      return { ok: false, error: String((e && e.message) || e) };
+    } finally {
+      if (sftp) { try { sftp.end(); } catch (e) { /* ignore */ } }
+    }
+  }
+  /** 上传本地文件到远程路径（localPath 由主进程「打开文件」对话框产生） */
+  async sftpUpload(id, localPath, remotePath, onProgress) {
+    const local = String(localPath == null ? '' : localPath).trim();
+    const p = cleanSftpRemotePath(remotePath, false);
+    if (!local) return { ok: false, error: '本地文件路径无效' };
+    if (!p) return { ok: false, error: '远程路径无效' };
+    let sftp = null;
+    try {
+      let localSize = null;
+      try { localSize = fs.statSync(local).size; } catch (e) { return { ok: false, error: '本地文件不可读' }; }
+      sftp = await this._sftpOf(id);
+      await new Promise((resolve, reject) => {
+        let lastEmit = 0;
+        sftp.fastPut(local, p, {
+          step: (transferred) => {
+            if (typeof onProgress !== 'function') return;
+            const now = Date.now();
+            if (now - lastEmit < 400) return;
+            lastEmit = now;
+            try { onProgress({ op: 'upload', id: String(id), name: p, transferred, total: localSize }); } catch (e) { /* ignore */ }
+          }
+        }, (err) => { try { err ? reject(err) : resolve(); } catch (e) { reject(e); } });
+      });
+      if (typeof onProgress === 'function') { try { onProgress({ op: 'upload', id: String(id), name: p, transferred: localSize, total: localSize }); } catch (e) { /* ignore */ } }
+      return { ok: true, path: p, size: localSize };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    } finally {
+      if (sftp) { try { sftp.end(); } catch (e) { /* ignore */ } }
+    }
+  }
+
   /* ---------- SSH（ssh2） ---------- */
   _ssh(o) {
     const em = new EventEmitter();
-    const decoder = new StringDecoder('utf8'); // 与 telnet 路径一致：缓存跨包的多字节 UTF-8 半字符
+    const decoder = makeDecoder(o.encoding); // 缓存跨包多字节半字符（gbk 会话按 gbk 解码）
     const client = new Client();
     let stream = null;
     let closed = false;
@@ -393,6 +611,7 @@ class ShellManager extends EventEmitter {
     em.write = (data) => { if (stream && !closed) stream.write(data); };
     em.resize = (cols, rows) => { if (stream && !closed) stream.setWindow(rows, cols); };
     em._close = () => finish('closed');
+    em._client = client; // SFTP 复用同一 SSH 连接按需开通道（会话关闭时随 client.end() 一并失效）
     return em;
   }
 
@@ -400,7 +619,7 @@ class ShellManager extends EventEmitter {
   _telnet(o) {
     const em = new EventEmitter();
     const sock = net.createConnection({ host: o.host, port: o.port });
-    const decoder = new StringDecoder('utf8'); // 处理跨包的多字节 UTF-8
+    const decoder = makeDecoder(o.encoding); // 处理跨包的多字节（gbk 会话按 gbk 解码）
     let buf = Buffer.alloc(0);
     let closed = false;
     // 连接超时（默认 12s，测试可传 opts.timeout 缩短）；连接建立后关闭空闲超时
@@ -528,4 +747,4 @@ class ShellManager extends EventEmitter {
   }
 }
 
-module.exports = { ShellManager };
+module.exports = { ShellManager, cleanSftpRemotePath, sftpRemoteJoin, fmtSftpSize, makeDecoder };

@@ -2,11 +2,13 @@
 'use strict';
 const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu } = require('electron');
 const path = require('path');
-const { ShellManager } = require('./js/shell.js');
+const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
+const { Maintenance } = require('./js/maintenance.js');
+const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList } = require('./js/diag.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
 const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, buildShellPrompt, buildCompliancePrompt, buildDailyReportPrompt, parseShellCommands, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
@@ -149,6 +151,21 @@ function getBackupStore() {
 }
 function resetBackupStore() { backupStore = null; }
 
+/* ---- 告警静默 / 维护窗口（通知抑制策略，见 js/maintenance.js 头注） ---- */
+const maintenance = new Maintenance({
+  load: (m) => {
+    const saved = loadAppSettings().maintenanceWindows;
+    if (saved && typeof saved === 'object') {
+      for (const [deviceId, w] of Object.entries(saved)) m.setWindow(deviceId, w);
+    }
+  }
+});
+/** 设备告警的系统通知统一出口：静默期内（手动静默 / 维护窗口）不弹通知，事件时间线照常记录 */
+function notifyForDevice(deviceId, title, body) {
+  try { if (maintenance.isMuted(deviceId).muted) return; } catch (e) { /* 判定失败照常通知 */ }
+  notifyUser(title, body);
+}
+
 /* ---- 系统托盘常驻 ---- */
 function rebuildTrayMenu() {
   if (!tray) return;
@@ -284,11 +301,11 @@ monitor.on('probe', (info) => {
   if (info.ok === false && prev !== false) {
     lastProbeOk.set(info.key, false);
     recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
-    if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
+    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
   } else if (info.ok === true && prev === false) {
     lastProbeOk.set(info.key, true);
     recordMonitorEvent(info, 'recovery', '探测恢复在线');
-    if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
+    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
   } else {
     lastProbeOk.set(info.key, info.ok);
   }
@@ -305,11 +322,11 @@ monitor.on('alert', (info) => {
       lastAlertOn.set(info.key, true);
       lastAlertPatterns.set(info.key, cur);
       recordMonitorEvent(info, 'alert', detail);
-      if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
+      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
     } else if (added.length) {
       lastAlertPatterns.set(info.key, cur);
       recordMonitorEvent(info, 'alert', detail + '（新增 ' + added.join('、') + '）');
-      if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
+      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
     }
   } else if (lastAlertOn.get(info.key) === true) {
     lastAlertOn.set(info.key, false);
@@ -329,7 +346,7 @@ monitor.on('compliance', (info) => {
     ? '合规巡检通过（' + info.total + ' 项）'
     : '合规违规 ' + info.failed + '/' + info.total + '：' + (info.items || []).map(i => i.name).join('、');
   recordMonitorEvent(info, 'compliance', detail);
-  if (!info.ok && notifyEnabled()) notifyUser('网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail);
+  if (!info.ok && notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail);
 });
 monitor.on('sysinfo', (info) => sendMonitor('monitor:sysinfo', info));
 // SNMP 性能采样（CPU/内存/sysUpTime）：实时推送监控中心「性能」页
@@ -339,7 +356,7 @@ monitor.on('reboot', (info) => {
   sendMonitor('monitor:reboot', info);
   const detail = '设备可能已重启（sysUpTime ' + fmtUptimeTicks(info.prev) + ' → ' + fmtUptimeTicks(info.cur) + '）';
   recordMonitorEvent(info, 'reboot', detail);
-  if (notifyEnabled()) notifyUser('网络拓扑管理软件 · 设备重启', info.name + '（' + info.host + '）' + detail);
+  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备重启', info.name + '（' + info.host + '）' + detail);
 });
 // SNMP 接口流量：实时采样推送主窗口；接口 up/down 跳变记入事件时间线并弹通知（接口离线才弹）
 monitor.on('iftraffic', (info) => sendMonitor('monitor:iftraffic', info));
@@ -349,8 +366,46 @@ monitor.on('ifstatus', (info) => {
     recordMonitorEvent(info, ch.to === 'down' ? 'if-down' : 'if-up',
       '接口 ' + ch.name + ' ' + (ch.to === 'down' ? 'DOWN（离线）' : 'UP（恢复）'));
     if (ch.to === 'down' && notifyEnabled()) {
-      notifyUser('网络拓扑管理软件 · 接口离线', info.name + '（' + info.host + '）接口 ' + ch.name + ' DOWN');
+      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 接口离线', info.name + '（' + info.host + '）接口 ' + ch.name + ' DOWN');
     }
+  }
+});
+// SSH 指标采样（df/free/loadavg）：实时推送主窗口；阈值告警变化沿记入时间线并弹通知
+monitor.on('metric', (info) => sendMonitor('monitor:metric', info));
+monitor.on('metric-alert', (info) => {
+  sendMonitor('monitor:metric-alert', info);
+  const detail = (info.detail || (info.alerting ? '指标超阈值' : '指标告警解除'));
+  recordMonitorEvent(info, info.alerting ? 'metric' : 'metric-clear', detail);
+  if (info.alerting && notifyEnabled()) {
+    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 指标告警', info.name + '（' + info.host + '）' + detail);
+  }
+});
+// HTTP 健康探测：状态沿（失败/恢复）记入时间线并弹通知（与在线探测同口径）
+const lastHttpOk = new Map(); // key -> 上次 HTTP 探测结果
+monitor.on('http', (info) => {
+  sendMonitor('monitor:http', info);
+  const prev = lastHttpOk.get(info.key);
+  if (info.ok === false && prev !== false) {
+    lastHttpOk.set(info.key, false);
+    recordMonitorEvent(info, 'http-fail', 'HTTP 探测失败：' + info.url + (info.error ? '（' + info.error + '）' : ''));
+    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测失败', info.name + '（' + info.host + '）' + info.url + ' 探测失败' + (info.error ? '：' + info.error : ''));
+  } else if (info.ok === true && prev === false) {
+    lastHttpOk.set(info.key, true);
+    recordMonitorEvent(info, 'http-ok', 'HTTP 探测恢复：' + info.url + (info.status ? '（HTTP ' + info.status + '）' : ''));
+    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测恢复', info.name + '（' + info.host + '）' + info.url + ' 已恢复');
+  } else {
+    lastHttpOk.set(info.key, info.ok);
+  }
+});
+// 证书到期阈值变化沿：告警与恢复都记入时间线，告警弹系统通知
+monitor.on('cert-alert', (info) => {
+  sendMonitor('monitor:cert-alert', info);
+  const detail = info.alerting
+    ? '证书剩余 ' + info.days + ' 天（阈值 ' + info.threshold + ' 天），到期时间 ' + (info.expire || '未知') + '：' + info.url
+    : '证书剩余 ' + info.days + ' 天，已高于告警阈值：' + info.url;
+  recordMonitorEvent(info, info.alerting ? 'cert' : 'cert-clear', detail);
+  if (info.alerting && notifyEnabled()) {
+    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 证书即将到期', info.name + '（' + info.host + '）' + detail);
   }
 });
 monitor.on('backup', (info) => {
@@ -367,7 +422,7 @@ monitor.on('backup', (info) => {
       const last = lastBackupChangeAt.get(info.key) || 0;
       if (now - last > 30 * 60 * 1000) {
         lastBackupChangeAt.set(info.key, now);
-        notifyUser('网络拓扑管理软件 · 配置变更', info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
+        notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置变更', info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
       }
     }
   } else {
@@ -376,7 +431,7 @@ monitor.on('backup', (info) => {
     const prevErr = lastBackupErrAt.get(info.key) || 0;
     if (now - prevErr > 10 * 60 * 1000) {
       lastBackupErrAt.set(info.key, now);
-      notifyUser('网络拓扑管理软件 · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
+      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
     }
   }
 });
@@ -657,6 +712,71 @@ ipcMain.handle('shell:clipboard-read', (e) => {
   return require('electron').clipboard.readText();
 });
 
+/* ---- Web Shell SFTP（远程文件浏览 / 上传 / 下载）----
+ * 复用已建立的 SSH 会话开 SFTP 通道；本地路径一律由主进程系统对话框产生，
+ * 渲染层只传远程路径与会话 id，杜绝借 IPC 读写任意本地路径。 */
+ipcMain.handle('shell:sftp-list', (e, p) => {
+  if (!shellSender(e)) return Promise.resolve({ ok: false, error: 'forbidden' });
+  return shell.sftpList(p && p.id, p && p.path);
+});
+ipcMain.handle('shell:sftp-mkdir', (e, p) => {
+  if (!shellSender(e)) return Promise.resolve({ ok: false, error: 'forbidden' });
+  return shell.sftpMkdir(p && p.id, p && p.path);
+});
+ipcMain.handle('shell:sftp-remove', (e, p) => {
+  if (!shellSender(e)) return Promise.resolve({ ok: false, error: 'forbidden' });
+  return shell.sftpRemove(p && p.id, p && p.path, !!(p && p.isDir));
+});
+ipcMain.handle('shell:sftp-rename', (e, p) => {
+  if (!shellSender(e)) return Promise.resolve({ ok: false, error: 'forbidden' });
+  return shell.sftpRename(p && p.id, p && p.from, p && p.to);
+});
+ipcMain.handle('shell:sftp-download', async (e, p) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  const sid = p && p.id;
+  const remote = String((p && p.remotePath) || '');
+  if (!sid || !remote || remote.length > 4096 || remote.indexOf('\0') >= 0) return { ok: false, error: '远程路径无效' };
+  const parent = (shellWin && !shellWin.isDestroyed()) ? shellWin : undefined;
+  let r;
+  try {
+    r = await dialog.showSaveDialog(parent, {
+      title: '保存远程文件',
+      defaultPath: path.join(app.getPath('downloads'), remote.split('/').pop() || 'download')
+    });
+  } catch (err) { return { ok: false, error: '无法打开保存对话框' }; }
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+  const onProgress = (info) => { const w = (shellWin && !shellWin.isDestroyed()) ? shellWin : (e && e.sender); try { w.webContents.send('shell:sftp-progress', info); } catch (err) { /* ignore */ } };
+  const res = await shell.sftpDownload(sid, remote, r.filePath, onProgress);
+  if (res.ok) res.path = r.filePath;
+  return res;
+});
+ipcMain.handle('shell:sftp-upload', async (e, p) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  const sid = p && p.id;
+  const dir = String((p && p.dir) || '.');
+  if (!sid || dir.length > 4096 || dir.indexOf('\0') >= 0) return { ok: false, error: '远程目录无效' };
+  const parent = (shellWin && !shellWin.isDestroyed()) ? shellWin : undefined;
+  let r;
+  try {
+    r = await dialog.showOpenDialog(parent, {
+      title: '选择要上传的文件',
+      defaultPath: app.getPath('downloads'),
+      properties: ['openFile', 'multiSelections']
+    });
+  } catch (err) { return { ok: false, error: '无法打开文件对话框' }; }
+  if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: false, canceled: true };
+  const onProgress = (info) => { const w = (shellWin && !shellWin.isDestroyed()) ? shellWin : (e && e.sender); try { w.webContents.send('shell:sftp-progress', info); } catch (err) { /* ignore */ } };
+  const files = [];
+  for (const lp of r.filePaths.slice(0, 32)) { // 单次上传数量封顶，防误选巨型目录
+    const name = path.basename(lp);
+    const remote = sftpRemoteJoin(dir, name);
+    if (!remote) { files.push({ name, ok: false, error: '远程路径无效' }); continue; }
+    const res = await shell.sftpUpload(sid, lp, remote, onProgress);
+    files.push({ name, ok: !!res.ok, error: res.ok ? null : (res.error || null) });
+  }
+  return { ok: true, files, failed: files.filter(f => !f.ok).length };
+});
+
 /* ---- 工程备份管理 IPC（仅主窗口可调用，防其它窗口/被注入脚本越权读写备份） ---- */
 function backupGuard(e) {
   return !!(mainWin && !mainWin.isDestroyed() && e && e.sender === mainWin.webContents);
@@ -722,7 +842,8 @@ ipcMain.handle('monitor:open-logs', (e, p) => {
 });
 ipcMain.handle('monitor:run-backup', (e, p) => monitorGuard(e) ? monitor.runBackupNow(String((p && p.key) || '')) : { ok: false, error: 'forbidden' });
 ipcMain.handle('secure:encrypt', (e, text) => {
-  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  // 主窗口（监控配置等落盘凭据）与 Shell 窗口（连接书签「记住密码」）均可调用
+  if (!monitorGuard(e) && !shellSender(e)) return { ok: false, error: 'forbidden' };
   text = String(text == null ? '' : text);
   if (!text) return { ok: true, cipher: '' };
   if (text.length > 4096) return { ok: false, error: '内容过长' };
@@ -733,7 +854,7 @@ ipcMain.handle('secure:encrypt', (e, text) => {
   } catch (err) { return { ok: false, error: '加密失败' }; }
 });
 ipcMain.handle('secure:decrypt', (e, cipher) => {
-  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  if (!monitorGuard(e) && !shellSender(e)) return { ok: false, error: 'forbidden' };
   cipher = String(cipher == null ? '' : cipher);
   if (!cipher || cipher.length > 8192) return { ok: false, error: '密文无效' };
   try {
@@ -776,6 +897,14 @@ ipcMain.handle('monitor:ifhistory', (e, key) => monitorGuard(e)
 ipcMain.handle('monitor:perfhistory', (e, key) => monitorGuard(e)
   ? monitor.perfHistory(String((key && key.key) || key || ''))
   : { ok: false, error: 'forbidden' });
+// SSH 指标（磁盘/内存/负载）采样历史
+ipcMain.handle('monitor:methistory', (e, key) => monitorGuard(e)
+  ? monitor.metricHistory(String((key && key.key) || key || ''))
+  : { ok: false, error: 'forbidden' });
+// HTTP 探测 / 证书到期历史
+ipcMain.handle('monitor:httphistory', (e, key) => monitorGuard(e)
+  ? monitor.httpHistory(String((key && key.key) || key || ''))
+  : { ok: false, error: 'forbidden' });
 // 测试钩子（仅冒烟测试环境）：模拟用户点击窗口关闭按钮
 if (process.env.NETTOPO_USERDATA) {
   ipcMain.handle('monitor:test-close', (e) => {
@@ -797,6 +926,61 @@ ipcMain.handle('monitor:tray', (e, p) => {
 /* ---- 已信任主机指纹管理（TOFU 信任库的查看/撤销） ---- */
 ipcMain.handle('monitor:trust-list', (e) => monitorGuard(e) ? monitor.trustList() : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:trust-revoke', (e, p) => monitorGuard(e) ? monitor.trustRevoke(String((p && p.host) || '')) : { ok: false, error: 'forbidden' });
+
+/* ---- 告警静默 / 维护窗口（手动静默内存态；维护窗口随 settings.json 持久化） ---- */
+ipcMain.handle('monitor:mute', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const deviceId = String((p && p.deviceId) || '');
+  const minutes = parseInt(p && p.minutes, 10) || 60;
+  if (!deviceId) return { ok: false, error: '设备无效' };
+  const until = maintenance.setMute(deviceId, minutes);
+  return { ok: true, until };
+});
+ipcMain.handle('monitor:maintenance-get', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const deviceId = String((p && p.deviceId) || '');
+  return { ok: true, window: maintenance.getWindow(deviceId), muted: maintenance.isMuted(deviceId) };
+});
+ipcMain.handle('monitor:maintenance-set', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const deviceId = String((p && p.deviceId) || '');
+  if (!deviceId) return { ok: false, error: '设备无效' };
+  const w = (p && p.window && typeof p.window === 'object') ? p.window : { enabled: false };
+  const r = maintenance.setWindow(deviceId, w);
+  if (!r) return { ok: false, error: '时间格式无效（需 HH:MM）' };
+  // 全量持久化维护窗口配置（手动静默不落盘）
+  try {
+    loadAppSettings().maintenanceWindows = maintenance.snapshotWindows();
+    saveAppSettings();
+  } catch (err) { /* 落盘失败不影响本次运行 */ }
+  return { ok: true, window: maintenance.getWindow(deviceId) };
+});
+
+/* ---- 本机诊断工具箱（Ping / 路由跟踪 / TCP 端口 / DNS，仅主窗口可调用）----
+ * 主机地址经白名单校验；外部命令以受控参数列表 spawn，不经 shell 拼接。 */
+ipcMain.handle('diag:ping', (e, p) => {
+  if (!monitorGuard(e)) return Promise.resolve({ ok: false, error: 'forbidden' });
+  return ping(String((p && p.host) || ''), parseInt(p && p.count, 10) || 4);
+});
+ipcMain.handle('diag:trace', (e, p) => {
+  if (!monitorGuard(e)) return Promise.resolve({ ok: false, error: 'forbidden' });
+  return trace(String((p && p.host) || ''));
+});
+ipcMain.handle('diag:tcp', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const host = String((p && p.host) || '');
+  if (!isValidDiagHost(host)) return { ok: false, error: '主机地址无效' };
+  const ports = parsePortList(String((p && p.ports) || ''));
+  if (!ports.length) return { ok: false, error: '请填写有效端口（1~65535，支持 8000-8002 区间）' };
+  const results = await scanPorts(host, ports, 2000);
+  return { ok: true, results };
+});
+ipcMain.handle('diag:dns', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const host = String((p && p.host) || '');
+  if (!isValidDiagHost(host)) return { ok: false, error: '主机地址无效' };
+  return dnsLookup(host);
+});
 
 /* ---- 在线升级（仅主窗口可调用）----
  * 源为 GitHub Releases：检查/下载/校验/换入全部在主进程完成，渲染层只收进度与结果。

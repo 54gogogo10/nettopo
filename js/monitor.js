@@ -319,8 +319,138 @@ function extractVersion(descr) {
   return m ? String(m[1]).slice(0, 48) : '';
 }
 
-/** 合规规则编译（与 util.js cleanComplianceRules 同口径：白名单 + 不区分大小写正则，主进程侧使用） */
-function compileComplianceRules(raw) {
+/* ---------------- SSH 指标采集解析（Linux 服务器 df / free / loadavg，纯函数可测） ---------------- */
+/** 解析 df 输出（df -P / df -h 通用，均为 6 列）：返回 [{mount, pct}]。
+ *  排除无容量的伪文件系统（tmpfs/udev/cgroup 系等，第一列命中名单即跳过；/dev/* 真实设备全保留，
+ *  overlay 保留——容器根分区）。表头行、列数不足、Use% 解析失败的行跳过。 */
+function parseLinuxDf(text) {
+  const skipFs = /^(tmpfs|devtmpfs|udev|shm|none|cgroup2?|proc|sysfs|devpts|securityfs|pstore|bpf|debugfs|tracefs|configfs|fusectl|hugetlbfs|mqueue|nsfs|squashfs|iso9660)/i;
+  const out = [];
+  for (const raw of String(text == null ? '' : text).split('\n')) {
+    const t = raw.trim();
+    if (!t || /^Filesystem/i.test(t)) continue;
+    const cols = t.split(/\s+/);
+    if (cols.length < 6) continue;
+    if (skipFs.test(cols[0])) continue;
+    const pm = String(cols[4]).match(/^(\d+)%$/);
+    if (!pm) continue;
+    const blocks = Number(cols[1]);
+    if (Number.isFinite(blocks) && blocks <= 0) continue; // 0 容量的伪挂载点不进指标
+    out.push({ mount: cols.slice(5).join(' ').slice(0, 64), pct: Math.min(100, Math.max(0, parseInt(pm[1], 10))) });
+  }
+  return out;
+}
+/** 解析 free 输出（free -m / -g / -k 通用）：返回 {mem, swap}（百分比，1 位小数）。
+ *  新版 procps 有 available 列（按 (total-available)/total，含 buff/cache 归还）；旧版无 available
+ *  按 (total-free-buffers-cached)/total 估算。Mem 行的上一行为表头，据此区分。 */
+function parseLinuxFree(text) {
+  const lines = String(text == null ? '' : text).split('\n');
+  const nums = (l) => (String(l).match(/\d+/g) || []).map(Number);
+  const r1 = (v) => Math.max(0, Math.min(100, Math.round(v * 10) / 10));
+  let memIdx = -1;
+  for (let i = 0; i < lines.length; i++) { if (/^\s*Mem[:\s]/.test(lines[i])) { memIdx = i; break; } }
+  if (memIdx < 0) return { mem: null, swap: null };
+  const m = nums(lines[memIdx]);
+  const hasAvail = memIdx > 0 && /available/i.test(lines[memIdx - 1]);
+  let mem = null;
+  if (m.length >= 6 && m[0] > 0) {
+    mem = hasAvail ? r1((m[0] - m[5]) / m[0] * 100)
+                   : r1((m[0] - m[2] - (m[4] || 0) - (m[5] || 0)) / m[0] * 100);
+  } else if (m.length >= 3 && m[0] > 0) {
+    mem = r1((m[0] - m[2]) / m[0] * 100);
+  }
+  let swap = null;
+  for (const l of lines) {
+    if (!/^\s*Swap[:\s]/.test(l)) continue;
+    const s = nums(l);
+    if (s.length >= 3) swap = s[0] > 0 ? r1(s[1] / s[0] * 100) : 0;
+    break;
+  }
+  return { mem, swap };
+}
+/** 解析负载：/proc/loadavg（0.52 0.58 0.59 1/234 12345）或 uptime（load average: 0.52, 0.58, 0.59）→ {l1, l5, l15} */
+function parseLinuxLoadavg(text) {
+  const t = String(text == null ? '' : text);
+  let m = t.match(/^\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+\d+\/\d+\s+\d+\s*$/m);
+  if (!m) m = t.match(/load average[s]?:\s*([\d.]+),?\s+([\d.]+),?\s+([\d.]+)/i);
+  if (!m) return { l1: null, l5: null, l15: null };
+  return { l1: Number(m[1]), l5: Number(m[2]), l15: Number(m[3]) };
+}
+/** 指标阈值级别判定（纯函数）：pct ≥ crit → 'crit'，≥ warn → 'warn'，否则 null。
+ *  磁盘多挂载点取最高级别，detail 列出超阈值的「挂载点 百分比」清单。 */
+function metricLevels(sample, th) {
+  th = th || {};
+  const lv = (pct, warn, crit) => (pct == null || !Number.isFinite(Number(pct))) ? null
+    : (pct >= crit ? 'crit' : pct >= warn ? 'warn' : null);
+  let disk = null;
+  const bad = [];
+  for (const d of ((sample && sample.disks) || [])) {
+    const l = lv(d.pct, th.diskWarn, th.diskCrit);
+    if (l) { bad.push((d.mount || '?') + ' ' + d.pct + '%'); if (l === 'crit') disk = 'crit'; else if (!disk) disk = 'warn'; }
+  }
+  return { disk, mem: lv(sample && sample.mem, th.memWarn, th.memCrit), detail: bad.join('、') };
+}
+
+/* ---------------- HTTP 健康探测 / SSL 证书到期（独立于 SSH 会话，纯函数可测） ---------------- */
+/** 证书剩余整天数：validTo 为证书 valid_to 文本（如 'Dec 31 23:59:59 2027 GMT'，Date 可解析即可）；
+ *  已过期返回负数；不可解析返回 null。 */
+function certDaysLeft(validTo, now) {
+  const t = Date.parse(String(validTo == null ? '' : validTo));
+  if (!Number.isFinite(t)) return null;
+  const ref = Number.isFinite(now) ? now : Date.now();
+  return Math.floor((t - ref) / 86400000);
+}
+/** 单次 HTTP/HTTPS 健康探测：状态码 2xx/3xx 且（可选）包含关键字判定在线；
+ *  HTTPS 附带证书剩余天数（rejectUnauthorized=false——内网自签名同样可测，不校验链只取有效期）。
+ *  响应体仅缓存前 256KB（关键字判定够用，防大响应撑内存）。 */
+function httpCheck(probe, cb) {
+  let u = null;
+  try { u = new URL(String((probe && probe.url) || '')); } catch (e) { cb({ ok: false, error: 'URL 无效' }); return; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') { cb({ ok: false, error: 'URL 仅支持 http/https' }); return; }
+  const mod = u.protocol === 'https:' ? require('https') : require('http');
+  const t0 = Date.now();
+  let settled = false;
+  let req = null;
+  const finish = (res) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    try { if (req) req.destroy(); } catch (e) { /* ignore */ }
+    cb(res);
+  };
+  const timeout = setTimeout(() => finish({ ok: false, error: '请求超时' }), Math.max(2000, Math.min(30000, (probe && probe.timeoutMs) || 8000)));
+  try {
+    req = mod.get(u, { rejectUnauthorized: false }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => { size += c.length; if (size <= 256 * 1024) chunks.push(c); });
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        const status = res.statusCode || 0;
+        const kw = String((probe && probe.keyword) || '');
+        const kwHit = kw ? body.indexOf(kw) >= 0 : null;
+        let certDays = null, certExpire = '';
+        if (u.protocol === 'https:') {
+          try {
+            const cert = res.socket && res.socket.getPeerCertificate && res.socket.getPeerCertificate();
+            if (cert && cert.valid_to) { certExpire = String(cert.valid_to); certDays = certDaysLeft(certExpire); }
+          } catch (e) { /* 证书信息缺失不阻断探测 */ }
+        }
+        const ok = status >= 200 && status < 400 && (kw ? kwHit : true);
+        finish({
+          ok, status, latencyMs: Date.now() - t0, certDays, certExpire,
+          keywordHit: kw ? kwHit : null,
+          error: ok ? null : (kw && !kwHit ? '响应未包含关键字「' + kw + '」' : (status ? 'HTTP ' + status : '连接失败'))
+        });
+      });
+      res.on('error', () => finish({ ok: false, error: '响应读取失败' }));
+    });
+    req.on('error', (e) => finish({ ok: false, error: '连接失败：' + ((e && e.message) || e) }));
+    req.on('timeout', () => finish({ ok: false, error: '请求超时' }));
+  } catch (e) { finish({ ok: false, error: '请求构造失败：' + ((e && e.message) || e) }); }
+}
+
+/** 合规规则编译（与 util.js cleanComplianceRules 同口径：白名单 + 不区分大小写正则，主进程侧使用） */function compileComplianceRules(raw) {
   const out = [];
   const seen = new Set();
   for (const r of (Array.isArray(raw) ? raw : [])) {
@@ -663,9 +793,49 @@ class MonitorManager extends EventEmitter {
       memUsedOid: cleanOid(pfOpt.memUsedOid),
       memFreeOid: cleanOid(pfOpt.memFreeOid)
     };
+    // ---- 服务器指标采集（SSH，可选）：复用监控会话执行 df/free 等命令并解析数值，
+    //      磁盘/内存超阈值告警（仅读取模式下禁用——与「只记录不写命令」语义冲突） ----
+    const mtOpt = opts.metrics && typeof opts.metrics === 'object' ? opts.metrics : {};
+    const metrics = { enabled: false, commands: [], intervalSec: 300, diskWarn: 80, diskCrit: 90, memWarn: 80, memCrit: 90 };
+    metrics.enabled = !!mtOpt.enabled && !readOnly;
+    {
+      const mtRaw = Array.isArray(mtOpt.command) ? mtOpt.command : String(mtOpt.command == null ? '' : mtOpt.command).split(/\r?\n/);
+      for (const c of mtRaw) {
+        const s = String(c == null ? '' : c).trim();
+        if (!s) continue;
+        if (metrics.commands.length >= 8) break;
+        metrics.commands.push(s.length > 256 ? s.slice(0, 256) : s);
+      }
+      if (metrics.enabled && !metrics.commands.length) metrics.commands = ['df -P', 'free -m', 'cat /proc/loadavg'];
+    }
+    let mtInt = parseFloat(mtOpt.intervalSec);
+    if (!Number.isFinite(mtInt)) mtInt = 300;
+    metrics.intervalSec = Math.max(60, Math.min(86400, mtInt));
+    const clampTh = (v, def) => {
+      const n = parseFloat(v);
+      const x = Number.isFinite(n) ? Math.round(n) : def;
+      return Math.max(1, Math.min(100, x));
+    };
+    metrics.diskWarn = clampTh(mtOpt.diskWarn, 80);
+    metrics.diskCrit = Math.max(metrics.diskWarn, clampTh(mtOpt.diskCrit, 90));
+    metrics.memWarn = clampTh(mtOpt.memWarn, 80);
+    metrics.memCrit = Math.max(metrics.memWarn, clampTh(mtOpt.memCrit, 90));
+    // ---- HTTP 健康探测 / 证书到期（可选，独立于 SSH/Telnet 连接，从本机直接发起） ----
+    const hpOpt = opts.httpProbe && typeof opts.httpProbe === 'object' ? opts.httpProbe : {};
+    const httpProbe = { enabled: false, url: '', intervalSec: 300, alertDays: 14, keyword: '', timeoutMs: 8000 };
+    const hUrl = String(hpOpt.url || '').trim().slice(0, 2048);
+    if (/^https?:\/\//i.test(hUrl)) httpProbe.url = hUrl;
+    let hpInt = parseFloat(hpOpt.intervalSec);
+    if (!Number.isFinite(hpInt)) hpInt = 300;
+    httpProbe.intervalSec = Math.max(30, Math.min(86400, hpInt));
+    let hDays = parseFloat(hpOpt.alertDays);
+    if (!Number.isFinite(hDays)) hDays = 14;
+    httpProbe.alertDays = Math.max(0, Math.min(365, Math.round(hDays)));
+    httpProbe.keyword = String(hpOpt.keyword == null ? '' : hpOpt.keyword).trim().slice(0, 256);
+    httpProbe.enabled = !!hpOpt.enabled && !!httpProbe.url;
     return {
       ok: true,
-      cfg: { key, deviceId, name, protocol, host, port, username, password, privateKey, keyPassphrase, jump, expectFp, commands, onConnect: onConnectCmds, readOnly, intervalSec, cmdDelayMs, retrySec, initDelayMs, probe, alerts, backup, sysinfo }
+      cfg: { key, deviceId, name, protocol, host, port, username, password, privateKey, keyPassphrase, jump, expectFp, commands, onConnect: onConnectCmds, readOnly, intervalSec, cmdDelayMs, retrySec, initDelayMs, probe, alerts, backup, sysinfo, metrics, httpProbe }
     };
   }
 
@@ -686,6 +856,15 @@ class MonitorManager extends EventEmitter {
       alerts: (cfg.alerts || []).map(a => ({ pattern: a.pattern, note: a.note, re: a.re })),
       backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 1000 }, cfg.backup || {}),
       sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60, sysUpTime: false, perf: { enabled: false, cpuOid: '', memUsedOid: '', memFreeOid: '' } }, cfg.sysinfo || {}),
+      metrics: Object.assign({ enabled: false, commands: [], intervalSec: 300, diskWarn: 80, diskCrit: 90, memWarn: 80, memCrit: 90 }, cfg.metrics || {}),
+      metricHist: [],   // SSH 指标采样历史（[{ts, disks:[{mount,pct}], mem, swap, load}]，容量 IF_HIST_MAX）
+      metricAlert: { disk: null, mem: null }, // 上次阈值级别（变化沿产生告警事件）
+      metricTimer: null, _metricBusy: false,
+      httpProbe: Object.assign({ enabled: false, url: '', intervalSec: 300, alertDays: 14, keyword: '', timeoutMs: 8000 }, cfg.httpProbe || {}),
+      httpHist: [],     // HTTP 探测历史（[{ts, ok, status, latency, certDays}]，容量 IF_HIST_MAX）
+      httpOk: null,     // 上次探测结果（在线状态沿判定在 electron-main）
+      certAlerted: null, // 上次证书到期告警状态（变化沿产生事件）
+      httpTimer: null,
       ifHist: [],       // 接口流量采样历史（[{ts, ifs:[{i,n,oper,in,out,speed}]}]，容量 IF_HIST_MAX）
       ifPrev: null,     // 上次采样的计数器（算速率用）{ts, map: ifIndex -> {inC, outC}}
       ifOperPrev: {},   // 上次采样的接口状态（ifIndex -> up/down/other），状态变化时发事件
@@ -720,6 +899,11 @@ class MonitorManager extends EventEmitter {
     // SNMP 轮询（接口流量 / 重启检测 / CPU·内存）：独立于 SSH/Telnet 连接的 UDP 定时轮询（任务级，重连不重启）
     const si = cfg.sysinfo || {};
     if (si.ifTable || si.sysUpTime || (si.perf && si.perf.enabled)) this._startSnmpPoll(job);
+    // HTTP 健康探测 / 证书到期：独立于 SSH/Telnet 会话的本机定时探测（任务级，重连不重启）
+    if (cfg.httpProbe && cfg.httpProbe.enabled) {
+      clearTimeout(job.httpTimer);
+      job.httpTimer = setTimeout(() => this._httpProbeOnce(job), 2000);
+    }
     this._startConnect(job);
     return { ok: true, id: cfg.key };
   }
@@ -758,6 +942,11 @@ class MonitorManager extends EventEmitter {
         ifTable: !!(job.sysinfo && job.sysinfo.ifTable),
         perf: !!(job.sysinfo && job.sysinfo.perf && job.sysinfo.perf.enabled),
         upCheck: !!(job.sysinfo && job.sysinfo.sysUpTime),
+        metrics: !!(job.metrics && job.metrics.enabled),
+        lastMetric: job.metricHist.length ? job.metricHist[job.metricHist.length - 1] : null,
+        httpProbe: !!(job.httpProbe && job.httpProbe.enabled),
+        httpOk: job.httpOk,
+        certDays: job.httpHist.length ? job.httpHist[job.httpHist.length - 1].certDays : null,
         lastPerf: job.perfHist.length ? { ts: job.perfHist[job.perfHist.length - 1].ts, cpu: job.perfHist[job.perfHist.length - 1].cpu, mem: job.perfHist[job.perfHist.length - 1].mem, up: job.perfHist[job.perfHist.length - 1].up } : null
       });
     }
@@ -829,6 +1018,8 @@ class MonitorManager extends EventEmitter {
     if (job.backupTimer) { clearTimeout(job.backupTimer); job.backupTimer = null; }
     if (job._alertTimer) { clearTimeout(job._alertTimer); job._alertTimer = null; }
     if (job.snmpTimer) { clearTimeout(job.snmpTimer); job.snmpTimer = null; }
+    if (job.metricTimer) { clearTimeout(job.metricTimer); job.metricTimer = null; }
+    if (job.httpTimer) { clearTimeout(job.httpTimer); job.httpTimer = null; }
     job._backupCap = null;
     job._cycleActive = false;
     job._alertPending = [];
@@ -1024,6 +1215,10 @@ class MonitorManager extends EventEmitter {
     if (job.sysinfo && job.sysinfo.enabled) {
       setTimeout(() => this._fetchSysInfo(job, gen), 2000);
     }
+    // SSH 指标采集：会话建立后启动定时轮询（复用监控会话执行指标命令）
+    if (job.metrics && job.metrics.enabled && !job.readOnly) {
+      this._startMetrics(job);
+    }
   }
 
   /** SNMP v2c 识别：GET sysDescr/sysObjectID，启发式提取软件版本后广播 sysinfo 事件 */
@@ -1042,6 +1237,126 @@ class MonitorManager extends EventEmitter {
         descr: descr.slice(0, 300), objectId, version: extractVersion(descr)
       });
     }).catch(() => { /* 识别失败静默：不影响监控 */ });
+  }
+
+  /* ---------------- SSH 指标采集（复用监控会话执行 df/free/loadavg，超阈值告警） ---------------- */
+  _startMetrics(job) {
+    clearTimeout(job.metricTimer);
+    job.metricTimer = setTimeout(() => this._runMetrics(job), Math.max(job.initDelayMs, 1000) + 2000);
+  }
+  async _runMetrics(job) {
+    if (!job.enabled || job.stopping || !job.metrics || !job.metrics.enabled || job.readOnly) return;
+    const gen = job.gen;
+    // 会话在线且命令循环/备份空闲时采集；忙则跳过本轮（下个间隔再试），不与备份/命令循环抢会话
+    if (job.state === 'monitoring' && job.sid && !job._cycleActive && !job.backupRunning && !job._metricBusy) {
+      job._metricBusy = true;
+      try { await this._collectMetrics(job, gen); } catch (e) { /* 采集失败静默：下轮再试 */ }
+      job._metricBusy = false;
+    }
+    if (!job.enabled || job.stopping || gen !== job.gen) return;
+    clearTimeout(job.metricTimer);
+    job.metricTimer = setTimeout(() => this._runMetrics(job), (job.metrics.intervalSec || 300) * 1000);
+  }
+  /** 逐条执行指标命令（捕获窗口复用备份通道：与备份/命令循环已互斥，cleanBackupLines 过滤命令回显），
+   *  按命令内容匹配解析器（df → 磁盘，free → 内存，loadavg/uptime → 负载），样本入历史并评估阈值。 */
+  async _collectMetrics(job, gen) {
+    const m = job.metrics || {};
+    const cmds = (m.commands || []).slice();
+    if (!cmds.length || !job.sid) return;
+    this._rollLogIfNeeded(job);
+    const disks = [];
+    let mem = null, swap = null, load = null;
+    // 占用命令循环互斥位：指标命令与周期命令/备份共享同一会话，交叉写入会互相污染捕获窗口
+    job._cycleActive = true;
+    try {
+      for (const cmd of cmds) {
+        if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) return;
+        await this._drainForBackup(job, gen, 2000); // 排空上一条命令的输出尾部，防混入指标解析
+        this._logCmd(job, cmd + '（指标采集）');
+        job._backupCap = { commands: cmds.concat(job.commands || [], job.onConnect || []), lines: [], chars: 0, truncated: false, startedAt: Date.now() };
+        const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
+        try { this.shell.write(job.sid, cmd + eol); } catch (e) { job._backupCap = null; return; }
+        await sleep(1200);      // 命令输出等待（磁盘/内存类命令输出快，固定短窗口）
+        await sleep(300);       // 尾部缓冲
+        const cap = job._backupCap;
+        job._backupCap = null;
+        if (!cap) return;
+        const text = cleanBackupLines(cap.lines, cap.commands).join('\n');
+        if (/\bdf\b/.test(cmd)) { for (const d of parseLinuxDf(text)) disks.push(d); }
+        else if (/\bfree\b/.test(cmd)) { const r = parseLinuxFree(text); if (r.mem != null) mem = r.mem; if (r.swap != null) swap = r.swap; }
+        else if (/loadavg|uptime/.test(cmd)) { const r = parseLinuxLoadavg(text); if (r.l1 != null) load = r; }
+      }
+    } finally {
+      job._cycleActive = false; // 中途退出（会话断开/停止）也必须释放，避免命令循环/备份永久等待
+    }
+    if (!disks.length && mem == null && load == null) return;
+    const sample = { ts: Date.now(), disks: disks.slice(0, 32), mem, swap, load: load || null };
+    job.metricHist.push(sample);
+    if (job.metricHist.length > IF_HIST_MAX) job.metricHist.shift();
+    const lv = metricLevels(sample, m);
+    const prev = job.metricAlert || { disk: null, mem: null };
+    const changed = lv.disk !== prev.disk || lv.mem !== prev.mem;
+    job.metricAlert = { disk: lv.disk, mem: lv.mem };
+    this._logLine(job, '指标采集：' + [
+      disks.length ? '磁盘 ' + sample.disks.map(d => d.mount + ' ' + d.pct + '%').join('，') : '',
+      mem != null ? '内存 ' + mem + '%' : '',
+      load ? '负载 ' + load.l1 + '/' + load.l5 + '/' + load.l15 : ''
+    ].filter(Boolean).join('，'));
+    this.emit('metric', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ts: sample.ts, sample, levels: { disk: lv.disk, mem: lv.mem } });
+    if (changed) {
+      const parts = [];
+      if (lv.disk !== prev.disk) parts.push('磁盘' + (lv.disk ? '超阈值（' + lv.disk + '）：' + lv.detail : '告警解除'));
+      if (lv.mem !== prev.mem) parts.push('内存' + (lv.mem ? '超阈值（' + lv.mem + '）：' + sample.mem + '%' : '告警解除'));
+      this._logLine(job, '【指标' + ((lv.disk || lv.mem) ? '告警】' : '解除】') + parts.join('；'));
+      this.emit('metric-alert', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ts: sample.ts, alerting: !!(lv.disk || lv.mem), disk: lv.disk, mem: lv.mem, detail: parts.join('；') });
+    }
+  }
+
+  /** SSH 指标采样历史（监控中心「性能」页按需拉取） */
+  metricHistory(key) {
+    const job = this.jobs.get(String(key || '').trim());
+    if (!job) return { ok: false, error: '任务不存在或已停止' };
+    return { ok: true, hist: job.metricHist, intervalSec: job.metrics ? job.metrics.intervalSec : 300, metrics: !!(job.metrics && job.metrics.enabled) };
+  }
+
+  /* ---------------- HTTP 健康探测 / SSL 证书到期（本机直连目标 URL，独立于 SSH 会话） ---------------- */
+  _httpProbeOnce(job) {
+    if (!job.enabled || job.stopping || !job.httpProbe || !job.httpProbe.enabled) return;
+    const gen = job.gen;
+    const done = () => {
+      if (!job.enabled || job.stopping || gen !== job.gen) return;
+      clearTimeout(job.httpTimer);
+      job.httpTimer = setTimeout(() => this._httpProbeOnce(job), (job.httpProbe.intervalSec || 300) * 1000);
+    };
+    httpCheck(job.httpProbe, (res) => {
+      if (!job.enabled || job.stopping || gen !== job.gen) return;
+      const sample = { ts: Date.now(), ok: !!res.ok, status: res.status == null ? null : res.status, latency: res.latencyMs == null ? null : res.latencyMs, certDays: res.certDays == null ? null : res.certDays, error: res.ok ? null : (res.error || '失败') };
+      job.httpHist.push(sample);
+      if (job.httpHist.length > IF_HIST_MAX) job.httpHist.shift();
+      const changed = job.httpOk !== sample.ok;
+      job.httpOk = sample.ok;
+      this._logLine(job, 'HTTP 探测：' + job.httpProbe.url + ' → ' + (sample.ok
+        ? 'HTTP ' + sample.status + '（' + sample.latency + 'ms）' + (sample.certDays != null ? '，证书剩余 ' + sample.certDays + ' 天' : '')
+        : '失败：' + (sample.error || '未知')));
+      this.emit('http', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, url: job.httpProbe.url, ts: sample.ts, ok: sample.ok, status: sample.status, latency: sample.latency, certDays: sample.certDays, error: sample.error });
+      // 证书到期阈值（变化沿：首次低于阈值或续期恢复时各产生一次事件）
+      const alerted = sample.certDays != null && sample.certDays <= job.httpProbe.alertDays;
+      if (alerted !== job.certAlerted) {
+        job.certAlerted = alerted;
+        this._logLine(job, alerted
+          ? '【证书告警】' + job.httpProbe.url + ' 证书剩余 ' + sample.certDays + ' 天（阈值 ' + job.httpProbe.alertDays + ' 天），到期时间 ' + (res.certExpire || '未知')
+          : '【证书恢复】' + job.httpProbe.url + ' 证书剩余 ' + sample.certDays + ' 天，已高于告警阈值');
+        this.emit('cert-alert', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, url: job.httpProbe.url, alerting: alerted, days: sample.certDays, expire: res.certExpire || '', threshold: job.httpProbe.alertDays });
+      }
+      done();
+    });
+  }
+
+  /** HTTP 探测 / 证书到期历史（监控中心「性能」页按需拉取） */
+  httpHistory(key) {
+    const job = this.jobs.get(String(key || '').trim());
+    if (!job) return { ok: false, error: '任务不存在或已停止' };
+    return { ok: true, hist: job.httpHist, intervalSec: job.httpProbe ? job.httpProbe.intervalSec : 300, enabled: !!(job.httpProbe && job.httpProbe.enabled), url: job.httpProbe ? job.httpProbe.url : '', alertDays: job.httpProbe ? job.httpProbe.alertDays : 14 };
   }
 
   /* ---------------- SNMP 轮询（接口流量 ifTable / 重启检测 sysUpTime / CPU·内存，独立于连接的 UDP 采集） ---------------- */
@@ -1829,5 +2144,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
 
