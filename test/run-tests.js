@@ -3325,6 +3325,79 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(U.buildInspectionExport([{ key: 'k3', host: 'h' }], { k3: { metric: { hist: [null, { ts: 'bad' }] } } }).rows.length === 0, '巡检导出：坏采样行跳过');
     }
 
+    // 终端搜索（本地化 addon 完整性）+ AI 日报每日调度时间计算
+    console.log('== 回归：终端搜索与日报定时（新功能） ==');
+    {
+      const SA = require('../lib/xterm-addon-search.js');
+      ok(typeof SA.SearchAddon === 'function', '终端搜索：UMD addon 可在 Node 加载');
+      const addon = new SA.SearchAddon({ highlightLimit: 100 });
+      ok(typeof addon.findNext === 'function' && typeof addon.findPrevious === 'function'
+        && typeof addon.clearDecorations === 'function' && typeof addon.onDidChangeResults === 'function',
+        '终端搜索：SearchAddon 实例含 findNext/findPrevious/clearDecorations/onDidChangeResults');
+      const shHtml = fs.readFileSync(path.join(root, 'shell.html'), 'utf8');
+      ok(shHtml.includes('lib/xterm-addon-search.js') && shHtml.includes('shSearchInput') && shHtml.includes('shSearchCount'),
+        '终端搜索：shell.html 引入 addon 且搜索条元素齐全');
+
+      const { nextDailyRun } = require('../js/maintenance.js');
+      const now7 = new Date(2026, 0, 1, 7, 0, 0, 0).getTime();
+      const today = nextDailyRun('08:30', now7);
+      ok(today === new Date(2026, 0, 1, 8, 30, 0, 0).getTime(), '日报调度：当前时刻早于设定时间取今天');
+      const tomorrow = nextDailyRun('06:00', now7);
+      ok(tomorrow === new Date(2026, 0, 2, 6, 0, 0, 0).getTime(), '日报调度：当前时刻已过设定时间取明天');
+      const exact = nextDailyRun('07:00', now7);
+      ok(exact === new Date(2026, 0, 2, 7, 0, 0, 0).getTime(), '日报调度：恰好等于当前时刻取明天（避免立即重复触发）');
+      ok(nextDailyRun('25:00', now7) === null && nextDailyRun('abc', now7) === null && nextDailyRun('9:5', now7) === null, '日报调度：非法时间拒绝');
+      const midnight = nextDailyRun('00:00', now7);
+      ok(midnight === new Date(2026, 0, 2, 0, 0, 0, 0).getTime(), '日报调度：00:00 视为明日零点（当前 7 点已过）');
+    }
+
+    // 标签恢复条目合并 + 快速命令面板（模糊评分 / 命令历史）
+    console.log('== 回归：标签恢复与命令面板（新功能） ==');
+    {
+      const { fuzzyScore, mergeCmdHistory, upsertRestoreEntry, sanitizeBookmark } = require('../js/shell-ui.js');
+      /* ---- 功能6：模糊评分 ---- */
+      ok(fuzzyScore('', '任何文本') === 0, '面板评分：空查询匹配一切');
+      ok(fuzzyScore('show', 'show version') === 160, '面板评分：前缀最高分');
+      const sub = fuzzyScore('ver', 'show version');
+      ok(sub != null && sub > 50 && sub < 160, '面板评分：连续子串次之（' + sub + '）');
+      const b1 = fuzzyScore('sv', 'show version');
+      ok(b1 != null && b1 < sub, '面板评分：子序列低于连续子串');
+      ok(fuzzyScore('xyz', 'show version') === null, '面板评分：不匹配返回 null');
+      ok(fuzzyScore('SV', 'show version') != null, '面板评分：不区分大小写');
+      ok(fuzzyScore('玻', 'display 玻璃') != null, '面板评分：中文子串');
+      const wl = fuzzyScore('ver', 'show-ver-info');
+      ok(wl != null && wl > 100, '面板评分：分隔符后词首加分（' + wl + '）');
+
+      /* ---- 功能6：命令历史合并 ---- */
+      let hist = mergeCmdHistory([], 'display version', 5);
+      ok(hist.length === 1 && hist[0].n === 1, '命令历史：新命令入列');
+      hist = mergeCmdHistory(hist, 'display version', 5);
+      ok(hist.length === 1 && hist[0].n === 2, '命令历史：重复命令频次 +1 不重复入列');
+      hist = mergeCmdHistory(hist, 'display ip routing-table', 5);
+      ok(hist[0].text === 'display version' && hist[0].n === 2, '命令历史：按频次排序');
+      for (let i = 0; i < 8; i++) hist = mergeCmdHistory(hist, 'cmd-' + i, 5);
+      ok(hist.length === 5 && hist.every(x => x.text !== 'display ip routing-table'), '命令历史：容量封顶淘汰低频旧项（' + hist.length + '）');
+      ok(mergeCmdHistory(hist, '   \r\n', 5).length === 5, '命令历史：空白命令忽略');
+      ok(mergeCmdHistory(null, 'x', 5)[0].text === 'x', '命令历史：非数组入参安全');
+
+      /* ---- 功能5：恢复条目合并 ---- */
+      let rl = upsertRestoreEntry([], { protocol: 'ssh', host: '10.0.0.9', port: '22', username: 'ops', encoding: 'gbk', name: 'srv9', passwordEnc: 'enc1:A' }, 3);
+      ok(rl.length === 1 && rl[0].passwordEnc === 'enc1:A' && rl[0].encoding === 'gbk', '恢复列表：新条目登记含密文');
+      rl = upsertRestoreEntry(rl, { host: '10.0.0.9', port: 22, username: 'ops', protocol: 'ssh' }, 3); // 重连未带密码
+      ok(rl.length === 1 && rl[0].passwordEnc === 'enc1:A', '恢复列表：密文为空时保留原密文');
+      rl = upsertRestoreEntry(rl, { host: 'h2', protocol: 'telnet', username: 'a' }, 3);
+      rl = upsertRestoreEntry(rl, { host: 'h3', protocol: 'telnet', username: 'a' }, 3);
+      rl = upsertRestoreEntry(rl, { host: '10.0.0.9', port: '22', username: 'ops', protocol: 'ssh' }, 3); // 再次连接：移到末尾
+      ok(rl.length === 3 && rl[2].host === '10.0.0.9', '恢复列表：更新条目移到末尾（最近使用）');
+      rl = upsertRestoreEntry(rl, { host: 'h4', username: 'a' }, 3);
+      ok(rl.length === 3 && !rl.some(x => x.host === 'h2') && rl.some(x => x.host === '10.0.0.9') && rl.some(x => x.host === 'h4'), '恢复列表：超容量淘汰最旧（' + rl.map(x => x.host) + '）');
+      ok(upsertRestoreEntry([], null, 3).length === 0 && upsertRestoreEntry([], { host: '' }, 3).length === 0, '恢复列表：无效条目拒绝');
+      const rSan = sanitizeBookmark({ host: 'x', passwordEnc: 'enc1:Z' });
+      ok(rSan && rSan.passwordEnc === 'enc1:Z' && !('pwdEnc' in rSan), '恢复列表：清洗后仅保留白名单字段');
+      const shHtml2 = fs.readFileSync(path.join(root, 'shell.html'), 'utf8');
+      ok(shHtml2.includes('shPalInput') && shHtml2.includes('shPalList') && shHtml2.includes('shSearchInput'), '面板 DOM：shell.html 元素齐全');
+    }
+
     // SSH 跳板机端到端：jump forwardOut 通道上完成目标握手
     console.log('== 回归：SSH 跳板机端到端（新功能） ==');
     {

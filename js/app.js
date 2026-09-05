@@ -4242,7 +4242,7 @@ function openHelp() {
     <h4>⑥ 路径分析 / 网段分析 / 拓扑校验 / 单点故障分析</h4>
     <p><b>路径分析</b>：选两台设备按带宽优选最宽路径并高亮（显示瓶颈带宽），故障链路自动绕行，聚合组按成员带宽之和参与计算。<b>网段分析</b>（布局菜单）：全部接口 IP / VLAN 接口 / 管理地址按网段汇总——成员设备与链路、已用/可用地址与利用率、VLAN、来源；自动检测<b>网段重叠</b>（不同掩码规划冲突）、<b>网段/广播地址误用</b>与<b>超容量</b>，点击行定位并金色高亮该网段全部成员，支持导出 CSV（管理地址无掩码信息，按 /24 归组）。<b>拓扑校验</b>：一键检查重复 IP / 接口 / 管理地址、孤立设备、环路、平行链路、跨网段等，报告内可点击定位；同名聚合组的平行链路视为正常组网不再提示。<b>单点故障分析</b>（布局菜单）：一键找出单点设备（故障拆散网络）与无冗余关键链路，点击条目定位并红色高亮受影响设备；右键设备/连线「故障影响分析」可模拟任一单点故障：查看失联区域（红色高亮），或存在冗余路径时高亮最短绕行路径（金色）。</p>
     <h4>⑦ Web Shell（桌面版）</h4>
-    <p>右键设备「Web Shell（SSH/Telnet）…」连接管理口（多管理口可下拉选择）；在<b>独立窗口</b>以<b>多标签</b>管理多台设备，主界面不锁定。终端支持：选中即复制、Ctrl+Shift+C/V 复制粘贴、右键菜单、字号调节（A−/A+ 或 Ctrl+-/Ctrl+=）、底部<b>快捷按钮条</b>（右键或「＋」新建，内容支持 \n 回车、\t 制表、\p 暂停 1 秒）。顶栏「<b>⇅ 文件</b>」打开 <b>SFTP 文件面板</b>：浏览当前 SSH 会话的远程目录（双击进入 / 下载），支持<b>上传 / 下载 / 新建目录 / 重命名 / 删除</b>（本地保存路径由系统对话框选择；Telnet 会话不支持）。连接对话框可选<b>输出编码</b>（UTF-8 / GBK，老设备中文环境不乱码）并勾选「<b>保存为书签</b>」——顶栏「<b>☆ 书签</b>」收藏常用连接（协议 / 地址 / 账号 / 编码，密码可选经系统级加密保存），双击即连。SSH 主机密钥以 SHA256 指纹展示。</p>
+    <p>右键设备「Web Shell（SSH/Telnet）…」连接管理口（多管理口可下拉选择）；在<b>独立窗口</b>以<b>多标签</b>管理多台设备，主界面不锁定。终端支持：选中即复制、Ctrl+Shift+C/V 复制粘贴、右键菜单、字号调节（A−/A+ 或 Ctrl+-/Ctrl+=）、底部<b>快捷按钮条</b>（右键或「＋」新建，内容支持 \n 回车、\t 制表、\p 暂停 1 秒）。顶栏「<b>⇅ 文件</b>」打开 <b>SFTP 文件面板</b>：浏览当前 SSH 会话的远程目录（双击进入 / 下载），支持<b>上传 / 下载 / 新建目录 / 重命名 / 删除</b>（本地保存路径由系统对话框选择；Telnet 会话不支持）。连接对话框可选<b>输出编码</b>（UTF-8 / GBK，老设备中文环境不乱码）并勾选「<b>保存为书签</b>」——顶栏「<b>☆ 书签</b>」收藏常用连接（协议 / 地址 / 账号 / 编码，密码可选经系统级加密保存），双击即连。顶栏「<b>🔍 搜索</b>」或 <b>Ctrl+F</b> 在当前标签终端缓冲区中<b>即输即搜</b>：Enter / Shift+Enter 上下导航、全部匹配高亮 + 结果计数，切标签自动跟随，Esc 关闭。<b>Ctrl+P</b> 呼出<b>快速命令面板</b>：快捷按钮 / 连接书签 / 历史命令（按钮与群发内容、AI 已下发命令自动按频次记忆）模糊搜索，回车即执行 / 即连接。关闭 Web Shell 窗口后重新打开会<b>自动恢复上次的标签连接</b>（凭据经系统级加密保存；显式关闭的标签不再恢复）。SSH 主机密钥以 SHA256 指纹展示。</p>
     <h4>⑧ 设备管理 Web 页（桌面版）</h4>
     <p>设备编辑中配置「管理Web页URL」，右键设备「打开设备管理页面」在<b>独立窗口</b>以<b>多标签</b>打开；支持地址栏 / 后退 / 前进 / 刷新；HTTPS 自签名 / 无效证书会弹出<b>安全告警</b>，手动确认后可继续访问并记住该站点。</p>
     <h4>⑨ 保存 / 导出</h4>
@@ -4556,6 +4556,7 @@ function wire() {
   $('#btnDropAI').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'wand', label: '解析设备配置…', act: () => openAiAnalysis('config') },
     { ic: 'list', label: '解析设备日志…', act: () => openAiAnalysis('logs') },
+    { ic: 'clock', label: '巡检日报定时…', act: openAiDailySchedule },
     { sep: true },
     { ic: 'clock', label: '分析记录…', act: openAiHistory },
     { ic: 'cloud', label: 'AI 设置…', act: openAiSettings }
@@ -6102,7 +6103,7 @@ function openMonitorCenter() {
         </div>
       </div>
       <div class="m-actions">
-        <button type="button" class="tb" data-act="daily" title="汇总当前监控状态、近期事件与在线率，交大模型生成中文巡检日报（数据发送到「AI 设置」中配置的服务）">AI 巡检日报</button>
+        <button type="button" class="tb" data-act="daily" title="汇总当前监控状态、近期事件与在线率，交大模型生成中文巡检日报（数据发送到「AI 设置」中配置的服务）；定时自动生成可在「AI ▾ 巡检日报定时…」配置">AI 巡检日报</button>
         <button type="button" class="tb" data-act="export" title="导出全部设备的 SSH 指标采样（磁盘/内存/负载）与 HTTP 探测 / 证书历史为 CSV">导出巡检数据</button>
         <button type="button" class="tb" data-act="trust" title="查看已自动信任的 SSH 主机指纹，可撤销（后续连接按首次连接重新确认）">信任的主机</button>
         <button type="button" class="tb" data-act="refresh">刷新</button>
@@ -7659,6 +7660,17 @@ function openWebShell(id) {
     }
     try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
     if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
+    // 标签恢复：密码加密为 DPAPI 密文随连接参数透传（Shell 窗口保存进恢复列表，明文不落盘）
+    try {
+      if (cfg.password && window.topoSecure && window.topoSecure.encryptSecret) {
+        const r = await window.topoSecure.encryptSecret(cfg.password);
+        if (r && r.ok && r.cipher) cfg.pwdEnc = r.cipher;
+      }
+      if (cfg.jump && cfg.jump.password && window.topoSecure && window.topoSecure.encryptSecret) {
+        const rj = await window.topoSecure.encryptSecret(cfg.jump.password);
+        if (rj && rj.ok && rj.cipher) cfg.jumpPwdEnc = rj.cipher;
+      }
+    } catch (e) { /* 加密失败仅影响恢复列表，不影响本次连接 */ }
     try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username, encoding: cfg.encoding })); } catch (e) {}
     const btn = ov.querySelector('[data-act=connect]');
     btn.disabled = true; btn.textContent = '连接中…';
@@ -7826,6 +7838,56 @@ async function openAiSettings() {
     else toast('连接失败：' + ((r && r.error) || '未知错误'));
   };
   actions.insertBefore(btn, actions.firstChild);
+}
+
+/** AI 巡检日报定时生成配置（默认关闭）：到点由主进程自动组装快照、调用 AI、存入「分析记录」并弹通知 */
+async function openAiDailySchedule() {
+  if (!window.topoAI || !window.topoAI.dailyGet) { toast('巡检日报定时需要桌面版（Electron）环境'); return; }
+  let cur = null;
+  try { cur = await window.topoAI.dailyGet(); } catch (e) { cur = null; }
+  if (!cur || !cur.ok) { toast('读取定时配置失败'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:480px">
+      <h3>AI 巡检日报 · 定时生成</h3>
+      <div class="m-sub">每天到点自动汇总监控状态、磁盘/内存/负载指标、HTTP 探测与证书剩余天数、近期事件与近 7 天在线率，交 AI 生成中文巡检日报。生成结果保存到「AI ▾ 分析记录」，成功 / 失败均弹系统通知。</div>
+      <div class="frow" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;margin:0"><input id="adOn" type="checkbox"${cur.enabled ? ' checked' : ''}/>启用定时生成</label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0">每天 <input id="adTime" type="time" style="width:104px" value="${U.escHtml(cur.time || '08:00')}"/> 生成</label>
+      </div>
+      <div id="adHint" class="m-sub" style="margin:4px 0 0"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const hint = ov.querySelector('#adHint');
+  const renderHint = (r) => {
+    const bits = [];
+    if (!r.aiReady) bits.push('<span style="color:var(--danger)">尚未配置 AI 服务：请先在「AI ▾ AI 设置」中填写地址与模型名，否则到点会跳过生成</span>');
+    else bits.push('AI 服务已配置。');
+    if (r.enabled && r.nextRun) bits.push('下次生成：' + U.fmtDateTime(new Date(r.nextRun)));
+    hint.innerHTML = bits.join('<br/>');
+  };
+  renderHint(cur);
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=save]').onclick = async () => {
+    const enabled = ov.querySelector('#adOn').checked;
+    const time = ov.querySelector('#adTime').value;
+    if (enabled && !time) { toast('请选择每天的生成时间'); return; }
+    let r;
+    try { r = await window.topoAI.dailySet({ enabled, time }); } catch (e) { r = { ok: false, error: String((e && e.message) || e) }; }
+    if (!r || !r.ok) { toast((r && r.error) || '保存失败'); return; }
+    close();
+    toast(r.enabled ? ('已启用：每天 ' + r.time + ' 自动生成 AI 巡检日报') : '已关闭巡检日报定时生成');
+  };
 }
 
 /** AI 解析主弹窗。kind: 'config'（配置备份）| 'logs'（设备日志）| 'compliance'（合规修复建议）| 'daily'（巡检日报）。

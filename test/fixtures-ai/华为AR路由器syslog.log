@@ -1,0 +1,49 @@
+2026-09-04 00:02:11.384 [info/user] AR-HQ-R1 %%01IFNET/6/IF_STATE(l)[11]:Interface GigabitEthernet0/0/0 has turned into UP state.
+2026-09-04 00:02:14.127 [info/user] AR-HQ-R1 %%01PPP/6/PPP_UP(l)[12]:The PPP session on interface GigabitEthernet0/0/0 is up.
+2026-09-04 00:15:47.902 [notice/user] AR-HQ-R1 %%01LLDP/6/LLDP_NEIGHBOR(l)[13]:Neighbor information changed: ChassisIdType=macAddress, ChassisId=00e0-fc12-3456, PortId=GigabitEthernet0/0/24.
+2026-09-04 01:00:03.551 [info/user] AR-HQ-R1 %%01NTP/6/NTP_SYNC_STATUS(l)[14]:NTP synchronization state changed to synchronized. Server=192.168.10.250, Stratum=3.
+2026-09-04 02:30:29.710 [info/user] AR-HQ-R1 %%01AAA/6/AAA_SUCC(l)[15]:User login succeeded. UserIp=192.168.10.55, UserName=audit, Method=SSH.
+2026-09-04 03:37:52.038 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[16]:Failed to login through SSH. IP=192.168.10.88, UserName=admin, Retry=1.
+2026-09-04 03:37:56.411 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[17]:Failed to login through SSH. IP=192.168.10.88, UserName=admin, Retry=2.
+2026-09-04 03:38:01.845 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[18]:Failed to login through SSH. IP=192.168.10.88, UserName=admin, Retry=3.
+2026-09-04 03:38:09.272 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[19]:Failed to login through SSH. IP=192.168.10.88, UserName=guest, Retry=1.
+2026-09-04 03:38:15.630 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[20]:Failed to login through SSH. IP=192.168.10.88, UserName=guest, Retry=2.
+2026-09-04 03:41:44.198 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[21]:Failed to login through SSH. IP=192.168.10.88, UserName=admin, Retry=4.
+2026-09-04 03:43:27.764 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[22]:Failed to login through SSH. IP=192.168.10.88, UserName=admin, Retry=5.
+2026-09-04 03:44:33.512 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[23]:Failed to login through SSH. IP=192.168.10.88, UserName=admin, Retry=6.
+2026-09-04 03:44:38.905 [warning/user] AR-HQ-R1 %%01SSH/4/SSH_FAIL(l)[24]:Failed to login through SSH. IP=192.168.10.88, UserName=admin, Retry=7.
+2026-09-04 03:45:02.337 [warning/user] AR-HQ-R1 %%01AAA/6/AAA_FAIL(l)[25]:User login failed. UserIp=192.168.10.88, UserName=admin, Method=TELNET.
+2026-09-04 03:45:58.644 [warning/user] AR-HQ-R1 %%01AAA/6/AAA_FAIL(l)[26]:User login failed. UserIp=192.168.10.88, UserName=admin, Method=TELNET.
+2026-09-04 03:46:19.876 [info/user] AR-HQ-R1 %%01SHELL/6/DISPLAY_LOGIN(l)[27]:Login succeeded. LoginIp=192.168.10.88, VtY=1, UserName=admin.
+2026-09-04 03:47:05.210 [warning/user] AR-HQ-R1 %%01CONFIG/4/CFG_CHANGE(l)[28]:The configuration was changed by user admin from 192.168.10.88 (Vty1).
+2026-09-04 03:47:41.553 [info/user] AR-HQ-R1 %%01SHELL/6/CMD_RECORD(l)[29]:[Vty1] user-input: telnet server enable
+2026-09-04 03:48:12.897 [warning/user] AR-HQ-R1 %%01CONFIG/4/CFG_CHANGE(l)[30]:The configuration was changed by user admin from 192.168.10.88 (Vty1).
+2026-09-04 03:48:49.221 [info/user] AR-HQ-R1 %%01SHELL/6/CMD_RECORD(l)[31]:[Vty1] user-input: local-user netops password simple Net0ps@2026
+2026-09-04 03:49:30.578 [notice/audit] AR-HQ-R1 %%01AAA/6/LOCALUSER_ADD(l)[32]:Local user netops is added. Operator=admin.
+2026-09-04 03:50:16.932 [info/user] AR-HQ-R1 %%01CONFIG/6/CONFIG_SAVE(l)[33]:The configuration has been saved successfully by user admin from 192.168.10.88.
+2026-09-04 03:51:44.286 [info/user] AR-HQ-R1 %%01SHELL/6/DISPLAY_LOGOUT(l)[34]:Logout succeeded. LoginIp=192.168.10.88, Vty=1, UserName=admin, Duration=325 seconds.
+2026-09-04 05:00:03.662 [info/user] AR-HQ-R1 %%01NTP/6/NTP_SYNC_STATUS(l)[35]:NTP synchronization state changed to synchronized. Server=192.168.10.250, Stratum=3.
+2026-09-04 06:30:41.095 [info/user] AR-HQ-R1 %%01DHCP/6/DHCP_ALLOC(l)[36]:The server allocated an IP address. IpAddress=192.168.30.107, MacAddress=34-01-3e-aa-bb-07.
+2026-09-04 07:05:18.429 [info/user] AR-HQ-R1 %%01AAA/6/AAA_SUCC(l)[37]:User login succeeded. UserIp=192.168.10.55, UserName=audit, Method=SSH.
+2026-09-04 07:22:55.771 [info/user] AR-HQ-R1 %%01IFNET/6/IF_STATE(l)[38]:Interface GigabitEthernet0/0/2 has turned into UP state.
+2026-09-04 07:23:04.114 [info/user] AR-HQ-R1 %%01OSPF/6/NBR_CHANGE(l)[39]:Neighbor changes: RouterId=1.1.1.1, NbrIpAddr=10.255.0.2, NbrRouterId=2.2.2.2, AreaId=0.0.0.0, IfName=GigabitEthernet0/0/2, NbrState=Full.
+2026-09-04 08:10:37.456 [info/user] AR-HQ-R1 %%01DHCP/6/DHCP_ALLOC(l)[40]:The server allocated an IP address. IpAddress=192.168.10.122, MacAddress=34-01-3e-cc-dd-22.
+2026-09-04 08:35:02.788 [notice/user] AR-HQ-R1 %%01LLDP/6/LLDP_NEIGHBOR(l)[41]:Neighbor information changed: ChassisIdType=macAddress, ChassisId=00e0-fc12-3456, PortId=GigabitEthernet0/0/23.
+2026-09-04 09:10:23.102 [warning/user] AR-HQ-R1 %%01IFNET/4/IF_STATE(l)[42]:Interface GigabitEthernet0/0/2 has turned into DOWN state.
+2026-09-04 09:10:24.330 [err/user] AR-HQ-R1 %%01OSPF/3/NBR_DOWN_REASON(l)[43]:Neighbor state left full or changed to Down. ProcessId=1, NeighborRouterId=2.2.2.2, AreaId=0.0.0.0, IfName=GigabitEthernet0/0/2, Reason=Dead timer expired.
+2026-09-04 09:10:41.655 [info/user] AR-HQ-R1 %%01IFNET/6/IF_STATE(l)[44]:Interface GigabitEthernet0/0/2 has turned into UP state.
+2026-09-04 09:11:02.981 [info/user] AR-HQ-R1 %%01OSPF/6/NBR_CHANGE(l)[45]:Neighbor changes: RouterId=1.1.1.1, NbrIpAddr=10.255.0.2, NbrRouterId=2.2.2.2, AreaId=0.0.0.0, IfName=GigabitEthernet0/0/2, NbrState=Full.
+2026-09-04 09:14:47.306 [warning/user] AR-HQ-R1 %%01IFNET/4/IF_STATE(l)[46]:Interface GigabitEthernet0/0/2 has turned into DOWN state.
+2026-09-04 09:15:05.632 [info/user] AR-HQ-R1 %%01IFNET/6/IF_STATE(l)[47]:Interface GigabitEthernet0/0/2 has turned into UP state.
+2026-09-04 09:16:22.957 [warning/user] AR-HQ-R1 %%01IFNET/4/IF_STATE(l)[48]:Interface GigabitEthernet0/0/2 has turned into DOWN state.
+2026-09-04 09:16:23.284 [err/user] AR-HQ-R1 %%01OSPF/3/NBR_DOWN_REASON(l)[49]:Neighbor state left full or changed to Down. ProcessId=1, NeighborRouterId=2.2.2.2, AreaId=0.0.0.0, IfName=GigabitEthernet0/0/2, Reason=Dead timer expired.
+2026-09-04 09:17:40.611 [info/user] AR-HQ-R1 %%01IFNET/6/IF_STATE(l)[50]:Interface GigabitEthernet0/0/2 has turned into UP state.
+2026-09-04 09:17:58.937 [info/user] AR-HQ-R1 %%01OSPF/6/NBR_CHANGE(l)[51]:Neighbor changes: RouterId=1.1.1.1, NbrIpAddr=10.255.0.2, NbrRouterId=2.2.2.2, AreaId=0.0.0.0, IfName=GigabitEthernet0/0/2, NbrState=Full.
+2026-09-04 09:18:15.262 [warning/user] AR-HQ-R1 %%01IFNET/4/IF_CRC_ERROR(l)[52]:The CRC error rate on interface GigabitEthernet0/0/2 exceeds the threshold. CurrentRate=3.2%, Threshold=1.0%.
+2026-09-04 09:20:36.589 [warning/user] AR-HQ-R1 %%01DEV/4/CPU_BUSY(l)[53]:The CPU is busy. CpuUsage=92%, Duration=35 seconds.
+2026-09-04 09:21:03.914 [info/user] AR-HQ-R1 %%01DEV/6/CPU_RESTORE(l)[54]:The CPU usage is restored. CpuUsage=41%.
+2026-09-04 09:47:20.240 [info/user] AR-HQ-R1 %%01DHCP/6/DHCP_ALLOC(l)[55]:The server allocated an IP address. IpAddress=192.168.30.113, MacAddress=34-01-3e-ee-ff-31.
+2026-09-04 10:02:44.566 [notice/user] AR-HQ-R1 %%01AAA/6/AAA_SUCC(l)[56]:User login succeeded. UserIp=192.168.10.55, UserName=admin, Method=TELNET.
+2026-09-04 10:05:11.891 [info/user] AR-HQ-R1 %%01CONFIG/6/CONFIG_SAVE(l)[57]:The configuration has been saved successfully by user admin from 192.168.10.55.
+2026-09-04 10:18:33.217 [info/user] AR-HQ-R1 %%01NTP/6/NTP_SYNC_STATUS(l)[58]:NTP synchronization state changed to synchronized. Server=192.168.10.250, Stratum=3.
+2026-09-04 10:24:57.543 [info/user] AR-HQ-R1 %%01IFNET/6/IF_STATE(l)[59]:Interface GigabitEthernet0/0/0 has turned into UP state.

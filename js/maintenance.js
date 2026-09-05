@@ -21,10 +21,21 @@ function parseHHMM(s) {
  *  支持跨午夜（from > to，如 22:00~06:00：now >= from 或 now < to）。 */
 function inWindow(nowMin, fromStr, toStr) {
   const f = parseHHMM(fromStr), t = parseHHMM(toStr);
-  if (!f || !t) return false;
+  if (!f || !t) return null;
   const F = f.h * 60 + f.m, T = t.h * 60 + t.m;
   if (F === T) return false;
   return F < T ? (nowMin >= F && nowMin < T) : (nowMin >= F || nowMin < T);
+}
+
+/** 每日定时的下一次触发时间戳：time 形如 '08:30'；晚于 now 当日时刻（含相等）取今天，否则取明天。
+ *  time 非法返回 null。供 AI 巡检日报等每日任务调度使用（与静默窗口同属运维时间策略工具）。 */
+function nextDailyRun(timeStr, now) {
+  const t = parseHHMM(timeStr);
+  if (!t) return null;
+  const n = new Date(Number.isFinite(now) ? now : Date.now());
+  const next = new Date(n.getFullYear(), n.getMonth(), n.getDate(), t.h, t.m, 0, 0);
+  if (next.getTime() <= n.getTime()) next.setDate(next.getDate() + 1);
+  return next.getTime();
 }
 
 class Maintenance {
@@ -86,4 +97,4 @@ class Maintenance {
   }
 }
 
-module.exports = { Maintenance, inWindow, parseHHMM };
+module.exports = { Maintenance, inWindow, parseHHMM, nextDailyRun };

@@ -1,0 +1,51 @@
+2026-09-04 00:17:01.204 [info/cron] prod-app-01 CRON[4121]: (root) CMD (command -v debian-sa1 > /dev/null && debian-sa1 1 1)
+2026-09-04 00:30:02.887 [info/daemon] prod-app-01 smartd[712]: Device: /dev/sda [SAT], SMART Usage Attribute: 194 Temperature_Celsius changed from 112 to 110
+2026-09-04 02:11:47.530 [warning/daemon] prod-app-01 smartd[712]: Device: /dev/sda [SAT], 4 Currently unreadable (pending) sectors
+2026-09-04 02:11:47.912 [warning/daemon] prod-app-01 smartd[712]: Device: /dev/sda [SAT], SMART Prefailure: 1 Reallocated_Sector_Ct changed from 96 to 88
+2026-09-04 03:10:01.243 [info/cron] prod-app-01 CRON[8934]: (root) CMD (/usr/local/bin/app-diskcheck.sh)
+2026-09-04 03:10:01.512 [notice/user] prod-app-01 app-diskcheck[8935]: /var usage 71% (threshold 90%)
+2026-09-04 04:27:33.004 [info/authpriv] prod-app-01 sshd[12045]: Accepted publickey for deploy from 192.168.10.55 port 51022 ssh2: RSA SHA256:8Fj2kQ9xVr4Tn7Lp
+2026-09-04 04:29:58.117 [info/authpriv] prod-app-01 systemd-logind[688]: New session 812 of user deploy.
+2026-09-04 04:30:11.908 [warning/auth] prod-app-01 sshd[13117]: Failed password for invalid user admin from 203.0.113.50 port 41234 ssh2
+2026-09-04 04:30:13.241 [warning/auth] prod-app-01 sshd[13119]: Failed password for invalid user oracle from 203.0.113.50 port 41260 ssh2
+2026-09-04 04:30:14.587 [info/auth] prod-app-01 sshd[13117]: Disconnected from invalid user admin 203.0.113.50 port 41234 [preauth]
+2026-09-04 04:30:15.902 [warning/auth] prod-app-01 sshd[13121]: Failed password for invalid user test from 203.0.113.50 port 41288 ssh2
+2026-09-04 04:30:16.355 [info/auth] prod-app-01 sshd[13121]: Disconnected from invalid user test 203.0.113.50 port 41288 [preauth]
+2026-09-04 06:00:04.721 [info/daemon] prod-app-01 systemd[1]: Starting Daily apt download activities...
+2026-09-04 06:00:05.108 [info/daemon] prod-app-01 systemd[1]: apt-daily.service: Succeeded.
+2026-09-04 08:12:36.554 [notice/user] prod-app-01 app[22190]: [info]: scheduled job 'nightly-report' finished in 3.2s
+2026-09-04 08:40:11.093 [warning/user] prod-app-01 app[22190]: [warn]: heap usage 89% of limit (6.5GiB/7.2GiB), GC pause 412ms
+2026-09-04 08:52:04.661 [warning/user] prod-app-01 app[22190]: [warn]: heap usage 96% of limit (6.9GiB/7.2GiB), GC pause 988ms
+2026-09-04 08:57:40.992 [err/user] prod-app-01 nginx[998]: *88123 connect() failed (111: Connection refused) while connecting to upstream, client: 198.51.100.7, server: api.example.com, request: "GET /api/orders HTTP/1.1", upstream: "http://127.0.0.1:3000/api/orders"
+2026-09-04 08:57:41.220 [err/user] prod-app-01 nginx[998]: *88124 connect() failed (111: Connection refused) while connecting to upstream, client: 198.51.100.9, server: api.example.com, request: "GET /api/users HTTP/1.1", upstream: "http://127.0.0.1:3000/api/users"
+2026-09-04 08:57:41.385 [crit/kernel] prod-app-01 kernel: Out of memory: Killed process 23117 (node) total-vm:8123456kB, anon-rss:7412568kB, rank: highest
+2026-09-04 08:57:41.542 [info/kernel] prod-app-01 kernel: oom_reaper: reaped process 23117 (node), now anon-rss:0kB
+2026-09-04 08:57:42.101 [err/daemon] prod-app-01 systemd[1]: app.service: Main process exited, code=killed, status=9/KILL
+2026-09-04 08:57:42.103 [warning/daemon] prod-app-01 systemd[1]: app.service: Failed with result 'oom-kill'.
+2026-09-04 08:57:52.614 [notice/daemon] prod-app-01 systemd[1]: app.service: Scheduled restart job, restart counter is at 1.
+2026-09-04 08:58:20.437 [notice/daemon] prod-app-01 systemd[1]: Started App backend service.
+2026-09-04 08:58:55.802 [err/daemon] prod-app-01 systemd[1]: app.service: Main process exited, code=exited, status=137/n/a
+2026-09-04 08:58:56.115 [notice/daemon] prod-app-01 systemd[1]: app.service: Scheduled restart job, restart counter is at 2.
+2026-09-04 08:59:33.428 [err/daemon] prod-app-01 systemd[1]: app.service: Main process exited, code=exited, status=137/n/a
+2026-09-04 08:59:33.741 [notice/daemon] prod-app-01 systemd[1]: app.service: Scheduled restart job, restart counter is at 3.
+2026-09-04 09:00:12.054 [err/user] prod-app-01 nginx[998]: *88201 upstream timed out (110: Connection timed out) while reading response header from upstream, client: 198.51.100.12, server: api.example.com, request: "POST /api/checkout HTTP/1.1", upstream: "http://127.0.0.1:3000/api/checkout"
+2026-09-04 09:00:16.389 [err/daemon] prod-app-01 systemd[1]: app.service: Main process exited, code=exited, status=137/n/a
+2026-09-04 09:00:16.702 [notice/daemon] prod-app-01 systemd[1]: app.service: Scheduled restart job, restart counter is at 4.
+2026-09-04 09:01:02.027 [err/daemon] prod-app-01 systemd[1]: app.service: Main process exited, code=exited, status=137/n/a
+2026-09-04 09:01:02.340 [notice/daemon] prod-app-01 systemd[1]: app.service: Scheduled restart job, restart counter is at 5.
+2026-09-04 09:02:18.455 [err/kernel] prod-app-01 kernel: EXT4-fs error (device sda1): ext4_find_entry:1671: inode #2883621: comm app: reading directory lblock 0
+2026-09-04 09:02:19.118 [warning/kernel] prod-app-01 kernel: Buffer I/O error on dev sda1, logical block 5767242, async page read
+2026-09-04 09:03:10.771 [notice/user] prod-app-01 app-diskcheck[20194]: /var usage 93% (threshold 90%)
+2026-09-04 09:28:44.902 [info/authpriv] prod-app-01 sshd[24501]: Accepted publickey for deploy from 192.168.10.55 port 52440 ssh2: RSA SHA256:8Fj2kQ9xVr4Tn7Lp
+2026-09-04 09:29:01.334 [notice/authpriv] prod-app-01 sudo: deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/usr/bin/journalctl --vacuum-size=500M
+2026-09-04 09:31:47.668 [notice/authpriv] prod-app-01 sudo: deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/usr/bin/systemctl restart app
+2026-09-04 09:31:48.102 [info/daemon] prod-app-01 systemd[1]: Stopped App backend service.
+2026-09-04 09:31:49.355 [info/daemon] prod-app-01 systemd[1]: Started App backend service.
+2026-09-04 09:32:20.628 [info/user] prod-app-01 app[25410]: [info]: server listening on :3000, pid=25410, heap 210MiB
+2026-09-04 09:32:21.073 [info/user] prod-app-01 nginx[998]: *88457 upstream resumed successfully for api.example.com
+2026-09-04 09:41:53.447 [notice/user] prod-app-01 app-diskcheck[26881]: /var usage 61% (threshold 90%)
+2026-09-04 10:02:09.772 [warning/daemon] prod-app-01 smartd[712]: Device: /dev/sda [SAT], 4 Currently unreadable (pending) sectors (unchanged)
+2026-09-04 10:17:01.205 [info/cron] prod-app-01 CRON[28902]: (root) CMD (command -v debian-sa1 > /dev/null && debian-sa1 1 1)
+2026-09-04 10:45:33.531 [info/authpriv] prod-app-01 systemd-logind[688]: Session 812 logged out. Waiting for processes to exit.
+2026-09-04 11:05:47.854 [info/user] prod-app-01 app[25410]: [info]: scheduled job 'hourly-sync' finished in 1.8s
+2026-09-04 11:18:12.207 [notice/user] prod-app-01 app-diskcheck[29554]: /var usage 62% (threshold 90%)

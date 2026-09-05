@@ -69,8 +69,62 @@ function parseBookmarkList(json) {
   if (!Array.isArray(arr)) return [];
   return arr.map(sanitizeBookmark).filter(Boolean).slice(0, 100);
 }
+/** 模糊匹配评分（快速命令面板用，纯函数）：不区分大小写。
+ *  前缀 > 词首 > 连续子串 > 子序列（按跳跃扣分）；不匹配返回 null。 */
+function fuzzyScore(query, text) {
+  const q = String(query == null ? '' : query).trim().toLowerCase();
+  const s = String(text == null ? '' : text).toLowerCase();
+  if (!q) return 0;
+  if (!s) return null;
+  const idx = s.indexOf(q);
+  if (idx === 0) return 160;                       // 前缀
+  if (idx > 0) {
+    const boundary = /[\s:：/\\\][(_\-@|]/.test(s[idx - 1]);
+    return (boundary ? 140 : 100) - Math.min(idx, 30); // 词首优先于普通子串，越靠前越好
+  }
+  // 子序列：逐字符跳跃匹配，累计跳跃距离扣分
+  let si = 0, gaps = 0, matched = 0;
+  for (let qi = 0; qi < q.length; qi++) {
+    const found = s.indexOf(q[qi], si);
+    if (found < 0) return null;
+    gaps += found - si;
+    si = found + 1;
+    matched++;
+  }
+  return Math.max(1, 60 - gaps - (q.length - matched));
+}
+/** 命令历史合并（纯函数）：同文本频次 +1 并刷新时间，按频次/新近排序，超容量淘汰末尾。
+ *  并列决胜用随条目持久化的单调 seq（数组下标每轮裁剪后语义反转，不可用）：
+ *  同频且同时刻（同毫秒批量下发的命令）时后写入者靠前，保证淘汰的永远是最旧项。 */
+function mergeCmdHistory(list, text, cap) {
+  const t = String(text == null ? '' : text).replace(/\r|\n/g, ' ').trim();
+  const src = Array.isArray(list) ? list : [];
+  if (!t) return src.slice();
+  const prev = src.find(x => x && typeof x.text === 'string' && x.text === t);
+  const merged = src.filter(x => x && typeof x.text === 'string' && x.text !== t)
+    .map(x => ({ text: x.text, n: Math.max(1, Math.floor(Number(x.n) || 1)), at: Number(x.at) || 0, seq: Math.floor(Number(x.seq) || 0) }));
+  mergeCmdHistory._seq = (mergeCmdHistory._seq || 0) + 1;
+  merged.push({ text: t.slice(0, 512), n: (prev ? Math.floor(Number(prev.n) || 1) : 0) + 1, at: Date.now(), seq: mergeCmdHistory._seq });
+  merged.sort((a, b) => (b.n - a.n) || (b.at - a.at) || (b.seq - a.seq));
+  return merged.slice(0, Math.max(1, Math.floor(cap) || 60)).map(x => ({ text: x.text, n: x.n, at: x.at, seq: x.seq }));
+}
+/** 恢复条目去重合并（纯函数，标签恢复列表用）：同键（协议|宿主|端口|用户）移到末尾；
+ *  新条目密文为空时保留原密文（重连未带密码不得抹掉已存凭据）；超容量淘汰最旧。 */
+function upsertRestoreEntry(list, entry, cap) {
+  const clean = sanitizeBookmark(entry);
+  if (!clean) return Array.isArray(list) ? list.slice() : [];
+  const rest = (Array.isArray(list) ? list : []).filter(x => bookmarkKey(x) !== bookmarkKey(clean));
+  const prev = (Array.isArray(list) ? list : []).find(x => bookmarkKey(x) === bookmarkKey(clean));
+  if (prev) {
+    if (!clean.passwordEnc && prev.passwordEnc) clean.passwordEnc = prev.passwordEnc;
+    if (clean.jump && prev.jump && prev.jump.passwordEnc && !clean.jump.passwordEnc) clean.jump.passwordEnc = prev.jump.passwordEnc;
+    if (!clean.name && prev.name) clean.name = prev.name;
+  }
+  rest.push(clean);
+  return rest.slice(Math.max(0, rest.length - (Math.floor(cap) || 24)));
+}
 (function () {
-  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs, parseRecording, sanitizeBookmark, bookmarkKey, parseBookmarkList }; return; } // Node 测试直取纯函数
+  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs, parseRecording, sanitizeBookmark, bookmarkKey, parseBookmarkList, fuzzyScore, mergeCmdHistory, upsertRestoreEntry }; return; } // Node 测试直取纯函数
   if (!window.topoShell) {
     // 浏览器直接打开本页：给出明确提示（否则空状态不显示、按钮无响应，整页死白）
     const e = document.getElementById('shEmpty');
@@ -262,11 +316,15 @@ function parseBookmarkList(json) {
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
+    const search = new SearchAddon.SearchAddon();
+    term.loadAddon(search);
     term.open(termEl);
-    const rec = { tabEl, wrapEl, term, fit, dotEl: tabEl.querySelector('.dot'), castEl: tabEl.querySelector('.cast'), ended: false, buf: [], rcBar, rcReason, rcBtn,
-      meta: { host: info.host || '', port: info.port || '', username: info.username || '', deviceName: info.deviceName || '', protocol: info.protocol || '' } };
+    const rec = { tabEl, wrapEl, term, fit, search, dotEl: tabEl.querySelector('.dot'), castEl: tabEl.querySelector('.cast'), ended: false, buf: [], rcBar, rcReason, rcBtn,
+      meta: { host: info.host || '', port: info.port || '', username: info.username || '', deviceName: info.deviceName || '', protocol: info.protocol || '', encoding: info.encoding || 'utf8' } };
     rcBtn.addEventListener('click', (e) => { e.stopPropagation(); reconnectNow(rec); });
     sessions.set(sid, rec);
+    // 标签恢复登记：保存连接元数据 + DPAPI 密文凭据（同名书签已存密文自动回填）
+    upsertRestore({ protocol: info.protocol, host: info.host, port: info.port, username: info.username, encoding: info.encoding, name: info.deviceName, pwdEnc: info.pwdEnc, jumpPwdEnc: info.jumpPwdEnc, jump: info.jump });
     term.write('\x1b[33m正在连接 ' + bannerText(info.title || sid) + ' …\r\n\x1b[0m');
     for (const item of rec.buf.splice(0)) {
       if (item[0] === 'out') term.write(item[1]);
@@ -294,6 +352,16 @@ function parseBookmarkList(json) {
     activate(sid);
     if (castMode && !rec.ended) castSel.add(sid); // 群发模式下新建的标签默认参与
     refreshCastCount();
+    // 搜索结果计数：仅当搜索条打开且本标签为活动标签时更新
+    if (search && search.onDidChangeResults) {
+      search.onDidChangeResults((res) => {
+        if (!shSearchEl || shSearchEl.classList.contains('hidden')) return;
+        const a = activeSession();
+        if (!a || a.id !== sid) return;
+        shSearchCountEl.textContent = !res.resultCount ? '无匹配'
+          : (res.resultIndex < 0 ? '?' : (res.resultIndex + 1)) + ' / ' + res.resultCount;
+      });
+    }
     requestAnimationFrame(fitResize);
     return rec;
   }
@@ -309,6 +377,10 @@ function parseBookmarkList(json) {
           window.topoShell.resize(id, s.term.cols, s.term.rows);
           s.term.focus();
         });
+        // 搜索条打开时切换标签：对新的活动标签重新执行当前搜索
+        if (shSearchEl && !shSearchEl.classList.contains('hidden') && shSearchInputEl.value) {
+          try { doSearch('next'); } catch (e) { /* ignore */ }
+        }
       }
     }
     if (typeof sftpSyncToActive === 'function' && sftpPanelEl && !sftpPanelEl.classList.contains('hidden')) sftpSyncToActive();
@@ -319,6 +391,7 @@ function parseBookmarkList(json) {
     if (!s) return;
     // 始终通知主进程关闭：活动会话关闭连接；已结束会话清理其建连参数（防内存留凭据副本）
     window.topoShell.close(sid);
+    removeRestoreEntry(s.meta); // 显式关闭标签：从恢复列表移除，下次开窗不再重连
     s.tabEl.remove();
     s.wrapEl.remove();
     try { if (s.fit && s.fit.dispose) s.fit.dispose(); } catch (e) { /* ignore */ }
@@ -383,6 +456,7 @@ function parseBookmarkList(json) {
     if (!targets.length) { toast('请先勾选要群发的标签'); return; }
     const text = castInputEl ? castInputEl.value : '';
     if (!text.trim()) { toast('请输入要群发的内容'); return; }
+    recordCmd(text); // 历史命令：群发内容进入命令面板候选
     for (const id of targets) {
       (async () => {
         const s = sessions.get(id);
@@ -881,6 +955,61 @@ function parseBookmarkList(json) {
     }
   }
 
+  /* ---- 终端搜索（Ctrl+F 呼出：即输即搜、Enter/Shift+Enter 上下导航、结果计数） ---- */
+  const shSearchEl = $('#shSearch'), shSearchBtnEl = $('#shSearchBtn'),
+        shSearchInputEl = $('#shSearchInput'), shSearchCountEl = $('#shSearchCount');
+  const SEARCH_DECO = { // 高亮配色按终端深色主题定值（SearchAddon 要求 #RRGGBB）
+    matchBackground: '#31456b', matchBorder: '#5a7ab5', matchOverviewRuler: '#5a7ab5',
+    activeMatchBackground: '#8a5a2b', activeMatchBorder: '#e8a04b', activeMatchColorOverviewRuler: '#e8a04b'
+  };
+  const activeSearchAddon = () => {
+    const a = activeSession();
+    return (a && a.s.search) ? a.s.search : null;
+  };
+  const setSearchOpen = (on) => {
+    if (!shSearchEl) return;
+    shSearchEl.classList.toggle('hidden', !on);
+    if (on) {
+      shSearchInputEl.focus();
+      shSearchInputEl.select();
+      if (shSearchInputEl.value) doSearch('next');
+      else if (shSearchCountEl) shSearchCountEl.textContent = '';
+    } else {
+      const addon = activeSearchAddon();
+      if (addon) { try { addon.clearDecorations(); } catch (e) { /* ignore */ } }
+      if (shSearchCountEl) shSearchCountEl.textContent = '';
+      const a = activeSession();
+      if (a && a.s.term) { try { a.s.term.focus(); } catch (e) { /* ignore */ } }
+    }
+  };
+  const doSearch = (dir) => {
+    if (!shSearchEl || shSearchEl.classList.contains('hidden')) return;
+    const addon = activeSearchAddon();
+    if (!addon) { if (shSearchCountEl) shSearchCountEl.textContent = '无活动会话'; return; }
+    const q = shSearchInputEl.value;
+    if (!q) {
+      try { addon.clearDecorations(); } catch (e) { /* ignore */ }
+      if (shSearchCountEl) shSearchCountEl.textContent = '';
+      return;
+    }
+    try {
+      if (dir === 'prev') addon.findPrevious(q, { decorations: SEARCH_DECO });
+      else addon.findNext(q, { decorations: SEARCH_DECO });
+    } catch (e) { if (shSearchCountEl) shSearchCountEl.textContent = '搜索失败'; }
+  };
+  function wireSearch() {
+    if (!shSearchEl) return;
+    if (shSearchBtnEl) shSearchBtnEl.onclick = () => setSearchOpen(shSearchEl.classList.contains('hidden'));
+    shSearchInputEl.addEventListener('input', () => doSearch('next')); // 即输即搜（增量高亮由 addon 处理）
+    shSearchInputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); doSearch(e.shiftKey ? 'prev' : 'next'); }
+      else if (e.key === 'Escape') { e.stopPropagation(); setSearchOpen(false); }
+    });
+    $('#shSearchPrev').onclick = () => doSearch('prev');
+    $('#shSearchNext').onclick = () => doSearch('next');
+    $('#shSearchClose').onclick = () => setSearchOpen(false);
+  }
+
   /* ---- 复制 / 粘贴 ---- */
   const copySelection = (s) => {
     try { const sel = s.term.getSelection(); if (sel) window.topoShell.copyText(sel); } catch (e) { /* ignore */ }
@@ -992,6 +1121,7 @@ function parseBookmarkList(json) {
       const s = sessions.get(sid);
       if (!s || s.ended) { toast('会话已断开，剩余命令未下发'); break; }
       window.topoShell.sendData(sid, c + '\r');
+      recordCmd(c); // 历史命令：AI 生成并实际下发的命令进入命令面板候选
       sent++;
       if (sent < cmds.length) await new Promise((r) => setTimeout(r, 400));
     }
@@ -1140,6 +1270,7 @@ function parseBookmarkList(json) {
     const a = activeSession();
     if (!a) { toast('当前没有活动会话'); return; }
     if (a.s.ended) { toast('会话已结束'); return; }
+    recordCmd(b.text); // 历史命令：快捷按钮内容进入命令面板候选
     const parts = parseSendText(substituteVars(b.text, a.s.meta)); // 按当前会话设备变量替换
     if (b.enter) parts.push({ type: 'text', data: '\r' });
     for (const p of parts) {
@@ -1313,6 +1444,138 @@ function parseBookmarkList(json) {
     });
   }
 
+  /* ---- 标签恢复（窗口重开后自动重连上次的连接；凭据为 DPAPI 密文，仅本机当前用户可解密） ---- */
+  const RESTORE_KEY = 'topoShellRestore';
+  const RESTORE_CAP = 24;
+  const loadRestoreList = () => { try { return parseBookmarkList(localStorage.getItem(RESTORE_KEY)).slice(0, RESTORE_CAP); } catch (e) { return []; } };
+  const saveRestoreList = (list) => { try { localStorage.setItem(RESTORE_KEY, JSON.stringify(list.slice(0, RESTORE_CAP))); } catch (e) { /* ignore */ } };
+  const removeRestoreEntry = (meta) => {
+    saveRestoreList(loadRestoreList().filter(x => bookmarkKey(x) !== bookmarkKey(meta)));
+  };
+  /** 连接建立时登记恢复条目：密文优先取连接透传的 pwdEnc，其次回填同名书签已存的密文 */
+  const upsertRestore = (info) => {
+    if (!info || !info.host) return;
+    const keyProbe = { protocol: info.protocol, host: info.host, port: info.port, username: info.username };
+    const bm = loadBookmarks().find(x => bookmarkKey(x) === bookmarkKey(keyProbe));
+    const jumpMeta = (info.jump && info.jump.host) ? { host: info.jump.host, port: info.jump.port, username: info.jump.username } : (bm && bm.jump && bm.jump.host ? { host: bm.jump.host, port: bm.jump.port, username: bm.jump.username } : null);
+    saveRestoreList(upsertRestoreEntry(loadRestoreList(), {
+      protocol: info.protocol, host: info.host, port: info.port, username: info.username,
+      encoding: info.encoding || 'utf8',
+      name: info.deviceName || '',
+      passwordEnc: info.pwdEnc || (bm ? bm.passwordEnc : ''),
+      jump: jumpMeta ? Object.assign(jumpMeta, { passwordEnc: info.jumpPwdEnc || (bm && bm.jump ? bm.jump.passwordEnc : '') }) : null
+    }, RESTORE_CAP));
+  };
+  const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+  /** 窗口打开时恢复上次的连接：逐个错峰发起（300ms），避免多台设备同时握手 */
+  async function restoreAtStartup() {
+    const list = loadRestoreList();
+    if (!list.length) return;
+    toast('正在恢复上次的 ' + list.length + ' 个连接…');
+    let okc = 0;
+    for (const entry of list) {
+      try { if (await connectBookmark(entry)) okc++; } catch (e) { /* 单个失败不影响其余 */ }
+      await sleepMs(300);
+    }
+    if (sessions.size) toast('已恢复 ' + okc + '/' + list.length + ' 个连接（关闭标签即不再恢复）');
+  }
+
+  /* ---- 快速命令面板（Ctrl+P）：快捷按钮 / 连接书签 / 历史命令，模糊搜索回车执行 ---- */
+  const CMDH_KEY = 'topoShellCmdHistory';
+  const CMDH_CAP = 60;
+  let cmdHistory = (() => {
+    try {
+      const a = JSON.parse(localStorage.getItem(CMDH_KEY) || '[]');
+      return Array.isArray(a) ? a.filter(x => x && typeof x.text === 'string' && x.text).slice(0, CMDH_CAP) : [];
+    } catch (e) { return []; }
+  })();
+  const saveCmdHistory = () => { try { localStorage.setItem(CMDH_KEY, JSON.stringify(cmdHistory)); } catch (e) { /* ignore */ } };
+  const recordCmd = (text) => { cmdHistory = mergeCmdHistory(cmdHistory, text, CMDH_CAP); saveCmdHistory(); };
+  const palEl = $('#shPal'), palInputEl = $('#shPalInput'), palListEl = $('#shPalList');
+  let palItems = [], palSel = 0;
+  /** 发送原始文本到当前会话（面板「命令」项执行入口，与快捷按钮同通道） */
+  const sendTextToActive = async (text) => {
+    const a = activeSession();
+    if (!a) { toast('当前没有活动会话'); return; }
+    if (a.s.ended) { toast('会话已结束'); return; }
+    const parts = parseSendText(substituteVars(text, a.s.meta));
+    parts.push({ type: 'text', data: '\r' });
+    for (const p of parts) {
+      if (a.s.ended) return;
+      if (p.type === 'pause') await sleepMs(p.ms);
+      else window.topoShell.sendData(a.id, p.data);
+    }
+  };
+  const buildPaletteItems = () => {
+    const btns = buttons.map(b => ({ cat: '按钮', label: b.label || String(b.text).split(/\r?\n/)[0].slice(0, 32), sub: b.text, act: () => sendBtn(b) }));
+    const bms = loadBookmarks().map(b => ({ cat: '书签', label: b.name || (b.host + ':' + b.port), sub: b.protocol.toUpperCase() + ' ' + b.host + ':' + b.port + ' · ' + b.username + (b.encoding === 'gbk' ? ' · GBK' : ''), act: () => connectBookmark(b) }));
+    const cmds = cmdHistory.slice(0, 20).map(h => ({ cat: '命令', label: h.text, sub: '已用 ' + h.n + ' 次', act: () => sendTextToActive(h.text) }));
+    return btns.concat(bms, cmds);
+  };
+  const renderPalList = () => {
+    if (!palListEl) return;
+    if (!palItems.length) {
+      palListEl.innerHTML = '<div class="sh-pal-empty">无匹配项：输入关键字搜索快捷按钮 / 书签 / 历史命令</div>';
+      return;
+    }
+    palSel = Math.max(0, Math.min(palSel, palItems.length - 1));
+    palListEl.innerHTML = palItems.map((it, i) => `
+      <div class="sh-pal-item${i === palSel ? ' sel' : ''}" data-i="${i}">
+        <span class="sh-pal-cat c-${it.cat === '按钮' ? 'btn' : it.cat === '书签' ? 'bm' : 'cmd'}">${it.cat}</span>
+        <span class="sh-pal-label">${escAttr(it.label)}</span>
+        <span class="sh-pal-sub">${escAttr(it.sub || '')}</span>
+      </div>`).join('');
+    const sel = palListEl.querySelector('.sel');
+    if (sel) sel.scrollIntoView({ block: 'nearest' });
+    palListEl.querySelectorAll('.sh-pal-item').forEach(el => {
+      el.onclick = () => { palSel = parseInt(el.dataset.i, 10) || 0; executePal(); };
+      el.onpointerenter = () => { palSel = parseInt(el.dataset.i, 10) || 0; palListEl.querySelectorAll('.sh-pal-item.sel').forEach(x => x.classList.remove('sel')); el.classList.add('sel'); };
+    });
+  };
+  const renderPal = () => {
+    const all = buildPaletteItems();
+    const q = palInputEl ? palInputEl.value.trim() : '';
+    if (!q) { palItems = all.slice(0, 30); }
+    else {
+      palItems = all.map(it => {
+        const s1 = fuzzyScore(q, it.label), s2 = fuzzyScore(q, it.sub || '');
+        const sc = (s1 != null ? s1 : (s2 != null ? s2 - 40 : null));
+        return { it, sc };
+      }).filter(x => x.sc != null).sort((a, b) => b.sc - a.sc).slice(0, 30).map(x => x.it);
+    }
+    palSel = 0;
+    renderPalList();
+  };
+  const openPal = () => {
+    if (!palEl) return;
+    palEl.classList.remove('hidden');
+    if (palInputEl) { palInputEl.value = ''; renderPal(); setTimeout(() => { if (palInputEl) palInputEl.focus(); }, 30); }
+  };
+  const closePal = () => {
+    if (!palEl) return;
+    palEl.classList.add('hidden');
+    const a = activeSession();
+    if (a && a.s.term) { try { a.s.term.focus(); } catch (e) { /* ignore */ } }
+  };
+  const executePal = () => {
+    const it = palItems[palSel];
+    closePal();
+    if (it && it.act) setTimeout(() => { it.act(); }, 60);
+  };
+  function wirePalette() {
+    if (!palEl) return;
+    palEl.addEventListener('pointerdown', (e) => { if (e.target === palEl) closePal(); });
+    if (palInputEl) {
+      palInputEl.addEventListener('input', renderPal);
+      palInputEl.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') { e.preventDefault(); palSel = Math.min(palSel + 1, palItems.length - 1); renderPalList(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); palSel = Math.max(palSel - 1, 0); renderPalList(); }
+        else if (e.key === 'Enter') { e.preventDefault(); executePal(); }
+        else if (e.key === 'Escape') { e.stopPropagation(); closePal(); }
+      });
+    }
+  }
+
   /* ---- 新建连接对话框（窗口内直接发起连接） ---- */
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem('topoShellCfg') || 'null'); } catch (e) { saved = null; }
@@ -1425,6 +1688,17 @@ function parseBookmarkList(json) {
       }
       try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
+      // 标签恢复登记用：密码加密为 DPAPI 密文随建连参数透传（明文不落盘）
+      try {
+        if (cfg.password && window.topoSecure && window.topoSecure.encryptSecret) {
+          const r = await window.topoSecure.encryptSecret(cfg.password);
+          if (r && r.ok && r.cipher) cfg.pwdEnc = r.cipher;
+        }
+        if (cfg.jump && cfg.jump.password && window.topoSecure && window.topoSecure.encryptSecret) {
+          const rj = await window.topoSecure.encryptSecret(cfg.jump.password);
+          if (rj && rj.ok && rj.cipher) cfg.jumpPwdEnc = rj.cipher;
+        }
+      } catch (e) { /* 加密失败仅影响恢复列表 */ }
       try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username, encoding: cfg.encoding })); } catch (e) {}
       // 保存为书签（同键覆盖；勾选「记住密码」时密码经 DPAPI 加密后保存）
       if (ov.querySelector('#wsSaveBm').checked) {
@@ -1502,6 +1776,12 @@ function parseBookmarkList(json) {
     // SFTP 文件面板
     wireSftp();
 
+    // 终端搜索
+    wireSearch();
+
+    // 快速命令面板
+    wirePalette();
+
     // 连接书签
     if (bmBtnEl) bmBtnEl.onclick = openBookmarks;
 
@@ -1528,6 +1808,8 @@ function parseBookmarkList(json) {
       // 弹窗输入框内不拦截快捷键
       if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#modalRoot')) return;
       const k = (e.key || '').toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && k === 'f') { e.preventDefault(); setSearchOpen(true); return; } // 终端搜索
+      if ((e.ctrlKey || e.metaKey) && k === 'p') { e.preventDefault(); if (palEl && !palEl.classList.contains('hidden')) closePal(); else openPal(); return; } // 快速命令面板
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && k === 'c') { e.preventDefault(); const a = activeSession(); if (a) copySelection(a.s); return; }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && k === 'v') { e.preventDefault(); const a = activeSession(); if (a) pasteTo(a.s); return; }
       if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_')) { e.preventDefault(); setFontSize(-1); return; }
@@ -1542,6 +1824,8 @@ function parseBookmarkList(json) {
       }
     });
     if (sessions.size === 0) emptyEl.classList.remove('hidden');
+    // 标签恢复：窗口打开后自动重连上次的连接（错峰发起）
+    restoreAtStartup();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

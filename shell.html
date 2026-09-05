@@ -22,6 +22,7 @@
   <button id="shCastBtn" class="sh-cast-btn" title="多标签命令广播（SecureCRT Chat Window 模式）：勾选标签后，一条命令同时下发">⇉ 群发</button>
   <button id="shSftpBtn" class="sh-cast-btn" title="文件（SFTP）：浏览当前 SSH 会话的远程目录，上传 / 下载 / 重命名 / 删除（Telnet 会话不支持）">⇅ 文件</button>
   <button id="shBmBtn" class="sh-cast-btn" title="连接书签：保存的常用连接，双击即连（协议/地址/账号/编码，可记住密码）">☆ 书签</button>
+  <button id="shSearchBtn" class="sh-cast-btn" title="终端搜索（Ctrl+F）：在当前标签的终端缓冲区中查找并高亮">🔍 搜索</button>
   <button id="shRecBtn" class="sh-cast-btn" title="会话录制：把当前所有标签的终端输出录制成 JSONL 录像（含时间戳，可回放）">⏺ 录制</button>
   <button id="shRecPlayBtn" class="sh-cast-btn" title="回放录像：选择已录制的会话录像，按原速/倍速回放">▶ 回放</button>
   <button id="shAiBtn" class="sh-cast-btn" title="AI 命令助手：输入自然语言需求，由 AI 生成命令并按所选权限模式在当前连接的终端上执行">✦ AI 助手</button>
@@ -29,6 +30,22 @@
 </header>
 
 <main id="shTerms" class="sh-terms"></main>
+
+<div id="shSearch" class="sh-search hidden" title="终端搜索：即输即搜，Enter / ↓ 下一个，Shift+Enter / ↑ 上一个，Esc 关闭">
+  <span class="sh-cast-tag">搜索</span>
+  <input id="shSearchInput" type="text" placeholder="在终端缓冲区中查找…" autocomplete="off" spellcheck="false"/>
+  <span id="shSearchCount" class="sh-search-count"></span>
+  <button id="shSearchPrev" class="sh-sftp-ib" title="上一个（Shift+Enter / ↑）">↑</button>
+  <button id="shSearchNext" class="sh-sftp-ib" title="下一个（Enter / ↓）">↓</button>
+  <button id="shSearchClose" class="sh-sftp-ib" title="关闭（Esc）">✕</button>
+</div>
+
+<div id="shPal" class="sh-pal hidden" title="快速命令面板（Ctrl+P）：快捷按钮 / 连接书签 / 历史命令，模糊搜索回车执行">
+  <div class="sh-pal-box">
+    <input id="shPalInput" type="text" placeholder="搜索快捷按钮 / 书签 / 历史命令…（Enter 执行，↑↓ 选择，Esc 关闭）" autocomplete="off" spellcheck="false"/>
+    <div id="shPalList" class="sh-pal-list"></div>
+  </div>
+</div>
 
 <div id="shCast" class="sh-cast hidden" title="多标签命令广播：勾选标签后，这里输入的命令同时发送到全部勾选的标签">
   <span class="sh-cast-tag">群发</span>
@@ -106,6 +123,7 @@
 
 <script src="lib/xterm.js?v=20260906a"></script>
 <script src="lib/xterm-addon-fit.js?v=20260906a"></script>
+<script src="lib/xterm-addon-search.js?v=20260906a"></script>
 <script src="js/shell-ui.js?v=20260906a"></script>
 </body>
 </html>
