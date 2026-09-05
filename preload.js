@@ -163,6 +163,9 @@ contextBridge.exposeInMainWorld('topoAI', {
   analyze: (p) => ipcRenderer.invoke('ai:analyze', p),
   shellChat: (p) => ipcRenderer.invoke('ai:shell-chat', p),
   cancel: () => ipcRenderer.invoke('ai:cancel'),
+  /* 巡检日报定时生成（默认关闭；到点主进程自动生成并存入分析记录） */
+  dailyGet: () => ipcRenderer.invoke('ai:daily-get'),
+  dailySet: (p) => ipcRenderer.invoke('ai:daily-set', p),
   historyList: () => ipcRenderer.invoke('ai:history-list'),
   historyRead: (name) => ipcRenderer.invoke('ai:history-read', { name }),
   historyRemove: (name) => ipcRenderer.invoke('ai:history-remove', { name }),

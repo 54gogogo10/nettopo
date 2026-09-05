@@ -1,0 +1,43 @@
+[2026-09-04 09:30:02] >> uptime && free -m && df -h
+[2026-09-04 09:30:02]  09:30:02 up 147 days,  3:12,  2 users,  load average: 4.87, 2.31, 1.05
+[2026-09-04 09:30:02]               total        used        free      shared  buff/cache   available
+[2026-09-04 09:30:02] Mem:            7910        7422         105          38         382          95
+[2026-09-04 09:30:02] Swap:          2047        1877         170
+[2026-09-04 09:30:02] Filesystem      Size  Used Avail Use% Mounted on
+[2026-09-04 09:30:02] /dev/sda1        78G   71G  3.1G  93% /
+[2026-09-04 09:30:02] tmpfs           3.9G     0  3.9G   0% /dev/shm
+[2026-09-04 09:30:05] >> systemctl status app --no-pager | head -12
+[2026-09-04 09:30:05] * app.service - App backend service
+[2026-09-04 09:30:05]      Loaded: loaded (/etc/systemd/system/app.service; enabled; vendor preset: enabled)
+[2026-09-04 09:30:05]      Active: active (running) since Tue 2026-09-04 09:01:03 CST; 28min ago
+[2026-09-04 09:30:05]    Main PID: 22190 (node)
+[2026-09-04 09:30:05]      Memory: 6.9G (peak: 7.1G)
+[2026-09-04 09:30:05]      Tasks: 41 (limit: 4915)
+[2026-09-04 09:30:09] >> journalctl -u app --since "-3 hours" --no-pager | grep -E "restart|oom|KILL|Failed" | tail -10
+[2026-09-04 09:30:09] Sep 04 08:57:42 prod-app-01 systemd[1]: app.service: Main process exited, code=killed, status=9/KILL
+[2026-09-04 09:30:09] Sep 04 08:57:42 prod-app-01 systemd[1]: app.service: Failed with result 'oom-kill'.
+[2026-09-04 09:30:09] Sep 04 08:58:55 prod-app-01 systemd[1]: app.service: Main process exited, code=exited, status=137/n/a
+[2026-09-04 09:30:09] Sep 04 09:00:16 prod-app-01 systemd[1]: app.service: Scheduled restart job, restart counter is at 4.
+[2026-09-04 09:30:09] Sep 04 09:01:02 prod-app-01 systemd[1]: app.service: Main process exited, code=exited, status=137/n/a
+[2026-09-04 09:30:09] Sep 04 09:01:02 prod-app-01 systemd[1]: app.service: Scheduled restart job, restart counter is at 5.
+[2026-09-04 09:30:12] >> smartctl -H /dev/sda 2>/dev/null | tail -3
+[2026-09-04 09:30:12] SMART overall-health self-assessment test result: PASSED
+[2026-09-04 09:30:12] Note: 4 pending sectors detected, see smartd log for details
+[2026-09-04 11:00:02] >> uptime && free -m && df -h
+[2026-09-04 11:00:02]  11:00:02 up 147 days,  4:42,  1 user,  load average: 0.52, 0.68, 1.42
+[2026-09-04 11:00:02]               total        used        free      shared  buff/cache   available
+[2026-09-04 11:00:02] Mem:            7910        3245        3312           38        1352        4320
+[2026-09-04 11:00:02] Swap:          2047         120        1927
+[2026-09-04 11:00:02] Filesystem      Size  Used Avail Use% Mounted on
+[2026-09-04 11:00:02] /dev/sda1        78G   46G  28.1G  62% /
+[2026-09-04 11:00:02] tmpfs           3.9G     0  3.9G   0% /dev/shm
+[2026-09-04 11:00:05] >> systemctl status app --no-pager | head -12
+[2026-09-04 11:00:05] * app.service - App backend service
+[2026-09-04 11:00:05]      Loaded: loaded (/etc/systemd/system/app.service; enabled; vendor preset: enabled)
+[2026-09-04 11:00:05]      Active: active (running) since Tue 2026-09-04 09:31:49 CST; 1h 28min ago
+[2026-09-04 11:00:05]    Main PID: 25410 (node)
+[2026-09-04 11:00:05]      Memory: 1.3G (peak: 2.1G)
+[2026-09-04 11:00:05]      Tasks: 38 (limit: 4915)
+[2026-09-04 11:00:08] >> smartctl -H /dev/sda 2>/dev/null | tail -3
+[2026-09-04 11:00:08] SMART overall-health self-assessment test result: PASSED
+[2026-09-04 11:00:08] Note: 4 pending sectors detected, see smartd log for details

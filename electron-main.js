@@ -7,7 +7,7 @@ const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
-const { Maintenance } = require('./js/maintenance.js');
+const { Maintenance, nextDailyRun } = require('./js/maintenance.js');
 const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList } = require('./js/diag.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
@@ -661,16 +661,29 @@ ipcMain.handle('shell:connect', (e, opts) => {
   if (r.ok) {
     const host = String(opts.host || '').trim();
     const proto = String(opts.protocol || 'ssh').toUpperCase();
-    // 会话元数据随标签下发：群发/快捷按钮的 {ip}/{hostname}/{port}/{user} 变量替换用
-    openShellTab({
+    // 会话元数据随标签下发：群发/快捷按钮的 {ip}/{hostname}/{port}/{user} 变量替换用。
+    // pwdEnc/jumpPwdEnc 为 DPAPI 密文（渲染层加密后透传），供 Shell 窗口「标签恢复」保存，
+    // 不含任何明文凭据。
+    const tabInfo = {
       sid: r.id,
       title: (opts.title || host) + ' · ' + proto + ' ' + host + ':' + (opts.port || (proto === 'TELNET' ? 23 : 22)),
       host,
       port: String(opts.port || (proto === 'TELNET' ? 23 : 22)),
       protocol: proto.toLowerCase(),
       username: String(opts.username || ''),
-      deviceName: String(opts.title || '')
-    });
+      deviceName: String(opts.title || ''),
+      encoding: opts.encoding === 'gbk' ? 'gbk' : 'utf8'
+    };
+    if (typeof opts.pwdEnc === 'string' && opts.pwdEnc && opts.pwdEnc.length <= 8192) tabInfo.pwdEnc = opts.pwdEnc;
+    if (typeof opts.jumpPwdEnc === 'string' && opts.jumpPwdEnc && opts.jumpPwdEnc.length <= 8192) tabInfo.jumpPwdEnc = opts.jumpPwdEnc;
+    if (opts.jump && typeof opts.jump === 'object' && String(opts.jump.host || '').trim()) {
+      tabInfo.jump = {
+        host: String(opts.jump.host).trim().slice(0, 256),
+        port: String(opts.jump.port == null ? '' : opts.jump.port).replace(/\D/g, '').slice(0, 5),
+        username: String(opts.jump.username == null ? '' : opts.jump.username).trim().slice(0, 128)
+      };
+    }
+    openShellTab(tabInfo);
   }
   return r;
 });
@@ -1414,6 +1427,141 @@ ipcMain.handle('ai:shell-chat', async (e, p) => {
   }
 });
 
+/* ---- AI 巡检日报定时生成（默认关闭；设置存 settings.aiDaily）----
+ * 到点在主进程组装巡检快照（monitor.status + 事件 + 在线率）→ 调 AI 生成 → 存「分析记录」并弹通知。
+ * 快照与提示词组装全部在主进程完成；AI 未配置时跳过并提示。 */
+const p2n = (n) => String(n).padStart(2, '0');
+function fmtDTMain(d) {
+  return d.getFullYear() + '-' + p2n(d.getMonth() + 1) + '-' + p2n(d.getDate())
+    + ' ' + p2n(d.getHours()) + ':' + p2n(d.getMinutes()) + ':' + p2n(d.getSeconds());
+}
+function buildDailySnapshotMain() {
+  const jobs = monitor.status();
+  const lines = [];
+  const statOk = jobs.filter(j => !j.alert && j.probeOk !== false && j.state === 'monitoring').length;
+  lines.push('【概览】巡检时间：' + fmtDTMain(new Date()));
+  lines.push('监控任务 ' + jobs.length + ' 台：在线 ' + statOk
+    + '，离线 ' + jobs.filter(j => j.probeOk === false).length
+    + '，告警中 ' + jobs.filter(j => !!j.alert).length
+    + '，配置备份覆盖 ' + jobs.filter(j => j.backupEnabled).length + ' 台。');
+  lines.push('');
+  lines.push('【设备明细】');
+  if (!jobs.length) lines.push('（无监控任务）');
+  for (const j of jobs) {
+    const bits = [];
+    bits.push(j.probeOk === false ? '离线' : (j.alert ? '告警中' : (j.state === 'monitoring' ? '在线' : (j.state || '未知'))));
+    if (j.probeLatency != null) bits.push('探测时延 ' + j.probeLatency + 'ms');
+    if (j.alert) bits.push('命中告警关键字「' + j.alert + '」');
+    if (j.backupEnabled) {
+      bits.push('最近备份 ' + (j.backupLast && j.backupLast.at ? fmtDTMain(new Date(j.backupLast.at)) : '无')
+        + (j.backupLast && j.backupLast.error ? '（失败：' + j.backupLast.error + '）' : (j.backupLast && j.backupLast.changed ? '（有变化）' : '')));
+    }
+    if (j.compliance && j.compliance.total) bits.push('合规违规 ' + j.compliance.failed + '/' + j.compliance.total);
+    if (j.lastPerf && (j.lastPerf.cpu != null || j.lastPerf.mem != null)) {
+      bits.push('CPU ' + (j.lastPerf.cpu == null ? '—' : j.lastPerf.cpu + '%') + ' / 内存 ' + (j.lastPerf.mem == null ? '—' : j.lastPerf.mem + '%'));
+    }
+    if (j.metrics && j.lastMetric) {
+      const lm = j.lastMetric;
+      if (Array.isArray(lm.disks) && lm.disks.length) bits.push('磁盘 ' + lm.disks.map(d => (d.mount || '?') + ' ' + d.pct + '%').join('，'));
+      if (lm.mem != null) bits.push('内存(SSH) ' + lm.mem + '%');
+      if (lm.load && lm.load.l1 != null) bits.push('负载 ' + lm.load.l1 + '/' + lm.load.l5 + '/' + lm.load.l15);
+    }
+    if (j.httpProbe) bits.push('HTTP ' + (j.httpOk ? '正常' : '失败') + (j.certDays != null ? '，证书剩余 ' + j.certDays + ' 天' : ''));
+    lines.push('- ' + (j.name || j.deviceId || '?') + '（' + j.host + '）：' + bits.join('；'));
+  }
+  lines.push('');
+  const evs = monitorEvents.slice(-30);
+  const byType = {};
+  for (const e of monitorEvents) byType[e.type] = (byType[e.type] || 0) + 1;
+  lines.push('【近期事件】累计 ' + monitorEvents.length + ' 条，按类型：' + (Object.entries(byType).map(([t, n]) => t + ' ' + n).join('、') || '无'));
+  for (const e of evs) lines.push('- ' + fmtDTMain(new Date(e.ts)) + ' [' + (e.name || e.deviceId || '?') + '] ' + (e.type || '') + '：' + (e.detail || ''));
+  lines.push('');
+  lines.push('【近 7 天在线率】');
+  try {
+    const series = uptimeStore.snapshot();
+    const keys = Object.keys(series);
+    if (!keys.length) lines.push('-（暂无在线率采样数据）');
+    else {
+      const jobByKey = {};
+      for (const j of jobs) jobByKey[j.key] = j;
+      for (const key of keys) {
+        const arr = series[key] || [];
+        if (!arr.length) continue;
+        const okPts = arr.filter(pt => pt[1] === 1).length;
+        const j = jobByKey[key];
+        lines.push('- ' + ((j && (j.name || j.host)) || key) + '：' + Math.round(okPts / arr.length * 100) + '%（' + arr.length + ' 个采样）');
+      }
+    }
+  } catch (e2) { lines.push('-（在线率数据不可用）'); }
+  return lines.join('\n');
+}
+async function runAiDailyReportNow() {
+  const cfg = aiCfgFromSettings();
+  const client = new AiClient(cfg);
+  if (!client.ready) {
+    notifyUser('网络拓扑管理软件 · AI 巡检日报未生成', '请先在「AI ▾ AI 设置」中配置 API 地址与模型名');
+    return { ok: false, error: 'AI 未配置' };
+  }
+  const snapshot = buildDailySnapshotMain();
+  const cut = truncateText(snapshot, (cfg.maxInputKB || DEFAULT_MAX_INPUT_KB) * 1024, 'head');
+  const messages = buildDailyReportPrompt(cut.text, null);
+  try {
+    const r = await client.chat({ messages });
+    if (r && r.ok) {
+      const hist = getAiHistory().add({
+        kind: 'daily',
+        title: '定时巡检 ' + fmtDTMain(new Date()),
+        model: r.model || client.model, ms: r.ms, usage: r.usage,
+        content: (cut.truncated ? '【输入已截断：原文共 ' + cut.totalBytes + ' 字节】\n\n' : '') + r.text
+      });
+      if (!hist.ok) console.warn('[ai] 定时日报保存失败：' + hist.error);
+      notifyUser('网络拓扑管理软件 · AI 巡检日报已生成', '已保存到「AI ▾ 分析记录」（' + fmtDTMain(new Date()).slice(11, 16) + '）');
+      return { ok: true };
+    }
+    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((r && r.error) || '未知错误').slice(0, 200));
+    return { ok: false, error: (r && r.error) || 'unknown' };
+  } catch (err) {
+    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((err && err.message) || err).slice(0, 200));
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
+let aiDailyTimer = null;
+let aiDailyNextRun = 0;
+function scheduleAiDailyReport() {
+  clearTimeout(aiDailyTimer);
+  aiDailyTimer = null;
+  aiDailyNextRun = 0;
+  const s = loadAppSettings().aiDaily;
+  const next = (s && s.enabled) ? nextDailyRun(s.time, Date.now()) : null;
+  if (!next) return;
+  aiDailyNextRun = next;
+  // setTimeout 时长上限 2^31-1ms：nextDailyRun 至多指向明天，实际 delay 远小于上限，仍钳制兜底
+  const delay = Math.min(Math.max(next - Date.now(), 1000), 2147483000);
+  aiDailyTimer = setTimeout(() => {
+    aiDailyTimer = null;
+    runAiDailyReportNow().catch(() => { /* 失败已通知 */ }).finally(() => {
+      if (loadAppSettings().aiDaily && loadAppSettings().aiDaily.enabled) scheduleAiDailyReport();
+    });
+  }, delay);
+}
+ipcMain.handle('ai:daily-get', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const s = loadAppSettings().aiDaily || {};
+  const c = aiCfgFromSettings();
+  return { ok: true, enabled: !!s.enabled, time: typeof s.time === 'string' ? s.time : '08:00', nextRun: aiDailyNextRun || null, aiReady: !!(c.baseUrl && c.model) };
+});
+ipcMain.handle('ai:daily-set', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const enabled = !!(p && p.enabled);
+  const time = String((p && p.time) || '').trim();
+  if (enabled && !nextDailyRun(time, Date.now())) return { ok: false, error: '时间格式无效（需 HH:MM）' };
+  loadAppSettings().aiDaily = { enabled, time: time || '08:00' };
+  saveAppSettings();
+  scheduleAiDailyReport();
+  const s = loadAppSettings().aiDaily;
+  return { ok: true, enabled: !!s.enabled, time: s.time, nextRun: aiDailyNextRun || null };
+});
+
 app.whenReady().then(() => {
   // 导出文件时弹出「另存为」对话框
   session.defaultSession.on('will-download', (e, item) => {
@@ -1439,6 +1587,8 @@ app.whenReady().then(() => {
   });
   createWindow();
   applyTray();
+  // AI 巡检日报定时任务：按 settings.aiDaily 恢复调度（默认关闭）
+  scheduleAiDailyReport();
   // 启动 30s 后静默检查一次在线升级：仅发现新版本时通知渲染层（检查失败完全静默，不打扰）
   setTimeout(() => {
     try {
