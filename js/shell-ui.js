@@ -31,8 +31,46 @@ function diffSessionOutputs(outputs) {
     perOut: arr.map(o => o.lines.map(t => ({ text: t, diff: !common(t) })))
   };
 }
+/* ---- 连接书签（纯函数，Node 测试可 require）：白名单清洗 / 去重键 / 列表解析 ---- */
+/** 书签字段清洗：宿主必填，协议/端口/编码白名单化，凭据密文限长；密码不落明文字段。 */
+function sanitizeBookmark(b) {
+  if (!b || typeof b !== 'object') return null;
+  const host = String(b.host == null ? '' : b.host).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 256);
+  if (!host) return null;
+  const protocol = b.protocol === 'telnet' ? 'telnet' : 'ssh';
+  let port = String(b.port == null ? '' : b.port).replace(/\D/g, '').slice(0, 5);
+  if (!(parseInt(port, 10) > 0)) port = protocol === 'telnet' ? '23' : '22';
+  const out = {
+    name: String(b.name == null ? '' : b.name).replace(/[\u0000-\u001f\u007f\r\n]/g, '').trim().slice(0, 64),
+    protocol, host, port,
+    username: String(b.username == null ? '' : b.username).replace(/[\u0000-\u001f\u007f\r\n]/g, '').trim().slice(0, 128) || 'admin',
+    encoding: b.encoding === 'gbk' ? 'gbk' : 'utf8',
+    passwordEnc: (typeof b.passwordEnc === 'string' && b.passwordEnc && b.passwordEnc.length <= 8192) ? b.passwordEnc : ''
+  };
+  if (b.jump && typeof b.jump === 'object' && String(b.jump.host || '').trim()) {
+    out.jump = {
+      host: String(b.jump.host).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 256),
+      port: String(b.jump.port == null ? '' : b.jump.port).replace(/\D/g, '').slice(0, 5),
+      username: String(b.jump.username == null ? '' : b.jump.username).replace(/[\u0000-\u001f\u007f\r\n]/g, '').trim().slice(0, 128),
+      passwordEnc: (typeof b.jump.passwordEnc === 'string' && b.jump.passwordEnc && b.jump.passwordEnc.length <= 8192) ? b.jump.passwordEnc : ''
+    };
+  }
+  return out;
+}
+/** 书签去重键：协议|宿主|端口|用户名（同键覆盖更新） */
+function bookmarkKey(b) {
+  if (!b || typeof b !== 'object') return '';
+  return (b.protocol || 'ssh') + '|' + String(b.host || '').trim() + '|' + String(b.port || '') + '|' + String(b.username || '').trim();
+}
+/** 解析书签列表存储（JSON 数组）：坏项清洗丢弃，上限 100 条 */
+function parseBookmarkList(json) {
+  let arr = null;
+  try { arr = JSON.parse(String(json == null ? '' : json)); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+  return arr.map(sanitizeBookmark).filter(Boolean).slice(0, 100);
+}
 (function () {
-  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs, parseRecording }; return; } // Node 测试直取纯函数
+  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs, parseRecording, sanitizeBookmark, bookmarkKey, parseBookmarkList }; return; } // Node 测试直取纯函数
   if (!window.topoShell) {
     // 浏览器直接打开本页：给出明确提示（否则空状态不显示、按钮无响应，整页死白）
     const e = document.getElementById('shEmpty');
@@ -135,6 +173,8 @@ function diffSessionOutputs(outputs) {
     castSel.delete(sid0(s));
     refreshCastCount();
     showReconnectBar(s, reason);
+    // SFTP 面板正浏览该会话：刷新为断开提示（重新连接成功后切回标签会自动重新浏览）
+    if (sftpPanelEl && !sftpPanelEl.classList.contains('hidden') && sid0(s) === sftpSid) sftpSyncToActive();
   }
   const sid0 = (s) => { for (const [id, v] of sessions) if (v === s) return id; return null; };
   function bindListeners() {
@@ -271,6 +311,7 @@ function diffSessionOutputs(outputs) {
         });
       }
     }
+    if (typeof sftpSyncToActive === 'function' && sftpPanelEl && !sftpPanelEl.classList.contains('hidden')) sftpSyncToActive();
   }
 
   function closeTab(sid) {
@@ -563,6 +604,282 @@ function diffSessionOutputs(outputs) {
       });
     }
   };
+
+  /* ---- SFTP 文件面板（复用当前 SSH 会话的远程文件浏览 / 上传 / 下载） ---- */
+  const sftpBtnEl = $('#shSftpBtn'), sftpPanelEl = $('#shSftp'), sftpListEl = $('#shSftpList'),
+        sftpStatusEl = $('#shSftpStatus'), sftpPathEl = $('#shSftpPath'), sftpHostEl = $('#shSftpHost');
+  const sftpPaths = new Map(); // sid -> 最近浏览目录（会话级记忆，切标签回来不丢位置）
+  let sftpSid = null;          // 面板当前浏览的会话（切标签/断开时刷新）
+  let sftpSel = null;          // 当前选中项 {name, dir}
+  let sftpBusy = false;        // 单飞：目录浏览请求进行中不再叠加
+  const sftpSetStatus = (msg, err) => {
+    if (!sftpStatusEl) return;
+    sftpStatusEl.textContent = msg || '';
+    sftpStatusEl.classList.toggle('err', !!err);
+  };
+  const sfmtSize = (n) => {
+    if (!Number.isFinite(Number(n)) || n < 0) return '';
+    if (n < 1024) return n + ' B';
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let v = n;
+    for (const u of units) { v /= 1024; if (v < 1024 || u === 'TB') return v.toFixed(v >= 100 ? 0 : 1) + ' ' + u; }
+    return '';
+  };
+  const sfmtTime = (ms) => {
+    if (!Number.isFinite(Number(ms)) || !ms) return '';
+    const d = new Date(ms), p2 = (x) => String(x).padStart(2, '0');
+    return p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+  };
+  /** 远程 POSIX 路径拼接（与主进程 sftpRemoteJoin 同口径，渲染层导航用） */
+  const sftpJoin = (dir, name) => {
+    dir = String(dir == null ? '.' : dir).trim() || '.';
+    name = String(name == null ? '' : name).trim().replace(/[\r\n\0]/g, '');
+    if (!name || name === '.' || name === '..' || name.indexOf('/') >= 0) return '';
+    if (dir === '.' || dir === '' || dir === '~') return name;
+    return (dir.endsWith('/') ? dir : dir + '/') + name;
+  };
+  const sftpParent = (p) => {
+    let cur = String(p == null ? '.' : p).trim() || '.';
+    if (cur === '.' || cur === '~') return '.';
+    cur = cur.replace(/\/+$/, '') || '/';
+    const i = cur.lastIndexOf('/');
+    if (i < 0) return '.';
+    return i === 0 ? '/' : cur.slice(0, i) || '/';
+  };
+  function renderSftpEmpty(msg) {
+    if (!sftpListEl) return;
+    sftpListEl.innerHTML = '';
+    const d = document.createElement('div');
+    d.className = 'sf-empty';
+    d.textContent = msg || '（空目录）';
+    sftpListEl.appendChild(d);
+  }
+  function renderSftpList(items) {
+    if (!sftpListEl) return;
+    sftpListEl.innerHTML = '';
+    if (!items || !items.length) { renderSftpEmpty('（空目录）'); return; }
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.className = 'sf-row';
+      const ic = document.createElement('span');
+      ic.className = 'sf-ic';
+      ic.textContent = it.dir ? '📁' : '📄';
+      const nm = document.createElement('span');
+      nm.className = 'sf-nm' + (it.dir ? ' is-dir' : '');
+      nm.textContent = it.name;
+      const sz = document.createElement('span');
+      sz.className = 'sf-sz';
+      sz.textContent = (it.dir ? '' : sfmtSize(it.size)) + (it.mtime ? '  ' + sfmtTime(it.mtime) : '');
+      row.appendChild(ic); row.appendChild(nm); row.appendChild(sz);
+      row.onclick = () => {
+        sftpSel = { name: it.name, dir: it.dir };
+        sftpListEl.querySelectorAll('.sf-row.sel').forEach(el => el.classList.remove('sel'));
+        row.classList.add('sel');
+        sftpSetStatus('已选中：' + it.name + (it.dir ? '（目录）' : '（' + (sfmtSize(it.size) || '0 B') + '）'));
+      };
+      row.ondblclick = () => {
+        if (it.dir) sftpBrowse(sftpSid, sftpJoin(sftpPaths.get(sftpSid) || '.', it.name));
+        else sftpDownloadSel(it.name);
+      };
+      sftpListEl.appendChild(row);
+    }
+  }
+  async function sftpBrowse(sid, path, opts) {
+    if (!sftpListEl || !sid) return;
+    const s = sessions.get(sid);
+    if (!s) { renderSftpEmpty('会话不存在'); return; }
+    if (s.meta.protocol !== 'ssh') { renderSftpEmpty('Telnet 会话不支持 SFTP 文件浏览'); sftpSetStatus(''); return; }
+    if (s.ended) { renderSftpEmpty('会话已断开，重新连接后可浏览远程文件'); sftpSetStatus(''); return; }
+    if (sftpBusy) return;
+    sftpBusy = true;
+    if (!opts || !opts.keepList) sftpSetStatus('加载中…');
+    let res;
+    try { res = await window.topoShell.sftpList({ id: sid, path: path || '.' }); }
+    catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+    sftpBusy = false;
+    if (sftpSid !== sid) return; // 期间已切到其他标签：结果作废
+    if (!res || !res.ok) {
+      if (!opts || !opts.keepList) renderSftpEmpty((res && res.error) || '浏览失败');
+      sftpSetStatus((res && res.error) || '浏览失败', true);
+      return;
+    }
+    sftpPaths.set(sid, res.path);
+    if (sftpPathEl && document.activeElement !== sftpPathEl) sftpPathEl.value = res.path;
+    sftpSel = null;
+    renderSftpList(res.items);
+    sftpSetStatus(res.items.length + ' 项 · ' + res.path);
+  }
+  const sftpCurDir = () => sftpPaths.get(sftpSid) || '.';
+  const sftpActiveRow = () => {
+    const s = sessions.get(sftpSid);
+    if (!s || s.ended) { toast('会话已断开'); return null; }
+    if (s.meta.protocol !== 'ssh') { toast('Telnet 会话不支持 SFTP'); return null; }
+    return s;
+  };
+  const sftpRequireSel = (needFile) => {
+    if (!sftpSel) { toast('请先在列表中选中一项'); return null; }
+    if (needFile && sftpSel.dir) { toast('请选中一个文件（目录不支持该操作）'); return null; }
+    return sftpSel;
+  };
+  async function sftpDownloadSel(name) {
+    const sel = name ? { name } : sftpRequireSel(true);
+    if (!sel || !sftpActiveRow()) return;
+    sftpSetStatus('下载中：' + sel.name);
+    let res;
+    try { res = await window.topoShell.sftpDownload({ id: sftpSid, remotePath: sftpJoin(sftpCurDir(), sel.name) }); }
+    catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+    if (res && res.ok) sftpSetStatus('已下载：' + sel.name + ' → ' + (res.path || '本地'));
+    else if (res && !res.canceled) sftpSetStatus('下载失败：' + ((res && res.error) || '未知错误'), true);
+  }
+  /** 通用输入小弹窗（新建目录 / 重命名共用） */
+  function sftpPrompt(title, hint, defval, cb) {
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal sh-dialog" role="dialog">
+        <h3>${escAttr(title)}</h3>
+        <div class="m-sub">${escAttr(hint || '')}</div>
+        <div class="frow"><input id="spIn" type="text" value="${escAttr(defval || '')}" spellcheck="false" autocomplete="off"/></div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="cancel">取消</button>
+          <button type="button" class="tb primary" data-act="ok">确定</button>
+        </div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    const submit = () => {
+      const v = ov.querySelector('#spIn').value.trim();
+      if (!v) { toast('请输入名称'); return; }
+      close();
+      cb(v);
+    };
+    ov.querySelector('[data-act=cancel]').onclick = close;
+    ov.querySelector('[data-act=ok]').onclick = submit;
+    ov.querySelector('#spIn').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    setTimeout(() => { if (document.body.contains(ov)) { const i = ov.querySelector('#spIn'); i.focus(); i.select(); } }, 250);
+  }
+  function sftpConfirm(title, text, cb) {
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal sh-dialog" role="dialog">
+        <h3>${escAttr(title)}</h3>
+        <div class="m-sub">${escAttr(text || '')}</div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="cancel">取消</button>
+          <button type="button" class="tb primary" data-act="ok">删除</button>
+        </div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    ov.querySelector('[data-act=cancel]').onclick = close;
+    ov.querySelector('[data-act=ok]').onclick = () => { close(); cb(); };
+  }
+  function setSftpOpen(on) {
+    if (!sftpPanelEl) return;
+    sftpPanelEl.classList.toggle('hidden', !on);
+    document.body.classList.toggle('sh-sftp-on', on);
+    if (sftpBtnEl) sftpBtnEl.classList.toggle('on', on);
+    const a = activeSession();
+    if (a) requestAnimationFrame(() => {
+      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
+      try { window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows); } catch (e) { /* ignore */ }
+    });
+    if (on) sftpSyncToActive();
+  }
+  function sftpSyncToActive() {
+    if (!sftpPanelEl || sftpPanelEl.classList.contains('hidden')) return;
+    const a = activeSession();
+    sftpSid = a ? a.id : null;
+    sftpSel = null;
+    if (!a) {
+      if (sftpHostEl) sftpHostEl.textContent = '';
+      renderSftpEmpty('没有活动会话：新建 SSH 连接后可浏览远程文件');
+      sftpSetStatus('');
+      return;
+    }
+    if (sftpHostEl) sftpHostEl.textContent = (a.s.meta.host || '') + '（' + String(a.s.meta.protocol || '').toUpperCase() + '）';
+    sftpBrowse(sftpSid, sftpPaths.get(sftpSid) || '.', { keepList: true });
+  }
+  function wireSftp() {
+    if (!sftpPanelEl) return;
+    if (sftpBtnEl) sftpBtnEl.onclick = () => setSftpOpen(sftpPanelEl.classList.contains('hidden'));
+    $('#shSftpClose').onclick = () => setSftpOpen(false);
+    $('#shSftpUp').onclick = () => sftpBrowse(sftpSid, sftpParent(sftpCurDir()));
+    $('#shSftpHome').onclick = () => sftpBrowse(sftpSid, '.');
+    $('#shSftpGo').onclick = () => sftpBrowse(sftpSid, sftpPathEl ? sftpPathEl.value : '.');
+    if (sftpPathEl) sftpPathEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sftpBrowse(sftpSid, sftpPathEl.value); } });
+    $('#shSftpRefresh').onclick = () => sftpBrowse(sftpSid, sftpCurDir());
+    $('#shSftpMkdir').onclick = () => {
+      if (!sftpActiveRow()) return;
+      sftpPrompt('新建远程目录', '目录名将创建在 ' + sftpCurDir() + ' 下', '', (name) => {
+        (async () => {
+          let res;
+          try { res = await window.topoShell.sftpMkdir({ id: sftpSid, path: sftpJoin(sftpCurDir(), name) }); }
+          catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+          if (res && res.ok) { toast('目录已创建'); sftpBrowse(sftpSid, sftpCurDir()); }
+          else toast('创建失败：' + ((res && res.error) || '未知错误'));
+        })();
+      });
+    };
+    $('#shSftpUpload').onclick = async () => {
+      if (!sftpActiveRow()) return;
+      let res;
+      try { res = await window.topoShell.sftpUpload({ id: sftpSid, dir: sftpCurDir() }); }
+      catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+      if (res && res.ok) {
+        const fails = res.failed || 0, total = (res.files || []).length;
+        sftpSetStatus(fails ? '上传完成：' + (total - fails) + '/' + total + ' 成功' : '已上传 ' + total + ' 个文件到 ' + sftpCurDir(), fails > 0);
+        sftpBrowse(sftpSid, sftpCurDir(), { keepList: true });
+      } else if (res && !res.canceled) {
+        sftpSetStatus('上传失败：' + ((res && res.error) || '未知错误'), true);
+      }
+    };
+    $('#shSftpDownload').onclick = () => sftpDownloadSel();
+    $('#shSftpRename').onclick = () => {
+      const sel = sftpRequireSel(false);
+      if (!sel || !sftpActiveRow()) return;
+      sftpPrompt('重命名', sel.name + ' → 新名称（同目录内）', sel.name, (name) => {
+        (async () => {
+          let res;
+          try { res = await window.topoShell.sftpRename({ id: sftpSid, from: sftpJoin(sftpCurDir(), sel.name), to: sftpJoin(sftpCurDir(), name) }); }
+          catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+          if (res && res.ok) { toast('已重命名'); sftpBrowse(sftpSid, sftpCurDir()); }
+          else toast('重命名失败：' + ((res && res.error) || '未知错误'));
+        })();
+      });
+    };
+    $('#shSftpDelete').onclick = () => {
+      const sel = sftpRequireSel(false);
+      if (!sel || !sftpActiveRow()) return;
+      sftpConfirm('删除远程' + (sel.dir ? '目录' : '文件'), '将删除 ' + sftpJoin(sftpCurDir(), sel.name) + (sel.dir ? '（目录必须为空）' : '') + '，此操作不可恢复。', () => {
+        (async () => {
+          let res;
+          try { res = await window.topoShell.sftpRemove({ id: sftpSid, path: sftpJoin(sftpCurDir(), sel.name), isDir: !!sel.dir }); }
+          catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+          if (res && res.ok) { toast('已删除'); sftpBrowse(sftpSid, sftpCurDir()); }
+          else toast('删除失败：' + ((res && res.error) || '未知错误'));
+        })();
+      });
+    };
+    // 上传/下载进度（主进程节流 400ms 推送）
+    if (window.topoShell.onSftpProgress) {
+      window.topoShell.onSftpProgress((info) => {
+        if (!info || !sftpPanelEl || sftpPanelEl.classList.contains('hidden')) return;
+        const label = info.op === 'upload' ? '上传' : '下载';
+        const nm = String(info.name || '').split('/').pop() || '';
+        sftpSetStatus(label + '中：' + nm + '（' + sfmtSize(info.transferred) + (info.total ? ' / ' + sfmtSize(info.total) : '') + '）');
+      });
+    }
+  }
 
   /* ---- 复制 / 粘贴 ---- */
   const copySelection = (s) => {
@@ -910,11 +1227,98 @@ function diffSessionOutputs(outputs) {
     showCtx(e.clientX, e.clientY, items);
   }
 
+  /* ---- 连接书签（保存常用连接；密码经 topoSecure(DPAPI) 加密后存本机 localStorage） ---- */
+  const bmBtnEl = $('#shBmBtn');
+  const BM_KEY = 'topoShellBookmarks';
+  const loadBookmarks = () => { try { return parseBookmarkList(localStorage.getItem(BM_KEY)); } catch (e) { return []; } };
+  const saveBookmarks = (list) => { try { localStorage.setItem(BM_KEY, JSON.stringify(list)); } catch (e) { /* ignore */ } };
+  const upsertBookmark = (b) => {
+    const clean = sanitizeBookmark(b);
+    if (!clean) return;
+    const list = loadBookmarks();
+    const i = list.findIndex(x => bookmarkKey(x) === bookmarkKey(clean));
+    if (i >= 0) {
+      // 覆盖更新：新密文为空时保留原密文（重连未勾「记住密码」不得抹掉已存密码），名称同理
+      if (!clean.passwordEnc && list[i].passwordEnc) clean.passwordEnc = list[i].passwordEnc;
+      if (clean.jump && list[i].jump && list[i].jump.passwordEnc && !clean.jump.passwordEnc) clean.jump.passwordEnc = list[i].jump.passwordEnc;
+      if (!clean.name && list[i].name) clean.name = list[i].name;
+      list[i] = clean;
+    } else list.push(clean);
+    saveBookmarks(list);
+  };
+  async function connectBookmark(b) {
+    const cfg = { protocol: b.protocol, host: b.host, port: b.port, username: b.username, encoding: b.encoding, title: b.name || b.host };
+    try { const fp = localStorage.getItem('topoShellFp:' + b.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
+    if (b.passwordEnc && window.topoSecure && window.topoSecure.decryptSecret) {
+      try { const r = await window.topoSecure.decryptSecret(b.passwordEnc); if (r && r.ok && r.text) cfg.password = r.text; } catch (e) { /* 解密失败按无密码连接 */ }
+    }
+    if (b.jump) {
+      cfg.jump = { host: b.jump.host, port: b.jump.port, username: b.jump.username };
+      if (b.jump.passwordEnc && window.topoSecure && window.topoSecure.decryptSecret) {
+        try { const r = await window.topoSecure.decryptSecret(b.jump.passwordEnc); if (r && r.ok && r.text) cfg.jump.password = r.text; } catch (e) { /* ignore */ }
+      }
+    }
+    let res;
+    try { res = await window.topoShell.connect(cfg); } catch (err) { res = { ok: false, error: String((err && err.message) || err) }; }
+    if (!res || !res.ok) { toast('连接失败：' + ((res && res.error) || '未知错误')); return false; }
+    return true;
+  }
+  async function openBookmarks() {
+    const items = loadBookmarks();
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal sh-dialog" role="dialog" style="width:600px">
+        <h3>连接书签</h3>
+        <div class="m-sub">双击条目或点「连接」直接建立连接；记住的密码经系统级加密保存、使用时自动解密。</div>
+        <div id="bmList" style="max-height:52vh;overflow:auto">${items.length ? '' : '<div class="bk-empty">暂无书签：新建连接时勾选「保存为书签」即可收藏常用连接</div>'}</div>
+        <div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    ov.querySelector('[data-act=close]').onclick = close;
+    const listEl = ov.querySelector('#bmList');
+    const emptyHtml = listEl.innerHTML;
+    items.forEach((b) => {
+      const row = document.createElement('div');
+      row.className = 'lb-file';
+      row.style.cursor = 'pointer';
+      row.innerHTML = `<span class="nm">${escAttr(b.name || (b.host + ':' + b.port))}</span>
+        <span class="sub">${escAttr(b.protocol.toUpperCase() + ' ' + b.host + ':' + b.port + ' · ' + b.username + (b.encoding === 'gbk' ? ' · GBK' : '') + (b.jump ? ' · 经跳板' : '') + (b.passwordEnc ? ' · 已存密码' : ''))}</span>
+        <button type="button" class="tb sh-bm-edit" title="在连接对话框中编辑">编辑</button>
+        <button type="button" class="tb trust-del sh-bm-del" title="删除书签">删除</button>`;
+      row.onclick = (e) => {
+        if (e.target.closest('.sh-bm-del') || e.target.closest('.sh-bm-edit')) return;
+        close();
+        connectBookmark(b);
+      };
+      row.querySelector('.sh-bm-edit').onclick = (e) => { e.stopPropagation(); close(); openConnectDialog(b); };
+      row.querySelector('.sh-bm-del').onclick = (e) => {
+        e.stopPropagation();
+        const list = loadBookmarks();
+        const idx = list.findIndex(x => bookmarkKey(x) === bookmarkKey(b));
+        if (idx >= 0) {
+          list.splice(idx, 1);
+          saveBookmarks(list);
+          row.remove();
+          if (!listEl.querySelector('.lb-file')) listEl.innerHTML = emptyHtml;
+          toast('已删除书签');
+        }
+      };
+      listEl.appendChild(row);
+    });
+  }
+
   /* ---- 新建连接对话框（窗口内直接发起连接） ---- */
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem('topoShellCfg') || 'null'); } catch (e) { saved = null; }
   saved = saved || {};
-  function openConnectDialog() {
+  function openConnectDialog(prefill) {
+    prefill = (prefill && typeof prefill === 'object') ? sanitizeBookmark(prefill) : null;
     const root = $('#modalRoot');
     const ov = document.createElement('div');
     ov.className = 'overlay';
@@ -933,6 +1337,13 @@ function diffSessionOutputs(outputs) {
           <label>主机 / 管理口</label>
           <input id="wsHost" type="text" placeholder="例如 10.255.0.1" autocomplete="off"/>
         </div>
+        <div class="frow">
+          <label>输出编码</label>
+          <select id="wsEnc">
+            <option value="utf8"${(saved.encoding || 'utf8') === 'utf8' ? ' selected' : ''}>UTF-8（默认）</option>
+            <option value="gbk"${saved.encoding === 'gbk' ? ' selected' : ''}>GBK（老设备 / 中文环境）</option>
+          </select>
+        </div>
         <div class="frow"><div class="frow-inline">
           <div class="frow"><label>端口</label><input id="wsPort" type="number" min="1" max="65535"/></div>
           <div class="frow"><label>用户名</label><input id="wsUser" type="text" placeholder="admin" value="${escAttr(saved.username || 'admin')}" autocomplete="off"/></div>
@@ -948,6 +1359,10 @@ function diffSessionOutputs(outputs) {
           <div class="frow"><label>跳板用户名</label><input id="wsJumpUser" type="text" placeholder="admin" autocomplete="off"/></div>
           <div class="frow"><label>跳板密码</label><input id="wsJumpPass" type="password" autocomplete="new-password"/></div>
         </div></div>
+        <div class="frow"><div class="frow-inline">
+          <label style="display:flex;align-items:center;gap:6px"><input id="wsSaveBm" type="checkbox"/> 保存为书签</label>
+          <label style="display:flex;align-items:center;gap:6px" title="密码经系统级加密（DPAPI）保存在本机，仅本机当前用户可解密"><input id="wsRememberPwd" type="checkbox"/> 记住密码</label>
+        </div></div>
         <div class="m-actions">
           <button type="button" class="tb" data-act="cancel">取消</button>
           <button type="button" class="tb primary" data-act="connect">连接</button>
@@ -959,6 +1374,26 @@ function diffSessionOutputs(outputs) {
     ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
     ov.querySelector('[data-act=cancel]').onclick = close;
     ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    // 书签预填（「编辑书签」入口）：填充连接参数并尝试解密已存密码
+    if (prefill) {
+      ov.querySelector('#wsProto').value = prefill.protocol;
+      ov.querySelector('#wsHost').value = prefill.host;
+      ov.querySelector('#wsPort').value = prefill.port;
+      ov.querySelector('#wsUser').value = prefill.username;
+      ov.querySelector('#wsEnc').value = prefill.encoding;
+      if (prefill.jump && prefill.jump.host) {
+        ov.querySelector('#wsJumpOn').checked = true;
+        ov.querySelector('#wsJumpWrap').style.display = '';
+        ov.querySelector('#wsJumpHost').value = prefill.jump.host;
+        ov.querySelector('#wsJumpPort').value = prefill.jump.port;
+        ov.querySelector('#wsJumpUser').value = prefill.jump.username;
+      }
+      if (prefill.passwordEnc && window.topoSecure && window.topoSecure.decryptSecret) {
+        window.topoSecure.decryptSecret(prefill.passwordEnc).then((r) => {
+          if (r && r.ok && r.text && document.body.contains(ov)) ov.querySelector('#wsPass').value = r.text;
+        }).catch(() => { /* ignore */ });
+      }
+    }
     const protoEl = ov.querySelector('#wsProto');
     const portEl = ov.querySelector('#wsPort');
     const autoPort = () => protoEl.value === 'telnet' ? '23' : '22';
@@ -977,6 +1412,7 @@ function diffSessionOutputs(outputs) {
         port: ov.querySelector('#wsPort').value.trim(),
         username: ov.querySelector('#wsUser').value.trim(),
         password: ov.querySelector('#wsPass').value,
+        encoding: ov.querySelector('#wsEnc').value === 'gbk' ? 'gbk' : 'utf8',
         title: ov.querySelector('#wsHost').value.trim() || '连接'
       };
       if (cfg.protocol === 'ssh' && jumpOnEl.checked && ov.querySelector('#wsJumpHost').value.trim()) {
@@ -989,7 +1425,24 @@ function diffSessionOutputs(outputs) {
       }
       try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
-      try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username })); } catch (e) {}
+      try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username, encoding: cfg.encoding })); } catch (e) {}
+      // 保存为书签（同键覆盖；勾选「记住密码」时密码经 DPAPI 加密后保存）
+      if (ov.querySelector('#wsSaveBm').checked) {
+        const bm = { protocol: cfg.protocol, host: cfg.host, port: cfg.port, username: cfg.username, encoding: cfg.encoding, name: prefill ? prefill.name : '' };
+        if (cfg.jump) bm.jump = { host: cfg.jump.host, port: cfg.jump.port, username: cfg.jump.username };
+        if (ov.querySelector('#wsRememberPwd').checked && cfg.password && window.topoSecure && window.topoSecure.encryptSecret) {
+          try {
+            const r = await window.topoSecure.encryptSecret(cfg.password);
+            if (r && r.ok && r.cipher) bm.passwordEnc = r.cipher;
+            else toast('系统加密不可用，书签不保存密码');
+            if (cfg.jump && cfg.jump.password && bm.jump) {
+              const rj = await window.topoSecure.encryptSecret(cfg.jump.password);
+              if (rj && rj.ok && rj.cipher) bm.jump.passwordEnc = rj.cipher;
+            }
+          } catch (e) { /* ignore */ }
+        }
+        upsertBookmark(bm);
+      }
       const btn = ov.querySelector('[data-act=connect]');
       btn.disabled = true; btn.textContent = '连接中…';
       let res;
@@ -1045,6 +1498,12 @@ function diffSessionOutputs(outputs) {
     if (castInputEl) castInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); sendCast(); }
     });
+
+    // SFTP 文件面板
+    wireSftp();
+
+    // 连接书签
+    if (bmBtnEl) bmBtnEl.onclick = openBookmarks;
 
     // AI 命令助手
     if (aiBtnEl) aiBtnEl.onclick = () => setAiBar(aiEl.classList.contains('hidden'));

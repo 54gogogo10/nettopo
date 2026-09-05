@@ -3038,6 +3038,293 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(empty.series('z').length === 1 && empty.file === '', '无文件路径时仅内存可用');
     }
 
+    // SFTP：远程文件浏览/上传/下载（注入 mock SSH client，验证 ShellManager 侧逻辑与路径白名单）
+    console.log('== 回归：SFTP 远程文件管理（新功能） ==');
+    {
+      const os = require('os');
+      const { ShellManager, sftpRemoteJoin, fmtSftpSize, cleanSftpRemotePath } = require('../js/shell.js');
+      const tmpD = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-sftp-'));
+      const rmD = () => { try { fs.rmSync(tmpD, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+      // mock SFTP 通道：内存目录树 + fastGet/fastPut 落盘实现（open/协议层由 ssh2 自测覆盖）
+      const tree = new Map();
+      tree.set('/', { dir: true });
+      tree.set('/etc', { dir: true });
+      tree.set('/var', { dir: true });
+      tree.set('/etc/hosts', { dir: false, size: 42, mtime: 1700000000 });
+      const mkAttrs = (e) => ({ isDirectory: () => e.dir, isSymbolicLink: () => false, isFile: () => !e.dir, size: e.size || 0, mtime: e.mtime || 1600000000 });
+      const mkSftp = () => ({
+        realpath: (p, cb) => cb(null, p === '.' ? '/' : p),
+        readdir: (p, cb) => {
+          const e = tree.get(p);
+          if (!e || !e.dir) { cb(new Error('No such file')); return; }
+          const prefix = p === '/' ? '/' : p + '/';
+          const names = [...tree.keys()].filter(k => k !== '/' && k.startsWith(prefix))
+            .map(k => k.slice(prefix.length)).filter(n => n && n.indexOf('/') < 0);
+          cb(null, names.map(n => ({ filename: n, attrs: mkAttrs(tree.get(prefix + n)) })));
+        },
+        mkdir: (p, cb) => { if (tree.has(p)) { cb(new Error('Failure')); return; } tree.set(p, { dir: true }); cb(null); },
+        rmdir: (p, cb) => { const e = tree.get(p); if (!e || !e.dir) { cb(new Error('No such file')); return; } tree.delete(p); cb(null); },
+        unlink: (p, cb) => { const e = tree.get(p); if (!e || e.dir) { cb(new Error('No such file')); return; } tree.delete(p); cb(null); },
+        rename: (a, b, cb) => { if (!tree.has(a) || a === b) { cb(new Error('Bad path')); return; } tree.set(b, tree.get(a)); tree.delete(a); cb(null); },
+        stat: (p, cb) => { const e = tree.get(p); if (!e) { cb(new Error('No such file')); return; } cb(null, mkAttrs(e)); },
+        fastGet: (remote, local, opts, cb) => {
+          const e = tree.get(remote);
+          if (!e || e.dir) { cb(new Error('No such file')); return; }
+          fs.writeFileSync(local, Buffer.alloc(e.size || 8, 7));
+          if (opts && opts.step) opts.step(e.size || 8, e.size || 8, e.size || 8);
+          cb(null);
+        },
+        fastPut: (local, remote, opts, cb) => {
+          const st = fs.statSync(local);
+          tree.set(remote, { dir: false, size: st.size, mtime: 1700000000 });
+          if (opts && opts.step) opts.step(st.size, st.size, st.size);
+          cb(null);
+        },
+        end() {}
+      });
+      const mgr = new ShellManager();
+      mgr.sessions.set('s1', { write() {}, resize() {}, _client: { sftp: (cb) => cb(null, mkSftp()) } });
+      mgr.sessions.set('s2', { write() {}, resize() {} }); // 无 _client：Telnet 等非 SSH 会话形态
+
+      await (async () => {
+        const l1 = await mgr.sftpList('s1', '.');
+        ok(l1.ok && l1.path === '/', 'SFTP 列目录：空路径解析为根（realpath）');
+        ok(l1.items.length === 2 && l1.items.every(i => i.dir) && l1.items[0].name === 'etc', 'SFTP 列目录：根下仅目录项且按名称排序');
+        const l2 = await mgr.sftpList('s1', '/etc');
+        ok(l2.ok && l2.items.length === 1 && l2.items[0].name === 'hosts' && !l2.items[0].dir, 'SFTP 列目录：文件项解析');
+        ok(l2.items[0].size === 42 && l2.items[0].mtime === 1700000000000, 'SFTP 列目录：大小与 mtime（秒→毫秒）');
+        const lErr = await mgr.sftpList('sX', '/');
+        ok(!lErr.ok && lErr.error.indexOf('会话不存在') >= 0, 'SFTP 列目录：无效会话拒绝');
+        const lNoSftp = await mgr.sftpList('s2', '/');
+        ok(!lNoSftp.ok && lNoSftp.error.indexOf('不支持 SFTP') >= 0, 'SFTP：非 SSH 会话明确报不支持');
+        const lBad = await mgr.sftpList('s1', 'a\0b');
+        ok(!lBad.ok && lBad.error.indexOf('路径无效') >= 0, 'SFTP：含 NUL 的远程路径拒绝');
+        ok(!cleanSftpRemotePath('x'.repeat(5000), false) && cleanSftpRemotePath('', true) === '.', 'SFTP：路径超长拒绝 / 空串允许回落当前目录');
+        const mk = await mgr.sftpMkdir('s1', '/etc/newdir');
+        ok(mk.ok && tree.get('/etc/newdir').dir === true, 'SFTP 新建目录成功');
+        const mkDup = await mgr.sftpMkdir('s1', '/etc/newdir');
+        ok(!mkDup.ok, 'SFTP 新建目录：已存在时报错');
+        const rm = await mgr.sftpRemove('s1', '/etc/newdir', true);
+        ok(rm.ok && !tree.has('/etc/newdir'), 'SFTP 删除空目录成功');
+        const mv = await mgr.sftpRename('s1', '/etc/hosts', '/etc/hosts.bak');
+        ok(mv.ok && tree.has('/etc/hosts.bak') && !tree.has('/etc/hosts'), 'SFTP 重命名成功');
+        const mvSame = await mgr.sftpRename('s1', '/etc/hosts.bak', '/etc/hosts.bak');
+        ok(!mvSame.ok && mvSame.error.indexOf('相同') >= 0, 'SFTP 重命名：同路径拒绝');
+        const prog = [];
+        const dl = await mgr.sftpDownload('s1', '/etc/hosts.bak', path.join(tmpD, 'hosts.dl'), (i) => prog.push(i));
+        ok(dl.ok && fs.existsSync(path.join(tmpD, 'hosts.dl')) && fs.statSync(path.join(tmpD, 'hosts.dl')).size === 42, 'SFTP 下载：本地文件落盘且大小一致');
+        ok(prog.length >= 1 && prog[0].op === 'download' && prog[0].total === 42, 'SFTP 下载：进度回调携带总量');
+        const dlBad = await mgr.sftpDownload('s1', '/etc/missing', path.join(tmpD, 'missing.dl'));
+        ok(!dlBad.ok && !fs.existsSync(path.join(tmpD, 'missing.dl')), 'SFTP 下载：失败不残留半成品文件');
+        const upSrc = path.join(tmpD, 'up.bin');
+        fs.writeFileSync(upSrc, Buffer.alloc(1024, 3));
+        const up = await mgr.sftpUpload('s1', upSrc, '/var/up.bin', (i) => prog.push(i));
+        ok(up.ok && tree.has('/var/up.bin') && tree.get('/var/up.bin').size === 1024, 'SFTP 上传：远端文件登记且大小一致');
+        const upNo = await mgr.sftpUpload('s1', path.join(tmpD, 'nope.bin'), '/var/nope.bin');
+        ok(!upNo.ok && upNo.error.indexOf('不可读') >= 0, 'SFTP 上传：本地文件不可读时明确报错');
+        ok(sftpRemoteJoin('.', 'a') === 'a' && sftpRemoteJoin('/var/log', 'a') === '/var/log/a' && sftpRemoteJoin('/var/', 'a') === '/var/a', 'SFTP 路径拼接：POSIX 口径');
+        ok(!sftpRemoteJoin('/var', '..') && !sftpRemoteJoin('/var', 'a/b') && !sftpRemoteJoin('/var', ''), 'SFTP 路径拼接：拒绝 ..、子路径与空名');
+        ok(fmtSftpSize(512) === '512 B' && /^2\.0 KB$/.test(fmtSftpSize(2048)), 'SFTP 大小人性化格式');
+        mgr.sessions.clear(); // mock 会话无 _close，不走 closeAll
+        rmD();
+      })();
+    }
+
+    // 服务器指标采集（SSH df/free/loadavg 解析 + 阈值判定 + _validate）与 HTTP 探测/证书到期
+    console.log('== 回归：服务器指标采集与 HTTP 探测（新功能） ==');
+    {
+      const { EventEmitter } = require('events');
+      const http = require('http');
+      const { MonitorManager, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft } = require('../js/monitor.js');
+
+      const dfOut = [
+        'Filesystem     1024-blocks      Used Available Capacity Mounted on',
+        'udev               4022844         0   4022844    0% /dev',
+        'tmpfs               810740      1180    809560    1% /run',
+        '/dev/sda1         61316032  41234512  16909872   71% /',
+        'tmpfs               4053704       0   4053704    0% /dev/shm',
+        '/dev/sdb1        103080888  97926844         0  100% /data',
+        'none                102400         0    102400    0% /run/user'
+      ].join('\n');
+      const df = parseLinuxDf(dfOut);
+      ok(df.length === 2 && df[0].mount === '/' && df[0].pct === 71 && df[1].mount === '/data' && df[1].pct === 100, 'df 解析：真实设备保留、伪文件系统排除（' + JSON.stringify(df) + '）');
+      const dfH = parseLinuxDf('/dev/sda1       59G   40G   17G  71% /');
+      ok(dfH.length === 1 && dfH[0].pct === 71, 'df 解析：df -h 输出同构');
+      ok(parseLinuxDf('Filesystem 1024-blocks Used Available Capacity Mounted\n').length === 0 && parseLinuxDf('').length === 0, 'df 解析：表头/空输入安全');
+      const freeNew = parseLinuxFree([
+        '               total        used        free      shared  buff/cache   available',
+        'Mem:          15948       8204        1244         412        6500        7244',
+        'Swap:          2047           0        2047'
+      ].join('\n'));
+      ok(freeNew.mem === 54.6, 'free 解析：available 列口径（' + freeNew.mem + '%）');
+      ok(freeNew.swap === 0, 'free 解析：swap 未用为 0%');
+      const freeOld = parseLinuxFree([
+        '             total       used       free     shared    buffers     cached',
+        'Mem:         2048       1800        248          0        300        900',
+        '-/+ buffers/cache:        600       1448',
+        'Swap:          99           99          0'
+      ].join('\n'));
+      ok(freeOld.mem === 29.3, 'free 解析：旧版 buffers/cached 口径（' + freeOld.mem + '%）');
+      ok(freeOld.swap === 100, 'free 解析：swap 占满 100%');
+      ok(parseLinuxFree('no mem here').mem === null && parseLinuxFree('').mem === null, 'free 解析：无 Mem 行安全');
+      const la1 = parseLinuxLoadavg('0.52 0.58 0.59 1/234 12345');
+      ok(la1.l1 === 0.52 && la1.l5 === 0.58 && la1.l15 === 0.59, 'loadavg 解析：/proc/loadavg');
+      const la2 = parseLinuxLoadavg(' 14:00:01 up 5 days,  1:23,  2 users,  load average: 1.10, 0.90, 0.75');
+      ok(la2.l1 === 1.10 && la2.l5 === 0.90 && la2.l15 === 0.75, 'loadavg 解析：uptime 格式');
+      const lvWarn = metricLevels({ disks: [{ mount: '/', pct: 85 }], mem: 40 }, { diskWarn: 80, diskCrit: 90, memWarn: 80, memCrit: 90 });
+      ok(lvWarn.disk === 'warn' && lvWarn.mem === null, '阈值判定：warn 级');
+      const lvCrit = metricLevels({ disks: [{ mount: '/', pct: 85 }, { mount: '/data', pct: 95 }], mem: 95 }, { diskWarn: 80, diskCrit: 90, memWarn: 80, memCrit: 90 });
+      ok(lvCrit.disk === 'crit' && lvCrit.mem === 'crit' && lvCrit.detail.indexOf('/data 95%') >= 0, '阈值判定：crit 级与明细（' + lvCrit.detail + '）');
+      ok(metricLevels({ disks: [{ mount: '/', pct: 10 }], mem: 10 }, { diskWarn: 80, diskCrit: 90 }).disk === null, '阈值判定：未超阈为 null');
+      ok(metricLevels(null, {}).disk === null && metricLevels({}, null).mem === null, '阈值判定：空样本安全');
+
+      const mm = new MonitorManager(new EventEmitter(), '', '');
+      const vOk = mm._validate({ key: 'd1@10.0.0.9', host: '10.0.0.9', commands: ['display version'], metrics: { enabled: true, command: 'df -P\nfree -m', intervalSec: 10, diskWarn: 70, diskCrit: 50 } });
+      ok(vOk.ok && vOk.cfg.metrics.enabled && vOk.cfg.metrics.commands.length === 2, '指标配置：命令解析与启用');
+      ok(vOk.cfg.metrics.intervalSec === 60, '指标配置：间隔下限钳制 60s（' + vOk.cfg.metrics.intervalSec + '）');
+      ok(vOk.cfg.metrics.diskCrit === 70 && vOk.cfg.metrics.diskWarn === 70, '指标配置：crit 不低于 warn');
+      const vDef = mm._validate({ key: 'd1@10.0.0.9', host: '10.0.0.9', commands: ['x'], metrics: { enabled: true } });
+      ok(vDef.cfg.metrics.commands.length === 3 && vDef.cfg.metrics.commands[0] === 'df -P', '指标配置：未填命令回落 Linux 默认三项');
+      const vRo = mm._validate({ key: 'd1@10.0.0.9', host: '10.0.0.9', readOnly: true, probe: { enabled: true }, metrics: { enabled: true } });
+      ok(vRo.ok && vRo.cfg.metrics.enabled === false, '指标配置：仅读取模式下禁用');
+      const vH = mm._validate({ key: 'd1@h', host: 'h', commands: ['x'], httpProbe: { enabled: true, url: 'https://1.2.3.4/status', intervalSec: 5, alertDays: 7, keyword: ' ok ' } });
+      ok(vH.ok && vH.cfg.httpProbe.enabled && vH.cfg.httpProbe.url === 'https://1.2.3.4/status' && vH.cfg.httpProbe.intervalSec === 30 && vH.cfg.httpProbe.alertDays === 7 && vH.cfg.httpProbe.keyword === 'ok', 'HTTP 探测配置：解析与钳制');
+      const vHbad = mm._validate({ key: 'd1@h', host: 'h', commands: ['x'], httpProbe: { enabled: true, url: 'ftp://x/' } });
+      ok(vHbad.ok && vHbad.cfg.httpProbe.enabled === false, 'HTTP 探测配置：非 http(s) URL 拒绝启用');
+      ok(certDaysLeft('Dec 31 23:59:59 2027 GMT', Date.UTC(2026, 0, 1)) > 700, '证书到期：未来日期为正天数');
+      ok(certDaysLeft('Jan 1 00:00:00 2000 GMT', Date.UTC(2026, 0, 1)) < 0, '证书到期：过去日期为负（已过期）');
+      ok(certDaysLeft('not-a-date') === null, '证书到期：不可解析返回 null');
+
+      // HTTP 探测：真实本地 http 服务（状态码 + 关键字 + 延迟）
+      const hsrv = http.createServer((req, res) => {
+        if (req.url === '/empty') { res.writeHead(200); res.end(); return; }
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('SERVICE-HEALTHY-v1');
+      });
+      await new Promise((res) => hsrv.listen(0, '127.0.0.1', res));
+      const hport = hsrv.address().port;
+      try {
+        const r1 = await new Promise((resolve) => httpCheck({ url: 'http://127.0.0.1:' + hport + '/health', keyword: 'HEALTHY' }, resolve));
+        ok(r1.ok === true && r1.status === 200 && r1.keywordHit === true && r1.latencyMs >= 0, 'HTTP 探测：200 + 关键字命中');
+        const r2 = await new Promise((resolve) => httpCheck({ url: 'http://127.0.0.1:' + hport + '/health', keyword: 'NOT-FOUND' }, resolve));
+        ok(r2.ok === false && r2.error && r2.error.indexOf('关键字') >= 0, 'HTTP 探测：关键字未命中判失败');
+        const r3 = await new Promise((resolve) => httpCheck({ url: 'http://127.0.0.1:' + hport + '/health' }, resolve));
+        ok(r3.ok === true && r3.keywordHit === null, 'HTTP 探测：无关键字仅看状态码');
+        const r4 = await new Promise((resolve) => httpCheck({ url: 'http://127.0.0.1:1/x' }, resolve));
+        ok(r4.ok === false && r4.error && r4.error.indexOf('失败') >= 0, 'HTTP 探测：连接失败判失败');
+        const r5 = await new Promise((resolve) => httpCheck({ url: 'ftp://bad/' }, resolve));
+        ok(r5.ok === false && r5.error.indexOf('http') >= 0, 'HTTP 探测：非 http(s) 协议拒绝');
+      } finally {
+        await new Promise((res) => hsrv.close(res));
+      }
+    }
+
+    // 编码选择（GBK 解码）、连接书签纯函数、告警静默/维护窗口、诊断工具箱、巡检数据导出
+    console.log('== 回归：编码/书签/静默/诊断/巡检导出（新功能） ==');
+    {
+      const { EventEmitter } = require('events');
+      const http = require('http');
+      const os = require('os');
+      const { makeDecoder } = require('../js/shell.js');
+      const { sanitizeBookmark, bookmarkKey, parseBookmarkList } = require('../js/shell-ui.js');
+      const { Maintenance, inWindow, parseHHMM } = require('../js/maintenance.js');
+      const { isValidDiagHost, parsePortList, parsePingStats, tcpProbe, scanPorts, dnsLookup, ping, trace } = require('../js/diag.js');
+
+      /* ---- 功能5：编码 ---- */
+      let gbkOk = true;
+      try { new TextDecoder('gbk'); } catch (e) { gbkOk = false; }
+      const utf8Dec = makeDecoder('utf8');
+      ok(utf8Dec.encoding === 'utf8' && utf8Dec.write(Buffer.from([0xe4, 0xb8])) + utf8Dec.write(Buffer.from([0xad, 0xe6, 0x96])) + utf8Dec.write(Buffer.from([0x87])) + utf8Dec.end() === '中文', '编码解码：utf8 跨包半字符缓存');
+      const gbkDec = makeDecoder('gbk');
+      if (gbkOk) {
+        ok(gbkDec.encoding === 'gbk' && gbkDec.write(Buffer.from([0xd6])) + gbkDec.write(Buffer.from([0xd0, 0xce, 0xc4])) + gbkDec.end() === '中文', '编码解码：gbk 跨包半字符缓存');
+      } else {
+        ok(gbkDec.encoding === 'utf8', '编码解码：small-icu 环境 gbk 回落 utf8');
+      }
+
+      /* ---- 功能9：连接书签纯函数 ---- */
+      const bmOk = sanitizeBookmark({ protocol: 'ssh', host: '10.0.0.9', port: '2222', username: 'ops', encoding: 'gbk', passwordEnc: 'enc1:abc', jump: { host: '10.0.0.1', port: '22', username: 'jmp', passwordEnc: 'enc1:j' } });
+      ok(bmOk && bmOk.host === '10.0.0.9' && bmOk.port === '2222' && bmOk.encoding === 'gbk' && bmOk.passwordEnc === 'enc1:abc' && bmOk.jump.passwordEnc === 'enc1:j', '书签清洗：合法项保留');
+      ok(sanitizeBookmark({ host: '  ' }) === null, '书签清洗：无宿主拒绝');
+      const bmBad = sanitizeBookmark({ host: 'h\x01ost\n', protocol: 'xyz', port: 'abc', username: 'u\x02', password: 'PLAINTEXT' });
+      ok(bmBad && bmBad.host === 'host' && bmBad.protocol === 'ssh' && bmBad.username === 'u' && bmBad.passwordEnc === '' && !('password' in bmBad), '书签清洗：控制字符剔除、端口回落、明文密码不落盘（' + JSON.stringify(bmBad) + '）');
+      ok(bmBad.port === '22', '书签清洗：非法端口回落 22');
+      ok(bookmarkKey({ protocol: 'ssh', host: ' h ', port: '22', username: 'admin' }) === bookmarkKey({ protocol: 'ssh', host: 'h', port: '22', username: 'admin' }), '书签去重键：同参同键');
+      ok(bookmarkKey({ host: 'h' }) !== bookmarkKey({ host: 'h', username: 'u' }), '书签去重键：不同用户不同键');
+      ok(parseBookmarkList('not-json').length === 0 && parseBookmarkList('{"a":1}').length === 0, '书签列表解析：坏存储安全');
+      ok(parseBookmarkList(JSON.stringify([{ host: 'a' }, null, { host: '' }, 'x', { host: 'b', protocol: 'telnet' }])).length === 2
+        && parseBookmarkList(JSON.stringify([{ host: 'b', protocol: 'telnet' }]))[0].protocol === 'telnet', '书签列表解析：坏项丢弃保形清洗');
+
+      /* ---- 功能7：告警静默 / 维护窗口 ---- */
+      ok(parseHHMM('22:00') && parseHHMM('9:5') === null && parseHHMM('24:00') === null && parseHHMM('abc') === null, '静默：HH:MM 解析白名单（9:5 需两位分钟）');
+      ok(inWindow(600, '08:00', '23:00') === true && inWindow(7 * 60 + 59, '08:00', '23:00') === false, '静默：普通窗口 [from, to) 判定');
+      ok(inWindow(23 * 60 + 30, '22:00', '06:00') === true && inWindow(3 * 60, '22:00', '06:00') === true && inWindow(12 * 60, '22:00', '06:00') === false, '静默：跨午夜窗口判定');
+      ok(inWindow(600, '10:00', '10:00') === false, '静默：from=to 视为空窗口');
+      const mt = new Maintenance();
+      const until = mt.setMute('d1', 60);
+      ok(until > Date.now() && mt.isMuted('d1').muted && mt.isMuted('d1').reason === 'manual', '静默：手动静默生效');
+      mt.mutes.set('d2', Date.now() - 1);
+      ok(mt.isMuted('d2').muted === false && mt.mutes.has('d2') === false, '静默：手动静默到期惰性清除');
+      ok(mt.setWindow('d3', { enabled: true, from: '00:00', to: '23:59' }) && mt.isMuted('d3').muted && mt.isMuted('d3').reason === 'window', '静默：维护窗口生效');
+      mt.setWindow('d3', { enabled: false });
+      ok(mt.getWindow('d3') === null, '静默：窗口关闭即删除配置');
+      ok(mt.setWindow('dX', { enabled: true, from: 'bad', to: '10:00' }) === true && mt.getWindow('dX') === null, '静默：非法时间不入配置');
+      ok(mt.snapshotWindows() && typeof mt.snapshotWindows() === 'object', '静默：窗口快照可持久化');
+
+      /* ---- 功能4：诊断工具箱 ---- */
+      ok(isValidDiagHost('10.255.0.1') && isValidDiagHost('srv-01.corp.example') && !isValidDiagHost('a b') && !isValidDiagHost('x;rm') && !isValidDiagHost(''), '诊断：主机白名单校验');
+      const ports = parsePortList('22, 80，443;8000-8002');
+      ok(JSON.stringify(ports) === JSON.stringify([22, 80, 443, 8000, 8001, 8002]), '诊断：端口列表解析（逗号/中文逗号/分号/区间）');
+      ok(parsePortList('1-99999').length > 0 && parsePortList('1-99999').every(p => p >= 1 && p <= 65535), '诊断：区间越界钳制');
+      ok(parsePortList('1-99999999').length <= 256, '诊断：端口总量封顶 256');
+      const winZh = '正在 Ping 10.0.0.1 具有 32 字节的数据:\n来自 10.0.0.1 的回复: 字节=32 时间=1ms TTL=64\n\n10.0.0.1 的 Ping 统计信息:\n    数据包: 已发送 = 4，已接收 = 4，丢失 = 0 (0% 丢失)，\n往返行程的估计时间(以毫秒为单位):\n    最短 = 1ms，最长 = 2ms，平均 = 1ms';
+      const stZh = parsePingStats(winZh);
+      ok(stZh && stZh.sent === 4 && stZh.received === 4 && stZh.lostPct === 0 && stZh.avg === 1 && stZh.max === 2, 'Ping 统计：Windows 中文格式');
+      const stEn = parsePingStats('Packets: Sent = 3, Received = 2, Lost = 1 (33% loss),\nApproximate round trip times in milli-seconds:\n    Minimum = 1ms, Maximum = 5ms, Average = 2ms');
+      ok(stEn && stEn.sent === 3 && stEn.received === 2 && stEn.lostPct === 33 && stEn.avg === 2 && stEn.min === 1, 'Ping 统计：Windows 英文格式');
+      const stLu = parsePingStats('4 packets transmitted, 4 received, 0% packet loss, time 3005ms\nrtt min/avg/max/mdev = 0.045/0.050/0.058/0.005 ms');
+      ok(stLu && stLu.sent === 4 && stLu.received === 4 && stLu.lostPct === 0 && stLu.min === 0.045 && stLu.avg === 0.05, 'Ping 统计：Linux iputils 格式');
+      ok(parsePingStats('garbage') === null, 'Ping 统计：无法解析返回 null');
+      const psrv = http.createServer((req, res) => { res.writeHead(200); res.end('ok'); });
+      await new Promise((res) => psrv.listen(0, '127.0.0.1', res));
+      const pport = psrv.address().port;
+      try {
+        const open = await tcpProbe('127.0.0.1', pport, 1000);
+        const shut = await tcpProbe('127.0.0.1', 1, 300); // 端口 1 常规关闭
+        ok(open.open === true && open.ms >= 0, 'TCP 探测：开放端口');
+        ok(shut.open === false, 'TCP 探测：关闭端口');
+        const scan = await scanPorts('127.0.0.1', [1, pport, pport], 500);
+        ok(scan.length === 3 && scan[0].port === 1 && scan.filter(x => x.open).length >= 1, 'TCP 扫描：批量有序去重');
+        const dnsR = await dnsLookup('localhost');
+        ok(dnsR.addresses.length >= 1, 'DNS 解析：localhost 可解析');
+        const pingR = await ping('127.0.0.1', 1);
+        ok(pingR.ok === true && pingR.output.length > 0 && pingR.stats && pingR.stats.received >= 1, 'Ping 诊断：本机回环可达且统计可解析（' + (pingR.stats && pingR.stats.avg) + 'ms）');
+        const pingBad = await ping('bad host;', 1);
+        ok(pingBad.ok === false && pingBad.error.indexOf('无效') >= 0, 'Ping 诊断：非法主机拒绝');
+        const traceR = await trace('127.0.0.1');
+        ok(traceR.ok === true || (traceR.error && traceR.error.indexOf('未找到') >= 0), '路由跟踪：本机可达或环境无 traceroute 时明确报错');
+      } finally {
+        await new Promise((res) => psrv.close(res));
+      }
+
+      /* ---- 功能8：巡检数据导出 ---- */
+      const exJobs = [{ key: 'k1', name: 'srv1', deviceId: 'dev1', host: '10.0.0.1', metrics: true, httpProbe: true }];
+      const exHist = {
+        k1: {
+          metric: { hist: [{ ts: 1700000000000, disks: [{ mount: '/', pct: 71 }, { mount: '/data', pct: 100 }], mem: 54.6, swap: 0, load: { l1: 1.1, l5: 0.9, l15: 0.8 } }] },
+          http: { hist: [{ ts: 1700000000000, ok: true, status: 200, latency: 12, certDays: 30 }] }
+        }
+      };
+      const exp = U.buildInspectionExport(exJobs, exHist);
+      ok(exp.header.length === 15 && exp.rows.length === 3, '巡检导出：表头 15 列，磁盘按挂载点展开 + HTTP 行（' + exp.rows.length + ' 行）');
+      const mRow = exp.rows[0];
+      ok(mRow[0] === '指标' && mRow[4] === '/' && mRow[5] === '71' && mRow[6] === '54.6' && mRow[9] === '0.9', '巡检导出：指标行数值列');
+      const hRow = exp.rows[2];
+      ok(hRow[0] === 'HTTP' && hRow[11] === '200' && hRow[13] === '成功' && hRow[14] === '30', '巡检导出：HTTP 行状态与证书列');
+      ok(U.buildInspectionExport([], {}).rows.length === 0 && U.buildInspectionExport([{ key: 'k2', host: 'h' }], {}).rows.length === 0, '巡检导出：空输入/无历史安全');
+      ok(U.buildInspectionExport([{ key: 'k3', host: 'h' }], { k3: { metric: { hist: [null, { ts: 'bad' }] } } }).rows.length === 0, '巡检导出：坏采样行跳过');
+    }
+
     // SSH 跳板机端到端：jump forwardOut 通道上完成目标握手
     console.log('== 回归：SSH 跳板机端到端（新功能） ==');
     {

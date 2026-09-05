@@ -32,7 +32,15 @@ contextBridge.exposeInMainWorld('topoShell', {
   recordStop: () => ipcRenderer.invoke('shell:record-stop'),
   recordList: () => ipcRenderer.invoke('shell:record-list'),
   recordRead: (p) => ipcRenderer.invoke('shell:record-read', p),
-  recordDelete: (p) => ipcRenderer.invoke('shell:record-delete', p)
+  recordDelete: (p) => ipcRenderer.invoke('shell:record-delete', p),
+  /* SFTP（远程文件浏览 / 上传 / 下载；本地路径由主进程系统对话框产生） */
+  sftpList: (p) => ipcRenderer.invoke('shell:sftp-list', p),
+  sftpMkdir: (p) => ipcRenderer.invoke('shell:sftp-mkdir', p),
+  sftpRemove: (p) => ipcRenderer.invoke('shell:sftp-remove', p),
+  sftpRename: (p) => ipcRenderer.invoke('shell:sftp-rename', p),
+  sftpUpload: (p) => ipcRenderer.invoke('shell:sftp-upload', p),
+  sftpDownload: (p) => ipcRenderer.invoke('shell:sftp-download', p),
+  onSftpProgress: sub('shell:sftp-progress')
 });
 
 contextBridge.exposeInMainWorld('topoWeb', {
@@ -79,10 +87,26 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   onIfTraffic: sub('monitor:iftraffic'),
   perfHistory: (key) => ipcRenderer.invoke('monitor:perfhistory', { key }),
   onPerf: sub('monitor:perf'),
+  metricHistory: (key) => ipcRenderer.invoke('monitor:methistory', { key }),
+  onMetric: sub('monitor:metric'),
+  httpHistory: (key) => ipcRenderer.invoke('monitor:httphistory', { key }),
+  onHttp: sub('monitor:http'),
   onReboot: sub('monitor:reboot'),
   /* 已信任主机指纹（TOFU 信任库）的查看与撤销：设备换机/重装后可在此重置 */
   trustList: () => ipcRenderer.invoke('monitor:trust-list'),
-  trustRevoke: (host) => ipcRenderer.invoke('monitor:trust-revoke', { host })
+  trustRevoke: (host) => ipcRenderer.invoke('monitor:trust-revoke', { host }),
+  /* 告警静默 / 维护窗口：静默期内通知不弹、事件时间线照常记录 */
+  mute: (p) => ipcRenderer.invoke('monitor:mute', p),
+  maintenanceGet: (p) => ipcRenderer.invoke('monitor:maintenance-get', p),
+  maintenanceSet: (p) => ipcRenderer.invoke('monitor:maintenance-set', p)
+});
+
+/* 本机诊断工具箱（Ping / 路由跟踪 / TCP 端口 / DNS）：命令与探测全部在主进程完成 */
+contextBridge.exposeInMainWorld('topoDiag', {
+  ping: (p) => ipcRenderer.invoke('diag:ping', p),
+  trace: (p) => ipcRenderer.invoke('diag:trace', p),
+  tcp: (p) => ipcRenderer.invoke('diag:tcp', p),
+  dns: (p) => ipcRenderer.invoke('diag:dns', p)
 });
 
 contextBridge.exposeInMainWorld('topoConfigBackup', {
