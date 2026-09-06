@@ -943,6 +943,90 @@ console.log('== LLDP/CDP 邻居表解析 ==');
   ok(m4.skipped === 2 && !nodes.some(n => n.name === 'X'), '自环与无效条目跳过');
 }
 
+console.log('== MAC/ARP 表解析与终端定位（normMac / canonIfname / parseArpMacTables / traceMacHops） ==');
+{
+  // normMac：四种写法归一，非法拒绝
+  eq(U.normMac('aabb.cc00.0100'), 'aa:bb:cc:00:01:00', 'normMac：思科点分');
+  eq(U.normMac('A4BB-6D11-2233'), 'a4:bb:6d:11:22:33', 'normMac：华为连分');
+  eq(U.normMac('AA-BB-CC-DD-EE-FF'), 'aa:bb:cc:dd:ee:ff', 'normMac：连字符大写');
+  eq(U.normMac('aabbccddeeff'), 'aa:bb:cc:dd:ee:ff', 'normMac：裸 12 位');
+  eq(U.normMac('动态'), '', 'normMac：中文拒绝');
+  eq(U.normMac('aa:bb:cc:dd:ee'), '', 'normMac：位数不足拒绝');
+  eq(U.normMac('zz:bb:cc:dd:ee:ff'), '', 'normMac：非十六进制拒绝');
+  // canonIfname：跨厂家接口名规范化
+  eq(U.canonIfname('GigabitEthernet1/0/1'), 'ge1/0/1', 'canon：全名展开');
+  eq(U.canonIfname('GE1/0/1'), 'ge1/0/1', 'canon：华为 GE');
+  eq(U.canonIfname('Gi1/0/1'), 'ge1/0/1', 'canon：思科缩写');
+  eq(U.canonIfname('Ten-GigabitEthernet1/0/3'), 'xge1/0/3', 'canon：Ten-GigabitEthernet');
+  eq(U.canonIfname('TE1/0/3'), 'xge1/0/3', 'canon：TE 缩写');
+  eq(U.canonIfname('XGE1/0/3'), 'xge1/0/3', 'canon：XGE');
+  eq(U.canonIfname('Eth-Trunk1'), 'lag1', 'canon：Eth-Trunk');
+  eq(U.canonIfname('Port-channel10'), 'lag10', 'canon：Port-channel');
+  eq(U.canonIfname('Po1'), 'lag1', 'canon：Po 缩写');
+  eq(U.canonIfname('Vlanif100'), 'vlanif100', 'canon：Vlanif');
+  eq(U.canonIfname('Vlan-interface100'), 'vlanif100', 'canon：H3C Vlan-interface');
+  eq(U.canonIfname('MEth0/0/0'), 'meth0/0/0', 'canon：MEth 管理口');
+  eq(U.canonIfname('eth0'), 'eth0', 'canon：Linux 原样');
+  eq(U.canonIfname('Ethernet0/1'), 'eth0/1', 'canon：Ethernet');
+  eq(U.canonIfname(''), '', 'canon：空串');
+  // parseArpMacTables：多厂家混合文本一次解析
+  const mixed = [
+    'System ARP cache:',
+    'Internet  10.1.1.10          5   aabb.cc00.0100  ARPA   GigabitEthernet0/1',
+    '  192.168.1.10        a4bb-6d11-2234   15      D       GE0/0/1',
+    '192.168.1.10 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE',
+    'MAC Address    VLAN/VSI/BD   Learned-From-Type   Interfaces',
+    ' a4bb-6d11-2233 100           Dynamic             GE0/0/2',
+    '   1    aabb.cc00.0101    DYNAMIC     Gi0/2',
+    '--More--',
+    '<SW1>'
+  ].join('\n');
+  const pm = U.parseArpMacTables(mixed);
+  eq(pm.arp.length, 3, 'ARP 行：思科/华为/ip neigh 各 1（共 3）');
+  ok(pm.arp.some(r => r.ip === '10.1.1.10' && r.mac === 'aa:bb:cc:00:01:00' && r.ifn === 'GigabitEthernet0/1'), '思科 show ip arp 行解析');
+  ok(pm.arp.some(r => r.ip === '192.168.1.10' && r.mac === 'a4:bb:6d:11:22:34' && r.ifn === 'GE0/0/1'), '华为 display arp 行解析');
+  ok(pm.arp.some(r => r.ip === '192.168.1.10' && r.mac === 'aa:bb:cc:dd:ee:ff' && r.ifn === 'eth0'), 'Linux ip neigh 行解析');
+  eq(pm.mac.length, 2, 'MAC 行：华为/思科各 1（表头与 More/提示符跳过）');
+  ok(pm.mac.some(r => r.mac === 'a4:bb:6d:11:22:33' && r.vlan === '100' && r.ifn === 'GE0/0/2'), '华为 display mac-address 行解析');
+  ok(pm.mac.some(r => r.mac === 'aa:bb:cc:00:01:01' && r.vlan === '1' && r.ifn === 'Gi0/2'), '思科 show mac address-table 行解析');
+  eq(U.parseArpMacTables('hello\nworld').arp.length + U.parseArpMacTables('hello').mac.length, 0, '无 MAC 文本安全返回空');
+  // traceMacHops：IP → ARP 命中解析 MAC → 沿拓扑跨厂家接口逐跳 → 末端
+  const tNodes = [
+    { id: 'r1', name: 'R1', mgmt: '10.0.0.1' },
+    { id: 'sw1', name: 'SW1', mgmt: '10.0.0.2' },
+    { id: 'sw2', name: 'SW2', mgmt: '10.0.0.3' },
+    { id: 'pc', name: 'PC-87', mgmt: '192.168.1.87' }
+  ];
+  const tLinks = [
+    { id: 'tl1', a: 'r1', b: 'sw1', aIf: 'GE0/0', bIf: 'GigabitEthernet0/1' },
+    { id: 'tl2', a: 'sw1', b: 'sw2', aIf: 'Gi0/24', bIf: 'GE1/0/24' },
+    { id: 'tl3', a: 'sw2', b: 'pc', aIf: 'Ethernet0/3', bIf: 'eth0' }
+  ];
+  const qr = {
+    r1: { arp: [{ ip: '192.168.1.87', mac: 'a4:bb:6d:11:22:33', ifn: 'GE0/0', vlan: '' }], mac: [] },
+    sw1: { arp: [], mac: [{ mac: 'a4bb-6d11-2233', vlan: '100', ifn: 'GigabitEthernet0/1' }, { mac: 'a4bb-6d11-2233', vlan: '100', ifn: 'Gi0/24' }] },
+    sw2: { arp: [], mac: [{ mac: 'a4bb-6d11-2233', vlan: '100', ifn: 'GE1/0/24' }, { mac: 'a4bb-6d11-2233', vlan: '100', ifn: 'Ethernet0/3' }] }
+  };
+  const tt = U.traceMacHops(tNodes, tLinks, qr, { ip: '192.168.1.87' });
+  ok(tt.ok && tt.mac === 'a4:bb:6d:11:22:33', '定位：IP 经 ARP 解析出 MAC');
+  eq(tt.sightings.length, 5, '定位：R1→SW1→SW2 五处命中（跨厂家接口匹配）');
+  ok(tt.sightings.some(s => s.nodeId === 'sw1' && s.ifn === 'Gi0/24' && s.next.length && s.next[0].nodeId === 'sw2'), 'SW1 Gi0/24 下一跳 SW2（Gi↔GE1/0/24 规范化匹配）');
+  ok(tt.unqueried.includes('pc'), '拓扑下游 PC 未采集 → 记入 unqueried');
+  eq(tt.selfHits.length, 1, '目标 IP 同为 PC 管理地址 → selfHits');
+  // 直接给 MAC：同样全链路命中
+  const tt2 = U.traceMacHops(tNodes, tLinks, qr, { mac: 'A4BB-6D11-2233' });
+  ok(tt2.ok && tt2.sightings.length === 5, '定位：直接给 MAC 同样全链路命中');
+  // 接入端口（无拓扑下游）：断开 PC 侧连线后 Ethernet0/3 成为 terminal
+  const tt3 = U.traceMacHops(tNodes, tLinks.slice(0, 2), qr, { ip: '192.168.1.87' });
+  ok(tt3.terminals.some(x => x.nodeId === 'sw2' && x.ifn === 'Ethernet0/3'), '无下游 sighting 记为接入端口候选');
+  // 无命中：明确失败
+  const tt4 = U.traceMacHops(tNodes, tLinks, {}, { ip: '9.9.9.9' });
+  ok(!tt4.ok && tt4.error, '无采集数据时明确失败并提示');
+  // 采集范围内有设备数据但 ARP/MAC 均无目标：明确失败（目标 IP 也不是任何设备管理地址）
+  const tt5 = U.traceMacHops(tNodes, tLinks, { sw1: { arp: [], mac: [{ mac: '11:22:33:44:55:66', vlan: '1', ifn: 'Gi0/1' }] } }, { ip: '9.9.9.9' });
+  ok(tt5.ok === false && tt5.error, '仅有他机 MAC 无目标命中：明确失败');
+}
+
 console.log('== 接口总表行构建 ==');
 {
   const nodes = [
@@ -3038,6 +3122,58 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(empty.series('z').length === 1 && empty.file === '', '无文件路径时仅内存可用');
     }
 
+    // 一次性命令执行（runOneShot）：本地模拟 Telnet 设备（就绪/回显剥离/分页自动空格）
+    console.log('== 回归：一次性命令执行 runOneShot（新功能） ==');
+    {
+      const serverData = [];
+      const socks = new Set();
+      const server = net.createServer((sock) => {
+        socks.add(sock);
+        sock.on('close', () => socks.delete(sock));
+        sock.on('data', (d) => {
+          serverData.push(Buffer.from(d));
+          const s = d.toString('latin1');
+          if (s === ' ') { sock.write('last page line\r\n<SW1>'); return; } // More 翻页应答
+          const cmd = s.replace(/\r\n$/, '');
+          if (cmd === 'display lldp neighbor') {
+            sock.write(cmd + '\r\n GE0/0/1  SW2  GE0/0/24\r\n GE0/0/2  SW3  GE0/0/3\r\n<SW1>');
+          } else if (cmd === 'page-cmd') {
+            sock.write(cmd + '\r\nfirst page line\r\n---- More ----'); // 等空格翻页
+          } else {
+            sock.write('\r\n<SW1>');
+          }
+        });
+        sock.write('\r\nWelcome to mock device\r\n<SW1>');
+      });
+      await new Promise((res) => server.listen(0, '127.0.0.1', res));
+      const port = server.address().port;
+      const mgr = new ShellManager();
+      try {
+        const bad = await mgr.runOneShot({ protocol: 'telnet', host: '', commands: ['x'] });
+        ok(bad.ok === false, 'runOneShot：空主机拒绝');
+        const bad2 = await mgr.runOneShot({ protocol: 'telnet', host: '127.0.0.1', port, commands: [] });
+        ok(bad2.ok === false, 'runOneShot：空命令拒绝');
+        const bad3 = await mgr.runOneShot({ protocol: 'telnet', host: '127.0.0.1', port, commands: ['a\nb'] });
+        ok(bad3.ok === false, 'runOneShot：含控制字符的命令拒绝（防换行注入）');
+        const r = await mgr.runOneShot({
+          protocol: 'telnet', host: '127.0.0.1', port, username: 'admin',
+          commands: ['display lldp neighbor', 'page-cmd'],
+          waitMs: 400, cmdTimeoutMs: 4000, readyTimeoutMs: 4000
+        });
+        ok(r.ok === true && r.outputs.length === 2, 'runOneShot：两条命令分别捕获（' + (r.outputs || []).length + '）');
+        ok(r.outputs[0].text.includes('GE0/0/1') && r.outputs[0].text.includes('SW2'), 'runOneShot：命令输出内容捕获');
+        ok(!r.outputs[0].text.includes('display lldp neighbor'), 'runOneShot：命令回显剥离');
+        ok(r.outputs[0].text.includes('GE0/0/2'), 'runOneShot：多行输出完整');
+        ok(r.outputs[1].text.includes('first page line') && r.outputs[1].text.includes('last page line'), 'runOneShot：More 分页自动空格翻页');
+        ok(serverData.some((b) => b.toString('latin1') === ' '), 'runOneShot：More 提示时发送了空格');
+        ok(Array.isArray(r.errors) && r.errors.length === 0, 'runOneShot：无会话错误');
+        ok(r.fingerprint === null, 'runOneShot：Telnet 无指纹事件');
+      } finally {
+        for (const s of socks) s.destroy();
+        await new Promise((res) => { server.close(res); setTimeout(res, 500); });
+      }
+    }
+
     // SFTP：远程文件浏览/上传/下载（注入 mock SSH client，验证 ShellManager 侧逻辑与路径白名单）
     console.log('== 回归：SFTP 远程文件管理（新功能） ==');
     {
@@ -3228,7 +3364,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const { makeDecoder } = require('../js/shell.js');
       const { sanitizeBookmark, bookmarkKey, parseBookmarkList } = require('../js/shell-ui.js');
       const { Maintenance, inWindow, parseHHMM } = require('../js/maintenance.js');
-      const { isValidDiagHost, parsePortList, parsePingStats, tcpProbe, scanPorts, dnsLookup, ping, trace } = require('../js/diag.js');
+      const { isValidDiagHost, parsePortList, parsePingStats, tcpProbe, scanPorts, dnsLookup, ping, trace, expandScanTargets, parseLocalArp, scanSubnet, localArpTable } = require('../js/diag.js');
 
       /* ---- 功能5：编码 ---- */
       let gbkOk = true;
@@ -3305,6 +3441,34 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         ok(traceR.ok === true || (traceR.error && traceR.error.indexOf('未找到') >= 0), '路由跟踪：本机可达或环境无 traceroute 时明确报错');
       } finally {
         await new Promise((res) => psrv.close(res));
+      }
+
+      /* ---- 功能4b：网段存活扫描（CIDR/区间展开 + 本机 ARP 解析 + 回环扫描） ---- */
+      eq(JSON.stringify(expandScanTargets('192.168.10.0/30')), JSON.stringify(['192.168.10.1', '192.168.10.2']), '网段展开：/30 剔除网段与广播地址');
+      eq(JSON.stringify(expandScanTargets('10.0.0.4/31')), JSON.stringify(['10.0.0.4', '10.0.0.5']), '网段展开：/31 按 RFC3021 全保留');
+      eq(JSON.stringify(expandScanTargets('10.1.1.10-12')), JSON.stringify(['10.1.1.10', '10.1.1.11', '10.1.1.12']), '网段展开：尾段区间');
+      eq(JSON.stringify(expandScanTargets('10.1.1.5-10.1.1.7, 10.1.1.7')), JSON.stringify(['10.1.1.5', '10.1.1.6', '10.1.1.7']), '网段展开：跨 IP 区间去重');
+      eq(expandScanTargets('192.168.0.0/8').length, 4096, '网段展开：超大网段封顶 4096');
+      eq(expandScanTargets('abc/24').length, 0, '网段展开：非法输入安全返回空');
+      eq(expandScanTargets('10.1.1.256').length, 0, '网段展开：非法 IP（>255）拒绝');
+      const arpWin = '接口: 192.168.1.55 --- 0x4\nInternet 地址         物理地址              类型\n  192.168.1.1          aa-bb-cc-dd-ee-ff     动态\n  192.168.1.99          a4-bb-6d-11-22-33     动态\n  192.168.1.102        incomplete';
+      const arpLu = '? (10.0.0.5) at 11:22:33:44:55:66 [ether] on eth0\n? (10.0.0.6) at <incomplete> on eth0';
+      const arpHuawei = '10.0.0.7        a4bb-6d11-2233  15        D          GE0/0/1';
+      const arpAll = parseLocalArp(arpWin + '\n' + arpLu + '\n' + arpHuawei);
+      eq(arpAll.length, 4, '本机 ARP 解析：Windows 中文/Linux/华为格式共 4 条（incomplete 跳过）');
+      ok(arpAll.some(e => e.ip === '192.168.1.1' && e.mac === 'aa:bb:cc:dd:ee:ff'), '本机 ARP：Windows 动态行');
+      ok(arpAll.some(e => e.ip === '10.0.0.5' && e.mac === '11:22:33:44:55:66'), '本机 ARP：Linux arp -n 行');
+      ok(arpAll.some(e => e.ip === '10.0.0.7' && e.mac === 'a4:bb:6d:11:22:33'), '本机 ARP：华为点分行');
+      {
+        // 仅回环存活：跨环境确定性（死主机路径依赖网络环境，不做确定性断言）
+        const loop = await scanSubnet(['127.0.0.1'], { mac: false });
+        ok(loop.alive.length === 1 && loop.alive[0].ip === '127.0.0.1' && loop.dead === 0, '网段扫描：回环存活计入（' + loop.alive.length + '/' + loop.dead + '）');
+        ok(loop.alive[0].ms != null, '网段扫描：存活主机带延迟');
+        ok(loop.error == null && Array.isArray(loop.alive), '网段扫描：结果结构完整');
+        const empty = await scanSubnet([], {});
+        ok(empty.error && empty.alive.length === 0, '网段扫描：空目标明确报错');
+        const arpL = await localArpTable();
+        ok(Array.isArray(arpL), '本机 ARP 表读取：返回数组（无 ARP 命令环境为空数组）');
       }
 
       /* ---- 功能8：巡检数据导出 ---- */

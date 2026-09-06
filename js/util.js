@@ -2088,6 +2088,182 @@ U.applyNeighbors = (nodes, links, localId, entries, opts) => {
   return { ok: true, addedNodes, addedLinks, updatedLinks, skipped };
 };
 
+/* ---------- MAC/ARP 表解析与终端定位（纯函数，Node 测试可调用） ----------
+ * 支持华为/H3C display arp / display mac-address、思科 show ip arp / show mac address-table、
+ * Linux ip neigh / arp -n 的表格输出；接口名跨厂家规范化后与拓扑连线接口匹配，
+ * 供「MAC/IP 终端定位」沿拓扑逐跳追踪接入端口。 */
+
+/** MAC 地址规范化：冒号/连字符/思科点分/华为连分/裸 12 位十六进制 → 小写冒号形式；非法返回空串 */
+U.normMac = (s) => {
+  const t = String(s == null ? '' : s).trim().toLowerCase();
+  if (!t) return '';
+  if (!/^[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}$/.test(t)
+    && !/^[0-9a-f]{4}[.-][0-9a-f]{4}[.-][0-9a-f]{4}$/.test(t)
+    && !/^[0-9a-f]{12}$/.test(t)) return '';
+  const hex = t.replace(/[^0-9a-f]/g, '');
+  return hex.match(/.{2}/g).join(':');
+};
+
+/** 接口名跨厂家规范化：GigabitEthernet1/0/1、GE1/0/1、Gi1/0/1 → ge1/0/1；
+ *  Ten-GigabitEthernet/TE/XGE → xge，Eth-Trunk/Port-channel/Po → lag，Vlan-if/Vlanif → vlanif 等。
+ *  未识别前缀按小写原样返回（仍支持同写法精确匹配）。用于连线两端接口与设备表内接口的对齐。 */
+U.canonIfname = (s) => {
+  const t = String(s == null ? '' : s).trim().toLowerCase().replace(/[\s_]/g, '');
+  if (!t) return '';
+  const MAP = [
+    [/^tengigabitethernet/, 'xge'], [/^ten-gigabitethernet/, 'xge'], [/^xgigabitethernet/, 'xge'],
+    [/^10gigabitethernet/, 'xge'], [/^tengig/, 'xge'], [/^xge/, 'xge'], [/^10ge(?=\d)/, 'xge'], [/^te(?=\d)/, 'xge'],
+    [/^fortygigabitethernet/, 'fge'], [/^40ge(?=\d)/, 'fge'], [/^fo(?=\d)/, 'fge'],
+    [/^hundredgigabitethernet/, 'hge'], [/^hundredgige/, 'hge'], [/^100ge(?=\d)/, 'hge'], [/^hu(?=\d)/, 'hge'],
+    [/^twentyfivegige/, 'tge'], [/^25ge(?=\d)/, 'tge'],
+    [/^gigabitethernet/, 'ge'], [/^gigabiteth/, 'ge'], [/^gi(?=\d)/, 'ge'], [/^ge(?=\d)/, 'ge'],
+    [/^eth-trunk/, 'lag'], [/^port-channel/, 'lag'], [/^portchannel/, 'lag'], [/^po(?=\d)/, 'lag'], [/^lag/, 'lag'],
+    [/^managementethernet/, 'meth'], [/^management(?=\d)/, 'meth'], [/^meth(?=\d)/, 'meth'], [/^ma(?=\d)/, 'meth'],
+    [/^vlan-interface/, 'vlanif'], [/^vlanif(?=\d)/, 'vlanif'], [/^vlan(?=\d)/, 'vlan'],
+    [/^loopback/, 'lo'], [/^lo(?=\d)/, 'lo'],
+    [/^tunnel/, 'tun'], [/^tu(?=\d)/, 'tun'],
+    [/^null(?=\d)/, 'null'], [/^register(?=\d)/, 'reg'],
+    [/^fastethernet/, 'fe'], [/^fa(?=\d)/, 'fe'],
+    [/^ethernet/, 'eth'], [/^eth(?=\d)/, 'eth'], [/^et(?=\d)/, 'eth'], [/^e(?=\d)/, 'eth'],
+    [/^serial/, 'ser'], [/^se(?=\d)/, 'ser'],
+    [/^posix/, 'pos'], [/^pos(?=\d)/, 'pos'],
+    [/^virtual-ethernet/, 've'], [/^ve(?=\d)/, 've'],
+    [/^nve(?=\d)/, 'nve'], [/^mtunnel/, 'mtun'],
+    [/^console/, 'con'], [/^aux/, 'aux']
+  ];
+  for (const [re, pre] of MAP) {
+    const m = re.exec(t);
+    if (m) return pre + t.slice(m[0].length);
+  }
+  return t;
+};
+
+/** 解析 ARP / MAC 地址表输出（多厂家混合文本，可一次粘贴多张表）：
+ *  返回 { arp:[{ip, mac, ifn, vlan}], mac:[{mac, vlan, ifn}] }。
+ *  行判定：同时含 IPv4 与合法 MAC → ARP 行；仅含合法 MAC → MAC 表行（vlan 取行内首个 1~4094 整数，
+ *  接口取最后一个形如接口的 token）。提示符行/表头/分隔线/无 MAC 行自动跳过。 */
+U.parseArpMacTables = (text) => {
+  const clean = String(text == null ? '' : text)
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b[()][0-9A-B]/g, '')
+    .slice(0, 400 * 1024);
+  const arp = [], mac = [];
+  const seen = new Set();
+  const IPv4_RE = /(?:^|[\s(])(\d{1,3}(?:\.\d{1,3}){3})(?=[\s):]|$)/;
+  for (const raw of clean.replace(/\r\n?/g, '\n').split('\n')) {
+    const t = raw.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+    if (!t) continue;
+    const tokens = t.split(/\s+/);
+    // MAC token：任一 token 能规范化为 MAC（表头/分隔线/无 MAC 行自动落空）
+    let macTok = '';
+    for (const tok of tokens) { const m = U.normMac(tok); if (m) { macTok = m; break; } }
+    if (!macTok) continue;
+    const ipm = IPv4_RE.exec(t);
+    const ip = ipm ? ipm[1] : '';
+    // 接口 token：含字母与数字、形如接口（复用邻居解析的 nbIsIface 判据），取最后一个
+    let ifn = '';
+    for (const tok of tokens) { if (nbIsIface(tok)) ifn = NB_IFACE_CLEAN(tok); }
+    // vlan：行内首个 1~4094 的整数 token（不含点分数字）
+    let vlan = '';
+    for (const tok of tokens) {
+      if (/^\d{1,4}$/.test(tok) && +tok >= 1 && +tok <= 4094) { vlan = tok; break; }
+    }
+    if (ip && IPv4_RE.test(ip) && ip.split('.').every(o => +o <= 255)) {
+      const k = ip + '|' + macTok;
+      if (!seen.has(k)) { seen.add(k); arp.push({ ip, mac: macTok, ifn, vlan }); }
+    } else {
+      const k = macTok + '|' + (ifn || '') + '|' + vlan;
+      if (!seen.has(k)) { seen.add(k); mac.push({ mac: macTok, vlan, ifn }); }
+    }
+  }
+  return { arp, mac };
+};
+
+/** MAC/IP 终端定位（纯函数）：在多设备 ARP/MAC 表采集结果中逐跳追踪目标 MAC 的接入端口。
+ *  @param nodes/links 拓扑数据；@param queryResults deviceId → U.parseArpMacTables 的结果
+ *  @param target {ip?, mac?}（至少其一；mac 缺省时先从 ARP 命中行解析出 MAC）
+ *  返回 {ok, mac, ip, selfHits, sightings, terminals, unqueried, error}
+ *  - sightings：某设备某接口看到目标（arp 命中 IP / mac 表命中 MAC），附沿拓扑推导的下一跳；
+ *  - terminals：无拓扑下游连接的 sighting —— 即接入端口候选（金色高亮/定位目标）；
+ *  - unqueried：拓扑下游存在但尚未采集的设备（界面可继续查询扩链）。 */
+U.traceMacHops = (nodes, links, queryResults, target) => {
+  target = target || {};
+  queryResults = queryResults || {};
+  const nodeList = Array.isArray(nodes) ? nodes : [];
+  const linkList = Array.isArray(links) ? links : [];
+  const tgtIp = String(target.ip || '').trim();
+  const tgtMacIn = U.normMac(target.mac);
+  // 目标 IP 即某设备管理地址：直接命中设备本身
+  const selfHits = tgtIp ? nodeList.filter(n => U.nodeMgmts(n).includes(tgtIp)).map(n => n.id) : [];
+  // 解析目标 MAC：显式给定优先，否则从 ARP 表命中行收集
+  const macs = new Set();
+  if (tgtMacIn) macs.add(tgtMacIn);
+  for (const r of Object.values(queryResults)) {
+    for (const row of ((r && r.arp) || [])) {
+      if (tgtIp && row.ip === tgtIp && U.normMac(row.mac)) macs.add(U.normMac(row.mac));
+    }
+  }
+  if (!macs.size && !selfHits.length) {
+    return { ok: false, mac: '', ip: tgtIp, selfHits: [], sightings: [], terminals: [], unqueried: [], error: '未在已采集设备的 ARP 表中找到该 IP（也未提供 MAC），请扩大采集范围或直接填写 MAC' };
+  }
+  const macList = [...macs];
+  // 连线索引：nodeId → [{linkId, localIf, peerId}]
+  const byNode = new Map();
+  for (const l of linkList) {
+    if (!l || !l.a || !l.b || l.a === l.b) continue;
+    if (!byNode.has(l.a)) byNode.set(l.a, []);
+    if (!byNode.has(l.b)) byNode.set(l.b, []);
+    byNode.get(l.a).push({ linkId: l.id, localIf: l.aIf || '', peerId: l.b });
+    byNode.get(l.b).push({ linkId: l.id, localIf: l.bIf || '', peerId: l.a });
+  }
+  const sightings = [];
+  const terminals = [];
+  const unqueriedSet = new Set();
+  const examined = new Set();
+  const queue = [];
+  const pushSighting = (nodeId, ifn, vlan, source) => {
+    const rec = { nodeId, ifn: String(ifn || ''), vlan: String(vlan || ''), source, next: [], terminal: false };
+    // 沿拓扑推导下一跳：连线本端接口与 sighting 接口规范化后一致
+    for (const e of (byNode.get(nodeId) || [])) {
+      if (!e.localIf || !rec.ifn) continue;
+      if (U.canonIfname(e.localIf) === U.canonIfname(rec.ifn)) rec.next.push({ linkId: e.linkId, nodeId: e.peerId });
+    }
+    if (rec.next.length) {
+      for (const nx of rec.next) {
+        if (queryResults[nx.nodeId]) { if (!examined.has(nx.nodeId) && !queue.includes(nx.nodeId)) queue.push(nx.nodeId); }
+        else unqueriedSet.add(nx.nodeId);
+      }
+    } else {
+      rec.terminal = true;
+      terminals.push({ nodeId: rec.nodeId, ifn: rec.ifn, vlan: rec.vlan });
+    }
+    sightings.push(rec);
+  };
+  // 种子：有直接命中（ARP 命中 IP / MAC 表或 ARP 行命中 MAC）的设备；随后按 sighting 的拓扑下一跳 BFS 扩散
+  for (const devId of Object.keys(queryResults)) {
+    const r = queryResults[devId];
+    const direct = (r.arp || []).some(row => (tgtIp && row.ip === tgtIp) || macList.includes(row.mac))
+      || (r.mac || []).some(row => macList.includes(row.mac));
+    if (direct && !queue.includes(devId)) queue.push(devId);
+  }
+  let guard = 0;
+  while (queue.length && guard++ < 512) {
+    const devId = queue.shift();
+    if (examined.has(devId)) continue;
+    examined.add(devId);
+    const r = queryResults[devId];
+    if (!r) continue;
+    for (const row of (r.arp || [])) {
+      if (tgtIp && row.ip === tgtIp) pushSighting(devId, row.ifn, row.vlan, 'arp');
+      else if (macList.includes(U.normMac(row.mac))) pushSighting(devId, row.ifn, row.vlan, 'arp-mac');
+    }
+    for (const row of (r.mac || [])) {
+      if (macList.includes(U.normMac(row.mac))) pushSighting(devId, row.ifn, row.vlan, 'mac');
+    }
+  }
+  return { ok: true, mac: macList.join('、'), ip: tgtIp, selfHits, sightings, terminals, unqueried: [...unqueriedSet], error: null };
+};
+
 /* ---------- 接口总表（全部链路两端接口集中编辑用；纯函数，Node 测试可调用） ----------
  * 每条链路的 a/b 两端各一行（接口名为空的行不生成），按设备名（中文序）+ 接口名排序。 */
 U.buildIfTableRows = (nodes, links) => {

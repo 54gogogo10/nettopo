@@ -293,6 +293,188 @@ class ShellManager extends EventEmitter {
     return true;
   }
 
+  /* ---------- 一次性命令执行（采集邻居表 / MAC·ARP 定位等无人值守单次采集） ---------- */
+  /** 独立建立会话（SSH/Telnet），等命令行就绪后逐条下发命令并按命令分窗收集输出，完成后关闭会话。
+   *  复用监控独立备份的成熟状态机（就绪判据/输出组包/凭据打码），另加：
+   *  - 「---- More ----」分页提示自动补空格翻页（未关分页的设备输出不被截断）；
+   *  - 首次连接指纹自动信任（TOFU，与监控同语义），事件携带指纹供渲染层记录；
+   *  opts: {protocol, host, port, username, password, privateKey, keyPassphrase, jump, encoding,
+   *         commands:[cmd,...], waitMs(命令输出最短等待,默认1200), cmdTimeoutMs(单命令上限,默认10000),
+   *         expectFp(已知指纹则严格比对), readyTimeoutMs}
+   *  返回 Promise<{ok, outputs:[{cmd,text}], fingerprint:{host,fp}|null, error, errors:[]}> */
+  runOneShot(opts) {
+    return new Promise((resolve) => {
+      opts = opts || {};
+      const cleanLog = (s) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]/g, '');
+      const protocol = String(opts.protocol || 'ssh').toLowerCase() === 'telnet' ? 'telnet' : 'ssh';
+      const host = cleanLog(opts.host).trim();
+      if (!host) { resolve({ ok: false, outputs: [], fingerprint: null, error: '未填写主机地址', errors: [] }); return; }
+      let port = parseInt(opts.port, 10);
+      if (!(port >= 1 && port <= 65535)) port = protocol === 'telnet' ? 23 : 22;
+      // 命令白名单校验：含控制字符（防换行注入拆分/伪造命令）或超长的整批拒绝，空白行跳过
+      const commands = [];
+      let cmdInvalid = false;
+      for (const c of (Array.isArray(opts.commands) ? opts.commands : [])) {
+        const raw = String(c == null ? '' : c);
+        if (/[\u0000-\u001f\u007f]/.test(raw) || raw.length > 256) { cmdInvalid = true; break; }
+        const t = raw.trim();
+        if (!t) continue;
+        if (commands.length >= 16) break;
+        commands.push(t);
+      }
+      if (cmdInvalid) { resolve({ ok: false, outputs: [], fingerprint: null, error: '命令包含控制字符或超过 256 字符，已拒绝执行', errors: [] }); return; }
+      if (!commands.length) { resolve({ ok: false, outputs: [], fingerprint: null, error: '未提供要执行的命令', errors: [] }); return; }
+      const clamp = (v, lo, hi, d) => { const n = parseInt(v, 10); return (n >= lo && n <= hi) ? n : d; };
+      const waitMs = clamp(opts.waitMs, 200, 20000, 1200);
+      const cmdTimeoutMs = clamp(opts.cmdTimeoutMs, 1000, 60000, 10000);
+      const readyTimeoutMs = clamp(opts.readyTimeoutMs, 3000, 60000, 15000);
+      const overallMs = readyTimeoutMs + commands.length * (cmdTimeoutMs + waitMs) + 15000;
+
+      const r = this.connect({
+        protocol, host, port,
+        username: cleanLog(opts.username).trim().slice(0, 128) || 'admin',
+        password: String(opts.password || ''),
+        privateKey: typeof opts.privateKey === 'string' ? opts.privateKey.trim() : '',
+        keyPassphrase: typeof opts.keyPassphrase === 'string' ? opts.keyPassphrase.slice(0, 1024) : '',
+        jump: opts.jump && typeof opts.jump === 'object' ? opts.jump : null,
+        cols: 200, rows: 50, // 宽终端：减少设备输出折行（表格解析更稳）
+        autoLogin: protocol === 'telnet',
+        encoding: opts.encoding === 'gbk' ? 'gbk' : 'utf8',
+        expectFp: String(opts.expectFp || '').trim(),
+        owner: 'monitor' // 后台采集语义：Web Shell 窗口关闭的 closeAll('monitor') 不误杀；结束后参数副本自动清理
+      });
+      if (!r.ok) { resolve({ ok: false, outputs: [], fingerprint: null, error: r.error || '连接失败', errors: [] }); return; }
+      const sid = r.id;
+      const sleep = (ms) => new Promise(x => setTimeout(x, ms));
+      const eol = protocol === 'telnet' ? '\r\n' : '\n';
+      // 就绪/提示符判据（与 monitor.js PROMPT_RE 同形态，不锚定行尾：首包提示符常与协商残渣粘连）
+      const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/;
+      const MORE_RE = /--+\s*more\s*--+\s*$/i;
+
+      let settled = false;
+      let curCap = null;          // 当前命令捕获窗 {lines:[], chars:0}
+      let lineBuf = '';
+      let promptSeen = false;     // 连接以来是否出现过命令提示符（就绪判据）
+      let connectedOnce = false;
+      let lastMoreAt = 0;
+      const fpOut = { v: null };  // 首连指纹（TOFU 自动信任后回传渲染层记录）
+      const errors = [];
+
+      const finish = (ok, error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(overallTimer);
+        this.removeListener('output', onOutput);
+        this.removeListener('status', onStatus);
+        this.removeListener('end', onEnd);
+        try { this.close(sid); } catch (e) { /* ignore */ }
+        resolve({ ok: !!ok, outputs, fingerprint: fpOut.v, error: error || null, errors });
+      };
+      const overallTimer = setTimeout(() => {
+        // 超时收尾：已收集的输出照常返回（ok=false 标注），供界面展示部分结果
+        finish(false, '采集超时（部分输出已保留）');
+      }, overallMs);
+
+      /** 分页提示自动翻页：输出尾部（含未换行的半行）命中 More 即补发一个空格。节流 150ms。 */
+      const maybeMore = () => {
+        const now = Date.now();
+        if (now - lastMoreAt < 150) return;
+        const tail = (lineBuf || '').trimEnd();
+        if (MORE_RE.test(tail)) { lastMoreAt = now; try { this.write(sid, ' '); } catch (e) { /* ignore */ } }
+      };
+      const onOutput = (sid2, data) => {
+        if (sid2 !== sid) return;
+        let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '');
+        text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        lineBuf += text;
+        const parts = lineBuf.split('\n');
+        lineBuf = parts.pop(); // 半行留缓冲（More 提示/提示符常不带换行）
+        for (const ln of parts) {
+          const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          if (!t) continue;
+          if (!promptSeen && PROMPT_RE.test(t.trim())) promptSeen = true;
+          if (curCap && curCap.chars + t.length + 1 <= 1024 * 1024) { curCap.lines.push(t); curCap.chars += t.length + 1; }
+        }
+        maybeMore();
+      };
+      const onStatus = (sid2, info) => {
+        if (sid2 !== sid || !info) return;
+        if (info.state === 'connected') {
+          connectedOnce = true;
+        } else if (info.state === 'fingerprint') {
+          // 无人值守采集的指纹语义与监控一致：首次连接自动信任（TOFU），变化拒绝由渲染层传入 expectFp 严格比对
+          const fh = String((info && info.host) || host);
+          fpOut.v = { host: fh, fp: String(info.fp || '') };
+          try { this.trustFingerprint(fh, true); } catch (e) { /* ignore */ }
+        } else if (info.state === 'error') {
+          if (!connectedOnce) { finish(false, info.text || '连接失败'); return; }
+          errors.push(String(info.text || '会话错误'));
+        }
+      };
+      const onEnd = (sid2, reason) => {
+        if (sid2 !== sid) return;
+        finish(false, '连接已断开：' + String(reason || '').slice(0, 120) + (outputs.length ? '（部分输出已保留）' : ''));
+      };
+      this.on('output', onOutput);
+      this.on('status', onStatus);
+      this.on('end', onEnd);
+
+      const outputs = [];
+      const waitReady = async () => {
+        // 空行探测提示符（Telnet 自动登录中跳过：空行落在 Username:/Password: 上会引发提示重印）
+        if (!(protocol === 'telnet' && String(opts.password || ''))) { try { this.write(sid, '\r\n'); } catch (e) { /* ignore */ } }
+        const t0 = Date.now();
+        while (!settled && (Date.now() - t0) < readyTimeoutMs) {
+          if (promptSeen) return true;
+          const tail = (lineBuf || '').trim();
+          if (tail && PROMPT_RE.test(tail)) { promptSeen = true; return true; }
+          await sleep(150);
+        }
+        return !!promptSeen; // 超时兜底：照常执行（等价监控的既有行为），命令可能被吞但输出窗口仍会等待
+      };
+      /** 等待当前命令完成：输出静默 ≥350ms 且半行残留为提示符形态（提示符重现 = 命令执行完毕）；
+       *  输出彻底静默 ≥3s 也推进（个别设备提示符形态特殊，兜底防单命令拖满超时）；期间处理 More 翻页 */
+      const waitCmdDone = async () => {
+        const t0 = Date.now();
+        let lastLen = -1, quietMs = 0;
+        while (!settled && (Date.now() - t0) < cmdTimeoutMs) {
+          maybeMore();
+          const len = curCap ? curCap.lines.length : 0;
+          quietMs = (len === lastLen) ? quietMs + 100 : 0;
+          lastLen = len;
+          const tail = (lineBuf || '').trimEnd();
+          if (quietMs >= 350 && tail && PROMPT_RE.test(tail)) break;
+          if (quietMs >= 3000) break;
+          await sleep(100);
+        }
+      };
+
+      (async () => {
+        const ready = await waitReady();
+        if (!ready) errors.push('未识别到命令提示符（会话可能未就绪），已按超时继续');
+        // 首条命令前的输出（登录横幅/提示符回显）不属于命令输出：丢弃
+        lineBuf = '';
+        for (const cmd of commands) {
+          if (settled) break;
+          curCap = { lines: [], chars: 0 };
+          try { this.write(sid, cmd + eol); } catch (e) { errors.push('命令写入失败：' + cmd); curCap = null; outputs.push({ cmd, text: '' }); continue; }
+          await sleep(Math.min(waitMs, 800)); // 最短输出等待（慢设备首包）
+          await waitCmdDone();
+          await sleep(150); // 尾部缓冲
+          // 半行残留冲进本命令窗口（末行无换行/收尾提示符）
+          const tail = (lineBuf || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          if (tail.trim()) { curCap.lines.push(tail); curCap.chars += tail.length + 1; }
+          lineBuf = '';
+          // 剥命令回显：首行「提示符+命令」或命令本身
+          const lines = curCap.lines;
+          if (lines.length && (lines[0].trim() === cmd || lines[0].trim().endsWith(cmd))) lines.shift();
+          outputs.push({ cmd, text: lines.join('\n') });
+        }
+        finish(true, null);
+      })().catch((e) => finish(false, '采集异常：' + String((e && e.message) || e)));
+    });
+  }
+
   /* ---------- SFTP（复用已建立的 SSH 会话，同连接按需开 SFTP 通道；Telnet 会话不支持） ---------- */
   /** 取会话的 SFTP 通道。每次操作新开一条通道（open 延迟约 1 个 RTT，可接受），
    *  不做通道缓存：会话关闭/重连时无失效状态需要追踪，实现更简单可靠。 */

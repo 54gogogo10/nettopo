@@ -1,9 +1,10 @@
 /* NetTopo 本机网络诊断工具箱 —— 主进程纯 Node 模块（不依赖 Electron）
- * 提供 Ping / 路由跟踪 / TCP 端口批量探测 / DNS 解析四类诊断：
+ * 提供 Ping / 路由跟踪 / TCP 端口批量探测 / DNS 解析 / 网段存活扫描五类诊断：
  *   - ping：spawn 系统 ping（Windows -n / Linux -c），解析收发包与 rt 统计
  *   - trace：Windows tracert / Linux traceroute（缺省回退 tracepath）
  *   - tcp：net.connect 批量端口探测（并发上限 + 单口超时）
  *   - dns：dns.promises lookup（A 记录）+ reverse（PTR）
+ *   - scan：网段 ICMP 存活扫描（CIDR/区间展开 + 并发 ping + 本机 ARP 解析）
  * 输出解析为纯函数（可在 Node 测试中直接使用）；外部命令仅以受控参数列表 spawn，
  * 不经 shell 拼接，主机地址以白名单字符校验。
  */
@@ -152,6 +153,138 @@ async function ping(host, count) {
   return { ok: !!r.ok, output: r.output, stats: parsePingStats(r.output), error: r.error };
 }
 
+/* ---------------- 网段存活扫描（CIDR 展开 + ICMP 并发 sweep + 本机 ARP 解析） ---------------- */
+/** IPv4 → 32 位整数；非法返回 null */
+function ipv4ToIntDiag(ip) {
+  const m = String(ip == null ? '' : ip).trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return null;
+  let v = 0;
+  for (let i = 1; i <= 4; i++) { const o = parseInt(m[i], 10); if (o > 255) return null; v = v * 256 + o; }
+  return v;
+}
+/** 整数 → 点分 IPv4 */
+function intToIpv4Diag(v) { return [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255].join('.'); }
+
+/** 扫描目标展开：'192.168.1.0/24'、'192.168.1.10-192.168.1.20'、'192.168.1.10-20'、单 IP、
+ *  逗号/空白/分号分隔的混合列表 → 点分 IPv4 数组（升序去重）。总量封顶 4096（防 /8 误填撑爆），
+ *  网段地址与广播地址按惯例剔除（/31、/32 保留全部主机位）。 */
+function expandScanTargets(text) {
+  const out = new Set();
+  for (const part of String(text == null ? '' : text).split(/[,，\s;；]+/)) {
+    if (!part || out.size >= 4096) break;
+    // CIDR 网段
+    let m = part.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
+    if (m) {
+      const base = ipv4ToIntDiag(m[1]);
+      const bits = parseInt(m[2], 10);
+      if (base == null || !(bits >= 8 && bits <= 32)) continue;
+      const size = 2 ** (32 - bits);
+      let start = (base >>> 0) & (size === 4294967296 ? 0 : (0xffffffff << (32 - bits)) >>> 0);
+      // /31（RFC 3021）与 /32 保留全部地址；其余剔除网段地址与广播地址
+      const lo = (bits >= 31) ? start : start + 1;
+      const hi = (bits >= 31) ? start + size - 1 : start + size - 2;
+      for (let v = lo; v <= hi && out.size < 4096; v++) out.add(intToIpv4Diag(v >>> 0));
+      continue;
+    }
+    // 区间：a.b.c.d-e 或 a.b.c.d-a.b.c.e
+    m = part.match(/^(\d{1,3}(?:\.\d{1,3}){3})-(\d{1,3}(?:\.\d{1,3}){3}|\d{1,3})$/);
+    if (m) {
+      const a = ipv4ToIntDiag(m[1]);
+      if (a == null) continue;
+      const bRaw = m[2];
+      let b;
+      if (/^\d{1,3}$/.test(bRaw)) { b = (a & 0xffffff00) | parseInt(bRaw, 10); if (b < a) b = a; }
+      else { b = ipv4ToIntDiag(bRaw); }
+      if (b == null || b < a) continue;
+      if (b - a > 4095) b = a + 4095;
+      for (let v = a; v <= b && out.size < 4096; v++) out.add(intToIpv4Diag(v >>> 0));
+      continue;
+    }
+    // 单 IP
+    const v = ipv4ToIntDiag(part);
+    if (v != null) out.add(intToIpv4Diag(v));
+  }
+  return [...out].sort((x, y) => ipv4ToIntDiag(x) - ipv4ToIntDiag(y));
+}
+
+/** 解析本机 ARP 表（Windows `arp -a` 中文/英文、Linux `arp -n` / `ip neigh`）→ [{ip, mac}]。
+ *  MAC 统一为小写冒号形式；无 MAC 的行（incomplete 等）跳过。纯函数可测。 */
+function parseLocalArp(output) {
+  const out = [];
+  const seen = new Set();
+  const normMac = (s) => {
+    const t = String(s || '').trim().toLowerCase();
+    let m = t.match(/^([0-9a-f]{1,2})[:-]([0-9a-f]{1,2})[:-]([0-9a-f]{1,2})[:-]([0-9a-f]{1,2})[:-]([0-9a-f]{1,2})[:-]([0-9a-f]{1,2})$/);
+    if (m) return m.slice(1).map(x => x.padStart(2, '0')).join(':');
+    m = t.match(/^([0-9a-f]{4})[.-]([0-9a-f]{4})[.-]([0-9a-f]{4})$/); // 华为 a4bb-6d11-2233 / 思科 aabb.cc00.0100
+    if (m) return (m[1] + m[2] + m[3]).match(/.{2}/g).join(':');
+    return '';
+  };
+  for (const raw of String(output == null ? '' : output).split('\n')) {
+    const t = raw.trim();
+    if (!t || /^(interface|internet\s+address|arp|entries|address|hw\s*type|flags)/i.test(t)) continue;
+    if (/(incomplete|no\s*entry|invalid)/i.test(t)) continue;
+    // Windows：192.168.1.5   aa-bb-cc-dd-ee-ff     动态 ；Linux arp -n：? (192.168.1.5) at aa:bb:cc… [ether] on eth0
+    let m = t.match(/^(\d{1,3}(?:\.\d{1,3}){3})\s+(?:at\s+)?([0-9a-fA-F:.\-]{11,17})/);
+    if (!m) m = t.match(/[?(](\d{1,3}(?:\.\d{1,3}){3})[)?]\s+at\s+([0-9a-fA-F:.\-]{11,17})/);
+    if (!m) continue;
+    const ip = m[1], mac = normMac(m[2]);
+    if (!ip || !mac || seen.has(ip)) continue;
+    seen.add(ip);
+    out.push({ ip, mac });
+  }
+  return out;
+}
+
+/** 本机 ARP 表读取（Windows arp -a / Linux arp -n）→ [{ip, mac}]；失败返回空数组。
+ *  网段扫描后在线主机通常已进入本机 ARP 缓存（同网段直连），借它给扫描结果补 MAC。 */
+async function localArpTable() {
+  const r = process.platform === 'win32'
+    ? await runCommand('arp', ['-a'], 10000)
+    : await runCommand('arp', ['-n'], 10000);
+  return r.ok ? parseLocalArp(r.output) : [];
+}
+
+/** 网段 ICMP 存活扫描：逐主机 spawn 系统 ping（1 包短超时），并发封顶 CONC。
+ *  返回 {alive:[{ip, ms, mac?, ptr?}], dead:n, error}；resolvePtr 时对存活主机做 PTR 反查，
+ *  mac 查询默认开启（读本机 ARP 表，失败不影响结果）。 */
+async function scanSubnet(hosts, opts) {
+  opts = opts || {};
+  const list = (Array.isArray(hosts) ? hosts : []).filter(h => isValidDiagHost(h) && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(h));
+  if (!list.length) return { alive: [], dead: 0, error: '没有可扫描的 IPv4 地址' };
+  const CONC = Math.max(1, Math.min(64, parseInt(opts.concurrency, 10) || 32));
+  const alive = [];
+  let dead = 0;
+  for (let i = 0; i < list.length; i += CONC) {
+    const batch = list.slice(i, i + CONC);
+    const rs = await Promise.all(batch.map((h) => ping(h, 1)));
+    rs.forEach((r, j) => {
+      if (r.ok) {
+        // 0ms 是合法延迟：不能走 || 兜底（0 会被吞成 null）
+        const st = r.stats;
+        const raw = st ? (st.min != null ? st.min : st.avg) : null;
+        alive.push({ ip: batch[j], ms: (raw != null && Number.isFinite(raw)) ? raw : null });
+      } else dead++;
+    });
+  }
+  alive.sort((a, b) => ipv4ToIntDiag(a.ip) - ipv4ToIntDiag(b.ip));
+  if (opts.mac !== false) {
+    try {
+      const macMap = new Map((await localArpTable()).map(e => [e.ip, e.mac]));
+      for (const a of alive) a.mac = macMap.get(a.ip) || '';
+    } catch (e) { /* MAC 补充失败不影响扫描结果 */ }
+  }
+  if (opts.resolvePtr) {
+    const CONC_D = 8;
+    for (let i = 0; i < alive.length; i += CONC_D) {
+      await Promise.all(alive.slice(i, i + CONC_D).map(async (a) => {
+        try { const names = await dnsPromises.reverse(a.ip); a.ptr = (names && names[0]) || ''; } catch (e) { a.ptr = ''; }
+      }));
+    }
+  }
+  return { alive, dead, error: null };
+}
+
 /** 路由跟踪：Windows tracert / Linux traceroute（未安装时回退 tracepath）；hop 上限 12 */
 async function trace(host) {
   const h = String(host == null ? '' : host).trim();
@@ -168,4 +301,4 @@ async function trace(host) {
   return { ok: !!r.ok, output: r.output, error: r.error };
 }
 
-module.exports = { isValidDiagHost, parsePortList, parsePingStats, scanPorts, tcpProbe, dnsLookup, ping, trace };
+module.exports = { isValidDiagHost, parsePortList, parsePingStats, scanPorts, tcpProbe, dnsLookup, ping, trace, expandScanTargets, parseLocalArp, scanSubnet, localArpTable };

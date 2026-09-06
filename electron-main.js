@@ -4,11 +4,11 @@ const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu }
 const path = require('path');
 const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
-const { MonitorManager, UptimeStore, fmtUptimeTicks } = require('./js/monitor.js');
+const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
 const { Maintenance, nextDailyRun } = require('./js/maintenance.js');
-const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList } = require('./js/diag.js');
+const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList, expandScanTargets, scanSubnet } = require('./js/diag.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
 const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, buildShellPrompt, buildCompliancePrompt, buildDailyReportPrompt, parseShellCommands, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
@@ -993,6 +993,39 @@ ipcMain.handle('diag:dns', async (e, p) => {
   const host = String((p && p.host) || '');
   if (!isValidDiagHost(host)) return { ok: false, error: '主机地址无效' };
   return dnsLookup(host);
+});
+/* 网段存活扫描：目标为 CIDR/区间展开后的 IPv4 列表（expandScanTargets 内封顶 4096），
+ * 逐主机 spawn 系统 ping（1 包短超时），并发与 PTR 反查在 diag.scanSubnet 内钳制 */
+ipcMain.handle('diag:subnet-scan', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const targets = expandScanTargets(String((p && p.targets) || ''));
+  if (!targets.length) return { ok: false, error: '没有可扫描的 IPv4 地址（支持 192.168.1.0/24、192.168.1.10-20、单 IP）' };
+  return scanSubnet(targets, { resolvePtr: !!(p && p.resolvePtr) });
+});
+/* SNMP v2c Walk / Get（诊断工具箱用）：复用监控模块的零依赖 SNMP 客户端；OID 白名单校验 */
+const DIAG_OID_RE = /^\d{1,10}(?:\.\d{1,10}){1,19}$/;
+ipcMain.handle('diag:snmp-walk', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const host = String((p && p.host) || '');
+  if (!isValidDiagHost(host)) return { ok: false, error: '主机地址无效' };
+  const oid = String((p && p.oid) || '').trim();
+  if (!DIAG_OID_RE.test(oid) || oid.length > 64) return { ok: false, error: 'OID 无效（点分十进制，如 1.3.6.1.2.1.1.1）' };
+  const community = String((p && p.community) || 'public').trim().slice(0, 64) || 'public';
+  let port = parseInt(p && p.port, 10);
+  if (!(port > 0 && port <= 65535)) port = 161;
+  const timeoutMs = Math.max(300, Math.min(10000, parseInt(p && p.timeoutMs, 10) || 1500));
+  const r = await snmpWalk(oid, host, community, timeoutMs, port, 512);
+  // walk 为空时回退单值 GET（叶子 OID 无子树，GETNEXT 也不命中时给 GET 一次机会）
+  if (r.ok && !r.varbinds.length) {
+    const g = await snmpGetValue(host, community, oid, timeoutMs, port);
+    if (g.ok) return { ok: true, varbinds: [{ oid: g.oid, value: g.value }] };
+  }
+  return { ok: !!r.ok, varbinds: r.varbinds || [], error: r.error || null };
+});
+/* 一次性命令执行（采集邻居表 / MAC·ARP 定位）：独立会话在 shell.js 内完成，凭据不落盘不进日志明文 */
+ipcMain.handle('shell:oneshot', (e, p) => {
+  if (!monitorGuard(e)) return Promise.resolve({ ok: false, outputs: [], fingerprint: null, error: 'forbidden', errors: [] });
+  return shell.runOneShot(p || {});
 });
 
 /* ---- 在线升级（仅主窗口可调用）----

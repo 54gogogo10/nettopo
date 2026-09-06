@@ -292,27 +292,62 @@ async function loadGraph(graph, msg) {
 
 /* ================= 从邻居表导入（LLDP/CDP） =================
  * 粘贴 display lldp neighbor / show cdp neighbors 等命令输出，
- * 解析出「本端接口 ⇄ 对端设备 ⇄ 对端接口」并合并进当前拓扑（缺设备自动建、缺连线自动连）。 */
-function openNeighborImport() {
+ * 解析出「本端接口 ⇄ 对端设备 ⇄ 对端接口」并合并进当前拓扑（缺设备自动建、缺连线自动连）。
+ * 桌面版可直接 SSH/Telnet 登录本端设备自动采集邻居表（runOneShot 一次性会话），无需手工粘贴。 */
+/** 各厂家邻居表采集命令预设（首条多为关分页命令；auto 逐条尝试直到解析命中） */
+const NB_COLLECT_CMDS = {
+  auto: ['display lldp neighbor', 'display lldp neighbor-information', 'show lldp neighbors', 'show cdp neighbors'],
+  huawei: ['screen-length 0 temporary', 'display lldp neighbor'],
+  h3c: ['screen-length disable', 'display lldp neighbor-information'],
+  cisco: ['terminal length 0', 'show lldp neighbors', 'show cdp neighbors'],
+  ruijie: ['terminal length 0', 'show cdp neighbors', 'show lldp neighbors']
+};
+/** 设备 SSH/Telnet 凭据预填：优先取该设备监控配置里的连接参数（本机已有，明文在内存） */
+function monitorCredOf(nodeId) {
+  const rows = normalizeMonitorHosts(state.monitorCfg[nodeId]);
+  return rows.find(x => x.protocol === 'ssh') || rows[0] || null;
+}
+/** 已信任主机指纹（TOFU）：与 Web Shell/监控同一份记录；采集前传入 expectFp 严格比对（变化即拒连） */
+function trustedFpOf(host) {
+  try { const fp = localStorage.getItem('topoShellFp:' + host); return (fp && fp.indexOf('SHA256:') === 0) ? fp : ''; } catch (e) { return ''; }
+}
+function rememberTrustedFp(host, fp) {
+  if (!host || !fp) return;
+  try { localStorage.setItem('topoShellFp:' + host, fp); } catch (e) { /* ignore */ }
+}
+function openNeighborImport(prefillText, presetLocalId) {
   if (!state.nodes.length) { toast('当前画布为空：请先添加或导入本端设备'); return; }
+  const canCollect = !!(window.topoShell && window.topoShell.runOneShot);
   const rootNode = $('#modalRoot');
   const ov = document.createElement('div');
   ov.className = 'overlay';
   const nodesSorted = [...state.nodes].sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
-  const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
+  const selId = presetLocalId || (state.sel && state.sel.kind === 'node' ? state.sel.id : '');
   ov.innerHTML = `
-    <div class="modal" role="dialog" style="width:720px;height:80vh;display:flex;flex-direction:column">
+    <div class="modal" role="dialog" style="width:760px;height:80vh;display:flex;flex-direction:column">
       <h3>从邻居表导入拓扑（LLDP / CDP）</h3>
-      <div class="m-sub">在设备上执行 <b>display lldp neighbor</b>（华为/H3C）或 <b>show cdp neighbors</b>（思科），把输出原样粘贴到下方：软件解析出邻居关系后合并进当前拓扑（同名对端复用画布设备，新设备自动创建，可再按 L 自动布局）。纯本机解析，不上传。</div>
+      <div class="m-sub">在设备上执行 <b>display lldp neighbor</b>（华为/H3C）或 <b>show cdp neighbors</b>（思科），把输出原样粘贴到下方；桌面版也可直接<b>从设备采集</b>（自动登录执行命令并解析，分页提示自动翻页）。纯本机解析，不上传。</div>
       <div class="frow" style="display:flex;gap:10px;align-items:flex-end">
-        <div class="frow" style="flex:1;margin-bottom:0"><label>本端设备（粘贴的是该设备的邻居表）</label>
+        <div class="frow" style="flex:1;margin-bottom:0"><label>本端设备（粘贴/采集的是该设备的邻居表）</label>
           <select id="nbLocal">${nodesSorted.map(n => `<option value="${U.escHtml(n.id)}"${n.id === selId ? ' selected' : ''}>${U.escHtml(n.name)}</option>`).join('')}</select>
         </div>
         <label style="display:flex;align-items:center;gap:5px;margin:0 0 4px" title="解析结果中对端接口为空时也创建连线（对端接口留空，之后可手动补）"><input id="nbNewIf" type="checkbox" checked/>对端接口未识别也创建连线</label>
         <button type="button" class="tb" id="nbParse"><i class="ic" data-ic="search"></i>解析预览</button>
       </div>
-      <div class="frow"><textarea id="nbText" rows="8" spellcheck="false" style="font-family:Consolas,monospace;font-size:12px" placeholder="<SW1>display lldp neighbor brief&#10;Local Intf     Neighbor Dev     Neighbor Intf&#10;GE0/0/1        SW2              GE0/0/24&#10;..."></textarea></div>
-      <div id="nbPrev" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:120px"><div class="bk-empty">粘贴输出后点「解析预览」。</div></div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;border-top:1px dashed var(--border);padding-top:8px">
+        <button type="button" class="tb" id="nbCollect" ${canCollect ? '' : 'disabled title="需要桌面版（Electron）环境"'}><i class="ic" data-ic="terminal"></i>从设备采集</button>
+        <div class="frow" style="margin:0"><label>协议</label><select id="nbProto"><option value="ssh">SSH</option><option value="telnet">Telnet</option></select></div>
+        <div class="frow" style="margin:0"><label>地址</label><input id="nbHost" type="text" style="width:120px" spellcheck="false" autocomplete="off"/></div>
+        <div class="frow" style="margin:0"><label>端口</label><input id="nbPort" type="number" style="width:60px" value="22"/></div>
+        <div class="frow" style="margin:0"><label>账号</label><input id="nbUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
+        <div class="frow" style="margin:0"><label>密码</label><input id="nbPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        <div class="frow" style="margin:0"><label>厂家</label>
+          <select id="nbVendor"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="ruijie">锐捷</option></select>
+        </div>
+        <label style="display:flex;align-items:center;gap:5px;margin:0 0 4px" title="老设备中文环境输出为 GBK 时勾选"><input id="nbGbk" type="checkbox"/>GBK 输出</label>
+      </div>
+      <div class="frow"><textarea id="nbText" rows="8" spellcheck="false" style="font-family:Consolas,monospace;font-size:12px" placeholder="<SW1>display lldp neighbor brief&#10;Local Intf     Neighbor Dev     Neighbor Intf&#10;GE0/0/1        SW2              GE0/0/24&#10;...">${U.escHtml(String(prefillText || ''))}</textarea></div>
+      <div id="nbPrev" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:120px"><div class="bk-empty">粘贴输出后点「解析预览」，或填写连接参数后「从设备采集」。</div></div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="cancel">关闭</button>
         <button type="button" class="tb primary" id="nbGo" disabled>导入拓扑</button>
@@ -327,7 +362,8 @@ function openNeighborImport() {
   const prevEl = ov.querySelector('#nbPrev');
   const goBtn = ov.querySelector('#nbGo');
   ov.querySelector('[data-act=cancel]').onclick = close;
-  ov.querySelector('#nbParse').onclick = () => {
+  /** 解析预览：采集完成与手工点击共用 */
+  const parseAndPreview = () => {
     const r = U.parseNeighbors(ov.querySelector('#nbText').value);
     parsed = r.ok ? r : null;
     goBtn.disabled = !r.ok;
@@ -340,6 +376,58 @@ function openNeighborImport() {
       `<tr><td>${U.escHtml(e.localIf)}</td><td>${U.escHtml(e.peer)}</td><td>${U.escHtml(e.peerIf || '（未识别）')}</td></tr>`).join('');
     prevEl.innerHTML = `<div class="comp-total">识别为「${U.escHtml(fmtName)}」，共 <b>${r.entries.length}</b> 条邻居关系${r.entries.length > 200 ? '（预览前 200 条）' : ''}</div>
       <table class="nb-table"><tr><th>本端接口</th><th>对端设备</th><th>对端接口</th></tr>${rows}</table>`;
+  };
+  ov.querySelector('#nbParse').onclick = parseAndPreview;
+  // 本端设备切换：预填该设备监控配置的连接参数（无则用管理地址）
+  const fillCred = () => {
+    const node = state.nodes.find(n => n.id === ov.querySelector('#nbLocal').value);
+    if (!node) return;
+    const cred = monitorCredOf(node.id);
+    ov.querySelector('#nbProto').value = cred ? cred.protocol : 'ssh';
+    ov.querySelector('#nbHost').value = cred ? cred.host : (U.nodeMgmts(node)[0] || '');
+    ov.querySelector('#nbPort').value = (cred && cred.port) ? cred.port : (ov.querySelector('#nbProto').value === 'telnet' ? 23 : 22);
+    ov.querySelector('#nbUser').value = cred ? cred.username : 'admin';
+    ov.querySelector('#nbPass').value = cred ? (cred.password || '') : '';
+  };
+  ov.querySelector('#nbLocal').addEventListener('change', fillCred);
+  fillCred();
+  ov.querySelector('#nbProto').addEventListener('change', () => {
+    ov.querySelector('#nbPort').value = ov.querySelector('#nbProto').value === 'telnet' ? 23 : 22;
+  });
+  // 从设备采集：一次性会话执行厂家预设命令，输出回填后自动解析预览
+  ov.querySelector('#nbCollect').onclick = async () => {
+    if (!canCollect) { toast('从设备采集需要桌面版（Electron）环境'); return; }
+    const host = ov.querySelector('#nbHost').value.trim();
+    if (!host) { toast('请填写设备管理地址'); return; }
+    const node = state.nodes.find(n => n.id === ov.querySelector('#nbLocal').value);
+    const btn = ov.querySelector('#nbCollect');
+    btn.disabled = true;
+    prevEl.innerHTML = '<div class="bk-empty">连接中…（首次连接自动信任主机指纹；命令执行约数秒）</div>';
+    const vendor = ov.querySelector('#nbVendor').value;
+    try {
+      const r = await window.topoShell.runOneShot({
+        protocol: ov.querySelector('#nbProto').value,
+        host, port: ov.querySelector('#nbPort').value,
+        username: ov.querySelector('#nbUser').value.trim() || 'admin',
+        password: ov.querySelector('#nbPass').value,
+        encoding: ov.querySelector('#nbGbk').checked ? 'gbk' : 'utf8',
+        commands: NB_COLLECT_CMDS[vendor] || NB_COLLECT_CMDS.auto,
+        expectFp: trustedFpOf(host)
+      });
+      if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.fp);
+      const text = (r.outputs || []).map(o => o.text).filter(t => t && t.trim()).join('\n');
+      if (text) ov.querySelector('#nbText').value = text;
+      const errs = (r.errors || []).filter(Boolean);
+      const head = r.ok ? '<div class="comp-total">已从 <b>' + U.escHtml(host) + '</b> 采集 ' + (r.outputs || []).length + ' 条命令输出</div>'
+        : '<div class="ipam-conflict">采集失败：' + U.escHtml(r.error || '未知') + (text ? '（已捕获部分输出）' : '') + '</div>';
+      prevEl.innerHTML = head + '<pre style="white-space:pre-wrap;font:11.5px/1.6 Consolas,monospace;max-height:160px;overflow:auto">' + U.escHtml(text || '（无输出）') + '</pre>';
+      if (errs.length) prevEl.innerHTML += '<div class="bk-empty">' + U.escHtml(errs.join('；')) + '</div>';
+      if (text) parseAndPreview();
+      else if (node && !r.ok) prevEl.innerHTML += '<div class="bk-empty">提示：请核对地址/账号/密码与厂家命令预设，或登录设备手工粘贴输出。</div>';
+    } catch (e) {
+      prevEl.innerHTML = '<div class="ipam-conflict">采集异常：' + U.escHtml(String((e && e.message) || e)) + '</div>';
+    }
+    btn.disabled = false;
   };
   goBtn.onclick = () => {
     if (!parsed || !parsed.entries.length) { toast('请先解析预览邻居表'); return; }
@@ -364,6 +452,170 @@ function openNeighborImport() {
     toast(`已从邻居表导入（${localNode.name}）：${parts.length ? parts.join('，') : '无变化'}` + (r.skipped ? `，跳过 ${r.skipped} 条重复/无效` : ''));
   };
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#nbText').focus(); }, 250);
+}
+
+/* ================= MAC/ARP 终端定位 =================
+ * 输入 IP 或 MAC，并发 SSH/Telnet 采集范围内设备的 ARP / MAC 地址表（凭据取自各设备监控配置，
+ * 无则用弹窗内的备用账号），U.traceMacHops 沿拓扑逐跳追踪到接入端口并高亮。 */
+const MAC_TRACE_CMDS = {
+  auto: ['display arp', 'display mac-address', 'show ip arp', 'show mac address-table', 'show mac-address-table', 'ip neigh'],
+  huawei: ['screen-length 0 temporary', 'display arp', 'display mac-address'],
+  h3c: ['screen-length disable', 'display arp', 'display mac-address'],
+  cisco: ['terminal length 0', 'show ip arp', 'show mac address-table'],
+  linux: ['ip neigh']
+};
+function openMacTrace(prefill) {
+  if (!(window.topoShell && window.topoShell.runOneShot)) { toast('MAC/ARP 定位需要桌面版（Electron）环境'); return; }
+  const cands = state.nodes
+    .filter(n => U.nodeMgmts(n).length || normalizeMonitorHosts(state.monitorCfg[n.id]).length)
+    .map(n => ({ node: n, cred: monitorCredOf(n.id) }));
+  if (!cands.length) { toast('当前没有配置管理地址或监控凭据的设备：先为设备填写管理地址'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:860px;height:80vh;display:flex;flex-direction:column">
+      <h3>MAC / ARP 终端定位</h3>
+      <div class="m-sub">输入终端的 <b>IP 或 MAC 地址</b>，软件并发登录范围内设备采集 ARP / MAC 地址表，沿拓扑逐跳追踪到<b>接入端口</b>并高亮。凭据优先取各设备「设备监控」里保存的账号；未保存的设备用下方备用账号（留空则跳过）。只读查询，不修改设备。</div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="flex:1;margin-bottom:0"><label>目标 IP / MAC</label>
+          <input id="mtTarget" type="text" placeholder="如 192.168.1.87 或 a4bb-6d11-2233" value="${U.escHtml(String(prefill || ''))}" spellcheck="false" autocomplete="off"/>
+        </div>
+        <div class="frow" style="margin:0"><label>厂家</label>
+          <select id="mtVendor"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="linux">Linux</option></select>
+        </div>
+        <div class="frow" style="margin:0"><label>备用账号</label><input id="mtUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
+        <div class="frow" style="margin:0"><label>备用密码</label><input id="mtPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        <button type="button" class="tb primary" id="mtRun"><i class="ic" data-ic="search"></i>开始定位</button>
+      </div>
+      <div class="frow" style="display:flex;gap:8px;align-items:center">
+        <span id="mtHint" class="m-sub" style="margin:0;flex:1">采集范围（勾选要登录查询的设备，默认勾选已保存凭据的）：</span>
+        <label style="display:flex;align-items:center;gap:4px;margin:0"><input id="mtAll" type="checkbox"/>全选</label>
+      </div>
+      <div id="mtDevs" style="max-height:140px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
+      <div id="mtResult" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:120px;margin-top:8px"><div class="bk-empty">填写目标后点「开始定位」。</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const devsEl = ov.querySelector('#mtDevs');
+  devsEl.innerHTML = cands.map((c, i) => {
+    const host = c.cred ? c.cred.host : U.nodeMgmts(c.node)[0] || '';
+    const mark = c.cred ? '<span style="color:var(--ok,#22c55e)" title="使用监控配置里保存的凭据">●</span>'
+      : (host ? '<span style="color:#f59e0b" title="无保存凭据，将使用备用账号">●</span>' : '<span style="color:var(--danger)" title="无管理地址，不可查询">✕</span>');
+    return `<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" data-idx="${i}" ${c.cred && host ? 'checked' : ''}/> ${mark} ${U.escHtml(c.node.name)}<span style="opacity:.6">（${U.escHtml(host || '无地址')}）</span></label>`;
+  }).join('');
+  ov.querySelector('#mtAll').addEventListener('change', (e) => {
+    devsEl.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = e.target.checked; });
+  });
+  const resultEl = ov.querySelector('#mtResult');
+  const hintEl = ov.querySelector('#mtHint');
+  const runBtn = ov.querySelector('#mtRun');
+  const queryResults = {};   // nodeId → parseArpMacTables 结果（跨「继续查询」轮次累积）
+  let lastUnqueried = [];    // 上一轮定位中「拓扑下游存在但未采集」的设备，供「继续查询下游」增量采集
+  const nameOf = (id) => { const n = state.nodes.find(x => x.id === id); return n ? n.name : id; };
+  /** 采集一组设备（并发 2）：返回 {got, fails} */
+  const collectDevices = async (items, vendor, fbUser, fbPass) => {
+    const got = [], fails = [];
+    const CONC = 2;
+    for (let i = 0; i < items.length; i += CONC) {
+      const batch = items.slice(i, i + CONC);
+      await Promise.all(batch.map(async (c) => {
+        const host = c.cred ? c.cred.host : (U.nodeMgmts(c.node)[0] || '');
+        if (!host || (!c.cred && !fbUser && !fbPass)) { fails.push(c.node.name + '（无凭据，跳过）'); return; }
+        const proto = c.cred ? c.cred.protocol : 'ssh';
+        try {
+          hintEl.textContent = '采集中：' + c.node.name + '（' + host + '）…';
+          const r = await window.topoShell.runOneShot({
+            protocol: proto, host,
+            port: c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22),
+            username: c.cred ? c.cred.username : fbUser,
+            password: c.cred ? c.cred.password : fbPass,
+            commands: MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto,
+            expectFp: trustedFpOf(host)
+          });
+          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.fp);
+          const text = (r.outputs || []).map(o => o.text).join('\n');
+          const t = U.parseArpMacTables(text);
+          if (t.arp.length || t.mac.length) { queryResults[c.node.id] = t; got.push(c.node.name); }
+          else fails.push(c.node.name + '（未解析到 ARP/MAC 表' + (r.ok ? '' : '：' + (r.error || '')) + '）');
+        } catch (e) { fails.push(c.node.name + '（' + String((e && e.message) || e) + '）'); }
+      }));
+    }
+    return { got, fails };
+  };
+  /** 执行定位：目标解析 → trace → 渲染结果 + 画布高亮（terminal 金色/脉冲） */
+  const runTrace = () => {
+    const raw = ov.querySelector('#mtTarget').value.trim();
+    if (!raw) { toast('请填写目标 IP 或 MAC'); return false; }
+    const isMacLike = U.normMac(raw);
+    const target = isMacLike ? { mac: raw } : { ip: raw };
+    const t = U.traceMacHops(state.nodes, state.links, queryResults, target);
+    if (!t.ok) { resultEl.innerHTML = '<div class="ipam-conflict">' + U.escHtml(t.error || '定位失败') + '</div>'; return false; }
+    lastUnqueried = t.unqueried.slice();
+    // 画布高亮：全部 sighting 设备 + 经过的连线；接入端口候选定位脉冲
+    const nodeIds = [...new Set(t.sightings.map(s => s.nodeId).concat(t.selfHits))];
+    const linkIds = [...new Set(t.sightings.flatMap(s => s.next.map(n => n.linkId)))];
+    renderer.highlightPath(nodeIds, linkIds);
+    const srcName = { arp: 'ARP', mac: 'MAC表', 'arp-mac': 'ARP' };
+    const rows = t.sightings.map(s => {
+      const nx = s.next.map(n => U.escHtml(nameOf(n.nodeId))).join('、');
+      return `<tr><td>${U.escHtml(nameOf(s.nodeId))}</td><td>${U.escHtml(s.ifn || '（未识别）')}</td><td>${U.escHtml(s.vlan || '—')}</td><td>${srcName[s.source] || s.source}</td><td>${s.terminal ? '<b style="color:#f59e0b">接入端口</b>' : U.escHtml(nx || '—')}</td></tr>`;
+    }).join('');
+    let html = '';
+    if (t.selfHits.length) html += '<div class="comp-total">目标 IP 是设备 <b>' + U.escHtml(t.selfHits.map(nameOf).join('、')) + '</b> 自身的管理地址</div>';
+    html += `<div class="comp-total">目标 <b>${U.escHtml(raw)}</b>${t.mac && !isMacLike ? '（MAC ' + U.escHtml(t.mac) + '）' : ''}：共 <b>${t.sightings.length}</b> 处命中</div>`;
+    if (rows) html += `<table class="nb-table"><tr><th>设备</th><th>接口</th><th>VLAN</th><th>来源</th><th>下一跳</th></tr>${rows}</table>`;
+    if (t.terminals.length) {
+      html += '<div class="comp-total">接入端口候选：<b style="color:#f59e0b">' + t.terminals.map(x => U.escHtml(nameOf(x.nodeId) + ' ' + (x.ifn || '?'))).join('；') + '</b></div>';
+      const first = t.terminals[0];
+      renderer.flash('node', first.nodeId);
+      centerOn('node', first.nodeId);
+    } else if (t.unqueried.length) {
+      html += '<div class="ipam-conflict">下游还有未查询的设备：' + U.escHtml(t.unqueried.map(nameOf).join('、')) +
+        ' <button type="button" class="tb" id="mtMore">继续查询下游</button></div>';
+    } else if (t.sightings.length) {
+      html += '<div class="bk-empty">命中的接口均未连到其他已查询设备：若下游设备不在采集范围，请勾选后重新定位。</div>';
+    }
+    html += '<div class="bk-empty">已画布高亮全部命中设备与链路。</div>';
+    resultEl.innerHTML = html;
+    const moreBtn = resultEl.querySelector('#mtMore');
+    if (moreBtn) moreBtn.onclick = async () => {
+      const vendor = ov.querySelector('#mtVendor').value;
+      const fbUser = ov.querySelector('#mtUser').value.trim();
+      const fbPass = ov.querySelector('#mtPass').value;
+      const items = lastUnqueried.map(id => cands.find(c => c.node.id === id)).filter(Boolean);
+      if (!items.length) { toast('没有可继续查询的下游设备'); return; }
+      runBtn.disabled = true;
+      resultEl.innerHTML = '<div class="bk-empty">继续采集下游设备…</div>';
+      await collectDevices(items, vendor, fbUser, fbPass);
+      runBtn.disabled = false;
+      runTrace();
+    };
+    refreshPanel();
+    return true;
+  };
+  runBtn.onclick = async () => {
+    const vendor = ov.querySelector('#mtVendor').value;
+    const fbUser = ov.querySelector('#mtUser').value.trim();
+    const fbPass = ov.querySelector('#mtPass').value;
+    const items = devsEl.querySelectorAll('input[type=checkbox]');
+    const chosen = [...items].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
+    if (!chosen.length) { toast('请勾选至少一台要查询的设备'); return; }
+    runBtn.disabled = true;
+    resultEl.innerHTML = '<div class="bk-empty">采集中…（并发 2 台，每台执行 ' + (MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto).length + ' 条只读命令）</div>';
+    const { got, fails } = await collectDevices(chosen, vendor, fbUser, fbPass);
+    hintEl.textContent = '采集完成：成功 ' + got.length + ' 台' + (fails.length ? '，失败 ' + fails.length + ' 台' : '');
+    runTrace();
+    runBtn.disabled = false;
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#mtTarget').focus(); }, 250);
 }
 
 /* ================= IP 地址管理（地址清单 / 网段汇总 / 冲突检测） =================
@@ -3591,6 +3843,7 @@ function openCtx(e, kind, id) {
       { ic: 'edit', label: '编辑设备…', act: () => editNode(id) },
       { ic: 'locate', label: '定位到视图', act: () => { select('node', id); centerOn('node', id); } },
       { ic: 'terminal', label: 'Web Shell（SSH/Telnet）…', act: () => openWebShell(id) },
+      { ic: 'search', label: '采集邻居表（SSH）…', act: () => openNeighborImport('', id) },
       { ic: 'pulse', label: '设备监控（静默采集）…', act: () => openMonitorConfig(id) },
       { ic: 'clock', label: '告警静默 1 小时', act: () => muteAlertsFor(id) },
       { ic: 'web', label: '打开设备管理页面', act: () => openDeviceWeb(id) },
@@ -4225,7 +4478,7 @@ function openHelp() {
     </table>
     <p>无表头按「设备A, 设备B, 接口A, IP A, 接口B, IP B, 带宽, 备注」顺序识别；自动识别 UTF-8 / GBK 编码，兼容 .csv / .txt / .xlsx / .xls。</p>
     <h4>②⁺ 从邻居表导入（LLDP / CDP）</h4>
-    <p>在设备上执行 <b>display lldp neighbor</b>（华为/H3C，支持 brief 简表、详细键值块、「接口 has N neighbor(s)」段头、H3C verbose）或 <b>show cdp neighbors</b>（思科表格 / detail 块）、<b>show lldp neighbors</b>（思科标准表格），把输出<b>原样粘贴</b>到「文件 ▾ 从邻居表导入…」弹窗，选好本端设备点「解析预览」：软件自动识别格式、列出「本端接口 ⇄ 对端设备 ⇄ 对端接口」，确认后合并进拓扑——同名对端复用画布设备、新设备按名称推断类型自动创建、已有链路回填空缺接口、重复导入幂等。纯本机解析，不上传。</p>
+    <p>在设备上执行 <b>display lldp neighbor</b>（华为/H3C，支持 brief 简表、详细键值块、「接口 has N neighbor(s)」段头、H3C verbose）或 <b>show cdp neighbors</b>（思科表格 / detail 块）、<b>show lldp neighbors</b>（思科标准表格），把输出<b>原样粘贴</b>到「文件 ▾ 从邻居表导入…」弹窗，选好本端设备点「解析预览」：软件自动识别格式、列出「本端接口 ⇄ 对端设备 ⇄ 对端接口」，确认后合并进拓扑——同名对端复用画布设备、新设备按名称推断类型自动创建、已有链路回填空缺接口、重复导入幂等。桌面版还可以在弹窗里<b>「从设备采集」</b>：预填设备监控配置里的连接参数（也可手填），自动登录执行厂家预设命令（自动尝试 / 华为 / H3C / 思科 / 锐捷），输出回填后自动解析——首次连接自动信任主机指纹（TOFU，变化即拒连），分页提示自动空格翻页，Telnet 自动应答登录提示。纯本机解析，不上传。</p>
     <h4>③ 画布操作</h4>
     <p>滚轮缩放（以光标为中心）、拖拽空白或中键平移；<b>Ctrl 点选</b>多选、<b>Shift 拖拽框选</b>；<kbd>Delete</kbd> 删除选中；多选后可整体拖动、批量编辑、对齐/分布。</p>
     <h4>④ 工具栏菜单</h4>
@@ -4248,7 +4501,7 @@ function openHelp() {
     <h4>⑨ 保存 / 导出</h4>
     <p><b>工程文件 .nettopo</b>：保存 / 打开含位置、视图、自定义类型、多管理口的完整工程；<b>CSV / Excel</b>：把修改后的拓扑保存回连线关系表（多管理口逗号分隔，可再导入；含聚合组列）；<b>PDF</b>：矢量高清交付；<b>PNG / SVG</b>：图片导出与复制到剪贴板；<b>Visio</b>：.vsdx 原生格式可在 Visio 继续编辑；<b>资产清单（Excel）</b>：设备名 / 类型 / 管理地址 / 型号 / 软件版本 / 监控状态 / 配置备份概况的交付台账；<b>设计报告</b>：自包含 HTML（设备 / IP / 子网 / 链路 / 配置）；<b>IP 规划清单</b>：Excel 导出含对端接口 IP；<b>生成设备配置</b>：华为 / H3C / 思科 / 锐捷及自定义模板（{name} {mgmt} {iface} {ip} {peer} {vlan}…），生成前自动做<b>冲突检查</b>，可<b>下载 ZIP</b> 按厂家分目录打包；模板掩码变量支持点分 / CIDR / 反掩码三种：{mask}（255.255.255.0）、{maskCidr}（/24）、{wildcard}（0.0.0.255）；「编辑设备」中可为设备指定<b>厂家与自定义图标</b>。</p>
     <h4>⑩ 后台监控（桌面版）</h4>
-    <p>右键设备「设备监控（静默采集）…」配置协议 / 管理口 / 账号 / 命令与循环间隔后，即可在后台静默通过 SSH/Telnet 定时采集命令输出，<b>全部输出连同时间戳写入本地日志（按天归档）</b>：<userData>/monitor-logs/设备名/日期/<设备名>_<管理口>.log，同一天内连接/重连只追加同一文件，不再重复生成。每个管理口可单独配置：<b>连接时执行命令</b>（每行一条可多条，每次连接成功仅执行一次、先于周期循环，适合登录后的会话初始化）、<b>在线探测</b>（TCP/ICMP，离线变红并弹通知）、<b>输出关键字告警</b>（正则匹配即告警，周期循环 / 连接时命令 / 仅读取模式的输出均可匹配；多条关键字同时命中时全部显示，<b>全部不再命中才解除</b>；告警事件携带具体匹配行）与<b>配置自动备份</b>（命令可多条、输出合并保存；连接方式可选<b>复用监控连接</b>或<b>独立连接</b>；首份备份显示「首次」而非「有变化」；可勾选<b>自动合规</b>——每次备份保存后按合规模板自动扫描，违规进事件时间线并弹通知）。SNMP 采集组还提供：<b>SNMP 识别</b>（v2c 读取 sysDescr 自动回填设备「软件版本」）、<b>重启检测</b>（定时 GET sysUpTime，数值骤减判定设备重启，记入事件时间线并弹通知）、<b>CPU/内存采集</b>（OID 可配置，内置华为/华三百分比型与思科字节型<b>厂家预设</b>一键填充，表型 OID 填基础前缀即可，GET 失败自动 GETNEXT）与<b>接口流量</b>（ifTable 采集每接口 UP/DOWN 与收发速率）。服务器管理组还提供：<b>磁盘/内存（SSH）</b>——复用监控会话按间隔执行 df/free 等命令并解析数值（「命令预设」一键填充 Linux 三件套，解析器按命令内容自动匹配），磁盘 / 内存超<b>告警/严重阈值</b>时记入事件时间线并弹通知，趋势在监控中心「性能」页查看；<b>HTTP 探测 / 证书</b>——从本机按间隔探测 HTTP(S) 服务（2xx/3xx 且可选关键字判定在线，失败 / 恢复沿弹通知），HTTPS 同时读取<b>证书剩余天数</b>，低于阈值（默认 14 天）告警、续期后自动解除。<b>仅读取模式</b>不执行周期命令，但连接时命令、在线探测、关键字告警、自动备份均可用；<b>仅探测模式</b>可不勾选仅读取、不填命令、只勾选「在线探测」，保持连接并仅做连通性探测。<b>监控中心…</b>（工具栏「监控」菜单或右键设备）聚合全部设备状态与统计与<b>近 7 天在线率</b>，「事件时间线 / 配置备份 / 接口流量 / 性能」以<b>标签页</b>切换——接口流量页查看每接口 UP/DOWN、出入速率与采样趋势线；性能页查看 CPU / 内存当前值（≥75% 橙 / ≥90% 红）、趋势线与本次开机时长（SNMP），并展示 SSH 采集的<b>各挂载点磁盘 / 内存 / 负载</b>与 HTTP 探测状态、<b>证书剩余天数</b>；<b>点击左侧设备名或管理地址可筛选时间线</b>，事件带设备徽标（离线 / 告警 / 备份变化 / 接口离线 / <b>设备重启</b>等），告警事件显示匹配到的具体内容；「监控日志…」支持<b>全局跨文件搜索</b>（一次搜全部设备 / 日期 / 文件，点击结果直接定位到对应行）。<b>告警静默</b>：右键设备「告警静默 1 小时」，或在本弹窗勾选「维护窗口（每日静默）」设置每日时段（支持跨午夜）——静默期内告警通知不弹、<b>事件时间线照常记录</b>，计划内重启不再刷屏；「监控 ▾ <b>诊断工具箱</b>」可从本机发起 Ping（含丢包 / 平均延迟统计）、路由跟踪、TCP 端口批量探测与 DNS 查询，排障不用切命令行。关闭主窗口时可<b>托盘常驻</b>（工具栏「监控」菜单或监控配置弹窗）让后台监控继续运行；正在监控的设备在<b>右侧设备列表显示绿色标记</b>（连接失败显示琥珀/红色）。断线自动重连，可在弹窗打开日志目录查看。</p>
+    <p>右键设备「设备监控（静默采集）…」配置协议 / 管理口 / 账号 / 命令与循环间隔后，即可在后台静默通过 SSH/Telnet 定时采集命令输出，<b>全部输出连同时间戳写入本地日志（按天归档）</b>：<userData>/monitor-logs/设备名/日期/<设备名>_<管理口>.log，同一天内连接/重连只追加同一文件，不再重复生成。每个管理口可单独配置：<b>连接时执行命令</b>（每行一条可多条，每次连接成功仅执行一次、先于周期循环，适合登录后的会话初始化）、<b>在线探测</b>（TCP/ICMP，离线变红并弹通知）、<b>输出关键字告警</b>（正则匹配即告警，周期循环 / 连接时命令 / 仅读取模式的输出均可匹配；多条关键字同时命中时全部显示，<b>全部不再命中才解除</b>；告警事件携带具体匹配行）与<b>配置自动备份</b>（命令可多条、输出合并保存；连接方式可选<b>复用监控连接</b>或<b>独立连接</b>；首份备份显示「首次」而非「有变化」；可勾选<b>自动合规</b>——每次备份保存后按合规模板自动扫描，违规进事件时间线并弹通知）。SNMP 采集组还提供：<b>SNMP 识别</b>（v2c 读取 sysDescr 自动回填设备「软件版本」）、<b>重启检测</b>（定时 GET sysUpTime，数值骤减判定设备重启，记入事件时间线并弹通知）、<b>CPU/内存采集</b>（OID 可配置，内置华为/华三百分比型与思科字节型<b>厂家预设</b>一键填充，表型 OID 填基础前缀即可，GET 失败自动 GETNEXT）与<b>接口流量</b>（ifTable 采集每接口 UP/DOWN 与收发速率）。服务器管理组还提供：<b>磁盘/内存（SSH）</b>——复用监控会话按间隔执行 df/free 等命令并解析数值（「命令预设」一键填充 Linux 三件套，解析器按命令内容自动匹配），磁盘 / 内存超<b>告警/严重阈值</b>时记入事件时间线并弹通知，趋势在监控中心「性能」页查看；<b>HTTP 探测 / 证书</b>——从本机按间隔探测 HTTP(S) 服务（2xx/3xx 且可选关键字判定在线，失败 / 恢复沿弹通知），HTTPS 同时读取<b>证书剩余天数</b>，低于阈值（默认 14 天）告警、续期后自动解除。<b>仅读取模式</b>不执行周期命令，但连接时命令、在线探测、关键字告警、自动备份均可用；<b>仅探测模式</b>可不勾选仅读取、不填命令、只勾选「在线探测」，保持连接并仅做连通性探测。<b>监控中心…</b>（工具栏「监控」菜单或右键设备）聚合全部设备状态与统计与<b>近 7 天在线率</b>，「事件时间线 / 配置备份 / 接口流量 / 性能」以<b>标签页</b>切换——接口流量页查看每接口 UP/DOWN、出入速率与采样趋势线；性能页查看 CPU / 内存当前值（≥75% 橙 / ≥90% 红）、趋势线与本次开机时长（SNMP），并展示 SSH 采集的<b>各挂载点磁盘 / 内存 / 负载</b>与 HTTP 探测状态、<b>证书剩余天数</b>；<b>点击左侧设备名或管理地址可筛选时间线</b>，事件带设备徽标（离线 / 告警 / 备份变化 / 接口离线 / <b>设备重启</b>等），告警事件显示匹配到的具体内容；「监控日志…」支持<b>全局跨文件搜索</b>（一次搜全部设备 / 日期 / 文件，点击结果直接定位到对应行）。<b>告警静默</b>：右键设备「告警静默 1 小时」，或在本弹窗勾选「维护窗口（每日静默）」设置每日时段（支持跨午夜）——静默期内告警通知不弹、<b>事件时间线照常记录</b>，计划内重启不再刷屏；「监控 ▾ <b>诊断工具箱</b>」可从本机发起 Ping（含丢包 / 平均延迟统计）、路由跟踪、TCP 端口批量探测、DNS 查询、<b>网段存活扫描</b>（CIDR / 区间展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）与 <b>SNMP Walk</b>（v2c 遍历任意 OID 子树，内置系统信息 / 接口名 / ARP 表等常用前缀），排障不用切命令行。「监控 ▾ <b>MAC/ARP 终端定位</b>」输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮，下游未查询设备可一键续查。关闭主窗口时可<b>托盘常驻</b>（工具栏「监控」菜单或监控配置弹窗）让后台监控继续运行；正在监控的设备在<b>右侧设备列表显示绿色标记</b>（连接失败显示琥珀/红色）。断线自动重连，可在弹窗打开日志目录查看。</p>
     <h4>⑪ 网络服务：TFTP / FTP / Syslog（桌面版）</h4>
     <p>「监控 ▾ 网络服务…」把本机变成一台内网运维服务器：<b>TFTP / FTP 服务器</b>接收设备主动推送的配置文件（思科 <b>copy running-config tftp://本机地址/文件名</b>、华为/H3C <b>tftp 本机地址 put vrpcfg.zip</b>；FTP 需在面板配置用户名/密码），文件<b>按来源 IP 分目录</b>落在 <userData>/net-services/，收到文件弹系统通知，可查看 / 删除，并<b>一键导入配置备份库</b>（按来源 IP 自动匹配拓扑设备，进入备份中心 / 对比 / 合规检查体系）；<b>Syslog 服务器</b>（UDP，可选 TCP）收集设备日志（<b>info-center loghost</b> / <b>logging host</b> 指向本机），按来源主机 / 日期归档，面板实时滚动查看、按级别与来源过滤、关键字检索历史。端口默认 69 / 21 / 514（可改），Linux 特权端口需 root 或改高位端口；服务随设置自动启停（保存后重启软件自动恢复）。</p>
     <h4>⑪ 配置合规基线检查（桌面版）</h4>
@@ -4543,7 +4796,8 @@ function wire() {
       openConfigBackups(selId || '');
     } },
     { ic: 'server', label: '网络服务（TFTP / FTP / Syslog）…', act: openNetServices },
-    { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / DNS）…', act: () => openDiagTools() },
+    { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / 网段 / SNMP）…', act: () => openDiagTools() },
+    { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
     { sep: true },
     { ic: 'tray', label: '托盘常驻（关闭窗口后台继续监控）', act: async () => {
       if (!window.topoMonitor || !window.topoMonitor.setTray) { toast('托盘常驻需要桌面版软件'); return; }
@@ -5968,7 +6222,7 @@ function openDiagTools(prefillHost) {
   ov.innerHTML = `
     <div class="modal" role="dialog" style="width:700px">
       <h3>网络诊断工具箱</h3>
-      <div class="m-sub">从本机对目标发起诊断：Ping 测速 / 路由跟踪 / TCP 端口批量探测 / DNS 解析。诊断经本机网络发出（与设备监控的探测相互独立）。</div>
+      <div class="m-sub">从本机对目标发起诊断：Ping 测速 / 路由跟踪 / TCP 端口批量探测 / DNS 解析 / 网段存活扫描 / SNMP Walk。诊断经本机网络发出（与设备监控的探测相互独立）。</div>
       <div class="frow"><div class="frow-inline">
         <div class="frow" style="flex:2"><label>目标主机</label><input id="dgHost" type="text" placeholder="IP 或主机名" value="${U.escHtml(defHost)}" autocomplete="off" spellcheck="false"/></div>
         <div class="frow"><label>工具</label>
@@ -5977,10 +6231,24 @@ function openDiagTools(prefillHost) {
             <option value="trace">路由跟踪</option>
             <option value="tcp">端口扫描</option>
             <option value="dns">DNS 查询</option>
+            <option value="subnet">网段扫描</option>
+            <option value="snmp">SNMP Walk</option>
           </select>
         </div>
         <div class="frow" id="dgCountRow"><label>次数</label><input id="dgCount" type="number" min="1" max="10" value="4" style="width:64px"/></div>
         <div class="frow" id="dgPortsRow" style="display:none"><label>端口</label><input id="dgPorts" type="text" value="22,80,443,3389,8080" style="width:230px" title="逗号分隔，支持区间 8000-8002，最多 256 个" spellcheck="false"/></div>
+        <div class="frow" id="dgTargetsRow" style="display:none"><label>网段</label><input id="dgTargets" type="text" value="192.168.1.0/24" style="width:190px" title="支持 CIDR（192.168.1.0/24）、区间（192.168.1.10-20）、单 IP，逗号分隔混合；总量封顶 4096" spellcheck="false"/></div>
+        <label id="dgPtrRow" style="display:none;align-items:center;gap:4px;margin-bottom:4px"><input id="dgPtr" type="checkbox"/>PTR 反查</label>
+        <div class="frow" id="dgCommRow" style="display:none"><label>团体名</label><input id="dgComm" type="text" value="public" style="width:90px" spellcheck="false"/></div>
+        <div class="frow" id="dgOidRow" style="display:none"><label>OID 前缀</label><input id="dgOid" type="text" value="1.3.6.1.2.1.1" style="width:150px" spellcheck="false"/></div>
+        <div class="frow" id="dgOidPresetRow" style="display:none"><label>常用</label>
+          <select id="dgOidPreset">
+            <option value="1.3.6.1.2.1.1">系统信息（system）</option>
+            <option value="1.3.6.1.2.1.2.2.1.2">接口名（ifDescr）</option>
+            <option value="1.3.6.1.2.1.4.22.1.2">ARP 表（ipNetToMedia）</option>
+            <option value="1.3.6.1.2.1.2.2.1.8">接口状态（ifOperStatus）</option>
+          </select>
+        </div>
       </div></div>
       <div class="frow" style="display:flex;gap:8px;align-items:center">
         <button type="button" class="tb primary" id="dgRun">执行</button>
@@ -6001,8 +6269,17 @@ function openDiagTools(prefillHost) {
   ov.querySelector('[data-act=clear]').onclick = () => { ov.querySelector('#dgOut').textContent = ''; };
   const toolEl = ov.querySelector('#dgTool');
   toolEl.addEventListener('change', () => {
-    ov.querySelector('#dgCountRow').style.display = toolEl.value === 'ping' ? '' : 'none';
-    ov.querySelector('#dgPortsRow').style.display = toolEl.value === 'tcp' ? '' : 'none';
+    const v = toolEl.value;
+    ov.querySelector('#dgCountRow').style.display = v === 'ping' ? '' : 'none';
+    ov.querySelector('#dgPortsRow').style.display = v === 'tcp' ? '' : 'none';
+    ov.querySelector('#dgTargetsRow').style.display = v === 'subnet' ? '' : 'none';
+    ov.querySelector('#dgPtrRow').style.display = v === 'subnet' ? 'flex' : 'none';
+    ov.querySelector('#dgCommRow').style.display = v === 'snmp' ? '' : 'none';
+    ov.querySelector('#dgOidRow').style.display = v === 'snmp' ? '' : 'none';
+    ov.querySelector('#dgOidPresetRow').style.display = v === 'snmp' ? '' : 'none';
+  });
+  ov.querySelector('#dgOidPreset').addEventListener('change', (e) => {
+    ov.querySelector('#dgOid').value = e.target.value;
   });
   const out = ov.querySelector('#dgOut');
   const hint = ov.querySelector('#dgHint');
@@ -6015,12 +6292,12 @@ function openDiagTools(prefillHost) {
   const run = async () => {
     if (busy) return;
     const host = ov.querySelector('#dgHost').value.trim();
-    if (!host) { toast('请填写目标主机（IP 或主机名）'); return; }
     const tool = toolEl.value;
-    const toolName = { ping: 'Ping', trace: '路由跟踪', tcp: '端口扫描', dns: 'DNS 查询' }[tool] || tool;
+    if (!host && tool !== 'subnet') { toast('请填写目标主机（IP 或主机名）'); return; }
+    const toolName = { ping: 'Ping', trace: '路由跟踪', tcp: '端口扫描', dns: 'DNS 查询', subnet: '网段扫描', snmp: 'SNMP Walk' }[tool] || tool;
     busy = true; runBtn.disabled = true; hint.textContent = '执行中…';
     append('');
-    append('$ ' + toolName + ' ' + host + '（' + U.fmtDateTime(new Date()).slice(11) + '）');
+    append('$ ' + toolName + ' ' + (tool === 'subnet' ? ov.querySelector('#dgTargets').value.trim() : host) + '（' + U.fmtDateTime(new Date()).slice(11) + '）');
     try {
       if (tool === 'ping') {
         const r = await window.topoDiag.ping({ host, count: parseInt(ov.querySelector('#dgCount').value, 10) || 4 });
@@ -6042,12 +6319,31 @@ function openDiagTools(prefillHost) {
           const open = r.results.filter(x => x.open);
           append('—— 共 ' + r.results.length + ' 个端口，开放 ' + open.length + ' 个' + (open.length ? '：' + open.map(x => x.port).join(', ') : ''));
         }
-      } else {
+      } else if (tool === 'dns') {
         const r = await window.topoDiag.dns({ host });
         if (r.error) append('—— ' + r.error);
         append(r.addresses.length ? 'A 记录：' + r.addresses.join('，') : (r.error ? '' : '（无 A 记录）'));
         if (r.cname) append('CNAME：' + r.cname);
         if (r.reverse.length) append('PTR 反查：' + r.reverse.join('，'));
+      } else if (tool === 'subnet') {
+        const r = await window.topoDiag.subnetScan({
+          targets: ov.querySelector('#dgTargets').value,
+          resolvePtr: ov.querySelector('#dgPtr').checked
+        });
+        if (!r.ok) append('—— 失败：' + (r.error || '未知'));
+        else {
+          for (const a of r.alive) append('  ' + a.ip.padEnd(16) + (a.ms != null ? String(a.ms).padStart(5) + 'ms  ' : '          ') + (a.mac ? a.mac + '  ' : '') + (a.ptr || ''));
+          append('—— 存活 ' + r.alive.length + '，无响应 ' + r.dead + '（ICMP 被禁ping的主机不会出现）');
+        }
+      } else if (tool === 'snmp') {
+        const r = await window.topoDiag.snmpWalk({
+          host,
+          community: ov.querySelector('#dgComm').value.trim() || 'public',
+          oid: ov.querySelector('#dgOid').value.trim()
+        });
+        if (!r.ok && !(r.varbinds || []).length) append('—— 失败：' + (r.error || '未知') + '（请核对设备已启用 SNMP 且团体名正确）');
+        for (const vb of (r.varbinds || [])) append('  ' + vb.oid + ' = ' + String(vb.value));
+        append('—— 共 ' + (r.varbinds || []).length + ' 个绑定' + ((r.varbinds || []).length >= 512 ? '（已达单次上限）' : ''));
       }
     } catch (e) { append('—— 异常：' + String((e && e.message) || e)); }
     busy = false; runBtn.disabled = false; hint.textContent = '';

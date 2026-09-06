@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('topoShell', {
   resize: (id, cols, rows) => ipcRenderer.send('shell:resize', id, cols, rows),
   close: (id) => ipcRenderer.send('shell:close', id),
   trustFingerprint: (host, trust) => ipcRenderer.invoke('shell:trust', { host, trust }),
+  /* 一次性命令执行（采集邻居表 / MAC·ARP 定位等无人值守采集；独立会话，主进程内完成） */
+  runOneShot: (p) => ipcRenderer.invoke('shell:oneshot', p),
   copyText: (text) => ipcRenderer.invoke('shell:clipboard-write', text),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   pasteText: () => ipcRenderer.invoke('shell:clipboard-read'),
@@ -101,12 +103,15 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   maintenanceSet: (p) => ipcRenderer.invoke('monitor:maintenance-set', p)
 });
 
-/* 本机诊断工具箱（Ping / 路由跟踪 / TCP 端口 / DNS）：命令与探测全部在主进程完成 */
+/* 本机诊断工具箱（Ping / 路由跟踪 / TCP 端口 / DNS / 网段存活扫描 / SNMP Walk）：
+ * 命令与探测全部在主进程完成 */
 contextBridge.exposeInMainWorld('topoDiag', {
   ping: (p) => ipcRenderer.invoke('diag:ping', p),
   trace: (p) => ipcRenderer.invoke('diag:trace', p),
   tcp: (p) => ipcRenderer.invoke('diag:tcp', p),
-  dns: (p) => ipcRenderer.invoke('diag:dns', p)
+  dns: (p) => ipcRenderer.invoke('diag:dns', p),
+  subnetScan: (p) => ipcRenderer.invoke('diag:subnet-scan', p),
+  snmpWalk: (p) => ipcRenderer.invoke('diag:snmp-walk', p)
 });
 
 contextBridge.exposeInMainWorld('topoConfigBackup', {
