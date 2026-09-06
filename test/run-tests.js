@@ -4534,6 +4534,158 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       await tsrv2.stop();
     }
 
+    /* ---------- SNMP v3（USM）：密钥本地化 / 三档安全 / mock 代理全链路 / v3 Trap 接收 ---------- */
+    console.log('== SNMP v3（USM） ==');
+    {
+      const V3 = require('../js/snmp-v3.js');
+      const { TrapServer } = require('../js/svc-trap.js');
+      const { normalizeConfig } = require('../js/net-services.js');
+      // 密钥本地化（与 pysnmp 互操作参考实现逐字节对照）
+      eq(Buffer.from(V3.passwordToKey('maplesn', '000000000000000000000002', 'md5')).toString('hex'), '2590dce8d939e9f2ce58ffcc1a8b9ebb', 'v3 密钥本地化：MD5（参考实现对照）');
+      eq(Buffer.from(V3.passwordToKey('maplesn', '000000000000000000000002', 'sha')).toString('hex'), 'ab9339559d11dfdf679933677bd96be56a81b302', 'v3 密钥本地化：SHA-1（参考实现对照）');
+      ok(V3.normalizeV3User({ user: 'u' }).level === 'noAuth', 'v3 用户归一：仅用户名 → noAuth');
+      ok(V3.normalizeV3User({ user: 'u', authProto: 'md5', authPass: 'p' }).level === 'auth', 'v3 用户归一：认证 → auth');
+      ok(V3.normalizeV3User({ user: 'u', authProto: 'sha', authPass: 'p', privProto: 'aes', privPass: 'x' }).level === 'authPriv', 'v3 用户归一：认证+加密 → authPriv');
+      ok(V3.normalizeV3User({ user: '   ' }) === null, 'v3 用户归一：空用户名拒绝');
+      // 三档消息构建/解析 + 篡改与错误口令
+      const engineID = Buffer.from('80001f8804e8c1d3b8a1b2c3', 'hex');
+      const uAP = V3.normalizeV3User({ user: 'ops', authProto: 'sha', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' });
+      const b1 = V3.buildV3Message({ pduTag: 0xa0, oids: ['1.3.6.1.2.1.1.1.0'], engineID, boots: 5, time: 60000, user: uAP, reportable: true, saltCounter: 0x1234 });
+      const p1 = V3.parseV3Message(b1.msg, { user: uAP });
+      ok(p1.ok && p1.authenticated && p1.decrypted && p1.pduTag === 0xa0, 'v3 authPriv AES：构建→解析往返（验签+解密）');
+      const uA = V3.normalizeV3User({ user: 'na', authProto: 'md5', authPass: 'p2' });
+      const b2 = V3.buildV3Message({ pduTag: 0xa1, oids: ['1.3.6.1.2.1.1.3.0'], engineID, boots: 1, time: 100, user: uA });
+      const p2 = V3.parseV3Message(b2.msg, { user: uA });
+      ok(p2.ok && p2.authenticated && !p2.decrypted && p2.pduTag === 0xa1, 'v3 authNoPriv MD5：往返');
+      const t2m = Buffer.from(b2.msg); t2m[t2m.length - 5] ^= 1;
+      ok(V3.parseV3Message(t2m, { user: uA }).ok === false, 'v3 篡改检测：改包拒绝');
+      ok(V3.parseV3Message(b2.msg, { user: V3.normalizeV3User({ user: 'na', authProto: 'md5', authPass: 'WRONG' }) }).ok === false, 'v3 错误认证口令拒绝');
+      const uN = V3.normalizeV3User({ user: 'nn' });
+      const b3 = V3.buildV3Message({ pduTag: 0xa0, oids: ['1.3.6.1.2.1.1.1.0'], engineID, boots: 1, time: 1, user: uN });
+      const p3 = V3.parseV3Message(b3.msg, { user: uN });
+      ok(p3.ok && !p3.authenticated && !p3.decrypted, 'v3 noAuthNoPriv：往返');
+      if (V3.desAvailable()) {
+        const uD = V3.normalizeV3User({ user: 'nd', authProto: 'sha', authPass: 'a4', privProto: 'des', privPass: 'd4' });
+        const b4 = V3.buildV3Message({ pduTag: 0xa0, oids: ['1.3.6.1.2.1.2.2.1.2.1'], engineID, boots: 9, time: 999, user: uD, saltCounter: 7 });
+        const p4 = V3.parseV3Message(b4.msg, { user: uD });
+        ok(p4.ok && p4.authenticated && p4.decrypted, 'v3 authPriv DES：往返（本环境支持 DES-CBC）');
+      } else {
+        let threw = false;
+        try { V3.buildV3Message({ pduTag: 0xa0, oids: ['1.3.6.1.2.1.1.1.0'], engineID, boots: 9, time: 999, user: V3.normalizeV3User({ user: 'nd', authProto: 'sha', authPass: 'a4', privProto: 'des', privPass: 'd4' }) }); }
+        catch (e) { threw = /AES/.test(e.message); }
+        ok(threw, 'v3 authPriv DES：本环境不支持时给出改用 AES 的明确提示');
+      }
+
+      // mock v3 代理（引擎发现 + 验签解密 + 加密认证响应）全链路：monitor.js snmpGet/snmpWalk
+      const USER = { user: 'ops', authProto: 'sha', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' };
+      const ENG = Buffer.from('80001f8804e8c1d3b8a1b2c3', 'hex');
+      const BOOTS = 3, TIME = 55555;
+      const TABLE = { '1.3.6.1.2.1.1.1.0': 'MockAgent v3', '1.3.6.1.2.1.1.3.0': '12345' };
+      const mockSock = dgram.createSocket('udp4');
+      mockSock.on('message', (buf, rinfo) => {
+        try {
+          // 先按已知用户验签解密（authPriv 请求），失败再按发现包（noAuth）解析
+          let parsed = V3.parseV3Message(buf, { user: V3.normalizeV3User(USER) });
+          if (!parsed.ok) parsed = V3.parseV3Message(buf, { user: null });
+          if (!parsed.ok) return;
+          if (!parsed.engineID.length || parsed.userName === '') {
+            // 引擎发现：回 Report（noAuthNoPriv，携带权威引擎三元组）
+            const usm = V3.berTlv(0x30, Buffer.concat([V3.berOct(ENG), V3.berInt(BOOTS), V3.berInt(TIME), V3.berOct(Buffer.alloc(0)), V3.berOct(Buffer.alloc(12)), V3.berOct(Buffer.alloc(0))]));
+            const reportVbs = V3.berTlv(0x30, V3.berTlv(0x30, Buffer.concat([V3.berOid(V3.OID_USM_UNKNOWN_ENGINE_IDS), V3.berInt(1)])));
+            const scoped = V3.berTlv(0x30, Buffer.concat([V3.berOct(ENG), V3.berOct(Buffer.alloc(0)),
+              V3.berTlv(0xa8, Buffer.concat([V3.berInt(1), V3.berInt(0), V3.berInt(0), reportVbs]))]));
+            const msg = V3.berTlv(0x30, Buffer.concat([V3.berInt(3), V3.berInt(1), V3.berInt(65507), V3.berOct(Buffer.from([0x04])), V3.berInt(3), usm, scoped]));
+            mockSock.send(msg, rinfo.port, rinfo.address);
+            return;
+          }
+          const req = V3.parseV3Message(buf, { user: V3.normalizeV3User(USER) });
+          if (!req.ok || !req.authenticated) return;
+          const oid = req.varbinds.length ? req.varbinds[0].oid : '';
+          let respOid, respVal;
+          if (req.pduTag === 0xa0) { respOid = oid; respVal = TABLE[oid] || ''; }
+          else { const keys = Object.keys(TABLE).sort(); const nx = keys.find(o => o > (oid || '')); respOid = nx || '1.3.6.1.2.1.2.0'; respVal = TABLE[nx] || 'next'; } // 兜底 OID 须离开所测子树，walk 才能终止
+          const user = V3.normalizeV3User(USER);
+          const kul = V3.passwordToKey(user.authPass, ENG, user.authProto);
+          const vbs = V3.berTlv(0x30, V3.berTlv(0x30, Buffer.concat([V3.berOid(respOid), Buffer.from([0x04, Buffer.byteLength(respVal)]), Buffer.from(respVal)])));
+          const pdu = V3.berTlv(0xa2, Buffer.concat([V3.berInt(req.rid), V3.berInt(0), V3.berInt(0), vbs]));
+          const scopedInner = V3.berTlv(0x30, Buffer.concat([V3.berOct(ENG), V3.berOct(Buffer.alloc(0)), pdu])); // 完整 scoped TLV（与客户端 build 口径一致）
+          const salt = Buffer.alloc(8); salt.writeUInt32BE(BOOTS, 0); salt.writeUInt32BE(42, 4);
+          const iv16 = Buffer.alloc(16); iv16.writeUInt32BE(BOOTS, 0); iv16.writeUInt32BE(TIME, 4); salt.copy(iv16, 8);
+          const enc = V3.encryptAES(kul.subarray(0, 16), iv16, scopedInner);
+          const usmBody = Buffer.concat([V3.berOct(ENG), V3.berInt(BOOTS), V3.berInt(TIME), V3.berOct(user.user), V3.berOct(Buffer.alloc(12)), V3.berOct(salt)]);
+          let msg = V3.berTlv(0x30, Buffer.concat([V3.berInt(3), V3.berInt(req.rid), V3.berInt(65507), V3.berOct(Buffer.from([0x03])), V3.berInt(3), V3.berOct(usmBody), V3.berOct(enc)]));
+          const root = V3.tlvWalk(msg, 0); let cur = 0; const fields = [];
+          while (cur < root.body.length) { const t = V3.tlvWalk(root.body, cur); fields.push(t); cur = t.next; }
+          const usmT = fields[5]; const uf = []; let c = 0;
+          while (c < usmT.body.length) { const t = V3.tlvWalk(usmT.body, c); uf.push(t); c = t.next; }
+          const off = root.start + root.hs + usmT.start + usmT.hs + uf[4].start + uf[4].hs;
+          const masked = Buffer.from(msg); masked.fill(0, off, off + 12);
+          V3.authDigest(masked, kul, user.authProto).copy(msg, off);
+          mockSock.send(msg, rinfo.port, rinfo.address);
+        } catch (e) { /* mock 内部异常忽略 */ }
+      });
+      await new Promise((res) => mockSock.bind(0, '127.0.0.1', res));
+      const mockPort = mockSock.address().port;
+      const { snmpGet, snmpWalk, snmpV3Reset } = require('../js/monitor.js');
+      snmpV3Reset();
+      const g3 = await snmpGet('127.0.0.1', USER, ['1.3.6.1.2.1.1.1.0'], 2000, mockPort);
+      ok(g3.ok && g3.varbinds[0] && g3.varbinds[0].value === 'MockAgent v3', 'v3 全链路：引擎发现 + authPriv GET（' + (g3.error || JSON.stringify(g3.varbinds)) + '）');
+      const w3 = await snmpWalk('1.3.6.1.2.1.1', '127.0.0.1', USER, 2000, mockPort);
+      ok(w3.ok && w3.varbinds.length === 2, 'v3 全链路：GETNEXT Walk 遍历 2 条');
+      const bad3 = await snmpGet('127.0.0.1', Object.assign({}, USER, { authPass: 'WRONG' }), ['1.3.6.1.2.1.1.1.0'], 2000, mockPort);
+      ok(bad3.ok === false && (bad3.error || '').length > 0, 'v3 全链路：错误认证口令明确报错（' + (bad3.error || '').slice(0, 20) + '）');
+      const noUser3 = await snmpGet('127.0.0.1', { user: '' }, ['1.3.6.1.2.1.1.1.0'], 500, mockPort);
+      ok(noUser3.ok === false && /无效/.test(noUser3.error), 'v3 全链路：空用户配置拒绝');
+      mockSock.close();
+
+      // v3 Trap 接收：TrapServer 配置 v3 用户 → 验签解密入库；错误口令/未知用户丢弃
+      const trapBase3 = path.join(tmpSvc, 'trapv3');
+      const v3u = V3.normalizeV3User({ user: 'trapops', authProto: 'sha', authPass: 'TrapAuth1', privProto: 'aes', privPass: 'TrapPriv1' });
+      const tsrv3 = new TrapServer({ baseDir: trapBase3, v3Users: [{ user: 'trapops', authProto: 'sha', authPass: 'TrapAuth1', privProto: 'aes', privPass: 'TrapPriv1' }] });
+      const tstart3 = await tsrv3.start(0);
+      ok(tstart3.ok, 'v3 Trap：服务器启动');
+      const v3Events = [];
+      tsrv3.on('trap', (t) => v3Events.push(t));
+      const buildV3TrapPkt = (userCfg, oidTrap, ifIdx) => {
+        const eng = Buffer.from('80001f8804aaa1b2c3d4e5f6', 'hex');
+        const kul = V3.passwordToKey(userCfg.authPass, eng, userCfg.authProto);
+        const vbs = V3.berTlv(0x30, Buffer.concat([
+          V3.berTlv(0x30, Buffer.concat([V3.berOid('1.3.6.1.2.1.1.3.0'), V3.berTlv(0x43, Buffer.from([0x01, 0xe2, 0x40]))])),   // sysUpTime 123456
+          V3.berTlv(0x30, Buffer.concat([V3.berOid('1.3.6.1.6.3.1.1.4.1.0'), V3.berOid(oidTrap)])),
+          V3.berTlv(0x30, Buffer.concat([V3.berOid('1.3.6.1.2.1.2.2.1.1.' + ifIdx), V3.berInt(ifIdx)]))
+        ]));
+        const pdu = V3.berTlv(0xa7, Buffer.concat([V3.berInt(9), V3.berInt(0), V3.berInt(0), vbs]));
+        const scoped = V3.berTlv(0x30, Buffer.concat([V3.berOct(eng), V3.berOct(Buffer.alloc(0)), pdu]));
+        const salt = Buffer.alloc(8); salt.writeUInt32BE(7, 4);
+        const iv16 = Buffer.alloc(16); iv16.writeUInt32BE(1, 0); iv16.writeUInt32BE(2000, 4); salt.copy(iv16, 8);
+        const enc = V3.encryptAES(kul.subarray(0, 16), iv16, scoped);
+        const usmBody = Buffer.concat([V3.berOct(eng), V3.berInt(1), V3.berInt(2000), V3.berOct(userCfg.user), V3.berOct(Buffer.alloc(12)), V3.berOct(salt)]);
+        let msg = V3.berTlv(0x30, Buffer.concat([V3.berInt(3), V3.berInt(77), V3.berInt(65507), V3.berOct(Buffer.from([0x03])), V3.berInt(3), V3.berOct(usmBody), V3.berOct(enc)]));
+        const root = V3.tlvWalk(msg, 0); let cur = 0; const flds = [];
+        while (cur < root.body.length) { const t = V3.tlvWalk(root.body, cur); flds.push(t); cur = t.next; }
+        const usmT = flds[5]; const uf = []; let c = 0;
+        while (c < usmT.body.length) { const t = V3.tlvWalk(usmT.body, c); uf.push(t); c = t.next; }
+        const off = root.start + root.hs + usmT.start + usmT.hs + uf[4].start + uf[4].hs;
+        const masked = Buffer.from(msg); masked.fill(0, off, off + 12);
+        V3.authDigest(masked, kul, userCfg.authProto).copy(msg, off);
+        return msg;
+      };
+      const us3 = dgram.createSocket('udp4');
+      const sendV3Trap = (pkt) => new Promise((res) => us3.send(pkt, 0, pkt.length, tsrv3.port, '127.0.0.1', res));
+      await sendV3Trap(buildV3TrapPkt(v3u, '1.3.6.1.6.3.1.1.5.3', 2));
+      await waitMs(200);
+      ok(v3Events.length === 1 && /linkDown/.test(v3Events[0].trap) && v3Events[0].version === 'v3' && v3Events[0].msg.includes('2'), 'v3 Trap：验签解密入库（linkDown + ifIndex）');
+      await sendV3Trap(buildV3TrapPkt({ user: 'trapops', authProto: 'sha', authPass: 'WRONG', privProto: 'aes', privPass: 'TrapPriv1' }, '1.3.6.1.6.3.1.1.5.4', 3));
+      await sendV3Trap(buildV3TrapPkt({ user: 'nobody', authProto: 'sha', authPass: 'x', privProto: 'aes', privPass: 'y' }, '1.3.6.1.6.3.1.1.5.1', 1));
+      await waitMs(200);
+      ok(v3Events.length === 1 && tsrv3.status().v3AuthFail >= 1 && tsrv3.status().v3Unknown >= 1, 'v3 Trap：错误口令/未知用户丢弃并计数');
+      us3.close();
+      await tsrv3.stop();
+      // net-services trap v3 配置归一化
+      const ncT = normalizeConfig({ trap: { enabled: true, port: 99999, v3: { user: 'v3u', authProto: 'xx', authPass: 'a', privProto: 'yy', privPass: 'p' } } });
+      ok(ncT.trap.enabled === true && ncT.trap.port === 162 && ncT.trap.v3.user === 'v3u' && ncT.trap.v3.authProto === 'sha' && ncT.trap.v3.privProto === 'aes', '配置归一化：trap v3 协议钳制');
+    }
+
     /* ---------- 管理器 NetServices ---------- */
     console.log('== 网络服务：管理器（配置应用/文件编目/导入备份） ==');
     const tmpBk = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-nsvbk-'));

@@ -25,7 +25,7 @@ function defaultConfig() {
     tftp: { enabled: false, port: 69 },
     ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true },
     syslog: { enabled: false, port: 514, tcp: false },
-    trap: { enabled: false, port: 162 }
+    trap: { enabled: false, port: 162, v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } }
   };
 }
 
@@ -69,6 +69,14 @@ function normalizeConfig(cfg) {
   const tr = cfg.trap && typeof cfg.trap === 'object' ? cfg.trap : {};
   out.trap.enabled = clampB(tr.enabled, dft.trap.enabled);
   out.trap.port = clampPort(tr.port, dft.trap.port);
+  const tv = tr.v3 && typeof tr.v3 === 'object' ? tr.v3 : {};
+  out.trap.v3 = {
+    user: cleanCred(tv.user, ''),
+    authProto: String(tv.authProto).toLowerCase() === 'md5' ? 'md5' : 'sha',
+    authPass: cleanCred(tv.authPass, ''),
+    privProto: String(tv.privProto).toLowerCase() === 'des' ? 'des' : 'aes',
+    privPass: cleanCred(tv.privPass, '')
+  };
   return out;
 }
 
@@ -139,10 +147,15 @@ class NetServices extends EventEmitter {
     // Trap：端口变化或启停才重启
     if (!n.trap.enabled) {
       if (this.applied.trap) { await this.trap.stop(); this.applied.trap = null; }
-    } else if (!this.applied.trap || this.applied.trap.port !== n.trap.port) {
-      await this.trap.stop();
-      const r = await this.trap.start(n.trap.port);
-      this.applied.trap = (r && r.ok) ? { port: n.trap.port } : null;
+    } else {
+      const v3sig = JSON.stringify(n.trap.v3);
+      if (!this.applied.trap || this.applied.trap.port !== n.trap.port || this.applied.trap.v3sig !== v3sig) {
+        await this.trap.stop();
+        this.trap = new TrapServer({ baseDir: this.trapDir, v3Users: n.trap.v3.user ? [n.trap.v3] : [] });
+        this.trap.on('trap', (t) => this.emit('trap', t));
+        const r = await this.trap.start(n.trap.port);
+        this.applied.trap = (r && r.ok) ? { port: n.trap.port, v3sig } : null;
+      }
     }
     this.emit('status', this.status());
     return this.status();

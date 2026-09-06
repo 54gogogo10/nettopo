@@ -4550,7 +4550,7 @@ function openHelp() {
       <li><b>在线探测</b>：TCP / ICMP，离线变红并弹通知</li>
       <li><b>输出关键字告警</b>：逐行正则匹配即告警（周期 / 连接时 / 仅读取输出均参与）；多关键字全部命中才显示、全部不再命中才解除，事件携带具体匹配行</li>
       <li><b>配置自动备份</b>：命令可多条、输出合并保存，连接方式可选复用监控连接或独立连接；首份显示「首次」；勾选<b>自动合规</b>后每次备份按合规模板自动扫描，违规进事件时间线并弹通知</li>
-      <li><b>SNMP 采集组</b>：SNMP 识别（sysDescr 自动回填软件版本）、重启检测（sysUpTime 骤减判定）、CPU / 内存采集（OID 可配置，华为 / 思科厂家预设一键填充，GET 失败自动 GETNEXT）、接口流量（ifTable 每接口 UP/DOWN 与收发速率）</li>
+      <li><b>SNMP 采集组</b>：SNMP 识别（sysDescr 自动回填软件版本）、重启检测（sysUpTime 骤减判定）、CPU / 内存采集（OID 可配置，华为 / 思科厂家预设一键填充，GET 失败自动 GETNEXT）、接口流量（ifTable 每接口 UP/DOWN 与收发速率）；SNMP 安全模式可选 <b>v2c 团体字或 v3（USM）</b>——无认证无加密 / 仅认证（SHA-1 / MD5）/ 认证加密（AES-128 / DES）三档，引擎发现与时间窗自动同步，v3 口令经系统级加密保存</li>
       <li><b>服务器管理组</b>：磁盘 / 内存（SSH）——复用监控会话执行 df/free 等并解析数值，超告警 / 严重双阈值记事件并弹通知；HTTP 探测 / 证书——本机按间隔探测 HTTP(S)（2xx/3xx 且可选关键字判定），HTTPS 同时读证书剩余天数，低于阈值告警、续期自动解除</li>
       <li><b>轻量模式</b>：仅读取（不执行周期命令，其余能力保留）/ 仅探测（不填命令，只做在线探测保持连接）</li>
       <li>断线自动重连；正在监控的设备在<b>右侧设备列表显示状态标记</b>（绿在线 / 琥珀红异常）</li>
@@ -4565,7 +4565,7 @@ function openHelp() {
     </ul>
     <h4>⑬ 诊断与终端定位（桌面版）</h4>
     <ul>
-      <li><b>诊断工具箱…</b>（监控 ▾）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀）</li>
+      <li><b>诊断工具箱…</b>（监控 ▾）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（v2c 团体字或 v3 USM 用户遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀）</li>
       <li><b>MAC/ARP 终端定位…</b>（监控 ▾）：输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置，可填备用账号），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮；接口名跨厂家规范化匹配（GE / Gi / GigabitEthernet 视为同一接口），下游未查询设备可一键续查</li>
     </ul>
     <h4>⑭ 网络服务：TFTP / FTP / Syslog / Trap（桌面版）</h4>
@@ -4573,7 +4573,7 @@ function openHelp() {
     <ul>
       <li><b>TFTP / FTP 服务器</b>：接收设备主动推送的配置文件（思科 <b>copy running-config tftp://本机地址/文件名</b>、华为/H3C <b>tftp 本机地址 put vrpcfg.zip</b>；FTP 需在面板配置账号），文件<b>按来源 IP 分目录</b>落盘、收到弹通知，可查看 / 删除并<b>一键导入配置备份库</b>（按来源 IP 自动匹配拓扑设备，进入备份 / 对比 / 合规体系）</li>
       <li><b>Syslog 服务器</b>（UDP 可选 TCP）：收集设备日志（<b>info-center loghost</b> / <b>logging host</b> 指向本机），按来源主机 / 日期归档，实时滚动、级别与来源过滤、关键字检索历史</li>
-      <li><b>SNMP Trap 接收</b>（UDP）：设备把 trap 目标指向本机（<b>snmp-agent target-host trap address …</b> / <b>snmp-server host …</b>）后接收主动告警——支持 SNMP v1 / v2c，标准 Trap 识别（接口 Down/Up、冷/热启动、认证失败等，中文名显示）、企业自定义 Trap 保留完整 OID、InformRequest 按协议回应答；来源 IP 匹配到拓扑设备的标准 Trap <b>弹系统通知</b>（受该设备静默 / 维护窗口约束）并记入事件时间线，全部按来源 / 日期归档可回查</li>
+      <li><b>SNMP Trap 接收</b>（UDP）：设备把 trap 目标指向本机（<b>snmp-agent target-host trap address …</b> / <b>snmp-server host …</b>）后接收主动告警——支持 SNMP v1 / v2c / <b>v3</b>（v3 按面板配置的 USM 用户验签并解密），标准 Trap 识别（接口 Down/Up、冷/热启动、认证失败等，中文名显示）、企业自定义 Trap 保留完整 OID、InformRequest 按协议回应答；来源 IP 匹配到拓扑设备的标准 Trap <b>弹系统通知</b>（受该设备静默 / 维护窗口约束）并记入事件时间线，全部按来源 / 日期归档可回查</li>
       <li>端口默认 69 / 21 / 514 / 162（可改，Linux 特权端口需 root）；面板展示本机地址与各厂家命令示例（点击复制），服务随设置自动启停</li>
     </ul>
     <h4>⑮ 配置合规基线检查（桌面版）</h4>
@@ -5244,7 +5244,7 @@ function secureBridge() {
   return (window.topoSecure && window.topoSecure.encryptSecret && window.topoSecure.decryptSecret) ? window.topoSecure : null;
 }
 /** 监控配置中的机密字段（密码 / 私钥口令 / 私钥内容），落盘与工程快照统一走 enc: 密文 */
-const MON_SECRET_FIELDS = ['password', 'keyPass', 'privateKey'];
+const MON_SECRET_FIELDS = ['password', 'keyPass', 'privateKey', 'snmpV3AuthPass', 'snmpV3PrivPass'];
 
 /** 单个机密值加密（无桥/失败返回空串） */
 async function encryptSecretValue(sec, val) {
@@ -5384,6 +5384,12 @@ function monitorRow(host, saved) {
     complianceEnabled: !!saved.complianceEnabled,
     snmpEnabled: !!saved.snmpEnabled,
     snmpCommunity: typeof saved.snmpCommunity === 'string' ? saved.snmpCommunity : 'public',
+    snmpVersion: saved.snmpVersion === 'v3' ? 'v3' : 'v2c',
+    snmpV3User: typeof saved.snmpV3User === 'string' ? saved.snmpV3User : '',
+    snmpV3AuthProto: saved.snmpV3AuthProto === 'md5' ? 'md5' : 'sha',
+    snmpV3AuthPass: typeof saved.snmpV3AuthPass === 'string' ? saved.snmpV3AuthPass : '',
+    snmpV3PrivProto: saved.snmpV3PrivProto === 'des' ? 'des' : 'aes',
+    snmpV3PrivPass: typeof saved.snmpV3PrivPass === 'string' ? saved.snmpV3PrivPass : '',
     snmpIfTable: !!saved.snmpIfTable,
     snmpUpTime: !!saved.snmpUpTime,
     snmpPerf: !!saved.snmpPerf,
@@ -5441,6 +5447,12 @@ function normalizeMonitorHosts(cfg) {
         complianceEnabled: !!h.complianceEnabled,
         snmpEnabled: !!h.snmpEnabled,
         snmpCommunity: typeof h.snmpCommunity === 'string' ? h.snmpCommunity.slice(0, 64) : 'public',
+        snmpVersion: h.snmpVersion === 'v3' ? 'v3' : 'v2c',
+        snmpV3User: typeof h.snmpV3User === 'string' ? h.snmpV3User.trim().slice(0, 32) : '',
+        snmpV3AuthProto: h.snmpV3AuthProto === 'md5' ? 'md5' : 'sha',
+        snmpV3AuthPass: typeof h.snmpV3AuthPass === 'string' ? h.snmpV3AuthPass.slice(0, 128) : '',
+        snmpV3PrivProto: h.snmpV3PrivProto === 'des' ? 'des' : 'aes',
+        snmpV3PrivPass: typeof h.snmpV3PrivPass === 'string' ? h.snmpV3PrivPass.slice(0, 128) : '',
         snmpIfTable: !!h.snmpIfTable,
         snmpUpTime: !!h.snmpUpTime,
         snmpPerf: !!h.snmpPerf,
@@ -5481,6 +5493,46 @@ function normalizeMonitorHosts(cfg) {
   if (Array.isArray(cfg.hosts) && cfg.hosts.length) return cfg.hosts.map(fill).filter(Boolean);
   if (cfg.host && String(cfg.host).trim()) return [monitorRow(cfg.host, cfg)];
   return [];
+}
+
+/** SNMP v3 口令设置子对话框：认证协议/口令 + 加密协议/口令（口令只在内存/DOM，随监控配置统一加密落盘） */
+function openSnmpV3SecretDialog(init, onDone) {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:420px">
+      <h3>SNMP v3 口令设置（USM）</h3>
+      <div class="m-sub">认证与加密口令经系统级加密后随监控配置保存在本机。设备侧 snmp-agent usm-user 需使用同一组协议与口令。</div>
+      <div class="frow"><label>认证协议</label>
+        <select id="sv3ap"><option value="sha"${init.authProto === 'sha' ? ' selected' : ''}>SHA-1</option><option value="md5"${init.authProto === 'md5' ? ' selected' : ''}>MD5</option></select>
+      </div>
+      <div class="frow"><label>认证口令</label><input id="sv3ak" type="password" value="${U.escHtml(init.authPass || '')}" autocomplete="new-password"/></div>
+      <div class="frow"><label>加密协议</label>
+        <select id="sv3pp"><option value="aes"${init.privProto === 'aes' ? ' selected' : ''}>AES-128</option><option value="des"${init.privProto === 'des' ? ' selected' : ''}>DES</option></select>
+      </div>
+      <div class="frow"><label>加密口令</label><input id="sv3pk" type="password" value="${U.escHtml(init.privPass || '')}" autocomplete="new-password"/></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="ok">确定</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=ok]').onclick = () => {
+    onDone({
+      authProto: ov.querySelector('#sv3ap').value,
+      authPass: ov.querySelector('#sv3ak').value,
+      privProto: ov.querySelector('#sv3pp').value,
+      privPass: ov.querySelector('#sv3pk').value
+    });
+    close();
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#sv3ak').focus(); }, 250);
 }
 
 /** 监控配置弹窗预填：已保存的 hosts 优先，否则用设备全部管理地址，否则留空一行 */
@@ -5540,7 +5592,7 @@ async function applyMonitor(id, cfg, enabled) {
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
           { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!r.snmpEnabled, community: r.snmpCommunity || 'public', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '' } } },
+        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '' } } },
         { metrics: { enabled: !!r.metricsEnabled, command: r.metricsCommands, intervalSec: r.metricsIntervalSec, diskWarn: r.metricsDiskWarn, diskCrit: r.metricsDiskCrit, memWarn: r.metricsMemWarn, memCrit: r.metricsMemCrit } },
         { httpProbe: { enabled: !!r.httpEnabled, url: r.httpUrl, intervalSec: r.httpIntervalSec, alertDays: r.httpAlertDays, keyword: r.httpKeyword } }
         ));
@@ -5645,7 +5697,7 @@ async function reconcileMonitors() {
         { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
         // 与 applyMonitor 的完整载荷同口径：缺 sysUpTime/perf 会让重启检测与 CPU/内存采集
         // 在软件重启/恢复工程后静默失效（monitor 侧按缺省 false 处理）
-        { sysinfo: { enabled: !!row.snmpEnabled, community: row.snmpCommunity || 'public', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '' } } },
+        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '' } } },
         { metrics: { enabled: !!row.metricsEnabled, command: row.metricsCommands, intervalSec: row.metricsIntervalSec, diskWarn: row.metricsDiskWarn, diskCrit: row.metricsDiskCrit, memWarn: row.metricsMemWarn, memCrit: row.metricsMemCrit } },
         { httpProbe: { enabled: !!row.httpEnabled, url: row.httpUrl, intervalSec: row.httpIntervalSec, alertDays: row.httpAlertDays, keyword: row.httpKeyword } }
       ));
@@ -5741,7 +5793,7 @@ function openMonitorConfig(id) {
   const listEl = ov.querySelector('#monHostList');
   const protoOpts = '<option value="ssh">SSH</option><option value="telnet">Telnet</option>';
   const rowHtml = (r) => `
-    <div class="mon-host-row">
+    <div class="mon-host-row" data-v3-auth-proto="${U.escHtml(r.snmpV3AuthProto || 'sha')}" data-v3-auth-pass="${U.escHtml(r.snmpV3AuthPass || '')}" data-v3-priv-proto="${U.escHtml(r.snmpV3PrivProto || 'aes')}" data-v3-priv-pass="${U.escHtml(r.snmpV3PrivPass || '')}">
       <input class="mh-host" type="text" placeholder="管理地址" value="${U.escHtml(r.host)}" autocomplete="off"/>
       <select class="mh-proto">${protoOpts.replace('value="ssh"', 'value="ssh"' + (r.protocol === 'ssh' ? ' selected' : '')).replace('value="telnet"', 'value="telnet"' + (r.protocol === 'telnet' ? ' selected' : ''))}</select>
       <input class="mh-port" type="number" min="1" max="65535" placeholder="端口" value="${U.escHtml(r.port)}"/>
@@ -5797,7 +5849,13 @@ function openMonitorConfig(id) {
         <label class="mh-si" title="按间隔经 SNMP v2c 采集接口状态与收发流量（ifTable，独立于连接的 UDP 轮询）：监控中心「接口流量」页查看趋势，接口 DOWN 记入事件时间线并弹通知"><input type="checkbox" class="mh-sift-cb"${r.snmpIfTable ? ' checked' : ''}/>接口流量</label>
         <label class="mh-si" title="按间隔 GET sysUpTime（TimeTicks），数值骤减判定为设备重启：记入事件时间线并弹通知（独立于 SSH/Telnet 连接）"><input type="checkbox" class="mh-si-up-cb"${r.snmpUpTime ? ' checked' : ''}/>重启检测</label>
         <label class="mh-si" title="按间隔 GET CPU/内存 OID（百分比型或字节型均可），监控中心「性能」页查看趋势"><input type="checkbox" class="mh-si-pf-cb"${r.snmpPerf ? ' checked' : ''}/>CPU/内存</label>
+        <select class="mh-si-sec" title="SNMP 安全模式：v2c 团体字，或 v3 用户名（USM 认证/加密，口令在「v3 口令设置」中配置）">
+          <option value="v2c"${r.snmpVersion === 'v3' ? '' : ' selected'}>v2c</option>
+          <option value="v3"${r.snmpVersion === 'v3' ? ' selected' : ''}>v3</option>
+        </select>
         <input class="mh-si-comm" type="text" title="SNMP v2c 团体字（SNMP 识别 / 接口流量 / 重启检测 / CPU·内存共用）" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
+        <input class="mh-si-v3user" type="text" style="display:none" title="SNMP v3 用户名（USM）" placeholder="v3 用户名" value="${U.escHtml(r.snmpV3User || '')}" autocomplete="off" spellcheck="false"/>
+        <button type="button" class="tb mh-si-v3btn" style="display:none;padding:2px 8px;font-size:11px">v3 口令…</button>
         <div class="mh-perf-wrap" hidden>
           <select class="mh-si-preset" title="按厂家预填常用 OID（可手动修改；不同型号可能不同，建议先用 snmpwalk 验证）">
             <option value="">OID 预设（选厂家自动填充）…</option>
@@ -5841,6 +5899,34 @@ function openMonitorConfig(id) {
       const otherDefault = autoPort(protoEl2.value) === '23' ? '22' : '23';
       if (!cur || cur === otherDefault) portEl2.value = autoPort(protoEl2.value);
     });
+    // SNMP 安全模式切换：v2c 显示团体字；v3 显示用户名 + 口令设置按钮
+    const secSel = rowEl.querySelector('.mh-si-sec');
+    const commEl = rowEl.querySelector('.mh-si-comm');
+    const v3UserEl = rowEl.querySelector('.mh-si-v3user');
+    const v3Btn = rowEl.querySelector('.mh-si-v3btn');
+    const applySec = () => {
+      const isV3 = secSel.value === 'v3';
+      commEl.style.display = isV3 ? 'none' : '';
+      v3UserEl.style.display = isV3 ? '' : 'none';
+      v3Btn.style.display = isV3 ? '' : 'none';
+    };
+    secSel.addEventListener('change', applySec);
+    applySec();
+    v3Btn.onclick = () => {
+      openSnmpV3SecretDialog({
+        authProto: rowEl.dataset.v3AuthProto === 'md5' ? 'md5' : 'sha',
+        authPass: rowEl.dataset.v3AuthPass || '',
+        privProto: rowEl.dataset.v3PrivProto === 'des' ? 'des' : 'aes',
+        privPass: rowEl.dataset.v3PrivPass || ''
+      }, (v) => {
+        rowEl.dataset.v3AuthProto = v.authProto;
+        rowEl.dataset.v3AuthPass = v.authPass;
+        rowEl.dataset.v3PrivProto = v.privProto;
+        rowEl.dataset.v3PrivPass = v.privPass;
+        v3Btn.textContent = (v.authPass ? 'v3 口令已设' : 'v3 口令…');
+        toast('SNMP v3 口令已更新（保存弹窗后生效）');
+      });
+    };
     const cmdBtn = rowEl.querySelector('.mh-cmd-btn');
     const cmdsWrap = rowEl.querySelector('.mh-cmds-wrap');
     cmdBtn.onclick = () => {
@@ -6006,6 +6092,12 @@ function openMonitorConfig(id) {
         snmpMemUsedOid: rowEl.querySelector('.mh-si-mused').value.trim().slice(0, 64),
         snmpMemFreeOid: rowEl.querySelector('.mh-si-mfree').value.trim().slice(0, 64),
         snmpCommunity: rowEl.querySelector('.mh-si-comm').value.trim().slice(0, 64),
+        snmpVersion: rowEl.querySelector('.mh-si-sec').value === 'v3' ? 'v3' : 'v2c',
+        snmpV3User: rowEl.querySelector('.mh-si-v3user').value.trim().slice(0, 32),
+        snmpV3AuthProto: rowEl.dataset.v3AuthProto === 'md5' ? 'md5' : 'sha',
+        snmpV3AuthPass: rowEl.dataset.v3AuthPass || '',
+        snmpV3PrivProto: rowEl.dataset.v3PrivProto === 'des' ? 'des' : 'aes',
+        snmpV3PrivPass: rowEl.dataset.v3PrivPass || '',
         backupCommand: (() => { const v = rowEl.querySelector('.mh-bk-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); return v.length ? v : ['display current-configuration']; })(),
         backupMode: rowEl.querySelector('.mh-bk-mode').value,
         backupSkipSame: rowEl.querySelector('.mh-bk-skip-cb').checked,
@@ -6325,7 +6417,12 @@ function openDiagTools(prefillHost) {
         <div class="frow" id="dgPortsRow" style="display:none"><label>端口</label><input id="dgPorts" type="text" value="22,80,443,3389,8080" style="width:230px" title="逗号分隔，支持区间 8000-8002，最多 256 个" spellcheck="false"/></div>
         <div class="frow" id="dgTargetsRow" style="display:none"><label>网段</label><input id="dgTargets" type="text" value="192.168.1.0/24" style="width:190px" title="支持 CIDR（192.168.1.0/24）、区间（192.168.1.10-20）、单 IP，逗号分隔混合；总量封顶 4096" spellcheck="false"/></div>
         <label id="dgPtrRow" style="display:none;align-items:center;gap:4px;margin-bottom:4px"><input id="dgPtr" type="checkbox"/>PTR 反查</label>
-        <div class="frow" id="dgCommRow" style="display:none"><label>团体名</label><input id="dgComm" type="text" value="public" style="width:90px" spellcheck="false"/></div>
+        <div class="frow" id="dgCommRow" style="display:none;gap:6px;align-items:flex-end;flex-wrap:wrap"><label>SNMP</label>
+          <select id="dgSnmpSec" style="width:76px"><option value="v2c">v2c</option><option value="v3">v3</option></select>
+          <input id="dgComm" type="text" value="public" style="width:90px" spellcheck="false" title="v2c 团体名"/>
+          <input id="dgV3User" type="text" placeholder="v3 用户名" style="width:110px;display:none" spellcheck="false" autocomplete="off"/>
+          <button type="button" class="tb" id="dgV3Btn" style="display:none;padding:3px 10px;font-size:11.5px">v3 口令…</button>
+        </div>
         <div class="frow" id="dgOidRow" style="display:none"><label>OID 前缀</label><input id="dgOid" type="text" value="1.3.6.1.2.1.1" style="width:150px" spellcheck="false"/></div>
         <div class="frow" id="dgOidPresetRow" style="display:none"><label>常用</label>
           <select id="dgOidPreset">
@@ -6367,6 +6464,20 @@ function openDiagTools(prefillHost) {
   ov.querySelector('#dgOidPreset').addEventListener('change', (e) => {
     ov.querySelector('#dgOid').value = e.target.value;
   });
+  // SNMP 安全模式：v2c 团体名 / v3 用户名 + 口令对话框（口令仅本次会话内存，不落 localStorage）
+  const dgV3 = { authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' };
+  const dgSecEl = ov.querySelector('#dgSnmpSec');
+  const dgApplySec = () => {
+    const isV3 = dgSecEl.value === 'v3';
+    ov.querySelector('#dgComm').style.display = isV3 ? 'none' : '';
+    ov.querySelector('#dgV3User').style.display = isV3 ? '' : 'none';
+    ov.querySelector('#dgV3Btn').style.display = isV3 ? '' : 'none';
+  };
+  dgSecEl.addEventListener('change', dgApplySec);
+  dgApplySec();
+  ov.querySelector('#dgV3Btn').onclick = () => {
+    openSnmpV3SecretDialog(dgV3, (v) => { Object.assign(dgV3, v); ov.querySelector('#dgV3Btn').textContent = v.authPass ? 'v3 口令已设' : 'v3 口令…'; });
+  };
   const out = ov.querySelector('#dgOut');
   const hint = ov.querySelector('#dgHint');
   const runBtn = ov.querySelector('#dgRun');
@@ -6422,11 +6533,15 @@ function openDiagTools(prefillHost) {
           append('—— 存活 ' + r.alive.length + '，无响应 ' + r.dead + '（ICMP 被禁ping的主机不会出现）');
         }
       } else if (tool === 'snmp') {
-        const r = await window.topoDiag.snmpWalk({
-          host,
-          community: ov.querySelector('#dgComm').value.trim() || 'public',
-          oid: ov.querySelector('#dgOid').value.trim()
-        });
+        const walkReq = { host, oid: ov.querySelector('#dgOid').value.trim() };
+        if (dgSecEl.value === 'v3') {
+          walkReq.version = 'v3';
+          walkReq.v3User = ov.querySelector('#dgV3User').value.trim();
+          Object.assign(walkReq, { v3AuthProto: dgV3.authProto, v3AuthPass: dgV3.authPass, v3PrivProto: dgV3.privProto, v3PrivPass: dgV3.privPass });
+        } else {
+          walkReq.community = ov.querySelector('#dgComm').value.trim() || 'public';
+        }
+        const r = await window.topoDiag.snmpWalk(walkReq);
         if (!r.ok && !(r.varbinds || []).length) append('—— 失败：' + (r.error || '未知') + '（请核对设备已启用 SNMP 且团体名正确）');
         for (const vb of (r.varbinds || [])) append('  ' + vb.oid + ' = ' + String(vb.value));
         append('—— 共 ' + (r.varbinds || []).length + ' 个绑定' + ((r.varbinds || []).length >= 512 ? '（已达单次上限）' : ''));
@@ -7528,7 +7643,7 @@ function openNetServices() {
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.innerHTML = `
-    <div class="modal nsv-dialog" role="dialog" style="width:1020px;height:86vh">
+    <div class="modal nsv-dialog" role="dialog" style="width:1100px;height:86vh">
       <h3>网络服务（TFTP / FTP / Syslog / Trap）</h3>
       <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）、<b>向本机发送 syslog 日志</b>并<b>把 SNMP Trap 告警上报到本机</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
       <div class="nsv-top">
@@ -7558,7 +7673,19 @@ function openNetServices() {
             <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvTrapOn"/>启用</label><b>SNMP Trap 接收</b><span class="nsv-dot" id="nsvTrapDot"></span></div>
             <div class="nsv-st" id="nsvTrapSt"></div>
             <div class="nsv-row"><label>端口</label><input type="number" id="nsvTrapPort" min="1" max="65535"/><span class="nsv-hint">标准 162（UDP）</span></div>
-            <div class="nsv-note">接收设备主动上报的告警（v1 / v2c）：接口 Down/Up、重启、认证失败等；标准 Trap 弹通知（受静默策略约束），按来源 / 日期归档。</div>
+            <div class="nsv-note">接收设备主动上报的告警（v1 / v2c / v3）：接口 Down/Up、重启、认证失败等；标准 Trap 弹通知（受静默策略约束），按来源 / 日期归档。</div>
+            <div style="border-top:1px dashed var(--border);padding-top:6px;margin-top:auto">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:3px">SNMP v3 接收用户（USM，可选：v3 Trap 按此验签并解密）</div>
+              <div class="nsv-row"><label>用户名</label><input type="text" id="nsvTrapV3User" maxlength="32" autocomplete="off" spellcheck="false"/></div>
+              <div class="nsv-row"><label>认证</label>
+                <select id="nsvTrapV3AP"><option value="sha">SHA-1</option><option value="md5">MD5</option></select>
+                <input type="password" id="nsvTrapV3AK" placeholder="认证口令" autocomplete="new-password" style="flex:1;min-width:90px"/>
+              </div>
+              <div class="nsv-row"><label>加密</label>
+                <select id="nsvTrapV3PP"><option value="aes">AES-128</option><option value="des">DES</option></select>
+                <input type="password" id="nsvTrapV3PK" placeholder="加密口令" autocomplete="new-password" style="flex:1;min-width:90px"/>
+              </div>
+            </div>
           </div>
         </div>
         <div class="nsv-aside">
@@ -7655,6 +7782,12 @@ function openNetServices() {
     ov.querySelector('#nsvSysTcp').checked = !!cfg.syslog.tcp;
     ov.querySelector('#nsvTrapOn').checked = !!cfg.trap.enabled;
     ov.querySelector('#nsvTrapPort').value = cfg.trap.port;
+    const tv3 = (cfg.trap && cfg.trap.v3) || {};
+    ov.querySelector('#nsvTrapV3User').value = tv3.user || '';
+    ov.querySelector('#nsvTrapV3AP').value = tv3.authProto === 'md5' ? 'md5' : 'sha';
+    ov.querySelector('#nsvTrapV3AK').value = tv3.authPass || '';
+    ov.querySelector('#nsvTrapV3PP').value = tv3.privProto === 'des' ? 'des' : 'aes';
+    ov.querySelector('#nsvTrapV3PK').value = tv3.privPass || '';
   }
   function readForm() {
     const pasv = String(ov.querySelector('#nsvFtpPasv').value || '').match(/^(\d+)\s*-\s*(\d+)$/);
@@ -7670,7 +7803,17 @@ function openNetServices() {
         overwrite: ov.querySelector('#nsvFtpOverwrite').checked
       },
       syslog: { enabled: ov.querySelector('#nsvSysOn').checked, port: parseInt(ov.querySelector('#nsvSysPort').value, 10) || 514, tcp: ov.querySelector('#nsvSysTcp').checked },
-      trap: { enabled: ov.querySelector('#nsvTrapOn').checked, port: parseInt(ov.querySelector('#nsvTrapPort').value, 10) || 162 }
+      trap: {
+        enabled: ov.querySelector('#nsvTrapOn').checked,
+        port: parseInt(ov.querySelector('#nsvTrapPort').value, 10) || 162,
+        v3: {
+          user: ov.querySelector('#nsvTrapV3User').value.trim(),
+          authProto: ov.querySelector('#nsvTrapV3AP').value,
+          authPass: ov.querySelector('#nsvTrapV3AK').value,
+          privProto: ov.querySelector('#nsvTrapV3PP').value,
+          privPass: ov.querySelector('#nsvTrapV3PK').value
+        }
+      }
     };
   }
   async function loadCfg() {
@@ -7756,7 +7899,7 @@ function openNetServices() {
     btn.disabled = false;
   };
   ov.querySelector('[data-act=defaults]').onclick = async () => {
-    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false }, trap: { enabled: false, port: 162 } });
+    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false }, trap: { enabled: false, port: 162, v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } } });
     ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
     toast('已恢复默认值（尚未保存，请点「保存并应用」）');
   };

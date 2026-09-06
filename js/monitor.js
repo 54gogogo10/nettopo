@@ -229,17 +229,20 @@ function tlvWalk(buf, start) {
   if (start + hs + len > buf.length) return null;
   return { tag, body: buf.subarray(start + hs, start + hs + len), next: start + hs + len };
 }
-/** SNMP v2c GET：返回 {ok, varbinds:[{oid,value}]} 或 {ok:false, error}；port 供测试注入 mock agent（默认 161）
- *  rid 混入进程级随机盐（纯顺序递增可被同网段盲猜抢答）；响应校验来源地址（IP 直连目标时）。 */
-function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
+/** SNMP 请求：target 为字符串时按 v2c 团体字；为对象（{user,authProto,authPass,privProto,privPass}）时走 SNMP v3（USM）通道。
+ *  返回 {ok, varbinds:[{oid,value}]} 或 {ok:false, error}；port 供测试注入 mock agent（默认 161）。
+ *  v2c rid 混入进程级随机盐（纯顺序递增可被同网段盲猜抢答）；响应校验来源地址（IP 直连目标时）。 */
+function snmpRequest(pduTag, host, target, oids, timeoutMs, port) {
+  if (target && typeof target === 'object') return v3Request(pduTag, host, target, oids, timeoutMs, port);
   return new Promise((resolve) => {
     try {
+      const community = String(target == null ? 'public' : target);
       const seq = (snmpGet._rid = (snmpGet._rid || 0) + 1) & 0x7fff;
       if (snmpGet._salt == null) snmpGet._salt = Math.floor(Math.random() * 0x8000);
       const rid = ((snmpGet._salt << 15) | seq) & 0x7fffffff;
       const varb = oids.map(oid => berTlv(0x30, Buffer.concat([berOid(oid), Buffer.from([0x05, 0x00])])));
       const pdu = Buffer.concat([berInt(rid), berInt(0), berInt(0), berTlv(0x30, Buffer.concat(varb))]);
-      const msg = berTlv(0x30, Buffer.concat([berInt(1) /* v2c */, berTlv(0x04, Buffer.from(String(community || 'public'), 'utf8')), berTlv(pduTag, pdu)]));
+      const msg = berTlv(0x30, Buffer.concat([berInt(1) /* v2c */, berTlv(0x04, Buffer.from(community, 'utf8')), berTlv(pduTag, pdu)]));
       const sock = dgram.createSocket('udp4');
       // host 为点分 IPv4 时校验响应来源：伪造抢答包必须来自目标 IP 才可能通过后续 rid/community 校验
       const isIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(host || ''));
@@ -251,7 +254,7 @@ function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
           if (isIpLiteral && rinfo && rinfo.address !== host) return;
           // 再校验 request-id 与 community：不匹配的抢答包同样丢弃
           const meta = snmpResponseMeta(buf);
-          if (!meta || meta.rid !== rid || meta.community !== String(community || 'public')) return;
+          if (!meta || meta.rid !== rid || meta.community !== community) return;
           done({ ok: true, varbinds: parseSnmpResponse(buf) });
         }
         catch (e) { done({ ok: false, error: 'SNMP 响应解析失败' }); }
@@ -260,6 +263,77 @@ function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
       sock.send(msg, port || 161, host, (err) => { if (err) done({ ok: false, error: 'SNMP 发送失败' }); });
     } catch (e) { resolve({ ok: false, error: 'SNMP 构造失败' }); }
   });
+}
+
+/* ---------------- SNMP v3（USM）请求通道：引擎发现 + 时间同步 + 认证/加密（RFC 3414/3826） ---------------- */
+const V3 = require('./snmp-v3.js');
+let v3Rid = 0;
+const nextV3Rid = () => (((v3Rid = ((v3Rid || 0) + 1) & 0x7fff) + (Math.floor(Math.random() * 0xffff) << 15)) & 0x7fffffff) || 1;
+/** 发送并等待单个 v3 包（来源不符的包被忽略直至超时；解析与认证校验交给 snmp-v3） */
+function v3Transmit(msg, host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    const sock = dgram.createSocket('udp4');
+    const isIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(host || ''));
+    const done = (res) => { clearTimeout(t); try { sock.close(); } catch (e) { /* ignore */ } resolve(res); };
+    const t = setTimeout(() => done({ ok: false, error: 'SNMP v3 响应超时' }), timeoutMs || 3000);
+    sock.on('message', (buf, rinfo) => {
+      if (isIpLiteral && rinfo && rinfo.address !== host) return;
+      done({ ok: true, buf });
+    });
+    sock.on('error', () => done({ ok: false, error: 'SNMP v3 网络错误' }));
+    sock.send(msg, port, host, (err) => { if (err) done({ ok: false, error: 'SNMP v3 发送失败' }); });
+  });
+}
+/** v3 请求：引擎发现（Report 回带权威 engineID/boots/time）→ 认证/加密请求；时间窗不同步/引擎变更各重试一次 */
+async function v3Request(pduTag, host, v3cfg, oids, timeoutMs, port) {
+  const user = V3.normalizeV3User(v3cfg);
+  if (!user) return { ok: false, error: 'SNMP v3 用户配置无效（需用户名；认证需协议与口令）' };
+  const p = (port > 0 && port <= 65535) ? port : 161;
+  let eng = V3.v3EngineGet(host, p, user.user);
+  let retries = 0;
+  for (;;) {
+    if (!eng) {
+      // 引擎发现：noAuthNoPriv、空引擎 ID 的 GET（reportable），设备回 Report 携带权威引擎三元组
+      const d = V3.buildV3Message({ pduTag: 0xa0, oids: [V3.OID_USM_UNKNOWN_ENGINE_IDS], engineID: Buffer.alloc(0), boots: 0, time: 0, user: { user: '', level: 'noAuth' }, reportable: true, msgID: nextV3Rid(), rid: nextV3Rid() });
+      const r = await v3Transmit(d.msg, host, p, timeoutMs);
+      if (!r.ok) return r;
+      const pr = V3.parseV3Message(r.buf, { user: null });
+      if (!pr.ok) return { ok: false, error: 'SNMP v3 引擎发现失败：' + pr.reason };
+      if (!pr.engineID) return { ok: false, error: 'SNMP v3 引擎发现失败：设备未返回引擎 ID' };
+      eng = { engineID: pr.engineID, boots: pr.boots, time: pr.time };
+      V3.v3EngineSet(host, p, user.user, eng);
+    }
+    const ridv = nextV3Rid();
+    const built = V3.buildV3Message({ pduTag, oids, engineID: Buffer.from(eng.engineID, 'hex'), boots: eng.boots, time: eng.time, user, reportable: true, msgID: nextV3Rid(), rid: ridv });
+    const r = await v3Transmit(built.msg, host, p, timeoutMs);
+    if (!r.ok) return r;
+    const pr = V3.parseV3Message(r.buf, { user });
+    if (!pr.ok) {
+      // 设备重启（引擎 boots/time 重置）会让签名校验失败：强制重新发现一次
+      if (retries < 2 && /认证失败/.test(pr.reason || '')) { V3.v3EngineReset(host, p, user.user); eng = null; retries++; continue; }
+      return { ok: false, error: 'SNMP v3：' + (pr.reason || '请求失败') };
+    }
+    if (pr.engineID !== eng.engineID) return { ok: false, error: 'SNMP v3 引擎 ID 与发现结果不匹配' };
+    if (pr.pduTag === 0xa8 && pr.report) {
+      if (pr.report.oid === V3.OID_USM_NOT_IN_TIME_WINDOWS && retries < 2) {
+        eng.boots = pr.boots; eng.time = pr.time; V3.v3EngineSet(host, p, user.user, eng); retries++; continue; // 时间窗重同步
+      }
+      if (retries < 2) { V3.v3EngineReset(host, p, user.user); eng = null; retries++; continue; } // 其余 USM 错误：重发现一次再定论
+      return { ok: false, error: 'SNMP v3：' + V3.reportReason(pr.report) };
+    }
+    if (pr.pduTag !== 0xa2) return { ok: false, error: 'SNMP v3 响应类型异常' };
+    if (pr.rid != null && pr.rid !== ridv) return { ok: false, error: 'SNMP v3 响应 request-id 不匹配' };
+    return { ok: true, varbinds: pr.varbinds };
+  }
+}
+
+/** SNMP 请求目标：sysinfo 配 v3 时返回 v3 用户对象，否则返回 v2c 团体字（透传给 snmpGet/snmpWalk 系列的 target 形参） */
+function snmpTargetOf(job) {
+  const si = job.sysinfo || {};
+  if (si.version === 'v3' && si.v3User) {
+    return { user: si.v3User, authProto: si.v3AuthProto, authPass: si.v3AuthPass, privProto: si.v3PrivProto, privPass: si.v3PrivPass };
+  }
+  return si.community || 'public';
 }
 function snmpGet(host, community, oids, timeoutMs, port) { return snmpRequest(0xa0, host, community, oids, timeoutMs, port); }
 function snmpGetNext(host, community, oid, timeoutMs, port) { return snmpRequest(0xa1, host, community, [oid], timeoutMs, port); }
@@ -772,6 +846,13 @@ class MonitorManager extends EventEmitter {
     // ---- SNMP 接口流量采集（ifTable walk）/ 重启检测（sysUpTime 骤减）/ CPU·内存采集（可配置 OID），独立于连接的 UDP 定时轮询 ----
     const sOpt = opts.sysinfo && typeof opts.sysinfo === 'object' ? opts.sysinfo : {};
     const sysinfo = { enabled: !!sOpt.enabled, community: (String(sOpt.community || 'public').trim().slice(0, 64)) || 'public', ifTable: !!sOpt.ifTable };
+    // SNMP v3（USM）：version 'v3' 时启用；认证/隐私协议白名单，口令长度钳制（密钥本地化输入）
+    sysinfo.version = String(sOpt.version) === 'v3' ? 'v3' : 'v2c';
+    sysinfo.v3User = String(sOpt.v3User || '').trim().slice(0, 32);
+    sysinfo.v3AuthProto = String(sOpt.v3AuthProto).toLowerCase() === 'md5' ? 'md5' : 'sha';
+    sysinfo.v3AuthPass = String(sOpt.v3AuthPass || '').slice(0, 128);
+    sysinfo.v3PrivProto = String(sOpt.v3PrivProto).toLowerCase() === 'des' ? 'des' : 'aes';
+    sysinfo.v3PrivPass = String(sOpt.v3PrivPass || '').slice(0, 128);
     let snmpIntervalSec = parseFloat(sOpt.intervalSec);
     if (!Number.isFinite(snmpIntervalSec)) snmpIntervalSec = 60;
     sysinfo.intervalSec = Math.max(30, Math.min(3600, snmpIntervalSec));
@@ -855,7 +936,7 @@ class MonitorManager extends EventEmitter {
       probe: Object.assign({ enabled: false, type: 'tcp', intervalSec: 30 }, cfg.probe || {}),
       alerts: (cfg.alerts || []).map(a => ({ pattern: a.pattern, note: a.note, re: a.re })),
       backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 1000 }, cfg.backup || {}),
-      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60, sysUpTime: false, perf: { enabled: false, cpuOid: '', memUsedOid: '', memFreeOid: '' } }, cfg.sysinfo || {}),
+      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60, sysUpTime: false, version: 'v2c', v3User: '', v3AuthProto: 'sha', v3AuthPass: '', v3PrivProto: 'aes', v3PrivPass: '', perf: { enabled: false, cpuOid: '', memUsedOid: '', memFreeOid: '' } }, cfg.sysinfo || {}),
       metrics: Object.assign({ enabled: false, commands: [], intervalSec: 300, diskWarn: 80, diskCrit: 90, memWarn: 80, memCrit: 90 }, cfg.metrics || {}),
       metricHist: [],   // SSH 指标采样历史（[{ts, disks:[{mount,pct}], mem, swap, load}]，容量 IF_HIST_MAX）
       metricAlert: { disk: null, mem: null }, // 上次阈值级别（变化沿产生告警事件）
@@ -1224,7 +1305,7 @@ class MonitorManager extends EventEmitter {
   /** SNMP v2c 识别：GET sysDescr/sysObjectID，启发式提取软件版本后广播 sysinfo 事件 */
   _fetchSysInfo(job, gen) {
     if (!job.enabled || job.stopping || gen !== job.gen || !job.sysinfo || !job.sysinfo.enabled) return;
-    snmpGet(job.host, job.sysinfo.community, [OID_SYSDESCR, OID_SYSOBJECT], 3000).then((r) => {
+    snmpGet(job.host, snmpTargetOf(job), [OID_SYSDESCR, OID_SYSOBJECT], 3000).then((r) => {
       if (!job.enabled || job.stopping || gen !== job.gen || !r.ok) return;
       const map = {};
       for (const vb of (r.varbinds || [])) if (vb.oid) map[vb.oid] = vb.value;
@@ -1387,10 +1468,10 @@ class MonitorManager extends EventEmitter {
   }
 
   async _collectIfTable(job) {
-    const host = job.host, community = job.sysinfo.community;
+    const host = job.host, target = snmpTargetOf(job);
     const port = job.sysinfo.snmpPort || 161;
     // 1. 接口名表（ifDescr walk 拿到全部 ifIndex）
-    const descr = await snmpWalk(OID_IF_DESCR, host, community, 3000, port);
+    const descr = await snmpWalk(OID_IF_DESCR, host, target, 3000, port);
     if (!descr.ok || !descr.varbinds.length) return;
     const ifs = new Map(); // ifIndex -> {i, n, oper, speed, inC, outC}
     for (const vb of descr.varbinds) {
@@ -1401,7 +1482,7 @@ class MonitorManager extends EventEmitter {
     if (!ifs.size) return;
     // 2. 状态 / 速率 / 计数器（各列独立 walk，ifIndex 不在_descr 表的行忽略）
     const merge = async (root, fn) => {
-      const w = await snmpWalk(root, host, community, 3000, port);
+      const w = await snmpWalk(root, host, target, 3000, port);
       if (!w.ok) return;
       for (const vb of w.varbinds) {
         const idx = vb.oid.slice(root.length + 1);
@@ -1412,13 +1493,13 @@ class MonitorManager extends EventEmitter {
     await merge(OID_IF_OPER, (o, v) => { o.oper = v === 1 ? 'up' : (v === 2 ? 'down' : 'other'); });
     await merge(OID_IF_SPEED, (o, v) => { o.speed = Number(v) || 0; });
     // 64 位计数器优先（ifHCIn/OutOctets），设备不支持（走完无数据）时回退 32 位
-    let inCol = await snmpWalk(OID_IF_HCIN, host, community, 3000, port);
+    let inCol = await snmpWalk(OID_IF_HCIN, host, target, 3000, port);
     let inRoot = OID_IF_HCIN;
-    if (!inCol.ok || !inCol.varbinds.length) { inCol = await snmpWalk(OID_IF_IN32, host, community, 3000, port); inRoot = OID_IF_IN32; }
+    if (!inCol.ok || !inCol.varbinds.length) { inCol = await snmpWalk(OID_IF_IN32, host, target, 3000, port); inRoot = OID_IF_IN32; }
     if (inCol.ok) for (const vb of inCol.varbinds) { const o = ifs.get(vb.oid.slice(inRoot.length + 1)); if (o) o.inC = Number(vb.value); }
-    let outCol = await snmpWalk(OID_IF_HCOUT, host, community, 3000, port);
+    let outCol = await snmpWalk(OID_IF_HCOUT, host, target, 3000, port);
     let outRoot = OID_IF_HCOUT;
-    if (!outCol.ok || !outCol.varbinds.length) { outCol = await snmpWalk(OID_IF_OUT32, host, community, 3000, port); outRoot = OID_IF_OUT32; }
+    if (!outCol.ok || !outCol.varbinds.length) { outCol = await snmpWalk(OID_IF_OUT32, host, target, 3000, port); outRoot = OID_IF_OUT32; }
     if (outCol.ok) for (const vb of outCol.varbinds) { const o = ifs.get(vb.oid.slice(outRoot.length + 1)); if (o) o.outC = Number(vb.value); }
 
     // 3. 组装采样并计算速率（与上次计数器差值）
@@ -1481,13 +1562,13 @@ class MonitorManager extends EventEmitter {
 
   /** SNMP 性能采集：sysUpTime（重启检测：数值骤减 5 分钟以上判为重启）+ CPU/内存（可配置 OID） */
   async _collectPerf(job) {
-    const host = job.host, community = job.sysinfo.community, port = job.sysinfo.snmpPort || 161;
+    const host = job.host, target = snmpTargetOf(job), port = job.sysinfo.snmpPort || 161;
     const perf = job.sysinfo.perf || {};
     const now = Date.now();
     const sample = { ts: now, up: null, cpu: null, mem: null };
     // sysUpTime（TimeTicks，1/100 秒）：骤减超过 5 分钟刻度视为设备重启（容忍采样抖动）
     if (job.sysinfo.sysUpTime) {
-      const r = await snmpGetValue(host, community, OID_SYSUPTIME, 3000, port);
+      const r = await snmpGetValue(host, target, OID_SYSUPTIME, 3000, port);
       if (r.ok && Number.isFinite(Number(r.value))) {
         const up = Number(r.value);
         sample.up = up;
@@ -1502,17 +1583,17 @@ class MonitorManager extends EventEmitter {
     const clampPct = (v) => Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v * 10) / 10)) : null;
     // CPU 利用率（%）
     if (perf.enabled && perf.cpuOid) {
-      const r = await snmpGetValue(host, community, perf.cpuOid, 3000, port);
+      const r = await snmpGetValue(host, target, perf.cpuOid, 3000, port);
       if (r.ok) sample.cpu = clampPct(Number(r.value));
     }
     // 内存占用：memFreeOid 已配置 → used/(used+free)（思科字节型）；未配置 → memUsedOid 值即百分比（华为/华三）
     if (perf.enabled && perf.memUsedOid) {
-      const ru = await snmpGetValue(host, community, perf.memUsedOid, 3000, port);
+      const ru = await snmpGetValue(host, target, perf.memUsedOid, 3000, port);
       if (ru.ok) {
         const used = Number(ru.value);
         if (Number.isFinite(used)) {
           if (perf.memFreeOid) {
-            const rf = await snmpGetValue(host, community, perf.memFreeOid, 3000, port);
+            const rf = await snmpGetValue(host, target, perf.memFreeOid, 3000, port);
             const free = rf.ok ? Number(rf.value) : NaN;
             sample.mem = (Number.isFinite(free) && used + free > 0)
               ? Math.round(used / (used + free) * 1000) / 10
@@ -2144,5 +2225,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
 

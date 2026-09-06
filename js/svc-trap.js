@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const dgram = require('dgram');
 const { EventEmitter } = require('events');
+const { normalizeV3User, parseV3Message } = require('./snmp-v3.js');
 
 const MAX_RING = 1000;               // 环形缓冲条数
 const TAIL_MAX = 300;                // 单次返回条数上限
@@ -123,7 +124,8 @@ function parseTrapPacket(buf) {
   if (fields.length < 3) return { ok: false, reason: '字段不足' };
   const verT = fields[0];
   const ver = verT.tag === 0x02 ? readUInt(verT.body) : null;
-  if (ver !== 0 && ver !== 1) return { ok: false, reason: '不支持的 SNMP 版本（仅 v1/v2c）' };
+  if (ver === 3) return { ok: false, isV3: true, reason: 'SNMP v3（走 USM 通道）' };
+  if (ver !== 0 && ver !== 1) return { ok: false, reason: '不支持的 SNMP 版本（仅 v1/v2c/v3）' };
   const commT = fields[1];
   const community = cleanText(commT && commT.tag === 0x04 ? commT.body.toString('utf8') : '');
   const pdu = fields[2];
@@ -252,6 +254,8 @@ class TrapServer extends EventEmitter {
     this.baseDir = opts.baseDir;
     this.keepDays = Math.max(1, Math.floor(Number(opts.keepDays) || 90));
     this.maxPerSec = Math.max(5, Math.floor(Number(opts.maxPerSec) || 100));
+    // SNMP v3 USM 接收用户（最多 8 个）：v3 Trap 按包内用户名匹配后验签/解密，未匹配或验签失败丢弃计数
+    this.v3Users = (Array.isArray(opts.v3Users) ? opts.v3Users : []).map(x => normalizeV3User(x)).filter(Boolean).slice(0, 8);
     this.ringMax = Math.max(50, Math.floor(Number(opts.ringMax) || MAX_RING));
     this.udp = null;
     this.port = 0;
@@ -261,7 +265,7 @@ class TrapServer extends EventEmitter {
     this.seq = 0;
     this.streams = new Map();  // 'ip\x00date' -> WriteStream
     this.lastDay = '';
-    this.stats = { rxPackets: 0, malformed: 0, dropped: 0 };
+    this.stats = { rxPackets: 0, malformed: 0, dropped: 0, v3Unknown: 0, v3AuthFail: 0 };
     this._winStart = 0;
     this._winCount = 0;
     try { fs.mkdirSync(this.baseDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
@@ -317,7 +321,10 @@ class TrapServer extends EventEmitter {
     if (++this._winCount > this.maxPerSec) { this.stats.dropped++; return; }
     this.stats.rxPackets++;
     const r = parseTrapPacket(buf);
-    if (!r.ok) { this.stats.malformed++; return; }
+    if (!r.ok) {
+      if (r.isV3) { this._ingestV3(buf, peer); return; }
+      this.stats.malformed++; return;
+    }
     if (r.inform) { r._peerAddr = String(peer || '').replace(/^::ffff:/, ''); r._peerPort = peerPort; this._answerInform(r); }
     const summary = (r.varbinds || []).slice(0, 8).map(v => v.oid + '=' + v.value).join(' ');
     const ent = {
@@ -332,6 +339,54 @@ class TrapServer extends EventEmitter {
       agent: r.agent,
       uptimeTicks: r.uptimeTicks,
       uptime: fmtUptime(r.uptimeTicks),
+      msg: summary
+    };
+    this.ring.push(ent);
+    if (this.ring.length > this.ringMax) this.ring.splice(0, this.ring.length - this.ringMax);
+    this._writeEntry(ent);
+    this.emit('trap', ent);
+  }
+
+  /** SNMP v3 Trap 接收：按包内用户名匹配本端 v3 用户 → 先验签后解密（parseV3Message 内固定顺序）→ 提取 Trap。
+   *  未知用户 / 验签失败分别计数丢弃（不出环形缓冲，防噪音）；time 窗不校验（Trap 无会话语义）。 */
+  _ingestV3(buf, peer) {
+    // v3 包的 userName 在签名保护内：逐个本端用户尝试验签/解密（用户数封顶 8）
+    let full = null;
+    let lastReason = '';
+    for (const u of this.v3Users) {
+      const r = parseV3Message(buf, { user: u });
+      if (r.ok) { full = r; break; }
+      lastReason = r.reason || '';
+    }
+    if (!full) {
+      const m = /用户 ([^s）]+) 未配置/.exec(lastReason);
+      if (m && !this.v3Users.some(x => x.user === m[1])) this.stats.v3Unknown++; // 包内用户未在本端配置
+      else this.stats.v3AuthFail++;                                              // 已配置用户但验签/解密失败
+      return;
+    }
+    if (full.pduTag !== 0xa7) { this.stats.malformed++; return; } // 仅收 Trap（inform 应答不在 v3 接收范围）
+    let trapOid = '';
+    let uptimeTicks = null;
+    const rest = [];
+    for (const vb of (full.varbinds || [])) {
+      if (vb.oid === TRAPOID_OID) trapOid = vb.value;
+      else if (vb.oid === UPTIME_OID) uptimeTicks = Number(vb.value) || null;
+      else rest.push(vb);
+    }
+    const tn = trapNameOf(trapOid);
+    const summary = rest.slice(0, 8).map(v => v.oid + '=' + v.value).join(' ');
+    const ent = {
+      seq: ++this.seq,
+      ts: Date.now(),
+      host: String(peer || '').replace(/^::ffff:/, '') || 'unknown',
+      version: 'v3',
+      community: '',
+      trap: tn.name,
+      oid: tn.name === 'unknown' ? '' : trapOid,
+      standard: !!tn.standard,
+      agent: '',
+      uptimeTicks,
+      uptime: fmtUptime(uptimeTicks),
       msg: summary
     };
     this.ring.push(ent);
@@ -433,7 +488,8 @@ class TrapServer extends EventEmitter {
   status() {
     return {
       running: this.running, port: this.port, error: this.lastError,
-      rxPackets: this.stats.rxPackets, malformed: this.stats.malformed, dropped: this.stats.dropped, buffered: this.ring.length
+      rxPackets: this.stats.rxPackets, malformed: this.stats.malformed, dropped: this.stats.dropped, buffered: this.ring.length,
+      v3Users: this.v3Users.length, v3Unknown: this.stats.v3Unknown, v3AuthFail: this.stats.v3AuthFail
     };
   }
 }

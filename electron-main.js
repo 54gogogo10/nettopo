@@ -1031,11 +1031,23 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
   if (!isValidDiagHost(host)) return { ok: false, error: '主机地址无效' };
   const oid = String((p && p.oid) || '').trim();
   if (!DIAG_OID_RE.test(oid) || oid.length > 64) return { ok: false, error: 'OID 无效（点分十进制，如 1.3.6.1.2.1.1.1）' };
-  const community = String((p && p.community) || 'public').trim().slice(0, 64) || 'public';
+  // SNMP v3（可选）：version=v3 时走 USM 通道，团体字被忽略
+  let target = community;
+  if (String((p && p.version) || '') === 'v3') {
+    const v3user = String((p && p.v3User) || '').trim().slice(0, 32);
+    if (!v3user) return { ok: false, error: 'SNMP v3 需填写用户名' };
+    target = {
+      user: v3user,
+      authProto: String((p && p.v3AuthProto) || 'sha').toLowerCase() === 'md5' ? 'md5' : 'sha',
+      authPass: String((p && p.v3AuthPass) || '').slice(0, 128),
+      privProto: String((p && p.v3PrivProto) || 'aes').toLowerCase() === 'des' ? 'des' : 'aes',
+      privPass: String((p && p.v3PrivPass) || '').slice(0, 128)
+    };
+  }
   let port = parseInt(p && p.port, 10);
   if (!(port > 0 && port <= 65535)) port = 161;
   const timeoutMs = Math.max(300, Math.min(10000, parseInt(p && p.timeoutMs, 10) || 1500));
-  const r = await snmpWalk(oid, host, community, timeoutMs, port, 512);
+  const r = await snmpWalk(oid, host, target, timeoutMs, port, 512);
   // walk 为空时回退单值 GET（叶子 OID 无子树，GETNEXT 也不命中时给 GET 一次机会）
   if (r.ok && !r.varbinds.length) {
     const g = await snmpGetValue(host, community, oid, timeoutMs, port);
@@ -1251,6 +1263,14 @@ ipcMain.handle('netsvc:set', async (e, p) => {
     if (stored.ftp && typeof stored.ftp === 'object' && typeof stored.ftp.password === 'string'
       && stored.ftp.password && stored.ftp.password.indexOf(ENC_PREFIX) !== 0) {
       stored.ftp.password = encryptSecretValue(stored.ftp.password);
+    }
+    // Trap v3 口令同样密文化落盘
+    if (stored.trap && typeof stored.trap === 'object' && stored.trap.v3 && typeof stored.trap.v3 === 'object') {
+      for (const f of ['authPass', 'privPass']) {
+        if (typeof stored.trap.v3[f] === 'string' && stored.trap.v3[f] && stored.trap.v3[f].indexOf(ENC_PREFIX) !== 0) {
+          stored.trap.v3[f] = encryptSecretValue(stored.trap.v3[f]);
+        }
+      }
     }
     loadAppSettings().netSvc = stored;
     saveAppSettings();
@@ -1662,6 +1682,13 @@ app.whenReady().then(() => {
       if (restored.ftp && typeof restored.ftp === 'object' && typeof restored.ftp.password === 'string'
         && restored.ftp.password.indexOf(ENC_PREFIX) === 0) {
         restored.ftp.password = decryptSecretValue(restored.ftp.password);
+      }
+      if (restored.trap && typeof restored.trap === 'object' && restored.trap.v3 && typeof restored.trap.v3 === 'object') {
+        for (const f of ['authPass', 'privPass']) {
+          if (typeof restored.trap.v3[f] === 'string' && restored.trap.v3[f].indexOf(ENC_PREFIX) === 0) {
+            restored.trap.v3[f] = decryptSecretValue(restored.trap.v3[f]);
+          }
+        }
       }
       netSvc.applyConfig(restored).catch(() => { /* 恢复失败由面板状态展示 */ });
     }
