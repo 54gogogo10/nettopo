@@ -152,9 +152,11 @@ contextBridge.exposeInMainWorld('topoNetSvc', {
   syslogSearch: (p) => ipcRenderer.invoke('netsvc:syslog-search', p),
   syslogFiles: () => ipcRenderer.invoke('netsvc:syslog-files'),
   syslogRead: (host, date) => ipcRenderer.invoke('netsvc:syslog-read', { host, date }),
+  trapTail: (since) => ipcRenderer.invoke('netsvc:trap-tail', { since }),
   openFolder: (svc) => ipcRenderer.invoke('netsvc:open-folder', { svc }),
   onFile: sub('netsvc:file'),
-  onStatus: sub('netsvc:status')
+  onStatus: sub('netsvc:status'),
+  onTrap: sub('netsvc:trap')
 });
 
 /* AI 解析（LLM，仅主窗口可用）：配置/分析经主进程发起（渲染层 CSP 禁止直连外网）；

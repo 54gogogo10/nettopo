@@ -96,6 +96,27 @@ netSvc.on('file', (info) => {
   }
 });
 netSvc.on('status', (st) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:status', st); });
+// SNMP Trap：实时推送面板；标准 Trap（接口 Down/Up、冷/热启动、认证失败等）弹系统通知——
+// 来源 IP 能匹配到监控任务的设备时走该设备的静默/维护窗口判定并记入事件时间线，未匹配设备直接通知
+netSvc.on('trap', (t) => {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:trap', t);
+  if (!t.standard || !notifyEnabled()) return;
+  let deviceId = '', name = '';
+  try {
+    const job = monitor.status().find(s => s.host === t.host);
+    if (job) { deviceId = job.deviceId; name = job.name || job.deviceId; }
+  } catch (e) { /* 匹配失败按未匹配处理 */ }
+  const title = '网络拓扑管理软件 · 收到 SNMP Trap';
+  const body = (name ? name + '（' + t.host + '）' : t.host) + ' 上报 ' + t.trap
+    + (t.uptime ? '，设备已运行 ' + t.uptime : '')
+    + (t.msg ? '：' + t.msg.slice(0, 120) : '');
+  if (deviceId) {
+    recordMonitorEvent({ key: deviceId + '@' + t.host, deviceId, host: t.host, name }, 'trap', t.trap + (t.msg ? '：' + t.msg : ''));
+    notifyForDevice(deviceId, title, body);
+  } else {
+    notifyUser(title, body);
+  }
+});
 
 /** 本机 IPv4 地址列表（面板展示，方便在设备侧配置 tftp/ftp/loghost 指向） */
 function localIPv4s() {
@@ -1241,6 +1262,7 @@ ipcMain.handle('netsvc:file-read', (e, p) => monitorGuard(e) ? netSvc.readFile(p
 ipcMain.handle('netsvc:file-delete', (e, p) => monitorGuard(e) ? netSvc.deleteFile(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:import', (e, p) => monitorGuard(e) ? netSvc.importBackup(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:syslog-tail', (e, p) => monitorGuard(e) ? netSvc.syslogTail(p && p.since) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:trap-tail', (e, p) => monitorGuard(e) ? netSvc.trapTail(p && p.since) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:syslog-search', (e, p) => monitorGuard(e) ? netSvc.syslogSearch(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:open-folder', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };

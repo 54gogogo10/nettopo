@@ -14,16 +14,18 @@ const { EventEmitter } = require('events');
 const { TftpServer } = require('./svc-tftp.js');
 const { FtpServer } = require('./svc-ftp.js');
 const { SyslogServer } = require('./svc-syslog.js');
+const { TrapServer } = require('./svc-trap.js');
 
 const READ_CAP = 2 * 1024 * 1024;   // 单文件预览上限
 const LIST_CAP = 300;               // 文件列表条数上限
 
-/** 默认配置（端口 69/21/514 为协议标准端口；Linux 非 root 绑定失败时面板会提示改高位端口） */
+/** 默认配置（端口 69/21/514/162 为协议标准端口；Linux 非 root 绑定失败时面板会提示改高位端口） */
 function defaultConfig() {
   return {
     tftp: { enabled: false, port: 69 },
     ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true },
-    syslog: { enabled: false, port: 514, tcp: false }
+    syslog: { enabled: false, port: 514, tcp: false },
+    trap: { enabled: false, port: 162 }
   };
 }
 
@@ -64,6 +66,9 @@ function normalizeConfig(cfg) {
   out.syslog.enabled = clampB(s.enabled, dft.syslog.enabled);
   out.syslog.port = clampPort(s.port, dft.syslog.port);
   out.syslog.tcp = clampB(s.tcp, dft.syslog.tcp);
+  const tr = cfg.trap && typeof cfg.trap === 'object' ? cfg.trap : {};
+  out.trap.enabled = clampB(tr.enabled, dft.trap.enabled);
+  out.trap.port = clampPort(tr.port, dft.trap.port);
   return out;
 }
 
@@ -77,13 +82,16 @@ class NetServices extends EventEmitter {
     this.tftpDir = path.join(this.baseDir, 'tftp');
     this.ftpDir = path.join(this.baseDir, 'ftp');
     this.syslogDir = path.join(this.baseDir, 'syslog');
+    this.trapDir = path.join(this.baseDir, 'trap');
     this.cfg = defaultConfig();
-    this.applied = { tftp: null, ftp: null, syslog: null }; // 各服务当前生效参数（判断是否需要重启）
+    this.applied = { tftp: null, ftp: null, syslog: null, trap: null }; // 各服务当前生效参数（判断是否需要重启）
     this.tftp = new TftpServer({ rootDir: this.tftpDir });
     this.ftp = new FtpServer({ rootDir: this.ftpDir });
     this.syslog = new SyslogServer({ baseDir: this.syslogDir });
+    this.trap = new TrapServer({ baseDir: this.trapDir });
     this.tftp.on('file', (info) => this.emit('file', info));
     this.ftp.on('file', (info) => this.emit('file', info));
+    this.trap.on('trap', (t) => this.emit('trap', t));
   }
 
   getConfig() { return JSON.parse(JSON.stringify(this.cfg)); }
@@ -128,22 +136,31 @@ class NetServices extends EventEmitter {
       const r = await this.syslog.start(n.syslog.port, n.syslog.tcp);
       this.applied.syslog = (r && r.ok) ? { port: n.syslog.port, tcp: n.syslog.tcp } : null;
     }
+    // Trap：端口变化或启停才重启
+    if (!n.trap.enabled) {
+      if (this.applied.trap) { await this.trap.stop(); this.applied.trap = null; }
+    } else if (!this.applied.trap || this.applied.trap.port !== n.trap.port) {
+      await this.trap.stop();
+      const r = await this.trap.start(n.trap.port);
+      this.applied.trap = (r && r.ok) ? { port: n.trap.port } : null;
+    }
     this.emit('status', this.status());
     return this.status();
   }
 
   status() {
-    const ts = this.tftp.status(), fs2 = this.ftp.status(), ss = this.syslog.status();
+    const ts = this.tftp.status(), fs2 = this.ftp.status(), ss = this.syslog.status(), trs = this.trap.status();
     return {
       tftp: Object.assign({ enabled: this.cfg.tftp.enabled, cfgPort: this.cfg.tftp.port }, ts),
       ftp: Object.assign({ enabled: this.cfg.ftp.enabled, cfgPort: this.cfg.ftp.port }, fs2),
-      syslog: Object.assign({ enabled: this.cfg.syslog.enabled, cfgPort: this.cfg.syslog.port }, ss)
+      syslog: Object.assign({ enabled: this.cfg.syslog.enabled, cfgPort: this.cfg.syslog.port }, ss),
+      trap: Object.assign({ enabled: this.cfg.trap.enabled, cfgPort: this.cfg.trap.port }, trs)
     };
   }
 
   async stopAll() {
-    await Promise.all([this.tftp.stop(), this.ftp.stop(), this.syslog.stop()]);
-    this.applied = { tftp: null, ftp: null, syslog: null };
+    await Promise.all([this.tftp.stop(), this.ftp.stop(), this.syslog.stop(), this.trap.stop()]);
+    this.applied = { tftp: null, ftp: null, syslog: null, trap: null };
     this.emit('status', this.status());
   }
 
@@ -247,6 +264,7 @@ class NetServices extends EventEmitter {
   /** 目录句柄（electron-main 打开文件夹用） */
   dirOf(svc) {
     if (svc === 'syslog') return this.syslogDir;
+    if (svc === 'trap') return this.trapDir;
     const d = this._svcDir(svc);
     if (!d) return null;
     try { fs.mkdirSync(d, { recursive: true }); } catch (e) { /* ignore */ }
@@ -255,6 +273,7 @@ class NetServices extends EventEmitter {
 
   syslogTail(sinceSeq) { return this.syslog.tail(sinceSeq); }
   syslogSearch(q) { return this.syslog.search(q || {}); }
+  trapTail(sinceSeq) { return this.trap.tail(sinceSeq); }
 }
 
 module.exports = { NetServices, defaultConfig, normalizeConfig };

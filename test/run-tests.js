@@ -4449,6 +4449,91 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ok(!fs.existsSync(path.join(syslogBase, 'r1', '2020-01-01.log')) && !fs.existsSync(path.join(syslogBase, 'r1', '1999-12-31.log')) && fs.existsSync(path.join(syslogBase, 'r1', '2099-01-01.log')), 'Syslog 过期日志清理（旧文件删除、未过期保留）');
     await ssrv.stop();
 
+    /* ---------- SNMP Trap 接收器（v1 / v2c / inform / 限速 / 归档） ---------- */
+    console.log('== 网络服务：SNMP Trap 接收器 ==');
+    {
+      const { parseTrapPacket, trapNameOf, TrapServer } = require('../js/svc-trap.js');
+      // 测试内联 BER 编码工具（与 svc-trap 解析器对偶）
+      const berLen = (n) => n < 128 ? Buffer.from([n]) : Buffer.from([0x81, n]);
+      const tlv = (tag, body) => Buffer.concat([Buffer.from([tag]), berLen(body.length), body]);
+      const int = (n) => { const b = []; let v = n; do { b.unshift(v & 0xff); v = v >>> 8; } while (v); return tlv(0x02, Buffer.from(b)); };
+      const oct = (s) => tlv(0x04, Buffer.from(s, 'utf8'));
+      const oidOf = (s) => { const p = s.split('.').map(Number); const body = [p[0] * 40 + p[1]]; for (let i = 2; i < p.length; i++) { let v = p[i]; const t = [v & 0x7f]; v >>>= 7; while (v) { t.unshift((v & 0x7f) | 0x80); v >>>= 7; } body.push(...t); } return tlv(0x06, Buffer.from(body)); };
+      const ticksV = (n) => { const b = []; let v = n; do { b.unshift(v & 0xff); v = v >>> 8; } while (v); return tlv(0x43, Buffer.from(b)); };
+      const vbPair = (o, v) => tlv(0x30, Buffer.concat([oidOf(o), v]));
+
+      // 纯函数：v2c Trap（linkDown + ifIndex varbind）
+      const vbs2 = tlv(0x30, Buffer.concat([
+        vbPair('1.3.6.1.2.1.1.3.0', ticksV(123456)),
+        vbPair('1.3.6.1.6.3.1.1.4.1.0', oidOf('1.3.6.1.6.3.1.1.5.3')),
+        vbPair('1.3.6.1.2.1.2.2.1.1.2', int(2))
+      ]));
+      const pkt2 = tlv(0x30, Buffer.concat([int(1), oct('public'), tlv(0xa7, Buffer.concat([int(1), int(0), int(0), vbs2]))]));
+      const r2 = parseTrapPacket(pkt2);
+      ok(r2.ok === true && r2.version === 'v2c' && r2.community === 'public', 'Trap v2c：解析成功（版本/团体名）');
+      ok(r2.standard === true && /linkDown/.test(r2.trapName), 'Trap v2c：标准 Trap OID 命名（linkDown）');
+      ok(r2.uptimeTicks === 123456, 'Trap v2c：sysUpTime 解析');
+      ok(r2.varbinds.length === 1 && r2.varbinds[0].oid === '1.3.6.1.2.1.2.2.1.1.2' && r2.varbinds[0].value === '2', 'Trap v2c：varbind（ifIndex）保留（剔除 uptime/trapOID 约定项）');
+      // 纯函数：v1 Trap（generic 3 = linkUp，思科企业 OID + 代理地址）
+      const v1pdu = tlv(0xa4, Buffer.concat([
+        oidOf('1.3.6.1.4.1.9'),
+        tlv(0x40, Buffer.from([10, 1, 1, 1])),
+        int(3), int(0), ticksV(999),
+        tlv(0x30, vbPair('1.3.6.1.2.1.2.2.1.1.3', int(3)))
+      ]));
+      const r1 = parseTrapPacket(tlv(0x30, Buffer.concat([int(0), oct('private'), v1pdu])));
+      ok(r1.ok === true && r1.version === 'v1' && /linkUp/.test(r1.trapName) && r1.standard === true, 'Trap v1：generic 3 → linkUp');
+      ok(r1.agent === '10.1.1.1' && r1.uptimeTicks === 999, 'Trap v1：代理地址与 TimeTicks');
+      // 企业自定义 Trap（v2c snmpTrapOID 指向华为私有子树 / v1 generic 6）
+      const entVbs = tlv(0x30, Buffer.concat([vbPair('1.3.6.1.2.1.1.3.0', ticksV(1)), vbPair('1.3.6.1.6.3.1.1.4.1.0', oidOf('1.3.6.1.4.1.2011.6.3.300.2.1'))]));
+      const r3 = parseTrapPacket(tlv(0x30, Buffer.concat([int(1), oct('public'), tlv(0xa7, Buffer.concat([int(2), int(0), int(0), entVbs]))])));
+      ok(r3.ok === true && r3.standard === false && /enterprise/.test(r3.trapName) && r3.trapOid === '1.3.6.1.4.1.2011.6.3.300.2.1', 'Trap 企业自定义：不误判标准、保留完整 OID');
+      ok(/enterpriseSpecific/.test(trapNameOf('1.3.6.1.6.3.1.1.5.6.17').name), 'Trap 名称：enterpriseSpecific(specific=N)');
+      // 拒绝路径
+      ok(parseTrapPacket(Buffer.from([1, 2, 3, 4, 5, 6, 7, 8])).ok === false, 'Trap：畸形包拒绝');
+      ok(parseTrapPacket(tlv(0x30, Buffer.concat([int(3), oct('x'), tlv(0xa7, Buffer.concat([int(1), int(0), int(0), vbs2]))]))).ok === false, 'Trap：v3 版本拒绝');
+      ok(parseTrapPacket(tlv(0x30, Buffer.concat([int(1), oct('x'), tlv(0xa2, Buffer.concat([int(1), int(0), int(0), vbs2]))]))).ok === false, 'Trap：GET 响应 PDU（0xa2）不当作 Trap');
+
+      // 服务器端到端：UDP 发包 → 事件 + 归档 + tail 增量；inform 应答；限速
+      const trapBase = path.join(tmpSvc, 'trap');
+      const tsrv2 = new TrapServer({ baseDir: trapBase, maxPerSec: 3 });
+      const tstart2 = await tsrv2.start(0);
+      ok(tstart2.ok && tstart2.port > 0, 'Trap 服务器启动（随机端口）');
+      const trapEvents = [];
+      tsrv2.on('trap', (t) => trapEvents.push(t));
+      const us2 = dgram.createSocket('udp4');
+      const sendTrap = (pkt) => new Promise((res) => us2.send(pkt, 0, pkt.length, tsrv2.port, '127.0.0.1', res));
+      await sendTrap(pkt2);
+      await waitMs(150);
+      ok(trapEvents.length === 1 && /linkDown/.test(trapEvents[0].trap) && trapEvents[0].host === '127.0.0.1', 'Trap 端到端：v2c 入站事件');
+      ok(trapEvents[0].uptime === '20m34s' || /m|s/.test(trapEvents[0].uptime), 'Trap 端到端：uptime 可读化（' + trapEvents[0].uptime + '）');
+      const trapDayFile = path.join(trapBase, '127.0.0.1', new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0') + '-' + String(new Date().getDate()).padStart(2, '0') + '.log');
+      ok(await waitUntil(() => /linkDown/.test(fs.readFileSync(trapDayFile, 'utf8'))), 'Trap 按来源/日期归档落盘（含 trap 名称）');
+      // InformRequest：应答 GetResponse（同 request-id）
+      const ivbs = tlv(0x30, Buffer.concat([vbPair('1.3.6.1.6.3.1.1.4.1.0', oidOf('1.3.6.1.6.3.1.1.5.1'))]));
+      const informPkt = tlv(0x30, Buffer.concat([int(1), oct('public'), tlv(0xa6, Buffer.concat([int(4242), int(0), int(0), ivbs]))]));
+      const respPromise = new Promise((res) => {
+        us2.once('message', (m) => res(m));
+        setTimeout(() => res(null), 1500);
+      });
+      await sendTrap(informPkt);
+      const resp = await respPromise;
+      ok(resp && resp[0] === 0x30 && resp.includes(Buffer.from([0xa2])), 'Trap InformRequest 回 GetResponse 应答');
+      // 限速：maxPerSec=3，连发 10 个畸形之外的有效包（第 4 个起丢弃）
+      for (let i = 0; i < 10; i++) await sendTrap(pkt2);
+      await waitMs(250);
+      const tr2 = tsrv2.status();
+      ok(tr2.dropped >= 5, 'Trap 限速：超频丢弃并计数（dropped=' + tr2.dropped + '）');
+      ok(parseTrapPacket(Buffer.from('not a packet')).ok === false && tsrv2.status().malformed === 0, 'Trap：畸形包不入计数（未发送到服务器）');
+      // tail 增量
+      const tt = tsrv2.tail(0);
+      ok(tt.msgs.length >= 2 && tt.last >= tt.msgs.length, 'Trap tail：环形缓冲拉取');
+      const tt2 = tsrv2.tail(tt.last);
+      ok(tt2.msgs.length === 0, 'Trap tail：增量（sinceSeq 之后为空）');
+      us2.close();
+      await tsrv2.stop();
+    }
+
     /* ---------- 管理器 NetServices ---------- */
     console.log('== 网络服务：管理器（配置应用/文件编目/导入备份） ==');
     const tmpBk = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-nsvbk-'));
@@ -4471,22 +4556,46 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       }
       return await freeUdpPort();
     };
-    let tPort = 0, fPort = 0, sPort = 0, st1 = null;
+    let tPort = 0, fPort = 0, sPort = 0, trPort = 0, st1 = null;
     for (let i = 0; i < 6; i++) {
-      tPort = await freeUdpPort(); fPort = await freeTcpPort(); sPort = await freeSyslogPort();
+      tPort = await freeUdpPort(); fPort = await freeTcpPort(); sPort = await freeSyslogPort(); trPort = await freeUdpPort();
       st1 = await mgr.applyConfig({
         tftp: { enabled: true, port: tPort },
         ftp: { enabled: true, port: fPort, username: 'op', password: 'secret' },
-        syslog: { enabled: true, port: sPort, tcp: true }
+        syslog: { enabled: true, port: sPort, tcp: true },
+        trap: { enabled: true, port: trPort }
       });
-      if (st1.tftp.running && st1.ftp.running && st1.syslog.running) break;
+      if (st1.tftp.running && st1.ftp.running && st1.syslog.running && st1.trap.running) break;
     }
-    if (!(st1.tftp.running && st1.ftp.running && st1.syslog.running)) console.log('    [dbg] manager status:', JSON.stringify(st1));
+    if (!(st1.tftp.running && st1.ftp.running && st1.syslog.running && st1.trap.running)) console.log('    [dbg] manager status:', JSON.stringify(st1));
     ok(st1.tftp.running && st1.tftp.port === tPort, '管理器：TFTP 按配置端口启动');
     ok(st1.ftp.running && st1.ftp.port === fPort, '管理器：FTP 按配置端口启动');
     ok(st1.syslog.running && st1.syslog.tcp === true, '管理器：Syslog（UDP+TCP）启动');
+    ok(st1.trap.running && st1.trap.port === trPort, '管理器：Trap 按配置端口启动');
     const mgrFiles = [];
     mgr.on('file', (f) => mgrFiles.push(f));
+    // Trap 经管理器端口上报
+    {
+      const berLen = (n) => n < 128 ? Buffer.from([n]) : Buffer.from([0x81, n]);
+      const tlv = (tag, body) => Buffer.concat([Buffer.from([tag]), berLen(body.length), body]);
+      const int = (n) => { const b = []; let v = n; do { b.unshift(v & 0xff); v = v >>> 8; } while (v); return tlv(0x02, Buffer.from(b)); };
+      const oct = (s) => tlv(0x04, Buffer.from(s, 'utf8'));
+      const oidOf = (s) => { const p = s.split('.').map(Number); const body = [p[0] * 40 + p[1]]; for (let i = 2; i < p.length; i++) { let v = p[i]; const t = [v & 0x7f]; v >>>= 7; while (v) { t.unshift((v & 0x7f) | 0x80); v >>>= 7; } body.push(...t); } return tlv(0x06, Buffer.from(body)); };
+      const vbPair = (o) => tlv(0x30, Buffer.concat([oidOf(o), Buffer.from([0x05, 0x00])]));
+      // snmpTrapOID.0（值类型必须为 OID）→ 标准 Trap .5 = authenticationFailure
+      const vbsOk = tlv(0x30, Buffer.concat([
+        tlv(0x30, Buffer.concat([oidOf('1.3.6.1.6.3.1.1.4.1.0'), oidOf('1.3.6.1.6.3.1.1.5.5')]))
+      ]));
+      const pktM = tlv(0x30, Buffer.concat([int(1), oct('public'), tlv(0xa7, Buffer.concat([int(9), int(0), int(0), vbsOk]))]));
+      const mgrTrap = new Promise((res) => { mgr.once('trap', (t) => res(t)); setTimeout(() => res(null), 1500); });
+      const usM = dgram.createSocket('udp4');
+      usM.send(pktM, 0, pktM.length, trPort, '127.0.0.1', () => {});
+      const gotT = await mgrTrap;
+      usM.close();
+      ok(!!gotT && /authenticationFailure/.test(gotT.trap), '管理器：Trap 事件转发（authFailure）');
+      const mtt = mgr.trapTail(0);
+      ok(mtt.msgs.length >= 1 && mtt.msgs.some(m => /authenticationFailure/.test(m.trap)), '管理器：trapTail 拉取');
+    }
     // TFTP 走管理器端口上传
     ok(await tftpPut('mgr-tftp.cfg', cfgText, [['blksize', 1024]], tPort) === null, '管理器：TFTP 上传（经管理器实例）');
     // FTP 走管理器端口上传（用配置的账号）

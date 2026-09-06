@@ -4568,12 +4568,13 @@ function openHelp() {
       <li><b>诊断工具箱…</b>（监控 ▾）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀）</li>
       <li><b>MAC/ARP 终端定位…</b>（监控 ▾）：输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置，可填备用账号），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮；接口名跨厂家规范化匹配（GE / Gi / GigabitEthernet 视为同一接口），下游未查询设备可一键续查</li>
     </ul>
-    <h4>⑭ 网络服务：TFTP / FTP / Syslog（桌面版）</h4>
+    <h4>⑭ 网络服务：TFTP / FTP / Syslog / Trap（桌面版）</h4>
     <p>「监控 ▾ 网络服务…」把本机变成一台内网运维服务器：</p>
     <ul>
       <li><b>TFTP / FTP 服务器</b>：接收设备主动推送的配置文件（思科 <b>copy running-config tftp://本机地址/文件名</b>、华为/H3C <b>tftp 本机地址 put vrpcfg.zip</b>；FTP 需在面板配置账号），文件<b>按来源 IP 分目录</b>落盘、收到弹通知，可查看 / 删除并<b>一键导入配置备份库</b>（按来源 IP 自动匹配拓扑设备，进入备份 / 对比 / 合规体系）</li>
       <li><b>Syslog 服务器</b>（UDP 可选 TCP）：收集设备日志（<b>info-center loghost</b> / <b>logging host</b> 指向本机），按来源主机 / 日期归档，实时滚动、级别与来源过滤、关键字检索历史</li>
-      <li>端口默认 69 / 21 / 514（可改，Linux 特权端口需 root）；面板展示本机地址与各厂家命令示例（点击复制），服务随设置自动启停</li>
+      <li><b>SNMP Trap 接收</b>（UDP）：设备把 trap 目标指向本机（<b>snmp-agent target-host trap address …</b> / <b>snmp-server host …</b>）后接收主动告警——支持 SNMP v1 / v2c，标准 Trap 识别（接口 Down/Up、冷/热启动、认证失败等，中文名显示）、企业自定义 Trap 保留完整 OID、InformRequest 按协议回应答；来源 IP 匹配到拓扑设备的标准 Trap <b>弹系统通知</b>（受该设备静默 / 维护窗口约束）并记入事件时间线，全部按来源 / 日期归档可回查</li>
+      <li>端口默认 69 / 21 / 514 / 162（可改，Linux 特权端口需 root）；面板展示本机地址与各厂家命令示例（点击复制），服务随设置自动启停</li>
     </ul>
     <h4>⑮ 配置合规基线检查（桌面版）</h4>
     <ul>
@@ -4880,7 +4881,7 @@ function wire() {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
       openConfigBackups(selId || '');
     } },
-    { ic: 'server', label: '网络服务（TFTP / FTP / Syslog）…', act: openNetServices },
+    { ic: 'server', label: '网络服务（TFTP / FTP / Syslog / Trap）…', act: openNetServices },
     { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / 网段 / SNMP）…', act: () => openDiagTools() },
     { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
     { sep: true },
@@ -7528,8 +7529,8 @@ function openNetServices() {
   ov.className = 'overlay';
   ov.innerHTML = `
     <div class="modal nsv-dialog" role="dialog" style="width:1020px;height:86vh">
-      <h3>网络服务（TFTP / FTP / Syslog）</h3>
-      <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）并<b>向本机发送 syslog 日志</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
+      <h3>网络服务（TFTP / FTP / Syslog / Trap）</h3>
+      <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）、<b>向本机发送 syslog 日志</b>并<b>把 SNMP Trap 告警上报到本机</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
       <div class="nsv-top">
         <div class="nsv-cards">
           <div class="nsv-card">
@@ -7553,6 +7554,12 @@ function openNetServices() {
             <div class="nsv-row"><label class="nsv-mini"><input type="checkbox" id="nsvSysTcp"/>同时监听 TCP（RFC 6587）</label></div>
             <div class="nsv-note">按来源主机 / 日期归档，支持级别过滤与关键字检索；超限自动限速丢弃并计数。</div>
           </div>
+          <div class="nsv-card">
+            <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvTrapOn"/>启用</label><b>SNMP Trap 接收</b><span class="nsv-dot" id="nsvTrapDot"></span></div>
+            <div class="nsv-st" id="nsvTrapSt"></div>
+            <div class="nsv-row"><label>端口</label><input type="number" id="nsvTrapPort" min="1" max="65535"/><span class="nsv-hint">标准 162（UDP）</span></div>
+            <div class="nsv-note">接收设备主动上报的告警（v1 / v2c）：接口 Down/Up、重启、认证失败等；标准 Trap 弹通知（受静默策略约束），按来源 / 日期归档。</div>
+          </div>
         </div>
         <div class="nsv-aside">
           <div class="nsv-h">本机地址（设备侧指向）</div>
@@ -7565,9 +7572,11 @@ function openNetServices() {
       <div class="nsv-tabs">
         <button type="button" class="mc-tab on" data-pane="files">接收文件（TFTP / FTP）</button>
         <button type="button" class="mc-tab" data-pane="syslog">Syslog 日志</button>
+        <button type="button" class="mc-tab" data-pane="trap">SNMP Trap</button>
         <span class="nsv-tabs-sp"></span>
         <button type="button" class="tb nsv-mini-btn" data-act="openfiles">打开文件目录</button>
         <button type="button" class="tb nsv-mini-btn" data-act="opensys">打开日志目录</button>
+        <button type="button" class="tb nsv-mini-btn" data-act="opentrap">打开 Trap 目录</button>
         <button type="button" class="tb nsv-mini-btn" data-act="refresh">刷新</button>
       </div>
       <div class="nsv-pane" data-pane="files">
@@ -7584,6 +7593,15 @@ function openNetServices() {
           <span class="nsv-logcnt" id="nsvLogCnt"></span>
         </div>
         <div class="nsv-log" id="nsvLog"></div>
+      </div>
+      <div class="nsv-pane" data-pane="trap" hidden>
+        <div class="nsv-logbar">
+          <input type="text" id="nsvTrapHost" placeholder="按来源地址过滤…"/>
+          <label class="nsv-mini"><input type="checkbox" id="nsvTrapPause"/>暂停滚动</label>
+          <span class="nsv-tabs-sp"></span>
+          <span class="nsv-logcnt" id="nsvTrapCnt"></span>
+        </div>
+        <div class="nsv-log" id="nsvTrapList"></div>
       </div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="defaults">恢复默认</button>
@@ -7618,6 +7636,8 @@ function openNetServices() {
     dotFor(ov.querySelector('#nsvFtpDot'), st.ftp); ov.querySelector('#nsvFtpSt').textContent = stText(st.ftp);
     dotFor(ov.querySelector('#nsvSysDot'), st.syslog); ov.querySelector('#nsvSysSt').textContent = st.syslog.running
       ? ('运行中 :' + st.syslog.port + (st.syslog.tcp ? '（UDP+TCP）' : '（UDP）')) : (st.syslog.error ? '错误：' + st.syslog.error : '已停止');
+    dotFor(ov.querySelector('#nsvTrapDot'), st.trap); ov.querySelector('#nsvTrapSt').textContent = st.trap.running
+      ? ('运行中 :' + st.trap.port + '（UDP）' + (st.trap.rxPackets ? ' · 已收 ' + st.trap.rxPackets + ' 包' : '')) : (st.trap.error ? '错误：' + st.trap.error : '已停止');
     ov.querySelector('#nsvLogCnt').textContent = st.syslog.rxMsgs
       ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : '')) : '';
   }
@@ -7633,6 +7653,8 @@ function openNetServices() {
     ov.querySelector('#nsvSysOn').checked = !!cfg.syslog.enabled;
     ov.querySelector('#nsvSysPort').value = cfg.syslog.port;
     ov.querySelector('#nsvSysTcp').checked = !!cfg.syslog.tcp;
+    ov.querySelector('#nsvTrapOn').checked = !!cfg.trap.enabled;
+    ov.querySelector('#nsvTrapPort').value = cfg.trap.port;
   }
   function readForm() {
     const pasv = String(ov.querySelector('#nsvFtpPasv').value || '').match(/^(\d+)\s*-\s*(\d+)$/);
@@ -7647,7 +7669,8 @@ function openNetServices() {
         pasvMax: pasv ? parseInt(pasv[2], 10) : 0,
         overwrite: ov.querySelector('#nsvFtpOverwrite').checked
       },
-      syslog: { enabled: ov.querySelector('#nsvSysOn').checked, port: parseInt(ov.querySelector('#nsvSysPort').value, 10) || 514, tcp: ov.querySelector('#nsvSysTcp').checked }
+      syslog: { enabled: ov.querySelector('#nsvSysOn').checked, port: parseInt(ov.querySelector('#nsvSysPort').value, 10) || 514, tcp: ov.querySelector('#nsvSysTcp').checked },
+      trap: { enabled: ov.querySelector('#nsvTrapOn').checked, port: parseInt(ov.querySelector('#nsvTrapPort').value, 10) || 162 }
     };
   }
   async function loadCfg() {
@@ -7697,7 +7720,14 @@ function openNetServices() {
       '',
       '# 日志发送到本机 Syslog（华为/H3C：info-center；思科：logging）',
       'info-center loghost ' + ip,
-      'logging host ' + ip
+      'logging host ' + ip,
+      '',
+      '# Trap 上报到本机（华为，需开启 snmp-agent）',
+      'snmp-agent target-host trap address udp-domain ' + ip + ' params securityname public',
+      'snmp-agent trap enable',
+      '# H3C 同华为；思科：',
+      'snmp-server host ' + ip + ' public',
+      'snmp-server enable traps'
     ].join('\n');
   }
   ov.querySelector('[data-act=apply]').onclick = async () => {
@@ -7716,7 +7746,7 @@ function openNetServices() {
         st = r.status;
         renderStatus();
         const parts = [];
-        for (const [k, nm] of [['tftp', 'TFTP'], ['ftp', 'FTP'], ['syslog', 'Syslog']]) {
+        for (const [k, nm] of [['tftp', 'TFTP'], ['ftp', 'FTP'], ['syslog', 'Syslog'], ['trap', 'Trap']]) {
           const s = r.status[k];
           parts.push(nm + (s.error ? '错误' : (s.running ? ':' + s.port : '已停止')));
         }
@@ -7726,12 +7756,13 @@ function openNetServices() {
     btn.disabled = false;
   };
   ov.querySelector('[data-act=defaults]').onclick = async () => {
-    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false } });
+    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false }, trap: { enabled: false, port: 162 } });
     ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
     toast('已恢复默认值（尚未保存，请点「保存并应用」）');
   };
   ov.querySelector('[data-act=openfiles]').onclick = () => { window.topoNetSvc.openFolder('tftp').catch(() => {}); };
   ov.querySelector('[data-act=opensys]').onclick = () => { window.topoNetSvc.openFolder('syslog').catch(() => {}); };
+  ov.querySelector('[data-act=opentrap]').onclick = () => { window.topoNetSvc.openFolder('trap').catch(() => {}); };
 
   /* ---------- 接收文件表 ---------- */
   async function loadFiles() {
@@ -7881,12 +7912,49 @@ function openNetServices() {
   };
   ov.querySelector('#nsvLogKw').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.stopPropagation(); ov.querySelector('#nsvLogSearch').click(); } });
 
+  /* ---------- SNMP Trap 实时视图 ---------- */
+  let trapSeq = 0, trapPaused = false;
+  const trapEl = ov.querySelector('#nsvTrapList');
+  ov.querySelector('#nsvTrapPause').addEventListener('change', (e) => { trapPaused = e.target.checked; });
+  async function refreshTrapTail(reset) {
+    if (trapPaused && !reset) return;
+    try {
+      const r = await window.topoNetSvc.trapTail(reset ? 0 : trapSeq);
+      if (!r || !ov.isConnected) return;
+      trapSeq = r.last;
+      const cnt = ov.querySelector('#nsvTrapCnt');
+      if (cnt) cnt.textContent = ((r.last ? '已收 ' + r.last + ' 包' : '') + (r.dropped ? ' · 限速丢弃 ' + r.dropped : '') + (r.malformed ? ' · 畸形 ' + r.malformed : '')).trim();
+      appendTraps(r.msgs || [], reset);
+    } catch (e) { /* ignore */ }
+  }
+  function appendTraps(msgs, replaceAll) {
+    if (replaceAll) trapEl.innerHTML = '';
+    if (!msgs.length && !replaceAll) return;
+    const hostF = String(ov.querySelector('#nsvTrapHost').value || '').trim().toLowerCase();
+    const html = [];
+    for (const m of msgs) {
+      if (hostF && String(m.host || '').toLowerCase().indexOf(hostF) < 0) continue;
+      const d = new Date(m.ts);
+      html.push('<div class="nsv-lg ' + (m.standard ? 's-note' : 's-info') + '">' +
+        '<span class="t">' + pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()) + ':' + pad2s(d.getSeconds()) + '</span>' +
+        '<span class="sev">' + U.escHtml(m.version || '-') + '</span>' +
+        '<span class="h" title="' + U.escHtml(m.host || '') + '">' + U.escHtml(m.host || '-') + '</span>' +
+        '<span class="m"><b>' + U.escHtml(m.trap || 'unknown') + '</b>' + (m.uptime ? '（运行 ' + U.escHtml(m.uptime) + '）' : '') + (m.msg ? '：' + U.escHtml(m.msg) : '') + '</span></div>');
+    }
+    if (!html.length && !replaceAll) return;
+    const stick = trapEl.scrollHeight - trapEl.scrollTop - trapEl.clientHeight < 40;
+    trapEl.insertAdjacentHTML('beforeend', html.join(''));
+    while (trapEl.childElementCount > 600) trapEl.firstElementChild.remove();
+    if (stick || replaceAll) trapEl.scrollTop = trapEl.scrollHeight;
+  }
+
   /* ---------- 标签切换 / 轮询 / 实时事件 ---------- */
   ov.querySelectorAll('.nsv-tabs .mc-tab').forEach(tab => {
     tab.onclick = () => {
       ov.querySelectorAll('.nsv-tabs .mc-tab').forEach(t => t.classList.toggle('on', t === tab));
       ov.querySelectorAll('.nsv-pane').forEach(p => { p.hidden = p.dataset.pane !== tab.dataset.pane; });
       if (tab.dataset.pane === 'syslog') refreshTail(true);
+      else if (tab.dataset.pane === 'trap') refreshTrapTail(true);
       else loadFiles();
     };
   });
@@ -7902,11 +7970,13 @@ function openNetServices() {
     if (!ov.isConnected) { clearInterval(pollTimer); return; }
     window.topoNetSvc.getConfig().then((r) => { if (r && r.ok && ov.isConnected) { st = r.status; renderStatus(); } }).catch(() => {});
     refreshTail(false);
+    refreshTrapTail(false);
   }, 2500);
 
   loadCfg();
   loadFiles();
   refreshTail(true);
+  refreshTrapTail(true);
 }
 
 /* ================= Web Shell ================= */
