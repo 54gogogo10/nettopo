@@ -2915,6 +2915,32 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       mm._fetchSysInfo(jobC, jobC.gen);
       await new Promise((res) => setTimeout(res, 300));
       ok(sys.length === 0, '无 SNMP agent 时识别静默不广播（不抛错）');
+      // 回归：识别 GET 必须采用任务的自定义 snmpPort（实测发现漏传端口导致识别永远打默认 161）
+      const dg = require('dgram');
+      const sysAgent = dg.createSocket('udp4');
+      const tlvS = (tag, body) => Buffer.concat([Buffer.from([tag, body.length]), body]);
+      sysAgent.on('message', (msg, rinfo) => {
+        const rd = (buf, p) => ({ body: buf.subarray(p + 2, p + 2 + buf[p + 1]), next: p + 2 + buf[p + 1] });
+        const top = rd(msg, 0);
+        const f2 = rd(top.body, rd(top.body, 0).next);
+        const reqRid = rd(rd(top.body, f2.next).body, 0).body;
+        const val = Buffer.from('Linux ffr 6.8.0-generic #1 SMP net-snmp', 'utf8');
+        const vb = tlvS(0x30, Buffer.concat([tlvS(0x06, Buffer.from([43, 6, 1, 2, 1, 1, 1, 0])), tlvS(0x04, val)]));
+        const pduBody = Buffer.concat([tlvS(0x02, reqRid), tlvS(0x02, Buffer.from([0])), tlvS(0x02, Buffer.from([0])), tlvS(0x30, vb)]);
+        sysAgent.send(tlvS(0x30, Buffer.concat([tlvS(0x02, Buffer.from([1])), tlvS(0x04, Buffer.from('pub9')), tlvS(0xa2, pduBody)])), rinfo.port, rinfo.address);
+      });
+      await new Promise((res) => sysAgent.bind(0, '127.0.0.1', res));
+      const rs2 = mm.start({
+        key: 'd2@127.0.0.1', deviceId: 'd2', name: 'd2', protocol: 'ssh', host: '127.0.0.1', port: 22,
+        commands: ['display version'], password: 'p',
+        sysinfo: { enabled: true, community: 'pub9', snmpPort: sysAgent.address().port }
+      });
+      ok(rs2.ok === true, '自定义 snmpPort 任务接受');
+      const jobD = mm.jobs.get('d2@127.0.0.1');
+      mm._fetchSysInfo(jobD, jobD.gen);
+      await new Promise((res) => setTimeout(res, 500));
+      ok(sys.length === 1 && /Linux ffr/.test(sys[0].descr || ''), '识别 GET 走任务自定义 snmpPort（真实设备实测回归）');
+      sysAgent.close();
       mm.stopAll();
       rmTmp(tmpC);
     }

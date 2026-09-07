@@ -1305,7 +1305,7 @@ class MonitorManager extends EventEmitter {
   /** SNMP v2c 识别：GET sysDescr/sysObjectID，启发式提取软件版本后广播 sysinfo 事件 */
   _fetchSysInfo(job, gen) {
     if (!job.enabled || job.stopping || gen !== job.gen || !job.sysinfo || !job.sysinfo.enabled) return;
-    snmpGet(job.host, snmpTargetOf(job), [OID_SYSDESCR, OID_SYSOBJECT], 3000).then((r) => {
+    snmpGet(job.host, snmpTargetOf(job), [OID_SYSDESCR, OID_SYSOBJECT], 3000, job.sysinfo.snmpPort || 161).then((r) => {
       if (!job.enabled || job.stopping || gen !== job.gen || !r.ok) return;
       const map = {};
       for (const vb of (r.varbinds || [])) if (vb.oid) map[vb.oid] = vb.value;
