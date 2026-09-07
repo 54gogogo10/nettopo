@@ -2196,6 +2196,38 @@ U.buildLinkFlow = (nodes, links, traffic, opts) => {
   return out;
 };
 
+/* ---------- 批量只读巡检（监控 ▾ 批量巡检）：厂家命令预设与只读白名单 ---------- */
+/** 各厂家巡检命令预设（全部只读；首条为关分页命令；auto 双厂家 flavor 逐条尝试，与邻居表采集同思路） */
+U.INSPECT_PRESETS = {
+  auto: ['display version', 'show version', 'display clock', 'show clock', 'display cpu-usage', 'show processes cpu',
+    'display memory-usage', 'show memory summary', 'display interface brief', 'show ip interface brief'],
+  huawei: ['screen-length 0 temporary', 'display version', 'display clock', 'display cpu-usage', 'display memory-usage',
+    'display interface brief', 'display ip routing-table statistics', 'display device'],
+  h3c: ['screen-length disable', 'display version', 'display clock', 'display cpu-usage summary', 'display memory',
+    'display interface brief', 'display ip routing-table statistics', 'display device'],
+  cisco: ['terminal length 0', 'show version', 'show clock', 'show processes cpu', 'show memory summary', 'show ip interface brief'],
+  ruijie: ['terminal length 0', 'show version', 'show clock', 'show cpu', 'show memory', 'show ip interface brief'],
+  linux: ['uname -a', 'uptime', 'free -m', 'df -h']
+};
+
+/** 批量巡检只读白名单校验：每条命令必须命中只读前缀（display/show/关分页/Linux 只读），防止配置类命令混入。
+ *  非数组输入一律拒绝（防误用）。返回 {ok:true} 或 {ok:false, error}（首条不合规命令）。 */
+U.checkInspectCommands = (cmds) => {
+  if (!Array.isArray(cmds)) return { ok: false, error: '命令集必须是数组' };
+  const ALLOW = [
+    /^display\b/, /^show\b/,
+    /^screen-length 0 temporary$/, /^screen-length disable$/, /^terminal length 0$/, /^terminal monitor$/,
+    /^uname\b/, /^uptime$/, /^free\b/, /^df\b/, /^ip neigh\b/, /^ip -br\b/
+  ];
+  for (const c of cmds) {
+    const t = String(c == null ? '' : c).trim().toLowerCase();
+    if (!t) continue;
+    if (t.length > 256) return { ok: false, error: '命令超长：' + t.slice(0, 40) + '…' };
+    if (!ALLOW.some(re => re.test(t))) return { ok: false, error: '非只读白名单命令：' + t };
+  }
+  return { ok: true };
+};
+
 /** 解析 ARP / MAC 地址表输出（多厂家混合文本，可一次粘贴多张表）：
  *  返回 { arp:[{ip, mac, ifn, vlan}], mac:[{mac, vlan, ifn}] }。
  *  行判定：同时含 IPv4 与合法 MAC → ARP 行；仅含合法 MAC → MAC 表行（vlan 取行内首个 1~4094 整数，

@@ -619,6 +619,161 @@ function openMacTrace(prefill) {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#mtTarget').focus(); }, 250);
 }
 
+/* ================= 批量巡检（设备清单并发执行只读命令，结果汇总/查看/导出） ================= */
+function openBatchInspect() {
+  if (!(window.topoShell && window.topoShell.runOneShot)) { toast('批量巡检需要桌面版（Electron）环境'); return; }
+  const cands = state.nodes
+    .filter(n => U.nodeMgmts(n).length || normalizeMonitorHosts(state.monitorCfg[n.id]).length)
+    .map(n => ({ node: n, cred: monitorCredOf(n.id) }));
+  if (!cands.length) { toast('当前没有配置管理地址或监控凭据的设备：先为设备填写管理地址'); return; }
+  const BI_VENDOR_LB = { auto: '自动尝试', huawei: '华为 VRP', h3c: 'H3C Comware', cisco: '思科 IOS', ruijie: '锐捷', linux: 'Linux' };
+  const biVendorOpts = Object.keys(U.INSPECT_PRESETS)
+    .map(k => `<option value="${k}">${BI_VENDOR_LB[k] || k}（${U.INSPECT_PRESETS[k].length} 条）</option>`).join('');
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:920px;height:82vh;display:flex;flex-direction:column">
+      <h3>批量巡检（只读命令）</h3>
+      <div class="m-sub">并发登录勾选的设备执行<b>只读白名单命令</b>（版本 / 时钟 / CPU / 内存 / 接口概览等），汇总各设备输出，可查看与导出 CSV。凭据优先取各设备「设备监控」里保存的账号；未保存的设备用下方备用账号（留空则跳过）。不会修改设备配置。</div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>厂家命令集</label>
+          <select id="biVendor">${biVendorOpts}</select>
+        </div>
+        <div class="frow" style="margin:0"><label>备用账号</label><input id="biUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
+        <div class="frow" style="margin:0"><label>备用密码</label><input id="biPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        <button type="button" class="tb primary" id="biRun"><i class="ic" data-ic="search"></i>开始巡检</button>
+        <span id="biHint" class="m-sub" style="margin:0;flex:1">巡检范围（默认勾选已保存凭据的设备）：</span>
+        <label style="display:flex;align-items:center;gap:4px;margin:0"><input id="biAll" type="checkbox"/>全选</label>
+      </div>
+      <div id="biDevs" style="max-height:130px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
+      <div id="biResult" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:120px;margin-top:8px"><div class="bk-empty">点「开始巡检」后结果汇总在这里。</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="biCsv" disabled>导出 CSV</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const devsEl = ov.querySelector('#biDevs');
+  devsEl.innerHTML = cands.map((c, i) => {
+    const host = c.cred ? c.cred.host : U.nodeMgmts(c.node)[0] || '';
+    const mark = c.cred ? '<span style="color:var(--ok,#22c55e)" title="使用监控配置里保存的凭据">●</span>'
+      : (host ? '<span style="color:#f59e0b" title="无保存凭据，将使用备用账号">●</span>' : '<span style="color:var(--danger)" title="无管理地址，不可查询">✕</span>');
+    return `<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" data-idx="${i}" ${c.cred && host ? 'checked' : ''}/> ${mark} ${U.escHtml(c.node.name)}<span style="opacity:.6">（${U.escHtml(host || '无地址')}）</span></label>`;
+  }).join('');
+  ov.querySelector('#biAll').addEventListener('change', (e) => {
+    devsEl.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = e.target.checked; });
+  });
+  const resultEl = ov.querySelector('#biResult');
+  const hintEl = ov.querySelector('#biHint');
+  const runBtn = ov.querySelector('#biRun');
+  const csvBtn = ov.querySelector('#biCsv');
+  const results = [];   // {node, host, proto, ok, cmds:[{cmd, text}], error, ms}
+  /** 查看单设备输出：按命令分节，可复制全文 */
+  const viewOutput = (r) => {
+    const v = document.createElement('div');
+    v.className = 'overlay';
+    const body = (r.cmds || []).map(o => '<h4 style="margin:10px 0 4px;font-size:12.5px">' + U.escHtml(o.cmd) + '</h4>' +
+      '<pre class="nsv-view" spellcheck="false">' + (o.text ? U.escHtml(o.text) : '（无输出）') + '</pre>').join('')
+      || '<div class="bk-empty">（无输出' + (r.error ? '：' + U.escHtml(r.error) : '') + '）</div>';
+    v.innerHTML = '<div class="modal" role="dialog" style="width:860px;height:80vh;display:flex;flex-direction:column">' +
+      '<h3>' + U.escHtml(r.node.name) + '（' + U.escHtml(r.host || '—') + '）巡检输出</h3>' +
+      '<div class="m-sub">' + (r.ok ? '巡检成功' : '巡检失败：' + U.escHtml(r.error || '未知错误')) + ' · ' + r.ms + ' ms · ' + (r.cmds || []).length + ' 条命令</div>' +
+      '<div style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:4px">' + body + '</div>' +
+      '<div class="m-actions"><button type="button" class="tb" id="biCopy">复制全部输出</button><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+    $('#modalRoot').appendChild(v);
+    v.tabIndex = -1; v.focus();
+    const vc = () => v.remove();
+    v.addEventListener('pointerdown', (e) => { if (e.target === v) vc(); });
+    v.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); vc(); } });
+    v.querySelector('[data-act=close]').onclick = vc;
+    v.querySelector('#biCopy').onclick = () => {
+      const text = (r.cmds || []).map(o => '<' + r.node.name + '> ' + o.cmd + '\n' + o.text).join('\n\n');
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => toast('已复制全部输出')).catch(() => toast('复制失败'));
+    };
+  };
+  const renderResults = () => {
+    if (!results.length) { resultEl.innerHTML = '<div class="bk-empty">无结果。</div>'; return; }
+    const rows = results.map((r, i) => `<tr>` +
+      `<td>${r.ok ? '<b style="color:var(--ok,#22c55e)">✓ 成功</b>' : '<b style="color:var(--danger)">✕ 失败</b>'}</td>` +
+      `<td>${U.escHtml(r.node.name)}</td><td>${U.escHtml(r.host || '—')}</td><td>${U.escHtml(r.proto.toUpperCase())}</td>` +
+      `<td>${(r.cmds || []).length} 条</td><td>${r.ms} ms</td>` +
+      `<td>${r.error ? '<span title="' + U.escHtml(r.error) + '" style="color:var(--danger)">' + U.escHtml(r.error.slice(0, 40)) + (r.error.length > 40 ? '…' : '') + '</span> ' : ''}` +
+      `<button type="button" class="tb nsv-mini-btn" data-i="${i}">查看</button></td></tr>`).join('');
+    resultEl.innerHTML = '<table class="nb-table"><tr><th>状态</th><th>设备</th><th>地址</th><th>协议</th><th>命令</th><th>耗时</th><th>明细</th></tr>' + rows + '</table>';
+    resultEl.querySelectorAll('button[data-i]').forEach(btn => {
+      btn.onclick = () => viewOutput(results[parseInt(btn.dataset.i, 10)]);
+    });
+  };
+  csvBtn.onclick = () => {
+    if (!results.length) { toast('还没有巡检结果'); return; }
+    const rows = [['设备', '地址', '协议', '命令', '状态', '输出']];
+    for (const r of results) {
+      if (r.ok && (r.cmds || []).length) {
+        for (const o of r.cmds) rows.push([r.node.name, r.host || '', r.proto, o.cmd, '成功', o.text || '']);
+      } else {
+        rows.push([r.node.name, r.host || '', r.proto, '', '失败', r.error || '（无输出）']);
+      }
+    }
+    U.download('批量巡检_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出巡检结果 CSV（' + (rows.length - 1) + ' 行）');
+  };
+  runBtn.onclick = async () => {
+    const vendor = ov.querySelector('#biVendor').value;
+    const fbUser = ov.querySelector('#biUser').value.trim();
+    const fbPass = ov.querySelector('#biPass').value;
+    const chosen = [...devsEl.querySelectorAll('input[type=checkbox]')].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
+    if (!chosen.length) { toast('请勾选至少一台要巡检的设备'); return; }
+    const cmds = U.INSPECT_PRESETS[vendor] || U.INSPECT_PRESETS.auto;
+    const guard = U.checkInspectCommands(cmds);
+    if (!guard.ok) { toast('命令集未通过只读白名单校验：' + guard.error); return; }
+    results.length = 0;
+    runBtn.disabled = true; csvBtn.disabled = true;
+    resultEl.innerHTML = '<div class="bk-empty">巡检中…（并发 2 台，每台 ' + cmds.length + ' 条只读命令）</div>';
+    const CONC = 2;
+    for (let i = 0; i < chosen.length; i += CONC) {
+      await Promise.all(chosen.slice(i, i + CONC).map(async (c) => {
+        const host = c.cred ? c.cred.host : (U.nodeMgmts(c.node)[0] || '');
+        if (!host || (!c.cred && !fbUser && !fbPass)) {
+          results.push({ node: c.node, host, proto: c.cred ? c.cred.protocol : 'ssh', ok: false, cmds: [], error: '无凭据，已跳过', ms: 0 });
+          renderResults();
+          return;
+        }
+        const proto = c.cred ? c.cred.protocol : 'ssh';
+        const t0 = Date.now();
+        hintEl.textContent = '巡检中：' + c.node.name + '（' + host + '）…';
+        try {
+          const r = await window.topoShell.runOneShot({
+            protocol: proto, host,
+            port: c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22),
+            username: c.cred ? c.cred.username : fbUser,
+            password: c.cred ? c.cred.password : fbPass,
+            commands: cmds,
+            expectFp: trustedFpOf(host)
+          });
+          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.fp);
+          const textOf = (o) => { const t = String((o && o.text) || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, ''); return t.trim(); };
+          const got = (r.outputs || []).map(o => ({ cmd: o.cmd, text: textOf(o) })).filter(o => o.text);
+          const okDev = r.ok && got.length > 0;
+          results.push({ node: c.node, host, proto, ok: okDev, cmds: got, error: okDev ? '' : (r.error || '未取得有效输出'), ms: Date.now() - t0 });
+        } catch (e) {
+          results.push({ node: c.node, host, proto, ok: false, cmds: [], error: String((e && e.message) || e), ms: Date.now() - t0 });
+        }
+        renderResults();
+      }));
+    }
+    hintEl.textContent = '巡检完成：成功 ' + results.filter(r => r.ok).length + ' / ' + results.length + ' 台';
+    runBtn.disabled = false; csvBtn.disabled = false;
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#biVendor').focus(); }, 250);
+}
+
 /* ================= IP 地址管理（地址清单 / 网段汇总 / 冲突检测） =================
  * 从管理口与接口总表聚合全部 IPv4 地址：按网段汇总容量与利用率，检测跨设备同 IP 冲突。
  * 只读视图 + CSV 导出，不修改拓扑数据。 */
@@ -4891,6 +5046,7 @@ function wire() {
     { ic: 'server', label: '网络服务（TFTP / FTP / Syslog / Trap）…', act: openNetServices },
     { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / 网段 / SNMP）…', act: () => openDiagTools() },
     { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
+    { ic: 'grid', label: '批量巡检（只读命令）…', act: () => openBatchInspect() },
     { sep: true },
     { ic: 'tray', label: '托盘常驻（关闭窗口后台继续监控）', act: async () => {
       if (!window.topoMonitor || !window.topoMonitor.setTray) { toast('托盘常驻需要桌面版软件'); return; }

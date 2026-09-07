@@ -1004,6 +1004,21 @@ console.log('== MAC/ARP 表解析与终端定位（normMac / canonIfname / parse
     const lfFirst = U.buildLinkFlow(lfNodes, [lfLinks[0]], { ra: { ts: t0, ifs: [{ n: 'GE0/0/1', oper: 'up', speed: 1e9, in: null, out: null }] } }, { now: t0 });
     eq(Object.keys(lfFirst).length, 0, '链路流量：仅首采无速率样本不出结果');
   }
+  // INSPECT_PRESETS + checkInspectCommands：批量巡检命令预设全部只读、白名单拦截配置类命令
+  {
+    const presets = U.INSPECT_PRESETS;
+    for (const k of Object.keys(presets)) {
+      ok(Array.isArray(presets[k]) && presets[k].length >= 4 && presets[k].length <= 16, '巡检预设 ' + k + '：命令数在 4~16（runOneShot 上限内）');
+      ok(U.checkInspectCommands(presets[k]).ok === true, '巡检预设 ' + k + '：全部通过只读白名单');
+    }
+    ok(U.checkInspectCommands(['system-view', 'display version']).ok === false, '白名单拒绝进入配置模式（system-view）');
+    ok(U.checkInspectCommands(['show version', 'undo stelnet']).ok === false, '白名单拒绝 undo/关闭类命令');
+    ok(U.checkInspectCommands(['display version', 'conf t', 'terminal length 0']).ok === false, '白名单拒绝 conf t');
+    ok(U.checkInspectCommands(['screen-length 0 temporary', 'screen-length disable', 'terminal length 0', 'terminal monitor', 'uname -a', 'uptime', 'free -m', 'df -h', 'ip neigh', 'ip -br addr']).ok === true, '白名单放行关分页与 Linux 只读命令');
+    ok(U.checkInspectCommands(['display version']).ok === true && U.checkInspectCommands([]).ok === true, '白名单：空命令集视为通过（拒绝逻辑在 runOneShot）');
+    ok(U.checkInspectCommands(['display version ' + 'x'.repeat(300)]).ok === false, '白名单拒绝超长命令');
+    ok(U.checkInspectCommands('display version').ok === false, '白名单：非数组输入拒绝（防误用）');
+  }
   // parseArpMacTables：多厂家混合文本一次解析
   const mixed = [
     'System ARP cache:',
