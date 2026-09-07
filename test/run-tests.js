@@ -2945,6 +2945,34 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       rmTmp(tmpC);
     }
 
+    /* ---------- 回归：输出关键字告警的预算截断（实测发现：小输出场景告警永不触发） ---------- */
+    console.log('== 回归：输出关键字告警预算截断 ==');
+    {
+      const os = require('os');
+      const { EventEmitter } = require('events');
+      const stub2 = new EventEmitter();
+      stub2.connect = () => ({ ok: true, id: 'x' }); stub2.write = () => {}; stub2.close = () => {}; stub2.trustFingerprint = () => true;
+      const tmpA = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-alert-'));
+      const mm2 = new MonitorManager(stub2, tmpA, path.join(tmpA, 't.json'));
+      const events = [];
+      mm2.on('alert', (i) => events.push(i));
+      mm2.start({ key: 'a@h', deviceId: 'a', name: 'a', protocol: 'ssh', host: '1.2.3.4', port: 22, commands: ['echo x'], alerts: [{ pattern: 'ffr-alarm', note: 't' }] });
+      const job = mm2.jobs.get('a@h');
+      job._alertPending.push('ffr-alarm-heartbeat-CPU-high');
+      await mm2._checkAlerts(job);
+      await new Promise((res) => setTimeout(res, 600));
+      ok(events.some(e => e.matched === true && /ffr-alarm-heartbeat/.test(e.matchedText || '')), '关键字告警：预算内小输出触发告警事件（实测回归）');
+      mm2.start({ key: 'b@h', deviceId: 'b', name: 'b', protocol: 'ssh', host: '1.2.3.4', port: 22, commands: ['echo x'], alerts: [{ pattern: 'ffr-tail', note: 't' }] });
+      const job2 = mm2.jobs.get('b@h');
+      for (let i = 0; i < 1200; i++) job2._alertPending.push('x'.repeat(100));
+      job2._alertPending.push('final ffr-tail hit');
+      await mm2._checkAlerts(job2);
+      await new Promise((res) => setTimeout(res, 600));
+      ok(events.some(e => e.matched === true && /ffr-tail/.test(e.matchedText || '')), '关键字告警：超预算时丢最旧保留最新命中行');
+      mm2.stopAll();
+      rmTmp(tmpA);
+    }
+
     // 配置合规基线引擎（新功能）
     console.log('== 回归：配置合规基线引擎（新功能） ==');
     {

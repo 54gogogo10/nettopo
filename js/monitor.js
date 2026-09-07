@@ -1879,13 +1879,15 @@ class MonitorManager extends EventEmitter {
       const lines = job._alertPending;
       job._alertPending = [];
       job._alertPendingChars = 0;
-      // 字节预算内从尾部保留（新输出更值得关注）：join 结果 ≤ MAX_ALERT_TEXT_CHARS，先算后拼
-      let total = 0, start = lines.length;
+      // 字节预算内从尾部保留（新输出更值得关注）：join 结果 ≤ MAX_ALERT_TEXT_CHARS，先算后拼。
+      // start 从 0 起步：预算内保留全部；仅当超出预算时才推进起点（丢最旧）——
+      // 此前 start 初始为 lines.length，预算未超时会 slice 出空数组导致关键字告警永不触发（实测发现）
+      let total = 0, start = 0;
       for (let i = lines.length - 1; i >= 0; i--) {
         total += lines[i].length + 1;
         if (total > MAX_ALERT_TEXT_CHARS) { start = i + 1; break; }
       }
-      const kept = start > 0 ? lines.slice(start) : lines;
+      const kept = lines.slice(start);
       const text = kept.join('\n');
       // 本轮命中的全部关键字（按配置顺序）；告警解除需所有关键字同时不再命中
       const hit = [];
