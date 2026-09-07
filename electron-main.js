@@ -7,6 +7,7 @@ const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 const { NetServices } = require('./js/net-services.js');
+const { SEV_NAMES: SYSLOG_SEV_NAMES } = require('./js/svc-syslog.js');
 const { Maintenance, nextDailyRun } = require('./js/maintenance.js');
 const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList, expandScanTargets, scanSubnet } = require('./js/diag.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
@@ -96,6 +97,29 @@ netSvc.on('file', (info) => {
   }
 });
 netSvc.on('status', (st) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:status', st); });
+// Syslog 日志告警（关键字 / 级别阈值命中，服务端已按同主机同规则冷却）：实时推送面板 + 弹系统通知——
+// 来源主机匹配到监控任务的设备时走该设备的静默/维护窗口判定并记入事件时间线，未匹配设备直接通知
+netSvc.on('syslog-alert', (a) => {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:syslog-alert', a);
+  if (!notifyEnabled()) return;
+  let deviceId = '', name = '';
+  try {
+    const job = monitor.status().find(s => s.host === a.host);
+    if (job) { deviceId = job.deviceId; name = job.name || job.deviceId; }
+  } catch (e) { /* 匹配失败按未匹配处理 */ }
+  const sevName = (a.severity != null && SYSLOG_SEV_NAMES[a.severity]) || String(a.severity);
+  const why = (a.matched && a.matched.length)
+    ? '命中告警关键字「' + a.matched.join('、') + '」'
+    : '日志级别 ' + sevName + ' 达到告警阈值';
+  const title = '网络拓扑管理软件 · Syslog 告警';
+  const body = (name ? name + '（' + a.host + '）' : a.host) + ' ' + why + '：' + String(a.msg || '').slice(0, 120);
+  if (deviceId) {
+    recordMonitorEvent({ key: deviceId + '@' + a.host, deviceId, host: a.host, name }, 'syslog-alert', why + '：' + (a.msg || ''));
+    notifyForDevice(deviceId, title, body);
+  } else {
+    notifyUser(title, body);
+  }
+});
 // SNMP Trap：实时推送面板；标准 Trap（接口 Down/Up、冷/热启动、认证失败等）弹系统通知——
 // 来源 IP 能匹配到监控任务的设备时走该设备的静默/维护窗口判定并记入事件时间线，未匹配设备直接通知
 netSvc.on('trap', (t) => {

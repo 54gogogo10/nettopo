@@ -6,6 +6,7 @@
  *   - 消息解析：PRI(设施/严重级别) → RFC5424 → RFC3164 → 裸文本 三级回退；无时间戳用本机接收时间
  *   - 存储：<baseDir>/<主机名或来源IP>/<YYYY-MM-DD>.log，行格式「时间 [级别/设施] 主机 消息」
  *   - 防洪限速（每秒 maxPerSec 条，超出丢弃并计数）、按天滚动、过期清理（keepDays）
+ *   - 日志告警：关键字 / 级别阈值命中发 alert 事件（同主机同规则冷却防风暴），setAlertRules 热更新
  *   - 目录/文件名全部白名单清洗 + 最终路径必须仍在 baseDir 内，杜绝穿越
  * 可在 Node 测试中直接使用。
  */
@@ -129,6 +130,48 @@ function fmtLogLine(d, ent) {
 
 function fmtDate(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
 
+/* ---- 日志告警规则（关键字 / 级别阈值）：命中即向管理器发 alert 事件，通知与事件时间线由上层桥接 ---- */
+/** 归一化告警规则：非法值回退默认（enabled=false / severity=err）；severity=null 表示不按级别（只按关键字）。
+ *  关键字剔除控制字符、截断 64 字符、按大小写不敏感去重、上限 16 个；冷却 10~3600 秒（防告警风暴）。 */
+function normalizeAlertRules(a) {
+  const out = { enabled: false, severity: 3, keywords: [], cooldownSec: 300 };
+  if (!a || typeof a !== 'object') return out;
+  out.enabled = a.enabled === true;
+  if (a.severity == null || a.severity === 'off') out.severity = null;
+  else {
+    const sev = Math.floor(Number(a.severity));
+    out.severity = (sev >= 0 && sev <= 7) ? sev : 3;
+  }
+  const kw = Array.isArray(a.keywords) ? a.keywords : [];
+  const seen = new Set();
+  for (let k of kw) {
+    k = String(k == null ? '' : k).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64);
+    if (!k) continue;
+    const key = k.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.keywords.push(k);
+    if (out.keywords.length >= 16) break;
+  }
+  const cd = Math.floor(Number(a.cooldownSec));
+  out.cooldownSec = (cd >= 10 && cd <= 3600) ? cd : 300;
+  return out;
+}
+
+/** 评估单条日志是否命中告警规则：命中返回 {matched:[关键字], via}，未启用/未命中返回 null。
+ *  匹配范围 = tag + msg（大小写不敏感的子串匹配）；级别命中 = severity <= 阈值（0=emerg 最严重）。 */
+function matchAlert(ent, rules) {
+  if (!rules || !rules.enabled) return null;
+  const matched = [];
+  const hay = ((ent.tag ? ent.tag + ' ' : '') + (ent.msg || '')).toLowerCase();
+  for (const k of rules.keywords) {
+    if (hay.indexOf(k.toLowerCase()) >= 0) matched.push(k);
+  }
+  const sevHit = rules.severity != null && ent.severity != null && ent.severity <= rules.severity;
+  if (!matched.length && !sevHit) return null;
+  return { matched, via: matched.length ? (sevHit ? 'keyword+severity' : 'keyword') : 'severity' };
+}
+
 class SyslogServer extends EventEmitter {
   /** @param opts { baseDir, ringMax=1000, keepDays=90, maxPerSec=200 } */
   constructor(opts) {
@@ -148,7 +191,9 @@ class SyslogServer extends EventEmitter {
     this.seq = 0;
     this.streams = new Map();   // 'host\x00date' -> fs.WriteStream
     this.lastDay = '';
-    this.stats = { rxMsgs: 0, dropped: 0, hosts: 0 };
+    this.stats = { rxMsgs: 0, dropped: 0, hosts: 0, alerts: 0 };
+    this.alertRules = normalizeAlertRules(null);
+    this.alertLast = new Map();  // 告警冷却：'主机\x00规则键' -> 上次告警时间
     this._winStart = 0;
     this._winCount = 0;
     try { fs.mkdirSync(this.baseDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
@@ -287,6 +332,27 @@ class SyslogServer extends EventEmitter {
     this.streams.clear();
   }
 
+  /** 热更新告警规则（不重启服务，下一条件即刻生效） */
+  setAlertRules(rules) { this.alertRules = normalizeAlertRules(rules); }
+
+  /** 告警评估：命中的条目在环形缓冲打 alert 标记（面板高亮）；emit 受同主机同规则冷却约束（防风暴） */
+  _evalAlert(ent) {
+    const hit = matchAlert(ent, this.alertRules);
+    if (!hit) return;
+    ent.alert = hit;
+    const cdKey = ent.host + '\x00' + (hit.matched.length ? hit.matched.join(',').toLowerCase() : 'sev');
+    const now = Date.now();
+    const last = this.alertLast.get(cdKey) || 0;
+    if (now - last < this.alertRules.cooldownSec * 1000) return;
+    this.alertLast.set(cdKey, now);
+    if (this.alertLast.size > 512) this.alertLast.clear(); // 冷却表只防风暴，无需精确：超限整体清零重新冷却
+    this.stats.alerts++;
+    this.emit('alert', {
+      seq: ent.seq, ts: ent.ts, host: ent.host, severity: ent.severity, facility: ent.facility,
+      tag: ent.tag, msg: ent.msg, matched: hit.matched, via: hit.via
+    });
+  }
+
   /** 限速 + 解析 + 落盘 + 环形缓冲 */
   _ingest(text, peer) {
     const now = Date.now();
@@ -296,9 +362,10 @@ class SyslogServer extends EventEmitter {
     ent.ts = ent.ts == null ? now : ent.ts;
     ent.seq = ++this.seq;
     this.stats.rxMsgs++;
-    this.ring.push({ seq: ent.seq, ts: ent.ts, host: ent.host, facility: ent.facility, severity: ent.severity, tag: ent.tag, msg: ent.msg });
+    this.ring.push(ent); // 环形缓冲直接持有 ent：告警标记（ent.alert）要能从 tail() 拿到
     if (this.ring.length > this.ringMax) this.ring.splice(0, this.ring.length - this.ringMax);
     this._writeEntry(ent);
+    this._evalAlert(ent);
     this.emit('message', ent);
   }
 
@@ -376,9 +443,10 @@ class SyslogServer extends EventEmitter {
   status() {
     return {
       running: this.running, port: this.port, tcp: !!this.tcp, error: this.lastError,
-      rxMsgs: this.stats.rxMsgs, dropped: this.stats.dropped, buffered: this.ring.length
+      rxMsgs: this.stats.rxMsgs, dropped: this.stats.dropped, buffered: this.ring.length,
+      alerts: this.stats.alerts, alertOn: this.alertRules.enabled
     };
   }
 }
 
-module.exports = { SyslogServer, parseSyslogMsg, sanitizeHostDir, SEV_NAMES, FAC_NAMES };
+module.exports = { SyslogServer, parseSyslogMsg, sanitizeHostDir, SEV_NAMES, FAC_NAMES, normalizeAlertRules, matchAlert };

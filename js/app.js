@@ -6781,13 +6781,15 @@ function openMonitorCenter() {
     offline: '🔴', recovery: '🟢', alert: '🟠', 'alert-clear': '⚪',
     backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️',
     'if-down': '🔻', 'if-up': '🔺', reboot: '🔄',
-    metric: '📈', 'metric-clear': '📉', 'http-fail': '🌐', 'http-ok': '🌐', cert: '🔐', 'cert-clear': '🔓'
+    metric: '📈', 'metric-clear': '📉', 'http-fail': '🌐', 'http-ok': '🌐', cert: '🔐', 'cert-clear': '🔓',
+    trap: '📨', 'syslog-alert': '📋'
   }[t] || '•');
   const evTypeLabel = {
     offline: '离线', recovery: '恢复', alert: '告警', 'alert-clear': '解除',
     backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规',
     'if-down': '接口离线', 'if-up': '接口恢复', reboot: '设备重启',
-    metric: '指标告警', 'metric-clear': '指标恢复', 'http-fail': 'HTTP 失败', 'http-ok': 'HTTP 恢复', cert: '证书告警', 'cert-clear': '证书恢复'
+    metric: '指标告警', 'metric-clear': '指标恢复', 'http-fail': 'HTTP 失败', 'http-ok': 'HTTP 恢复', cert: '证书告警', 'cert-clear': '证书恢复',
+    trap: 'SNMP Trap', 'syslog-alert': 'Syslog 告警'
   };
   // 事件时间线筛选：null = 全部；curDev = 设备；curHost = 具体管理地址
   let curDev = null, curHost = null, curDevName = '';
@@ -7668,6 +7670,18 @@ function openNetServices() {
             <div class="nsv-row"><label>端口</label><input type="number" id="nsvSysPort" min="1" max="65535"/><span class="nsv-hint">标准 514（UDP）</span></div>
             <div class="nsv-row"><label class="nsv-mini"><input type="checkbox" id="nsvSysTcp"/>同时监听 TCP（RFC 6587）</label></div>
             <div class="nsv-note">按来源主机 / 日期归档，支持级别过滤与关键字检索；超限自动限速丢弃并计数。</div>
+            <div style="border-top:1px dashed var(--border);padding-top:6px;margin-top:auto">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:3px">日志告警（命中弹通知并记入事件时间线，受设备静默策略约束；同主机同规则 5 分钟冷却）</div>
+              <div class="nsv-row"><label class="nsv-mini"><input type="checkbox" id="nsvSysAlertOn"/>启用</label>
+                <select id="nsvSysAlertSev" style="flex:1;min-width:0">
+                  <option value="off">不按级别（仅关键字）</option>
+                  <option value="2">crit 及以上告警</option>
+                  <option value="3" selected>err 及以上告警</option>
+                  <option value="4">warning 及以上告警</option>
+                  <option value="5">notice 及以上告警</option>
+                </select></div>
+              <div class="nsv-row"><label>关键字</label><input type="text" id="nsvSysAlertKw" placeholder="逗号分隔，如 down,attack（至多 16 个）" style="flex:1;min-width:0" spellcheck="false"/></div>
+            </div>
           </div>
           <div class="nsv-card">
             <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvTrapOn"/>启用</label><b>SNMP Trap 接收</b><span class="nsv-dot" id="nsvTrapDot"></span></div>
@@ -7765,8 +7779,9 @@ function openNetServices() {
       ? ('运行中 :' + st.syslog.port + (st.syslog.tcp ? '（UDP+TCP）' : '（UDP）')) : (st.syslog.error ? '错误：' + st.syslog.error : '已停止');
     dotFor(ov.querySelector('#nsvTrapDot'), st.trap); ov.querySelector('#nsvTrapSt').textContent = st.trap.running
       ? ('运行中 :' + st.trap.port + '（UDP）' + (st.trap.rxPackets ? ' · 已收 ' + st.trap.rxPackets + ' 包' : '')) : (st.trap.error ? '错误：' + st.trap.error : '已停止');
-    ov.querySelector('#nsvLogCnt').textContent = st.syslog.rxMsgs
-      ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : '')) : '';
+    ov.querySelector('#nsvLogCnt').textContent = (st.syslog.rxMsgs
+      ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : ''))
+      : '') + (st.syslog.alerts ? (st.syslog.rxMsgs ? ' · ' : '') + '告警 ' + st.syslog.alerts + ' 条' : '');
   }
   function fillForm(cfg) {
     ov.querySelector('#nsvTftpOn').checked = !!cfg.tftp.enabled;
@@ -7780,6 +7795,11 @@ function openNetServices() {
     ov.querySelector('#nsvSysOn').checked = !!cfg.syslog.enabled;
     ov.querySelector('#nsvSysPort').value = cfg.syslog.port;
     ov.querySelector('#nsvSysTcp').checked = !!cfg.syslog.tcp;
+    const sa = cfg.syslog.alert || {};
+    ov.querySelector('#nsvSysAlertOn').checked = !!sa.enabled;
+    ov.querySelector('#nsvSysAlertSev').value = (sa.severity == null ? 'off' : String(sa.severity));
+    if (ov.querySelector('#nsvSysAlertSev').selectedIndex < 0) ov.querySelector('#nsvSysAlertSev').value = '3';
+    ov.querySelector('#nsvSysAlertKw').value = (sa.keywords || []).join(',');
     ov.querySelector('#nsvTrapOn').checked = !!cfg.trap.enabled;
     ov.querySelector('#nsvTrapPort').value = cfg.trap.port;
     const tv3 = (cfg.trap && cfg.trap.v3) || {};
@@ -7802,7 +7822,17 @@ function openNetServices() {
         pasvMax: pasv ? parseInt(pasv[2], 10) : 0,
         overwrite: ov.querySelector('#nsvFtpOverwrite').checked
       },
-      syslog: { enabled: ov.querySelector('#nsvSysOn').checked, port: parseInt(ov.querySelector('#nsvSysPort').value, 10) || 514, tcp: ov.querySelector('#nsvSysTcp').checked },
+      syslog: {
+        enabled: ov.querySelector('#nsvSysOn').checked,
+        port: parseInt(ov.querySelector('#nsvSysPort').value, 10) || 514,
+        tcp: ov.querySelector('#nsvSysTcp').checked,
+        alert: {
+          enabled: ov.querySelector('#nsvSysAlertOn').checked,
+          severity: ov.querySelector('#nsvSysAlertSev').value === 'off' ? null : parseInt(ov.querySelector('#nsvSysAlertSev').value, 10),
+          keywords: String(ov.querySelector('#nsvSysAlertKw').value || '').split(/[,，;；\n]+/).map(s => s.trim()).filter(Boolean),
+          cooldownSec: 300
+        }
+      },
       trap: {
         enabled: ov.querySelector('#nsvTrapOn').checked,
         port: parseInt(ov.querySelector('#nsvTrapPort').value, 10) || 162,
@@ -7899,7 +7929,7 @@ function openNetServices() {
     btn.disabled = false;
   };
   ov.querySelector('[data-act=defaults]').onclick = async () => {
-    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false }, trap: { enabled: false, port: 162, v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } } });
+    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } }, trap: { enabled: false, port: 162, v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } } });
     ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
     toast('已恢复默认值（尚未保存，请点「保存并应用」）');
   };
@@ -8027,7 +8057,8 @@ function openNetServices() {
       if (m.severity != null && m.severity > sevMax) continue;
       if (hostF && String(m.host || '').toLowerCase().indexOf(hostF) < 0) continue;
       const d = new Date(m.ts);
-      html.push('<div class="nsv-lg ' + (m.severity != null ? NSV_SEV_CLS[m.severity] : '') + '">' +
+      const hitTitle = m.alert ? (' title="日志告警：命中「' + U.escHtml((m.alert.matched || []).join('、') || '级别阈值') + '」"') : '';
+      html.push('<div class="nsv-lg ' + (m.alert ? 's-hit ' : '') + (m.severity != null ? NSV_SEV_CLS[m.severity] : '') + '"' + hitTitle + '>' +
         '<span class="t">' + pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()) + ':' + pad2s(d.getSeconds()) + '</span>' +
         '<span class="sev">' + (m.severity != null ? NSV_SEV_NAME[m.severity] : '-') + '</span>' +
         '<span class="h" title="' + U.escHtml(m.host || '') + '">' + U.escHtml(m.host || '-') + '</span>' +

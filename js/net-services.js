@@ -3,7 +3,7 @@
  *   - 配置归一化（端口钳制、账号/开关校验）与应用（按需启动/停止/热更新，不无谓重启）
  *   - TFTP/FTP 收到的文件统一编目（listFiles/readFile/deleteFile，路径白名单校验）
  *   - 收到的配置文件一键导入设备配置备份库（ConfigBackupStore，进入备份中心/合规检查体系）
- *   - Syslog 环形缓冲增量拉取与跨文件检索转发
+ *   - Syslog 环形缓冲增量拉取与跨文件检索转发；关键字/级别告警规则热更新并转发 syslog-alert 事件
  * 配置持久化由 electron-main.js 存 settings.json，本模块只负责运行态。
  * 可在 Node 测试中直接使用。
  */
@@ -13,7 +13,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { TftpServer } = require('./svc-tftp.js');
 const { FtpServer } = require('./svc-ftp.js');
-const { SyslogServer } = require('./svc-syslog.js');
+const { SyslogServer, normalizeAlertRules } = require('./svc-syslog.js');
 const { TrapServer } = require('./svc-trap.js');
 
 const READ_CAP = 2 * 1024 * 1024;   // 单文件预览上限
@@ -24,7 +24,7 @@ function defaultConfig() {
   return {
     tftp: { enabled: false, port: 69 },
     ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true },
-    syslog: { enabled: false, port: 514, tcp: false },
+    syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } },
     trap: { enabled: false, port: 162, v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } }
   };
 }
@@ -66,6 +66,7 @@ function normalizeConfig(cfg) {
   out.syslog.enabled = clampB(s.enabled, dft.syslog.enabled);
   out.syslog.port = clampPort(s.port, dft.syslog.port);
   out.syslog.tcp = clampB(s.tcp, dft.syslog.tcp);
+  out.syslog.alert = normalizeAlertRules(s.alert && typeof s.alert === 'object' ? s.alert : dft.syslog.alert);
   const tr = cfg.trap && typeof cfg.trap === 'object' ? cfg.trap : {};
   out.trap.enabled = clampB(tr.enabled, dft.trap.enabled);
   out.trap.port = clampPort(tr.port, dft.trap.port);
@@ -99,6 +100,7 @@ class NetServices extends EventEmitter {
     this.trap = new TrapServer({ baseDir: this.trapDir });
     this.tftp.on('file', (info) => this.emit('file', info));
     this.ftp.on('file', (info) => this.emit('file', info));
+    this.syslog.on('alert', (a) => this.emit('syslog-alert', a));
     this.trap.on('trap', (t) => this.emit('trap', t));
   }
 
@@ -136,13 +138,16 @@ class NetServices extends EventEmitter {
         this.ftp.setAuth({ username: n.ftp.username, password: n.ftp.password, overwrite: n.ftp.overwrite });
       }
     }
-    // Syslog：端口/TCP 开关变化或启停才重启
+    // Syslog：端口/TCP 开关变化或启停才重启；告警规则热更新（不重启，即刻生效）
     if (!n.syslog.enabled) {
       if (this.applied.syslog) { await this.syslog.stop(); this.applied.syslog = null; }
-    } else if (!this.applied.syslog || this.applied.syslog.port !== n.syslog.port || this.applied.syslog.tcp !== n.syslog.tcp) {
-      await this.syslog.stop();
-      const r = await this.syslog.start(n.syslog.port, n.syslog.tcp);
-      this.applied.syslog = (r && r.ok) ? { port: n.syslog.port, tcp: n.syslog.tcp } : null;
+    } else {
+      if (!this.applied.syslog || this.applied.syslog.port !== n.syslog.port || this.applied.syslog.tcp !== n.syslog.tcp) {
+        await this.syslog.stop();
+        const r = await this.syslog.start(n.syslog.port, n.syslog.tcp);
+        this.applied.syslog = (r && r.ok) ? { port: n.syslog.port, tcp: n.syslog.tcp } : null;
+      }
+      this.syslog.setAlertRules(n.syslog.alert);
     }
     // Trap：端口变化或启停才重启
     if (!n.trap.enabled) {

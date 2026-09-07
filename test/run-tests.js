@@ -4070,6 +4070,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ok(nc.ftp.port === 21 && nc.ftp.username === 'ab' && nc.ftp.password === 'p', '配置归一化：端口回退与凭据控制字符剔除');
     ok(nc.ftp.pasvMin === 0 && nc.ftp.pasvMax === 0, '配置归一化：非法被动端口范围（<1024）回退随机');
     ok(nc.syslog.enabled === false, '配置归一化：字符串开关按 false');
+    ok(nc.syslog.alert && nc.syslog.alert.enabled === false && nc.syslog.alert.severity === 3 && Array.isArray(nc.syslog.alert.keywords), '配置归一化：Syslog 告警规则回退默认');
+    const ncAlert = normalizeConfig({ syslog: { alert: { enabled: true, severity: 4, keywords: [' down ', 'down', ''], cooldownSec: 99999 } } });
+    ok(ncAlert.syslog.alert.enabled === true && ncAlert.syslog.alert.severity === 4 && ncAlert.syslog.alert.keywords.length === 1 && ncAlert.syslog.alert.cooldownSec === 300, '配置归一化：Syslog 告警规则清洗与钳制');
 
     /* ---------- TFTP 服务器（协议级客户端） ---------- */
     console.log('== 网络服务：TFTP 服务器 ==');
@@ -4387,13 +4390,14 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     /* ---------- Syslog 服务器（UDP / TCP） ---------- */
     console.log('== 网络服务：Syslog 服务器 ==');
     const syslogBase = path.join(tmpSvc, 'syslog');
-    // 随机端口的「UDP+TCP 同端口」偶发与另一协议的临时端口撞车（EADDRINUSE）：整个 start 重试
+    // 随机端口的「UDP+TCP 同端口」偶发与另一协议的临时端口撞车（EADDRINUSE）：整个 start 重试（间隔递增）
     let ssrv = null, sstart = null;
-    for (let i = 0; i < 6 && !(sstart && sstart.ok); i++) {
+    for (let i = 0; i < 10 && !(sstart && sstart.ok); i++) {
+      if (i) await waitMs(60 * i);
       ssrv = new SyslogServer({ baseDir: syslogBase, maxPerSec: 10000 }); // 限速在专用用例中单独测
       sstart = await ssrv.start(0, true);
     }
-    ok(sstart.ok && sstart.port > 0 && ssrv.tcp, 'Syslog 启动（UDP+TCP 同端口）');
+    ok(sstart.ok && sstart.port > 0 && ssrv.tcp, 'Syslog 启动（UDP+TCP 同端口）' + (sstart && sstart.ok ? '' : '：' + (ssrv && ssrv.lastError)));
     const us = dgram.createSocket('udp4');
     const sendUdp = (msg, port) => new Promise((res) => us.send(Buffer.from(msg), 0, Buffer.byteLength(msg), port || ssrv.port, '127.0.0.1', res));
     await sendUdp('<134>Oct 12 22:14:15 r1 sshd[123]: Accepted password for admin');
@@ -4448,6 +4452,49 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ssrv._cleanupOld();
     ok(!fs.existsSync(path.join(syslogBase, 'r1', '2020-01-01.log')) && !fs.existsSync(path.join(syslogBase, 'r1', '1999-12-31.log')) && fs.existsSync(path.join(syslogBase, 'r1', '2099-01-01.log')), 'Syslog 过期日志清理（旧文件删除、未过期保留）');
     await ssrv.stop();
+
+    /* ---------- Syslog 日志告警（关键字 / 级别阈值 / 冷却 / 热更新） ---------- */
+    console.log('== 网络服务：Syslog 日志告警 ==');
+    {
+      const { normalizeAlertRules, matchAlert } = require('../js/svc-syslog.js');
+      // 规则归一化：关键字清洗/去重/截断、级别钳制、冷却钳制、非法输入回退默认
+      const nr = normalizeAlertRules({ enabled: true, severity: 99, keywords: ['Down', ' down ', '', 'DOWN', 'x'.repeat(100)], cooldownSec: 1 });
+      ok(nr.enabled === true && nr.severity === 3, '告警规则归一化：级别越界回退 err');
+      ok(nr.keywords.length === 2 && nr.keywords[0] === 'Down' && nr.keywords[1].length === 64, '告警规则归一化：关键字去重（大小写不敏感）与截断');
+      ok(nr.cooldownSec === 300, '告警规则归一化：冷却越界回退默认');
+      ok(normalizeAlertRules({ enabled: true, severity: 'off' }).severity === null, '告警规则归一化：severity=off 表示不按级别');
+      ok(normalizeAlertRules(null).enabled === false && normalizeAlertRules({ keywords: 'x' }).keywords.length === 0, '告警规则归一化：非法输入回退默认（非数组关键字丢弃）');
+      // 匹配语义：tag+msg 子串（大小写不敏感）、级别阈值（severity<=阈值）、未启用不告警
+      const rules = normalizeAlertRules({ enabled: true, severity: 3, keywords: ['attack'] });
+      ok(matchAlert({ severity: 5, tag: 'SEC', msg: 'detect Attack now' }, rules).via === 'keyword', '告警匹配：关键字大小写不敏感含 tag');
+      ok(matchAlert({ severity: 2, tag: 'SYS', msg: 'system reboot' }, rules).via === 'severity', '告警匹配：级别阈值（crit<=err）');
+      ok(matchAlert({ severity: 3, tag: 'IF', msg: 'link down (attack)' }, rules).via === 'keyword+severity', '告警匹配：关键字与级别同时命中');
+      ok(matchAlert({ severity: 5, tag: 'IF', msg: 'link flap' }, rules) === null, '告警匹配：未命中不告警');
+      ok(matchAlert({ severity: 2, msg: 'down' }, normalizeAlertRules({ enabled: true, severity: null, keywords: [] })) === null, '告警匹配：不按级别且无关键字等于关闭');
+      ok(matchAlert({ severity: 2, msg: 'down' }, normalizeAlertRules({ enabled: false, severity: 3, keywords: ['down'] })) === null, '告警匹配：未启用不告警');
+      // 服务器级：事件发出、同主机同规则冷却抑制、跨主机独立、环形缓冲标记、status 计数
+      let alerts = [];
+      const asrv = new SyslogServer({ baseDir: path.join(tmpSvc, 'syslog-alert') });
+      asrv.setAlertRules({ enabled: true, severity: 3, keywords: ['down'], cooldownSec: 3600 });
+      asrv.on('alert', (a) => alerts.push(a));
+      const astart = await asrv.start(0, false);
+      ok(astart.ok, 'Syslog 告警服务器启动');
+      await sendUdp('<131>Oct 12 22:20:00 r1 %%01IFNET/4/IF_STATE(l): GigabitEthernet0/0/1 is DOWN', asrv.port); // 关键字+级别双命中
+      await sendUdp('<131>Oct 12 22:20:01 r1 another interface is down too', asrv.port);                        // 同主机同规则：冷却抑制
+      await sendUdp('<131>Oct 12 22:20:02 r2 interface is down too', asrv.port);                                // 跨主机：独立冷却
+      await sendUdp('<135>Oct 12 22:20:03 r3 user login ok', asrv.port);                                        // 未命中
+      ok(await waitUntil(() => alerts.length === 2 && asrv.tail(0).msgs.filter(m => m.alert).length === 3), 'Syslog 告警：同主机冷却抑制、跨主机独立');
+      ok(alerts[0].host === 'r1' && alerts[1].host === 'r2', 'Syslog 告警：冷却是按主机独立的');
+      ok(alerts[0].matched.length === 1 && /^down$/i.test(alerts[0].matched[0]) && alerts[0].severity === 3, 'Syslog 告警事件携带命中关键字与级别');
+      ok(asrv.tail(0).msgs.filter(m => m.alert).length === 3, 'Syslog 告警：命中条目（含冷却期）环形缓冲打标');
+      ok(asrv.status().alerts === 2, 'Syslog 告警：status 计数已发出的告警');
+      // 热更新：关闭规则后不再告警（无需重启）；先确认消息已入库再断言「无新告警」
+      const before = alerts.length;
+      asrv.setAlertRules({ enabled: true, severity: null, keywords: [], cooldownSec: 300 });
+      await sendUdp('<131>Oct 12 22:20:05 r9 cpu overload down', asrv.port);
+      ok(await waitUntil(() => asrv.tail(0).msgs.some(m => m.host === 'r9')) && alerts.length === before, 'Syslog 告警：规则热更新即刻生效（不按级别且无关键字不再告警）');
+      await asrv.stop();
+    }
 
     /* ---------- SNMP Trap 接收器（v1 / v2c / inform / 限速 / 归档） ---------- */
     console.log('== 网络服务：SNMP Trap 接收器 ==');

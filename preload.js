@@ -156,7 +156,8 @@ contextBridge.exposeInMainWorld('topoNetSvc', {
   openFolder: (svc) => ipcRenderer.invoke('netsvc:open-folder', { svc }),
   onFile: sub('netsvc:file'),
   onStatus: sub('netsvc:status'),
-  onTrap: sub('netsvc:trap')
+  onTrap: sub('netsvc:trap'),
+  onSyslogAlert: sub('netsvc:syslog-alert')
 });
 
 /* AI 解析（LLM，仅主窗口可用）：配置/分析经主进程发起（渲染层 CSP 禁止直连外网）；

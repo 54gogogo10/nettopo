@@ -1162,6 +1162,8 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .nsv-lg.s-dbg .sev, .nsv-lg.s-dbg .m { color: var(--muted); }
 .nsv-lg.s-found .dt { flex: 0 0 84px; color: var(--muted); }
 .nsv-lg.s-srchhead { color: var(--muted); padding: 3px 0; font-family: inherit; }
+.nsv-lg.s-hit { box-shadow: inset 3px 0 0 var(--danger); padding-left: 5px; }
+.nsv-lg.s-hit .m { font-weight: 600; }
 
 /* ---- 拓扑画布监控状态叠加角标（监控 ▾ 监控状态叠加） ---- */
 .mon-dot { stroke: var(--panel); stroke-width: 2; pointer-events: none; }
