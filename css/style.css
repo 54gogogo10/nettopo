@@ -1172,6 +1172,17 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .mon-dot.alert { fill: var(--danger); animation: monPulse 1.2s ease-in-out infinite; }
 @keyframes monPulse { 50% { opacity: .3; } }
 
+/* ---- 拓扑画布链路流量叠加徽标（监控 ▾ 链路流量叠加） ---- */
+.flow-badge { pointer-events: none; }
+.flow-badge rect { fill: var(--panel); stroke: var(--border); stroke-width: 1; }
+.flow-badge text { font: 600 10px/1 var(--font-ui, sans-serif); fill: var(--text); }
+.flow-badge.ok rect { fill: rgba(34, 197, 94, .92); stroke: transparent; }
+.flow-badge.warn rect { fill: rgba(245, 158, 11, .92); stroke: transparent; }
+.flow-badge.crit rect { fill: rgba(239, 68, 68, .92); stroke: transparent; animation: monPulse 1.6s ease-in-out infinite; }
+.flow-badge.ok text, .flow-badge.warn text, .flow-badge.crit text { fill: #fff; }
+.flow-badge.down rect { fill: var(--panel2); }
+.flow-badge.down text { fill: var(--muted); text-decoration: line-through; }
+
 /* ---- IP 地址管理视图 ---- */
 .ipam-t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .ipam-t th, .ipam-t td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }

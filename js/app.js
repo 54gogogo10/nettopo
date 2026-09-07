@@ -33,6 +33,7 @@ const state = {
   regions: [], // 区域分组容器（几何包含，双击编辑/拖动整体移动；随图纸保存）
   monitorCfg: {},   // 设备后台监控配置：nodeId -> {hosts:[{host,protocol,port,username,password,commands,onConnect,readOnly,...}],intervalSec,cmdDelayMs,enabled}
   monitorStatus: {}, // 设备后台监控运行状态：nodeId -> {state,text,since}（运行时态，不持久化）
+  linkFlow: {},      // 链路流量叠加数据：nodeId -> {ts, ifs:[{n,oper,speed,in,out}]}（最新 ifTable 采样，运行时态）
   sheets: [],       // 多图纸：[{id,name,nodes,links,texts,pan,zoom}]；活动页数据即 state.nodes/links/texts 本体
   sheetIdx: 0,      // 当前活动页索引
   sheetSeq: 0       // 页 id 生成计数（跨保存持久，避免恢复后撞 id）
@@ -4867,6 +4868,12 @@ function wire() {
       if (on) seedMonOverlay(); else syncMonOverlay();
       toast(on ? '已开启监控状态叠加：节点右上角显示状态圆点' : '已关闭监控状态叠加');
     } },
+    { ic: 'pulse', label: (linkFlowOn() ? '✓ ' : '') + '链路流量叠加（连线徽标）', act: () => {
+      const on = !linkFlowOn();
+      try { localStorage.setItem(LINK_FLOW_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+      if (on) seedLinkFlow(); else syncLinkFlow();
+      toast(on ? '已开启链路流量叠加：连线中点显示实时利用率（需设备开启「接口流量」SNMP 采集）' : '已关闭链路流量叠加');
+    } },
     { ic: 'archive', label: '配置合规检查…', act: () => openComplianceCheck() },
     { ic: 'pulse', label: '设备监控（静默采集）…', act: () => {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds && renderer.selIds.size ? [...renderer.selIds][0] : '');
@@ -5121,6 +5128,102 @@ function wire() {
   if (monOverlayOn()) seedMonOverlay();
   // 供 __topo 顶层导出桥接（函数为 wire 作用域私有，顶层无法直接引用）
   globalThis.__monOverlay = { sync: () => syncMonOverlay(), seed: () => seedMonOverlay() };
+
+  /* ---- 拓扑画布链路流量叠加（监控 ▾ 开关，localStorage 记忆）：连线中点徽标显示实时利用率。
+     数据取各设备 SNMP ifTable 采样速率（monitor:iftraffic 推送），按「设备 + 跨厂家规范化接口名」
+     对齐连线两端（U.buildLinkFlow）：绿 <50% / 橙 <80% / 红 ≥80%，接口 DOWN 灰显，采样过期灰显 ---- */
+  const LINK_FLOW_KEY = 'nettopo.linkFlow';
+  const linkFlowOn = () => { try { return localStorage.getItem(LINK_FLOW_KEY) === '1'; } catch (e) { return false; } };
+  let linkFlowRaf = 0;
+  const FLOW_MBPS = (v) => v == null ? '—' : (v >= 1e6 ? (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + ' Gbps' : v >= 1000 ? (v / 1000).toFixed(1) + ' Mbps' : Math.round(v) + ' Kbps');
+  const flowBadge = (d) => {
+    if (d.oper === 'down') return { cls: 'down', text: 'DOWN' };
+    if (d.stale) return { cls: 'stale', text: d.util != null ? Math.min(999, Math.round(d.util * 100)) + '%' : '—' };
+    if (d.util == null) return { cls: 'none', text: '—' };
+    const p = d.util * 100;
+    return { cls: p >= 80 ? 'crit' : p >= 50 ? 'warn' : 'ok', text: (p >= 100 ? '≥100' : Math.round(p)) + '%' };
+  };
+  const syncLinkFlow = () => {
+    if (linkFlowRaf || !window.topoMonitor) return;
+    linkFlowRaf = requestAnimationFrame(() => {
+      linkFlowRaf = 0;
+      const layer = renderer.linkLayer;
+      if (!layer) return;
+      for (const old of [...layer.querySelectorAll('.flow-badge')]) old.remove();
+      if (!linkFlowOn()) return;
+      const geom = U.linkGeom(state.nodes, state.links, { ortho: !!renderer.orthoLinks });
+      const data = U.buildLinkFlow(state.nodes, state.links, state.linkFlow, { now: Date.now() });
+      const z = 1 / (renderer.zoom || 1);
+      const NS = 'http://www.w3.org/2000/svg';
+      for (const l of state.links) {
+        const d = data[l.id], q = geom[l.id];
+        if (!d || !q) continue;
+        // 徽标锚点取走线中点（直角模式沿折线取弧长中点，与线段重合）
+        let mx, my;
+        if (q.pts) {
+          const segs = []; let total = 0;
+          for (let i = 1; i < q.pts.length; i++) { const L = Math.hypot(q.pts[i][0] - q.pts[i - 1][0], q.pts[i][1] - q.pts[i - 1][1]); segs.push(L); total += L; }
+          let t = total / 2;
+          mx = q.pts[q.pts.length - 1][0]; my = q.pts[q.pts.length - 1][1];
+          for (let i = 1; i < q.pts.length; i++) {
+            if (t <= segs[i - 1]) { const r = segs[i - 1] ? t / segs[i - 1] : 0; mx = q.pts[i - 1][0] + (q.pts[i][0] - q.pts[i - 1][0]) * r; my = q.pts[i - 1][1] + (q.pts[i][1] - q.pts[i - 1][1]) * r; break; }
+            t -= segs[i - 1];
+          }
+        } else { mx = (q.x1 + q.x2) / 2; my = (q.y1 + q.y2) / 2; }
+        const bd = flowBadge(d);
+        const g = document.createElementNS(NS, 'g');
+        g.setAttribute('class', 'flow-badge ' + bd.cls);
+        g.setAttribute('transform', 'translate(' + mx + ' ' + my + ') scale(' + z + ')');
+        const rect = document.createElementNS(NS, 'rect');
+        const txt = document.createElementNS(NS, 'text');
+        txt.setAttribute('text-anchor', 'middle');
+        txt.setAttribute('dominant-baseline', 'central');
+        txt.textContent = bd.text;
+        const w = Math.max(30, U.measureText(bd.text, 10) + 12);
+        rect.setAttribute('x', String(-w / 2)); rect.setAttribute('y', '-9');
+        rect.setAttribute('width', String(w)); rect.setAttribute('height', '18'); rect.setAttribute('rx', '9');
+        g.appendChild(rect); g.appendChild(txt);
+        const tt = document.createElementNS(NS, 'title');
+        const nm = (id) => { const n = state.nodes.find(x => x.id === id); return n ? n.name : (id || ''); };
+        tt.textContent = nm(l.a) + (l.aIf ? ' ' + l.aIf : '') + ' ⇄ ' + nm(l.b) + (l.bIf ? ' ' + l.bIf : '')
+          + '\n↓ ' + FLOW_MBPS(d.inBps == null ? null : d.inBps / 1000) + ' · ↑ ' + FLOW_MBPS(d.outBps == null ? null : d.outBps / 1000)
+          + (d.speedBps ? '（基准 ' + FLOW_MBPS(d.speedBps / 1000) + '）' : '')
+          + (d.ts ? '\n采样 ' + new Date(d.ts).toLocaleTimeString() + (d.stale ? '（已过期）' : '') : '');
+        g.appendChild(tt);
+        layer.appendChild(g);
+      }
+    });
+  };
+  /** 开启叠加时预填最新采样（等下一轮 ifTable 采集前先有数据）：复用监控中心 ifHistory 数据 */
+  const seedLinkFlow = async () => {
+    if (!window.topoMonitor || !window.topoMonitor.overview || !window.topoMonitor.ifHistory) return;
+    try {
+      const o = await window.topoMonitor.overview();
+      if (!o || !o.ok) return;
+      for (const j of (o.jobs || [])) {
+        const did = j.deviceId || deviceIdFromMonitorKey(j.key);
+        if (!did || state.linkFlow[did]) continue;
+        const r = await window.topoMonitor.ifHistory(j.key);
+        const hist = (r && r.ok && r.hist) || [];
+        const last = hist[hist.length - 1];
+        if (last && last.ifs) state.linkFlow[did] = { ts: last.ts, ifs: last.ifs };
+      }
+      syncLinkFlow();
+    } catch (e) { /* ignore */ }
+  };
+  if (window.topoMonitor && window.topoMonitor.onIfTraffic) {
+    window.topoMonitor.onIfTraffic((info) => {
+      if (!info) return;
+      const did = info.deviceId || deviceIdFromMonitorKey(info.key);
+      if (!did) return;
+      state.linkFlow[did] = { ts: info.ts, ifs: info.ifs || [] };
+      if (linkFlowOn()) syncLinkFlow();
+    });
+  }
+  renderer.onAfterUpdate = () => syncLinkFlow();
+  if (linkFlowOn()) seedLinkFlow();
+  // 供 __topo 顶层导出桥接（e2e/调试用）
+  globalThis.__linkFlow = { sync: () => syncLinkFlow(), seed: () => seedLinkFlow() };
   // 节点随画布操作重建后自动补挂角标（监听节点层子树变化，rAF 去抖）
   if (renderer.nodeLayer && typeof MutationObserver !== 'undefined') {
     new MutationObserver(() => syncMonOverlay()).observe(renderer.nodeLayer, { childList: true });

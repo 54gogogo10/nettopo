@@ -969,6 +969,41 @@ console.log('== MAC/ARP 表解析与终端定位（normMac / canonIfname / parse
   eq(U.canonIfname('eth0'), 'eth0', 'canon：Linux 原样');
   eq(U.canonIfname('Ethernet0/1'), 'eth0/1', 'canon：Ethernet');
   eq(U.canonIfname(''), '', 'canon：空串');
+  // buildLinkFlow：链路实时流量叠加（设备+规范化接口名对齐连线两端，计算利用率）
+  {
+    const lfNodes = [
+      { id: 'ra', name: 'RA' }, { id: 'rb', name: 'RB' }, { id: 'rc', name: 'RC' }
+    ];
+    const lfLinks = [
+      { id: 'l1', a: 'ra', b: 'rb', aIf: 'GE0/0/1', bIf: 'GigabitEthernet0/0/1', bw: 1000 },
+      { id: 'l2', a: 'ra', b: 'rc', aIf: 'GE0/0/2', bIf: 'Ten-GigabitEthernet1/0/1', bw: 1000 },
+      { id: 'l3', a: 'rb', b: 'rc', aIf: 'GE0/0/9', bIf: 'XGE1/0/2', bw: 10000 }
+    ];
+    const t0 = 1700000000000;
+    const traffic = {
+      ra: { ts: t0, ifs: [
+        { n: 'GigabitEthernet0/0/1', oper: 'up', speed: 1e9, in: 2e8, out: 6e8 },   // 60% of 1Gbps（与 rb 端取峰值更大者）
+        { n: 'GigabitEthernet0/0/2', oper: 'up', speed: 0, in: 2e9, out: 1e8 }      // 接口速率缺失回退连线带宽 1000Mbps → 200%
+      ] },
+      rb: { ts: t0, ifs: [
+        { n: 'GE0/0/1', oper: 'up', speed: 1e9, in: 1e8, out: 2e8 },                // 峰值 2e8 < ra 端 6e8
+        { n: 'GE0/0/9', oper: 'down', speed: 1e9, in: null, out: null }             // 尚无速率样本但有 oper
+      ] },
+      rc: { ts: t0 - 20 * 60000, ifs: [
+        { n: 'XGE1/0/2', oper: 'up', speed: 1e9, in: 5e7, out: 5e7 }                // 采样 20 分钟前 → stale
+      ] }
+    };
+    const lf = U.buildLinkFlow(lfNodes, lfLinks, traffic, { now: t0 });
+    ok(lf.l1 && Math.abs(lf.l1.util - 0.6) < 1e-9 && lf.l1.speedBps === 1e9, '链路流量：两端取峰值更大端，利用率按接口速率');
+    ok(lf.l1.inBps === 2e8 && lf.l1.outBps === 6e8 && lf.l1.oper === 'up', '链路流量：携带收发速率与接口状态');
+    ok(lf.l2 && Math.abs(lf.l2.util - 2) < 1e-9 && lf.l2.speedBps === 1e8 * 10, '链路流量：接口速率缺失回退连线带宽（Mbps 换算，可 >1）');
+    ok(lf.l3 && lf.l3.oper === 'down' && lf.l3.stale === true, '链路流量：对端过期采样标记 stale，DOWN 状态透出');
+    ok(!('l9' in lf), '链路流量：无采样连线不出现');
+    const lfNone = U.buildLinkFlow(lfNodes, lfLinks, null, { now: t0 });
+    eq(Object.keys(lfNone).length, 0, '链路流量：traffic 为空返回空对象');
+    const lfFirst = U.buildLinkFlow(lfNodes, [lfLinks[0]], { ra: { ts: t0, ifs: [{ n: 'GE0/0/1', oper: 'up', speed: 1e9, in: null, out: null }] } }, { now: t0 });
+    eq(Object.keys(lfFirst).length, 0, '链路流量：仅首采无速率样本不出结果');
+  }
   // parseArpMacTables：多厂家混合文本一次解析
   const mixed = [
     'System ARP cache:',

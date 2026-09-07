@@ -2138,6 +2138,64 @@ U.canonIfname = (s) => {
   return t;
 };
 
+/** 链路实时流量叠加（监控 ▾ 链路流量叠加）：把各设备最新 ifTable 采样按「设备 + 跨厂家规范化接口名」
+ *  对齐到连线两端，计算链路利用率。traffic: { deviceId: { ts, ifs: [{n, oper, speed, in, out}] } }，
+ *  in/out 为 bps 速率（首次采样前为 null）。返回 { linkId: { util, inBps, outBps, speedBps, oper, ts, stale } }：
+ *  util 为 0~1（可为 >1：配置带宽低于接口速率时），无速率基准为 null；两端都有采样取峰值方向更大的一端；
+ *  接口速率缺失回退连线带宽（Mbps）；无匹配采样的连线不出现在结果中；采样超过 maxAgeMs（默认 10 分钟）标 stale。 */
+U.buildLinkFlow = (nodes, links, traffic, opts) => {
+  const out = {};
+  if (!traffic) return out;
+  const maxAgeMs = (opts && opts.maxAgeMs) || 10 * 60 * 1000;
+  const now = (opts && opts.now) || 0;
+  // 设备 -> 规范化接口名 -> 采样行（同名取首行）
+  const ifMaps = new Map();
+  for (const [devId, t] of Object.entries(traffic)) {
+    if (!t || !Array.isArray(t.ifs)) continue;
+    const m = new Map();
+    for (const f of t.ifs) {
+      const key = U.canonIfname(f && f.n);
+      if (key && !m.has(key)) m.set(key, f);
+    }
+    ifMaps.set(devId, { ts: Number(t.ts) || 0, m });
+  }
+  for (const l of links || []) {
+    if (!l || !l.id) continue;
+    const ea = ifMaps.get(l.a), eb = ifMaps.get(l.b);
+    const ka = U.canonIfname(l.aIf), kb = U.canonIfname(l.bIf);
+    const sa = ea && ka ? ea.m.get(ka) : null;
+    const sb = eb && kb ? eb.m.get(kb) : null;
+    const cands = [];
+    for (const [s, ts] of [[sa, ea && ea.ts], [sb, eb && eb.ts]]) {
+      if (!s) continue;
+      cands.push({ s, ts: ts || 0 });
+    }
+    if (!cands.length) continue;
+    // 速率样本（首采前 in/out 为 null 的行不参与速率比较，但 DOWN 状态仍透出）
+    const withRate = cands.filter(c => (c.s.in != null && c.s.in >= 0) || (c.s.out != null && c.s.out >= 0));
+    // 取峰值方向更大的一端（链路利用率以重端为准；同一链路两端计数互为收发）
+    let best = null;
+    for (const c of withRate) {
+      const peak = Math.max(c.s.in || 0, c.s.out || 0);
+      if (!best || peak > Math.max(best.s.in || 0, best.s.out || 0)) best = c;
+    }
+    if (!best) continue;
+    const anyDown = cands.some(c => c.s.oper === 'down');
+    // 速率基准：接口 ifSpeed 优先（bps），缺失回退连线带宽（Mbps 换算）
+    const speedBps = best.s.speed > 0 ? best.s.speed : (Number(l.bw) > 0 ? Number(l.bw) * 1e6 : 0);
+    out[l.id] = {
+      util: speedBps > 0 ? Math.max(best.s.in || 0, best.s.out || 0) / speedBps : null,
+      inBps: best.s.in == null ? null : best.s.in,
+      outBps: best.s.out == null ? null : best.s.out,
+      speedBps: speedBps || null,
+      oper: anyDown ? 'down' : (best.s.oper || ''),
+      ts: best.ts,
+      stale: best.ts > 0 && now - best.ts > maxAgeMs
+    };
+  }
+  return out;
+};
+
 /** 解析 ARP / MAC 地址表输出（多厂家混合文本，可一次粘贴多张表）：
  *  返回 { arp:[{ip, mac, ifn, vlan}], mac:[{mac, vlan, ifn}] }。
  *  行判定：同时含 IPv4 与合法 MAC → ARP 行；仅含合法 MAC → MAC 表行（vlan 取行内首个 1~4094 整数，

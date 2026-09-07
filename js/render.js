@@ -455,6 +455,8 @@ class Renderer {
       });
       for (let i = ld.lines.length; i < 3; i++) texts[i] && texts[i].setAttribute('display', 'none');
     }
+    // 画布更新后回调（链路流量叠加等外部叠加层的重定位入口；异常不阻断渲染）
+    if (typeof this.onAfterUpdate === 'function') { try { this.onAfterUpdate(); } catch (e) { /* ignore */ } }
   }
 
   /* 更新 pdf/vsdx 风格三行标注不再需要 _setLabel，删除 */
