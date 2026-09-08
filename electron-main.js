@@ -1055,7 +1055,8 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
   if (!isValidDiagHost(host)) return { ok: false, error: '主机地址无效' };
   const oid = String((p && p.oid) || '').trim();
   if (!DIAG_OID_RE.test(oid) || oid.length > 64) return { ok: false, error: 'OID 无效（点分十进制，如 1.3.6.1.2.1.1.1）' };
-  // SNMP v3（可选）：version=v3 时走 USM 通道，团体字被忽略
+  // v2c 团体字（回退 GET 亦用）；v3 时被忽略，走 USM 通道
+  const community = String((p && p.community) || 'public').trim().slice(0, 64);
   let target = community;
   if (String((p && p.version) || '') === 'v3') {
     const v3user = String((p && p.v3User) || '').trim().slice(0, 32);

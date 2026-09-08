@@ -5645,6 +5645,7 @@ function monitorRow(host, saved) {
     complianceEnabled: !!saved.complianceEnabled,
     snmpEnabled: !!saved.snmpEnabled,
     snmpCommunity: typeof saved.snmpCommunity === 'string' ? saved.snmpCommunity : 'public',
+    snmpPort: saved.snmpPort != null ? String(saved.snmpPort) : '',
     snmpVersion: saved.snmpVersion === 'v3' ? 'v3' : 'v2c',
     snmpV3User: typeof saved.snmpV3User === 'string' ? saved.snmpV3User : '',
     snmpV3AuthProto: saved.snmpV3AuthProto === 'md5' ? 'md5' : 'sha',
@@ -5708,6 +5709,7 @@ function normalizeMonitorHosts(cfg) {
         complianceEnabled: !!h.complianceEnabled,
         snmpEnabled: !!h.snmpEnabled,
         snmpCommunity: typeof h.snmpCommunity === 'string' ? h.snmpCommunity.slice(0, 64) : 'public',
+        snmpPort: h.snmpPort != null ? String(h.snmpPort).slice(0, 6) : '',
         snmpVersion: h.snmpVersion === 'v3' ? 'v3' : 'v2c',
         snmpV3User: typeof h.snmpV3User === 'string' ? h.snmpV3User.trim().slice(0, 32) : '',
         snmpV3AuthProto: h.snmpV3AuthProto === 'md5' ? 'md5' : 'sha',
@@ -5853,7 +5855,7 @@ async function applyMonitor(id, cfg, enabled) {
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
           { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '' } } },
+        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', snmpPort: r.snmpPort || '', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '' } } },
         { metrics: { enabled: !!r.metricsEnabled, command: r.metricsCommands, intervalSec: r.metricsIntervalSec, diskWarn: r.metricsDiskWarn, diskCrit: r.metricsDiskCrit, memWarn: r.metricsMemWarn, memCrit: r.metricsMemCrit } },
         { httpProbe: { enabled: !!r.httpEnabled, url: r.httpUrl, intervalSec: r.httpIntervalSec, alertDays: r.httpAlertDays, keyword: r.httpKeyword } }
         ));
@@ -5958,7 +5960,7 @@ async function reconcileMonitors() {
         { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
         // 与 applyMonitor 的完整载荷同口径：缺 sysUpTime/perf 会让重启检测与 CPU/内存采集
         // 在软件重启/恢复工程后静默失效（monitor 侧按缺省 false 处理）
-        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '' } } },
+        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', snmpPort: row.snmpPort || '', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '' } } },
         { metrics: { enabled: !!row.metricsEnabled, command: row.metricsCommands, intervalSec: row.metricsIntervalSec, diskWarn: row.metricsDiskWarn, diskCrit: row.metricsDiskCrit, memWarn: row.metricsMemWarn, memCrit: row.metricsMemCrit } },
         { httpProbe: { enabled: !!row.httpEnabled, url: row.httpUrl, intervalSec: row.httpIntervalSec, alertDays: row.httpAlertDays, keyword: row.httpKeyword } }
       ));
@@ -6115,6 +6117,7 @@ function openMonitorConfig(id) {
           <option value="v3"${r.snmpVersion === 'v3' ? ' selected' : ''}>v3</option>
         </select>
         <input class="mh-si-comm" type="text" title="SNMP v2c 团体字（SNMP 识别 / 接口流量 / 重启检测 / CPU·内存共用）" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
+        <input class="mh-si-sp" type="number" min="1" max="65535" title="SNMP UDP 端口（默认 161；设备端口映射/非标端口填此，如对接公网网管 1161）" placeholder="端口(161)" value="${U.escHtml(r.snmpPort || '')}" autocomplete="off" style="width:72px"/>
         <input class="mh-si-v3user" type="text" style="display:none" title="SNMP v3 用户名（USM）" placeholder="v3 用户名" value="${U.escHtml(r.snmpV3User || '')}" autocomplete="off" spellcheck="false"/>
         <button type="button" class="tb mh-si-v3btn" style="display:none;padding:2px 8px;font-size:11px">v3 口令…</button>
         <div class="mh-perf-wrap" hidden>
@@ -6353,6 +6356,7 @@ function openMonitorConfig(id) {
         snmpMemUsedOid: rowEl.querySelector('.mh-si-mused').value.trim().slice(0, 64),
         snmpMemFreeOid: rowEl.querySelector('.mh-si-mfree').value.trim().slice(0, 64),
         snmpCommunity: rowEl.querySelector('.mh-si-comm').value.trim().slice(0, 64),
+        snmpPort: (() => { const v = parseInt(rowEl.querySelector('.mh-si-sp').value, 10); return (v > 0 && v <= 65535) ? String(v) : ''; })(),
         snmpVersion: rowEl.querySelector('.mh-si-sec').value === 'v3' ? 'v3' : 'v2c',
         snmpV3User: rowEl.querySelector('.mh-si-v3user').value.trim().slice(0, 32),
         snmpV3AuthProto: rowEl.dataset.v3AuthProto === 'md5' ? 'md5' : 'sha',
@@ -6681,6 +6685,7 @@ function openDiagTools(prefillHost) {
         <div class="frow" id="dgCommRow" style="display:none;gap:6px;align-items:flex-end;flex-wrap:wrap"><label>SNMP</label>
           <select id="dgSnmpSec" style="width:76px"><option value="v2c">v2c</option><option value="v3">v3</option></select>
           <input id="dgComm" type="text" value="public" style="width:90px" spellcheck="false" title="v2c 团体名"/>
+          <input id="dgSnmpPort" type="number" min="1" max="65535" value="161" style="width:72px" spellcheck="false" title="SNMP UDP 端口（默认 161；设备端口映射/非标端口填此）"/>
           <input id="dgV3User" type="text" placeholder="v3 用户名" style="width:110px;display:none" spellcheck="false" autocomplete="off"/>
           <button type="button" class="tb" id="dgV3Btn" style="display:none;padding:3px 10px;font-size:11.5px">v3 口令…</button>
         </div>
@@ -6794,7 +6799,7 @@ function openDiagTools(prefillHost) {
           append('—— 存活 ' + r.alive.length + '，无响应 ' + r.dead + '（ICMP 被禁ping的主机不会出现）');
         }
       } else if (tool === 'snmp') {
-        const walkReq = { host, oid: ov.querySelector('#dgOid').value.trim() };
+        const walkReq = { host, oid: ov.querySelector('#dgOid').value.trim(), port: (() => { const v = parseInt(ov.querySelector('#dgSnmpPort').value, 10); return (v > 0 && v <= 65535) ? v : 161; })() };
         if (dgSecEl.value === 'v3') {
           walkReq.version = 'v3';
           walkReq.v3User = ov.querySelector('#dgV3User').value.trim();
