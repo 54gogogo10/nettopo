@@ -25,14 +25,18 @@ function berLenOf(n) {
 }
 function berTlv(tag, body) { return Buffer.concat([Buffer.from([tag]), berLenOf(body.length), body]); }
 function berInt(n) {
+  // 无符号视值编码为最小长度补码整数：正数首字节高位为 1 时必须补前导 0x00
+  // （否则 65507 会被编码成 02 02 ff e3，按补码解读为 -29，真实设备直接丢包）
   const bytes = [];
-  let v = n;
+  let v = n >>> 0;
   do { bytes.unshift(v & 0xff); v = v >>> 8; } while (v);
+  if (bytes[0] & 0x80) bytes.unshift(0);
   return berTlv(0x02, Buffer.from(bytes));
 }
 function berOct(b) { return berTlv(0x04, Buffer.isBuffer(b) ? b : Buffer.from(String(b || ''), 'utf8')); }
 function berOid(oid) {
-  const parts = String(oid).split('.').map(Number);
+  // 容忍常见输入形态：前导点（.1.3.6.1）/多余空白/末尾点——strip 后再编码
+  const parts = String(oid).trim().replace(/^\.+/, '').replace(/\.+$/, '').split('.').map(Number);
   const body = [parts[0] * 40 + (parts[1] || 0)];
   for (let i = 2; i < parts.length; i++) {
     let v = parts[i];
@@ -186,7 +190,9 @@ function buildV3Message(opts) {
     berOct(user.user), berOct(Buffer.alloc(12)),
     user.level === 'authPriv' ? berOct(privSalt) : berOct(Buffer.alloc(0))
   ]);
-  const usm = berOct(usmBody);
+  // RFC 3414：msgSecurityParameters 是 OCTET STRING，内容为 USMSecurityParametersFields
+  // （SEQUENCE）的 ASN.1 编码——真实设备（net-snmp 等）要求必须有内层 SEQUENCE 头
+  const usm = berOct(berTlv(0x30, usmBody));
 
   let msgData;
   if (user.level === 'authPriv') {
@@ -212,12 +218,18 @@ function buildV3Message(opts) {
   } else {
     msgData = scoped;
   }
-  const msg = berTlv(0x30, Buffer.concat([
-    berInt(3),
+  // RFC 3411 SNMPv3Message ::= SEQUENCE { version, msgGlobalData(HeaderData SEQUENCE),
+  // msgSecurityParameters OCTET STRING, msgData }——msgID/maxSize/flags/secModel 必须包在
+  // HeaderData SEQUENCE 里；缺失时真实设备（net-snmp 等）按坏包丢弃
+  const header = berTlv(0x30, Buffer.concat([
     berInt((opts.msgID || 1) & 0x7fffffff),
     berInt(65507),
     berOct(Buffer.from([flags])),
+    berInt(3)
+  ]));
+  const msg = berTlv(0x30, Buffer.concat([
     berInt(3),
+    header,
     usm,
     msgData
   ]));
@@ -225,7 +237,7 @@ function buildV3Message(opts) {
   let authParamsOffset = -1;
   if (user.level !== 'noAuth') {
     const root = tlvWalk(msg, 0);
-    // 顶层字段：version(0) msgID(1) maxSize(2) flags(3) secModel(4) usm(5) data(6)
+    // 顶层字段：version(0) header(1) usm(2) data(3)
     let cur = 0;
     const fields = [];
     while (cur < root.body.length) {
@@ -234,11 +246,13 @@ function buildV3Message(opts) {
       fields.push(t);
       cur = t.next;
     }
-    const usmT = fields[5];
+    const usmT = fields[2];
+    const usmInner = tlvWalk(usmT.body, 0);
+    const usmScope = (usmInner && usmInner.tag === 0x30) ? usmInner.body : usmT.body;
     const ufields = [];
     let c = 0;
-    while (c < usmT.body.length) {
-      const t = tlvWalk(usmT.body, c);
+    while (c < usmScope.length) {
+      const t = tlvWalk(usmScope, c);
       if (!t) break;
       ufields.push(t);
       c = t.next;
@@ -247,7 +261,9 @@ function buildV3Message(opts) {
     if (authT && authT.body.length === 12) {
       const kul = passwordToKey(user.authPass, engineID, user.authProto);
       const digest = authDigest(msg, kul, user.authProto);
-      const off = root.start + root.hs + usmT.start + usmT.hs + authT.start + authT.hs;
+      const off = root.start + root.hs + usmT.start + usmT.hs +
+        (usmInner && usmInner.tag === 0x30 ? usmInner.start + usmInner.hs : 0) +
+        authT.start + authT.hs;
       digest.copy(msg, off);
       authParamsOffset = off;
     }
@@ -295,19 +311,46 @@ function parseV3Message(buf, opts) {
       fields.push(t);
       cur = t.next;
     }
-    if (fields.length < 6) return { ok: false, reason: 'v3 字段不足' };
+    if (fields.length < 4) return { ok: false, reason: 'v3 字段不足' };
     const version = readUInt(fields[0].body);
     if (version !== 3) return { ok: false, reason: '非 v3 版本' };
-    const rid = readUInt(fields[1].body);
-    const flagsBuf = fields[3].body;
+    // RFC 3411 标准形态：version, header(SEQUENCE{id,max,flags,secModel}), usm(OCTET), msgData；
+    // 兼容历史平铺形态：version, msgID, maxSize, flags, secModel, usm, msgData
+    const isRfc = fields[1].tag === 0x30;
+    let rid, flagsBuf, usmT, msgDataT;
+    if (isRfc) {
+      if (fields.length < 4) return { ok: false, reason: 'v3 字段不足' };
+      const hd = [];
+      let h = 0;
+      while (h < fields[1].body.length) {
+        const t = tlvWalk(fields[1].body, h);
+        if (!t) return { ok: false, reason: 'HeaderData 截断' };
+        hd.push(t);
+        h = t.next;
+      }
+      if (hd.length < 4) return { ok: false, reason: 'HeaderData 字段不足' };
+      rid = readUInt(hd[0].body);
+      flagsBuf = hd[2].body;
+      usmT = fields[2];
+      msgDataT = fields[3];
+    } else {
+      if (fields.length < 7) return { ok: false, reason: 'v3 字段不足' };
+      rid = readUInt(fields[1].body);
+      flagsBuf = fields[3].body;
+      usmT = fields[5];
+      msgDataT = fields[6];
+    }
     const flags = flagsBuf && flagsBuf.length ? flagsBuf[0] : 0;
     const wantAuth = !!(flags & 0x01);
     const wantPriv = !!(flags & 0x02);
-    const usmT = fields[5];
+    // 兼容两种形态：RFC 3414 标准（真实设备）为内层 SEQUENCE 包裹字段；历史形态为直接平铺
+    let usmScope = usmT.body;
+    const usmInner = tlvWalk(usmT.body, 0);
+    if (usmInner && usmInner.tag === 0x30) usmScope = usmInner.body;
     const uf = [];
     let c = 0;
-    while (c < usmT.body.length) {
-      const t = tlvWalk(usmT.body, c);
+    while (c < usmScope.length) {
+      const t = tlvWalk(usmScope, c);
       if (!t) return { ok: false, reason: 'USM 截断' };
       uf.push(t);
       c = t.next;
@@ -328,17 +371,19 @@ function parseV3Message(buf, opts) {
       if (authParams.length !== 12) return { ok: false, reason: 'authParams 长度异常' };
       const kul = passwordToKey(u.authPass, Buffer.from(engineID, 'hex'), u.authProto);
       const masked = Buffer.from(buf);
-      const off = root.start + root.hs + usmT.start + usmT.hs + uf[4].start + uf[4].hs;
+      const off = root.start + root.hs + usmT.start + usmT.hs +
+        (usmInner && usmInner.tag === 0x30 ? usmInner.start + usmInner.hs : 0) +
+        uf[4].start + uf[4].hs;
       masked.fill(0, off, off + 12); // authParams 置零后重算整包 HMAC（RFC 3414 7.2.4）
       const expect = authDigest(masked, kul, u.authProto);
       if (!expect.equals(Buffer.from(authParams))) return { ok: false, reason: 'v3 认证失败（签名不匹配，认证密码或算法不符）' };
       authenticated = true;
     }
 
-    // msgData：authPriv 为 OCTET STRING(密文)，解密后得完整 scopedPDU TLV；明文时 fields[6] 即 scopedPDU TLV
+    // msgData：authPriv 为 OCTET STRING(密文)，解密后得完整 scopedPDU TLV；明文时 msgDataT 即 scopedPDU TLV
     let scopedBody = null;
     let decrypted = false;
-    if (fields[6].tag === 0x04) {
+    if (msgDataT.tag === 0x04) {
       // 加密 scopedPDU：需本端配置用户且与包内用户一致
       const u = opts.user;
       if (!u || u.level !== 'authPriv') return { ok: false, reason: '收到加密 v3 包但未配置 v3 用户' };
@@ -350,20 +395,20 @@ function parseV3Message(buf, opts) {
         iv16.writeUInt32BE(boots >>> 0, 0);
         iv16.writeUInt32BE(time >>> 0, 4);
         privParams.copy(iv16, 8);
-        plain = decryptAES(kul.subarray(0, 16), iv16, fields[6].body);
+        plain = decryptAES(kul.subarray(0, 16), iv16, msgDataT.body);
       } else {
         const iv8 = Buffer.alloc(8);
         iv8.writeUInt32BE(boots >>> 0, 0);
         iv8.writeUInt32BE(time >>> 0, 4);
         for (let i = 0; i < 8; i++) iv8[i] = iv8[i] ^ privParams[i];
-        plain = decryptDES(kul.subarray(0, 8), iv8, fields[6].body);
+        plain = decryptDES(kul.subarray(0, 8), iv8, msgDataT.body);
       }
       const scoped = tlvWalk(plain, 0);
       if (!scoped || scoped.tag !== 0x30) return { ok: false, reason: 'scopedPDU 解密后格式异常' };
       scopedBody = scoped.body;
       decrypted = true;
     } else {
-      scopedBody = fields[6].body;
+      scopedBody = msgDataT.body;
     }
     const sfields = [];
     let s = 0;

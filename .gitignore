@@ -43,3 +43,6 @@ build-last.log
 
 # Mimosa 本机扫描器状态（会话缓存，不入库）
 .mimosa/
+
+# 真实设备测试实验室（frlab / WSL FRR，临时产物不入库）
+test/_frlab/

@@ -124,7 +124,8 @@ function berInt(n) {
   return berTlv(0x02, Buffer.from(bytes));
 }
 function berOid(oid) {
-  const parts = String(oid).split('.').map(Number);
+  // 容忍常见输入形态：前导点（.1.3.6.1）/多余空白/末尾点——strip 后再编码，避免 NaN 静默产出坏包
+  const parts = String(oid).trim().replace(/^\.+/, '').replace(/\.+$/, '').split('.').map(Number);
   const body = [parts[0] * 40 + (parts[1] || 0)];
   for (let i = 2; i < parts.length; i++) {
     let v = parts[i];
@@ -864,8 +865,9 @@ class MonitorManager extends EventEmitter {
     // memFreeOid 留空 = memUsedOid 的值直接是百分比（华为/华三 entity-ext）；填写 = 按 used/(used+free) 计算（思科字节型）。
     const pfOpt = sOpt.perf && typeof sOpt.perf === 'object' ? sOpt.perf : {};
     const cleanOid = (v) => {
-      // OID 白名单：点分十进制（最多 20 段——企业 MIB 常见 12~15 段），总长 64 上限
-      const s = String(v == null ? '' : v).trim();
+      // OID 白名单：点分十进制（最多 20 段——企业 MIB 常见 12~15 段），总长 64 上限；
+      // 容忍厂商文档常见的 .1.3.6.1 前导点/末尾点形态（此前会被静默清空导致 CPU/内存不采集）
+      const s = String(v == null ? '' : v).trim().replace(/^\.+/, '').replace(/\.+$/, '');
       return (/^\d{1,10}(?:\.\d{1,10}){1,19}$/.test(s) && s.length <= 64) ? s : '';
     };
     sysinfo.perf = {

@@ -4727,6 +4727,23 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         ok(threw, 'v3 authPriv DES：本环境不支持时给出改用 AES 的明确提示');
       }
 
+      // RFC 3411/3414 报文形态回归（真实 net-snmp 设备互通实测发现的三处结构性偏差）：
+      // 1) msgGlobalData 必须是 SEQUENCE（HeaderData 包裹 msgID/maxSize/flags/secModel）
+      const bd = V3.buildV3Message({ pduTag: 0xa0, oids: ['1.3.6.1.6.3.15.1.1.4.0'], engineID: Buffer.alloc(0), boots: 0, time: 0, user: { user: '', level: 'noAuth' }, reportable: true, msgID: 0x44ff2def, rid: 1 });
+      ok(bd.msg[0] === 0x30 && bd.msg[2] === 0x02 && bd.msg[4] === 0x03 && bd.msg[5] === 0x30, 'v3 发现包：HeaderData 为内层 SEQUENCE（msgGlobalData）');
+      // 2) berInt 正数高位为 1 时补前导 0：65507 → 02 03 00 ff e3（此前编码为 -29 被设备静默丢弃）
+      ok(bd.msg.subarray(0, 0x22).toString('hex').includes('020300ffe3'), 'v3 发现包：msgMaxSize=65507 按最小补码正整数编码（02 03 00 ff e3）');
+      // 3) USM 安全参数为 OCTET STRING{ SEQUENCE{...} }（内层 SEQUENCE）
+      const usmOff = bd.msg.toString('hex').indexOf('041c301a');
+      ok(usmOff > 0, 'v3 发现包：USM 为 OCTET STRING{ SEQUENCE{...} }（RFC 3414）');
+      // 4) OID 容错：前导点/末尾点/空白不产生 NaN 坏包（实测用户配置 .1.3.6.1... 形态 CPU OID 静默失败）
+      eq(V3.berOid('.1.3.6.1.2.1.1.5.0').toString('hex'), V3.berOid('1.3.6.1.2.1.1.5.0').toString('hex'), 'v3 berOid：前导点 OID 与标准形态编码一致');
+      // 解析真实 net-snmp 5.9 的 Report 报文（本实验室 10.200.0.12 实抓）：引擎发现回包可解
+      const REAL_REPORT = Buffer.from('307202010330110204189cee8e020300ffe304010002010304223020041180001f8880664b722e0145a06a0000000002010102020f4f040004000400303604118000 1f8880664b722e0145a06a000000000400a81f0204189cee8e0201000201003011300f060a2b060106030f01010400410108'.replace(/\s+/g, ''), 'hex');
+      const pr = V3.parseV3Message(REAL_REPORT, { user: null });
+      ok(pr.ok && pr.pduTag === 0xa8 && pr.engineID === '80001f8880664b722e0145a06a00000000' && pr.boots === 1 && pr.time === 3919, 'v3 解析：真实 net-snmp Report（引擎发现回包）');
+      ok(pr.report && String(pr.report.oid) === '1.3.6.1.6.3.15.1.1.4.0', 'v3 解析：真实 Report 携带 usmStatsUnknownEngineIDs');
+
       // mock v3 代理（引擎发现 + 验签解密 + 加密认证响应）全链路：monitor.js snmpGet/snmpWalk
       const USER = { user: 'ops', authProto: 'sha', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' };
       const ENG = Buffer.from('80001f8804e8c1d3b8a1b2c3', 'hex');
