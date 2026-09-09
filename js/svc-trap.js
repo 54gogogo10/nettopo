@@ -41,7 +41,7 @@ function tlvWalk(buf, start) {
   let hs = 2;
   if (len & 0x80) {
     const n = len & 0x7f;
-    if (n > 2 || start + 2 + n > buf.length) return null;
+    if (n > 4 || start + 2 + n > buf.length) return null;
     len = 0;
     for (let i = 0; i < n; i++) len = len * 256 + buf[start + 2 + i];
     hs = 2 + n;
@@ -360,10 +360,11 @@ class TrapServer extends EventEmitter {
       lastReason = r.reason || '';
     }
     if (!full) {
-      // 从「用户 X 未配置认证密钥」提取包内用户名：捕获不能排除字母 s（旧正则 [^s）] 会让
-      // 含 s 的用户名（如 snmpadmin）误入 v3AuthFail 而非 v3Unknown）
-      const m = /用户 (.+) 未配置/.exec(lastReason);
-      if (m && !this.v3Users.some(x => x.user === m[1])) this.stats.v3Unknown++; // 包内用户未在本端配置
+      // 从失败原因提取包内用户名做分类：「用户不匹配（X）」（本端无此用户；明文/noAuth 包的
+      // userName 校验走此路径）与「用户 X 未配置认证密钥」（级别不符）都携带用户名；捕获不能
+      // 排除字母 s（旧正则 [^s）] 会让含 s 用户名误入 v3AuthFail 而非 v3Unknown）
+      const mm = /用户不匹配（(.+?)）/.exec(lastReason) || /用户 (.+?) 未配置/.exec(lastReason);
+      if (mm && !this.v3Users.some(x => x.user === mm[1])) this.stats.v3Unknown++; // 包内用户未在本端配置
       else this.stats.v3AuthFail++;                                              // 已配置用户但验签/解密失败
       return;
     }
@@ -372,6 +373,9 @@ class TrapServer extends EventEmitter {
     // 未认证包一律按验签失败丢弃，否则局域网任意主机可注入 linkDown 等伪造告警
     //（本端用户显式配置为 noAuth 空口令时照常接收，等价于 v2c 的无认证语义）
     if (matched.level !== 'noAuth' && !full.authenticated) { this.stats.v3AuthFail++; return; }
+    // priv 档同样强制：本端配置 authPriv 而收到「已认证但明文」的降级包（flags 无 priv、
+    // msgData 非 OCTET STRING）也拒收——持认证凭据但无隐私密钥方不得以明文注入告警
+    if (matched.level === 'authPriv' && !full.decrypted) { this.stats.v3AuthFail++; return; }
     if (full.pduTag !== 0xa7) { this.stats.malformed++; return; } // 仅收 Trap（inform 应答不在 v3 接收范围）
     let trapOid = '';
     let uptimeTicks = null;
@@ -422,7 +426,7 @@ class TrapServer extends EventEmitter {
       // INTEGER/长度均按最小补码编码：正数首字节高位为 1 时补前导 0；长度 ≥256 需 0x82 两字节
       // （企业 inform 的 varbind 区常超 255 字节，此前 0x81 截断为低 8 位产出坏包，设备重发不止）
       const uintBytes = (n) => { const b = []; let v = n >>> 0; do { b.unshift(v & 0xff); v = v >>> 8; } while (v); if (b[0] & 0x80) b.unshift(0); return b; };
-      const berLen = (n) => n < 128 ? Buffer.from([n]) : n < 256 ? Buffer.from([0x81, n]) : Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
+      const berLen = (n) => n < 128 ? Buffer.from([n]) : n < 256 ? Buffer.from([0x81, n]) : n < 65536 ? Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]) : n < 16777216 ? Buffer.from([0x83, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]) : Buffer.from([0x84, (n >>> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
       const berTlv = (tag, body) => Buffer.concat([Buffer.from([tag]), berLen(body.length), body]);
       const rid = readUInt(ridT.body) || 0;
       const pdu = Buffer.concat([berTlv(0x02, Buffer.from(uintBytes(rid))), berTlv(0x02, Buffer.from([0])), berTlv(0x02, Buffer.from([0])), varb]);

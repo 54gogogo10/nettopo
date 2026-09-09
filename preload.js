@@ -129,11 +129,12 @@ contextBridge.exposeInMainWorld('topoSecure', {
   decryptSecret: (cipher) => ipcRenderer.invoke('secure:decrypt', cipher)
 });
 
-/* 在线升级（仅主窗口可用）：检查 / 下载校验 / 应用重启；进度与发现新版本经事件推送 */
+/* 在线升级（仅主窗口可用）：检查 / 下载校验 / 取消下载 / 应用重启；进度与发现新版本经事件推送 */
 contextBridge.exposeInMainWorld('topoUpdate', {
   check: () => ipcRenderer.invoke('update:check'),
   download: (assets) => ipcRenderer.invoke('update:download', { assets }),
   apply: () => ipcRenderer.invoke('update:apply'),
+  cancel: () => ipcRenderer.invoke('update:cancel'),
   reveal: () => ipcRenderer.invoke('update:reveal'),
   onStatus: sub('update:status'),
   onProgress: sub('update:progress'),

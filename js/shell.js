@@ -282,6 +282,16 @@ class ShellManager extends EventEmitter {
       }
       this.close(id);
     }
+    // 已断开的 UI 会话不在 sessions 里（end 即移除），close 走不到——但其建连参数（含明文
+    // 密码）仍在 _params 滞留供「重新连接」；窗口关闭后前端已不可能再触发重连，一并清掉，
+    // 否则用户反复开关窗口会累积不可达的凭据副本（与 close() 的「内存不留凭据」语义对齐）
+    if (exceptOwner) {
+      for (const id of [...this._params.keys()]) {
+        const base = this._params.get(id);
+        if (base && base.owner === exceptOwner) continue;
+        this._params.delete(id);
+      }
+    }
   }
 
   /** SSH 首次连接指纹确认：用户信任后放行该主机的全部待确认握手（TOFU）。
@@ -598,6 +608,9 @@ class ShellManager extends EventEmitter {
     const local = String(localPath == null ? '' : localPath).trim();
     if (!local) return { ok: false, error: '本地保存路径无效' };
     let sftp = null;
+    // 先写 .part 临时文件再 rename 覆盖：用户在另存为对话框选择覆盖既有文件时，下载中途
+    // 失败不得删掉原文件（系统覆盖确认的语义是「成功后才替换」，直接 unlink 会把原文件一并毁掉）
+    const part = local + '.nettopo.part';
     try {
       sftp = await this._sftpOf(id);
       const total = await new Promise((resolve) => {
@@ -605,7 +618,7 @@ class ShellManager extends EventEmitter {
       });
       await new Promise((resolve, reject) => {
         let lastEmit = 0;
-        sftp.fastGet(p, local, {
+        sftp.fastGet(p, part, {
           step: (transferred) => {
             if (typeof onProgress !== 'function') return;
             const now = Date.now();
@@ -615,11 +628,12 @@ class ShellManager extends EventEmitter {
           }
         }, (err) => { try { err ? reject(err) : resolve(); } catch (e) { reject(e); } });
       });
+      fs.renameSync(part, local);
       if (typeof onProgress === 'function') { try { onProgress({ op: 'download', id: String(id), name: p, transferred: total, total }); } catch (e) { /* ignore */ } }
       return { ok: true, path: local, size: total };
     } catch (e) {
-      // 失败时清理半成品文件，不留损坏产物
-      try { fs.unlinkSync(local); } catch (e2) { /* ignore */ }
+      // 失败时只清理 .part 半成品，用户选择覆盖的本地原文件保持原样
+      try { fs.unlinkSync(part); } catch (e2) { /* ignore */ }
       return { ok: false, error: String((e && e.message) || e) };
     } finally {
       if (sftp) { try { sftp.end(); } catch (e) { /* ignore */ } }
@@ -716,15 +730,15 @@ class ShellManager extends EventEmitter {
         }));
       };
     };
-    // 主机密钥校验（TOFU）：目标与跳板各自独立排队确认；带 expectFp 的目标严格比对
-    const makeVerifier = (host, rec) => (key, verify) => {
+    // 主机密钥校验（TOFU）：目标与跳板各自独立排队确认；带 expectFp 的端（目标或跳板）严格比对
+    const makeVerifier = (host, port, rec, expectFp) => (key, verify) => {
       try {
         const hex = String(key).toLowerCase();
         // ssh2 传入的是 SHA256 的 hex 摘要，转成 OpenSSH 标准 SHA256:<base64> 格式，便于与 ssh-keygen 输出核对
         const fp = 'SHA256:' + Buffer.from(hex, 'hex').toString('base64').replace(/=+$/, '');
-        if (o.expectFp && host === o.host) {
-          if (o.expectFp !== fp) {
-            em.emit('status', { state: 'error', text: '主机密钥指纹不匹配：' + fp + '（期望 ' + o.expectFp + '），可能存在中间人攻击' });
+        if (expectFp) {
+          if (expectFp !== fp) {
+            em.emit('status', { state: 'error', text: (host === o.host ? '主机' : '跳板') + '密钥指纹不匹配：' + fp + '（期望 ' + expectFp + '），可能存在中间人攻击' });
             return false;
           }
           em.emit('status', { state: 'info', host, fp, text: '主机密钥指纹: ' + fp });
@@ -735,7 +749,7 @@ class ShellManager extends EventEmitter {
         const arr = this._pendingVerify.get(host);
         if (arr) arr.push(rec);
         else this._pendingVerify.set(host, [rec]);
-        em.emit('status', { state: 'fingerprint', host, fp, text: '首次连接，请核对主机指纹: ' + fp });
+        em.emit('status', { state: 'fingerprint', host, port, fp, text: '首次连接，请核对主机指纹: ' + fp });
         return undefined; // 异步确认，不立即 verify
       } catch (e) {
         return false;
@@ -758,7 +772,7 @@ class ShellManager extends EventEmitter {
       keepaliveInterval: 15000,
       keepaliveCountMax: 4,
       hostHash: 'sha256',
-      hostVerifier: makeVerifier(o.host, pendingRec)
+      hostVerifier: makeVerifier(o.host, o.port, pendingRec, o.expectFp || '')
     };
     if (o.privateKey) {
       cfg.privateKey = o.privateKey;
@@ -792,7 +806,7 @@ class ShellManager extends EventEmitter {
         keepaliveInterval: 15000,
         keepaliveCountMax: 4,
         hostHash: 'sha256',
-        hostVerifier: makeVerifier(o.jump.host, jumpRec)
+        hostVerifier: makeVerifier(o.jump.host, o.jump.port || 22, jumpRec, o.jump.expectFp || '')
       };
       if (o.jump.privateKey) {
         jumpCfg.privateKey = o.jump.privateKey;

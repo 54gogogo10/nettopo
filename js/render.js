@@ -353,14 +353,16 @@ class Renderer {
     const size = 13.5;
     const text = String(name);
     if (U.measureText(text, size) <= avail) return text;
-    let out = '';
+    // 从头消费「为腾出空间需删除的字符」，返回其余部分 + 省略号——此前误把被删除的头段
+    // 当显示内容（长名溢出节点框数倍，略超宽却只剩一两个字符）
+    let cut = 0;
     let w = U.measureText(text, size);
     for (const ch of text) {
       if (w <= avail - 8) break;
       w -= /[\u4e00-\u9fff\uff00-\uffef]/.test(ch) ? size : size * 0.56;
-      out += ch;
+      cut += ch.length;
     }
-    return out + '…';
+    return text.slice(cut) + '…';
   }
 
   /* ---------- 连线构建 ---------- */

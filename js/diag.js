@@ -92,14 +92,15 @@ async function scanPorts(host, ports, timeoutMs) {
   return results;
 }
 
-/** DNS 解析：A 记录（lookup all）+ 首个 IPv4 的 PTR 反查；单项失败不影响整体 */
+/** DNS 解析：A 记录（lookup all）+ CNAME（resolveCname，失败保持 null）+ 首个 IPv4 的 PTR 反查；单项失败不影响整体 */
 async function dnsLookup(host) {
   const out = { host, addresses: [], cname: null, reverse: [], error: null };
   try {
     const all = await dnsPromises.lookup(host, { all: true, verbatim: true });
     out.addresses = (all || []).map(a => a.address).slice(0, 16);
-    for (const a of all || []) { if (a && a.type === 'CNAME' && !out.cname) out.cname = a.address; }
   } catch (e) { out.error = '解析失败：' + ((e && (e.message || e.code)) || e); return out; }
+  // lookup 的返回元素只有 {address, family}，不含记录类型——CNAME 须用 resolveCname 单独查
+  try { const cn = await dnsPromises.resolveCname(host); if (cn && cn.length) out.cname = cn[0]; } catch (e) { /* 无 CNAME 或不支持：保持 null */ }
   const v4 = out.addresses.find(a => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(a));
   if (v4) {
     try { out.reverse = (await dnsPromises.reverse(v4)).slice(0, 8); } catch (e) { /* 无 PTR 属正常 */ }
@@ -194,7 +195,14 @@ function expandScanTargets(text) {
       if (a == null) continue;
       const bRaw = m[2];
       let b;
-      if (/^\d{1,3}$/.test(bRaw)) { b = (a & 0xffffff00) | parseInt(bRaw, 10); if (b < a) b = a; }
+      if (/^\d{1,3}$/.test(bRaw)) {
+        const last = parseInt(bRaw, 10);
+        if (last > 255) continue; // 数字后缀仅指末八位组：>255 会借位溢出到第三段，语义歧义直接拒绝
+        // 无符号化必须显式 >>>0：a 为纯算术正数（首段 ≥128 时 ≥2^31），而按位或产出有符号
+        // int32 负数 → b < a 恒成立 → 192.168.x/172.16.x 等主流内网段静默退化为单 IP 扫描
+        b = (((a >>> 0) & 0xffffff00 | last) >>> 0);
+        if (b < a) b = a;
+      }
       else { b = ipv4ToIntDiag(bRaw); }
       if (b == null || b < a) continue;
       if (b - a > 4095) b = a + 4095;

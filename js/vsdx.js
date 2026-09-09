@@ -455,11 +455,12 @@ function buildVSDX(graph, opts) {
     </Shape>`);
   }
 
-  // 标注防碰撞：推开重叠的文本框后再生成
+  // 标注防碰撞：推开重叠的文本框后再生成（页面边界钳制：密集拓扑的标注不被推出可见区）
   if (labelBoxes.length) {
     U.resolveLabelCollisions(labelBoxes, {
       pad: 0.08,
-      obstacles: nodes.map(n => ({ x: (n.x - minX) * scale, y: Y(n.y + n.h), w: n.w * scale, h: n.h * scale }))
+      obstacles: nodes.map(n => ({ x: (n.x - minX) * scale, y: Y(n.y + n.h), w: n.w * scale, h: n.h * scale })),
+      bounds: { x: 0, y: 0, w: pw, h: ph }
     });
   }
   for (const lb of labelBoxes) {

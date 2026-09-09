@@ -360,12 +360,15 @@ function parseClaudeResponse(j) {
   return { ok: true, text, usage, model: String(j.model || '') };
 }
 
-/** 解析 SSE 流缓冲：返回 { deltas:[新增文本], done:bool, rest }。
- *  rest 为最后一个不完整事件（未遇到空行分隔），须与下个数据块拼接后再解析。 */
+/** 解析 SSE 流缓冲：返回 { deltas:[新增文本], done:bool, rest, usage }。
+ *  rest 为最后一个不完整事件（未遇到空行分隔），须与下个数据块拼接后再解析。
+ *  usage 取流末 chunk 携带的用量（OpenAI 兼容流的 j.usage、Claude message_delta 的
+ *  usage.output_tokens），供流式请求返回真实 token 数。 */
 function parseSseChunk(buf) {
   let s = String(buf == null ? '' : buf);
   const deltas = [];
   let done = false;
+  let usage = null;
   const events = [];
   for (;;) {
     const m = s.match(/\r?\n\r?\n/);
@@ -380,6 +383,13 @@ function parseSseChunk(buf) {
       if (data === '[DONE]') { done = true; continue; }
       let j = null;
       try { j = JSON.parse(data); } catch (e) { continue; } // 非 JSON 数据行：宽容忽略（各家实现差异）
+      if (j && typeof j.usage === 'object' && j.usage) usage = j.usage;
+      else if (j && j.type === 'message_delta' && j.usage && Number.isFinite(j.usage.output_tokens)) {
+        // Claude 流末的 message_delta 只带 output_tokens（prompt 用量在 message_start）
+        usage = { prompt_tokens: (usage && usage.prompt_tokens) || 0, completion_tokens: j.usage.output_tokens };
+      } else if (j && j.type === 'message_start' && j.message && j.usage && Number.isFinite(j.usage.input_tokens)) {
+        usage = Object.assign({}, usage, { prompt_tokens: j.usage.input_tokens });
+      }
       const ch = j && Array.isArray(j.choices) && j.choices[0];
       const d = ch && ch.delta;
       if (d && typeof d.content === 'string' && d.content) deltas.push(d.content);
@@ -389,7 +399,7 @@ function parseSseChunk(buf) {
       else if (j.type === 'content_block_delta' && j.delta && typeof j.delta.text === 'string' && j.delta.text) deltas.push(j.delta.text); // Claude 流式增量
     }
   }
-  return { deltas, done, rest: s };
+  return { deltas, done, rest: s, usage };
 }
 
 /** 解析非流式 Chat Completions 响应 JSON → { ok, text, usage, model } | { ok:false, error } */
@@ -651,6 +661,10 @@ class AiClient extends EventEmitter {
         let buf = '';      // SSE 跨块缓冲（不完整事件尾部）
         let received = 0;  // 响应字节计数（上限保护）
         const jsonChunks = [];
+        // 流式路径进入即清残留：_lastUsage 只在非流式收尾更新，否则 chat() 返回的是
+        // 上一次非流式请求（如连通性测试）的旧 token 数——用量统计张冠李戴
+        if (!nonStream) this._lastUsage = null;
+        let streamUsage = null;
         const onText = (text) => {
           armIdle(); // 收到数据即重置空闲定时器
           received += Buffer.byteLength(text, 'utf8');
@@ -659,6 +673,7 @@ class AiClient extends EventEmitter {
           buf += text;
           const r = parseSseChunk(buf);
           buf = r.rest;
+          if (r.usage) streamUsage = r.usage; // 流末 chunk 的真实用量（OpenAI 兼容 / Claude）
           for (const d of r.deltas) {
             try { onDelta(d); } catch (e) { /* 回调异常不中断接收 */ }
           }
@@ -681,10 +696,12 @@ class AiClient extends EventEmitter {
           // 流式收尾：处理无结束空行的残余事件
           if (buf) {
             const r = parseSseChunk(buf + '\n\n');
+            if (r.usage) streamUsage = r.usage;
             for (const d of r.deltas) {
               try { onDelta(d); } catch (e) { /* ignore */ }
             }
           }
+          this._lastUsage = streamUsage; // 流式真实用量（服务端未携带时为 null，如实展示）
           settled = true;
           clearTimers();
           resolve('');

@@ -279,6 +279,8 @@ async function loadGraph(graph, msg) {
   state.links = cleaned.links;
   state.texts = cleaned.texts;
   state.regions = []; // 导入的表格无区域数据
+  state.downLinks = new Set(); // 整体替换拓扑：故障标记一并重置（残留 id 指向已不存在的链路）
+  renderer.setDownLinks(state.downLinks);
   state.sel = { kind: null, id: null };
   state.undoStack = []; // 初始状态无需撤销
   state.redoStack = [];
@@ -314,13 +316,18 @@ function monitorCredOf(nodeId) {
   const rows = normalizeMonitorHosts(state.monitorCfg[nodeId]);
   return rows.find(x => x.protocol === 'ssh') || rows[0] || null;
 }
-/** 已信任主机指纹（TOFU）：与 Web Shell/监控同一份记录；采集前传入 expectFp 严格比对（变化即拒连） */
-function trustedFpOf(host) {
-  try { const fp = localStorage.getItem('topoShellFp:' + host); return (fp && fp.indexOf('SHA256:') === 0) ? fp : ''; } catch (e) { return ''; }
+/** 已信任主机指纹（TOFU）：与 Web Shell/监控同一份记录；采集前传入 expectFp 严格比对（变化即拒连）。
+ *  非默认端口（≠22）键含端口后缀（与 ssh known_hosts 口径一致，同 IP 不同端口互不挤掉）；读取兼容旧版 host-only 键 */
+function fpKeyOf(host, port) { return 'topoShellFp:' + host + (port && Number(port) !== 22 ? ':' + Number(port) : ''); }
+function trustedFpOf(host, port) {
+  try {
+    const fp = localStorage.getItem(fpKeyOf(host, port)) || localStorage.getItem('topoShellFp:' + host);
+    return (fp && fp.indexOf('SHA256:') === 0) ? fp : '';
+  } catch (e) { return ''; }
 }
-function rememberTrustedFp(host, fp) {
+function rememberTrustedFp(host, port, fp) {
   if (!host || !fp) return;
-  try { localStorage.setItem('topoShellFp:' + host, fp); } catch (e) { /* ignore */ }
+  try { localStorage.setItem(fpKeyOf(host, port), fp); } catch (e) { /* ignore */ }
 }
 function openNeighborImport(prefillText, presetLocalId) {
   if (!state.nodes.length) { toast('当前画布为空：请先添加或导入本端设备'); return; }
@@ -419,9 +426,9 @@ function openNeighborImport(prefillText, presetLocalId) {
         password: ov.querySelector('#nbPass').value,
         encoding: ov.querySelector('#nbGbk').checked ? 'gbk' : 'utf8',
         commands: NB_COLLECT_CMDS[vendor] || NB_COLLECT_CMDS.auto,
-        expectFp: trustedFpOf(host)
+        expectFp: trustedFpOf(host, ov.querySelector('#nbPort').value)
       });
-      if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.fp);
+      if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || ov.querySelector('#nbPort').value, r.fingerprint.fp);
       const text = (r.outputs || []).map(o => o.text).filter(t => t && t.trim()).join('\n');
       if (text) ov.querySelector('#nbText').value = text;
       const errs = (r.errors || []).filter(Boolean);
@@ -545,9 +552,9 @@ function openMacTrace(prefill) {
             username: c.cred ? c.cred.username : fbUser,
             password: c.cred ? c.cred.password : fbPass,
             commands: MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto,
-            expectFp: trustedFpOf(host)
+            expectFp: trustedFpOf(host, c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22))
           });
-          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.fp);
+          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port, r.fingerprint.fp);
           const text = (r.outputs || []).map(o => o.text).join('\n');
           const t = U.parseArpMacTables(text);
           if (t.arp.length || t.mac.length) { queryResults[c.node.id] = t; got.push(c.node.name); }
@@ -761,9 +768,9 @@ function openBatchInspect() {
             username: c.cred ? c.cred.username : fbUser,
             password: c.cred ? c.cred.password : fbPass,
             commands: cmds,
-            expectFp: trustedFpOf(host)
+            expectFp: trustedFpOf(host, c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22))
           });
-          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.fp);
+          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port, r.fingerprint.fp);
           const textOf = (o) => { const t = String((o && o.text) || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, ''); return t.trim(); };
           const got = (r.outputs || []).map(o => ({ cmd: o.cmd, text: textOf(o) })).filter(o => o.text);
           const okDev = r.ok && got.length > 0;
@@ -967,11 +974,13 @@ function openIfTable() {
         if (v) { if (!l[side + 'VlanMode']) l[side + 'VlanMode'] = 'access'; }
         else l[side + 'VlanMode'] = '';
       }
+      if (e.ip !== undefined) l[side + 'Ip'] = String(e.ip).trim();
       if (e.l2 !== undefined) {
         l[side + 'L2'] = !!e.l2;
-        if (e.l2 && e.ip === undefined) l[side + 'Ip'] = ''; // 勾二层清空 IP（与连线弹窗一致）
+        // 勾二层无条件清空 IP（写入顺序在 ip 之后）：同一行既勾二层又改 IP 时不得产出
+        // 「二层接口却带 IP」的矛盾数据（与连线弹窗的「勾二层禁用 IP 输入」同口径）
+        if (e.l2) l[side + 'Ip'] = '';
       }
-      if (e.ip !== undefined) l[side + 'Ip'] = String(e.ip).trim();
       if (e.agg !== undefined) l.agg = String(e.agg).trim().slice(0, 32);
       applied++;
     }
@@ -2401,10 +2410,18 @@ async function exportInventory() {
   }
 }
 
-function exportVisio() {
+async function exportVisio() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  // SVG 图标光栅化：VSDX 的 Foreign 图片形状仅接受位图，SVG dataURL 会被静默丢弃（导出图缺图标）
+  const nodes = await Promise.all(state.nodes.map(async (n) => {
+    if (n.icon && /^data:image\/svg/i.test(n.icon)) {
+      const png = await U.svgDataUrlToPng(n.icon);
+      return png ? Object.assign({}, n, { icon: png }) : Object.assign({}, n, { icon: '' });
+    }
+    return n;
+  }));
   // ortho 透传：直角连线模式下导出与画布/PDF/SVG 显示一致（否则画布直角、Visio 里变斜线）
-  const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+  const buf = TopoVsdx.buildVSDX({ nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   U.download(`网络拓扑图_${U.fmtDate()}.vsdx`,
     new Blob([buf], { type: 'application/vnd.ms-visio' }));
   toast('已导出 Visio 文件（.vsdx，Visio 2013+ 可直接打开编辑）');
@@ -3033,6 +3050,8 @@ async function newGraph() {
   state.links = [];
   state.texts = []; // 空白画布不保留旧文本框
   state.regions = []; // 空白画布不保留旧区域
+  state.downLinks = new Set(); // 故障标记一并重置（链路已不存在）
+  renderer.setDownLinks(state.downLinks);
   state.sel = { kind: null, id: null };
   state.undoStack = [];
   state.redoStack = [];
@@ -3079,6 +3098,7 @@ function addNodeAt(wx, wy) {
       renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll();
       select('node', node.id, { center: true });
+      saveGraph(); // pushUndo 里的 saveGraph 保存的是变更前状态，新增设备须显式再落一次（否则仅靠视图节流保存的 500ms 窗口内刷新即丢）
     }
   });
 }
@@ -3317,6 +3337,7 @@ function deleteNode(id) {
   stopMonitorForNode(id); // 删除设备时停止其后台监控
   delete state.monitorCfg[id]; saveMonitorCfg().catch(() => {});
   const removed = state.links.filter(l => l.a === id || l.b === id);
+  for (const rl of removed) state.downLinks.delete(rl.id); // 故障标记随链路删除，防死 id 残留
   state.links = state.links.filter(l => l.a !== id && l.b !== id);
   state.nodes = state.nodes.filter(x => x.id !== id);
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
@@ -3462,6 +3483,7 @@ function deleteLink(id) {
   if (!l) return;
   pushUndo(); // 变更前快照
   state.links = state.links.filter(x => x.id !== id);
+  state.downLinks.delete(id); // 故障标记随链路删除：死 id 残留会让图例计数/路径分析排除集引用不存在的链路
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
@@ -3500,6 +3522,8 @@ function deleteNodes(ids) {
   }
   if (cfgUndo.length) state.undoStack[state.undoStack.length - 1].monitorCfgUndoList = cfgUndo;
   saveMonitorCfg().catch(() => {});
+  // 连带删除的链路同步清故障标记（死 id 残留会污染图例计数与路径分析排除集）
+  for (const l of state.links) if (set.has(l.a) || set.has(l.b)) state.downLinks.delete(l.id);
   state.links = state.links.filter(l => !set.has(l.a) && !set.has(l.b));
   state.nodes = state.nodes.filter(n => !set.has(n.id));
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
@@ -3555,6 +3579,7 @@ function deleteLinks(ids) {
   const removed = state.links.filter(l => set.has(l.id));
   pushUndo();
   state.links = state.links.filter(l => !set.has(l.id));
+  for (const rl of removed) state.downLinks.delete(rl.id); // 故障标记随链路删除，防死 id 残留
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
@@ -4473,6 +4498,7 @@ function restoreGraph() {
       const act = state.sheets[state.sheetIdx];
       act.nodes = state.nodes; act.links = state.links; act.texts = state.texts;
       act.regions = state.regions;
+      refreshSheets(); // 页签栏须随 sheets 重建：启动序列的 refreshSheets 先于 restoreGraph 执行，此刻 sheets 仍为空——不补则刷新后页签栏隐藏、他页不可达（与 applyProjectData 同口径）
     }
     renderer.showLabels = state.showLabels;
     renderer.showSubnets = state.showSubnets;
@@ -4921,6 +4947,7 @@ function showUpdateDialog(res) {
     <pre class="about-license" style="max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word">${U.escHtml(String(latest.notes || '').slice(0, 2000)) || '（发布说明见发布页）'}</pre>
     <div class="about-actions" id="updActions">
       <button type="button" class="tb primary" id="updGo">立即升级</button>
+      <button type="button" class="tb" id="updCancel" hidden>取消下载</button>
       <button type="button" class="tb" id="updPage">去发布页</button>
     </div>
     <div class="about-actions" id="updDone" hidden>
@@ -4939,13 +4966,21 @@ function showUpdateDialog(res) {
   const bridge = updateBridge();
   const actions = ov.querySelector('#updActions'), done = ov.querySelector('#updDone'), wrap = ov.querySelector('#updProgressWrap');
   const goBtn = ov.querySelector('#updGo');
+  const cancelBtn = ov.querySelector('#updCancel');
+  if (cancelBtn) cancelBtn.onclick = async () => {
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = '正在取消…';
+    try { await bridge.cancel(); } catch (e) { /* 取消请求失败由下载结果兜底 */ }
+  };
   if (goBtn) goBtn.onclick = async () => {
     if (!bridge) return;
     goBtn.disabled = true;
     goBtn.textContent = '下载中…';
+    if (cancelBtn) { cancelBtn.hidden = false; cancelBtn.disabled = false; cancelBtn.textContent = '取消下载'; }
     wrap.hidden = false;
     let r = null;
     try { r = await bridge.download(res.assets || null); } catch (e) { r = null; }
+    if (cancelBtn) cancelBtn.hidden = true;
     if (r && r.ok) {
       actions.hidden = true;
       done.hidden = false;
@@ -5894,11 +5929,7 @@ async function applyMonitor(id, cfg, enabled) {
       let allOk = true;
       for (const r of hosts) {
         // 复用 Web Shell 已信任的指纹（若此前通过 Web Shell 信任过该主机，则直接严格校验）
-        let expectFp = '';
-        try {
-          const fp = localStorage.getItem('topoShellFp:' + r.host);
-          if (fp && fp.indexOf('SHA256:') === 0) expectFp = fp;
-        } catch (e) { expectFp = ''; }
+        const expectFp = trustedFpOf(r.host, r.port);
         const res = await bridge.start(Object.assign(
           { key: monitorKey(id, r.host), deviceId: id, name: node ? node.name : '', expectFp, host: r.host },
           { protocol: r.protocol, port: r.port, username: r.username, password: r.password, privateKey: r.privateKey || '', keyPassphrase: r.keyPass || '', jump: r.jump || null },
@@ -5963,8 +5994,10 @@ async function muteAlertsFor(id) {
 async function reconcileMonitors() {
   const bridge = monitorBridge(true); // 后台对齐：浏览器版静默
   if (!bridge) return;
-  // 简单互斥：fire-and-forget 的多处调用（loadGraph/loadProject/restoreGraph）并发时防止重复 start
-  if (reconcileMonitors._busy) return;
+  // 简单互斥 + 置脏重跑：fire-and-forget 的多处调用（loadGraph/loadProject/restoreGraph/拓扑变更）
+  // 并发时防止重复 start；忙窗口内的调用置脏而非丢弃——否则删设备等期望集合变更被静默吞掉，
+  // 已删设备的后台监控继续运行直到下一次任意触发
+  if (reconcileMonitors._busy) { reconcileMonitors._dirty = true; return; }
   reconcileMonitors._busy = true;
   try {
   const validIds = new Set(allSheetNodes().map(n => n.id));
@@ -6000,8 +6033,7 @@ async function reconcileMonitors() {
     }
     perDev[node.id][row.host] = { state: 'connecting', text: '启动监控…', since: Date.now() };
     try {
-      let expectFp = '';
-      try { const fp = localStorage.getItem('topoShellFp:' + row.host); if (fp && fp.indexOf('SHA256:') === 0) expectFp = fp; } catch (e) {}
+      const expectFp = trustedFpOf(row.host, row.port);
       const res = await bridge.start(Object.assign(
         { key: hk, deviceId: node.id, name: node.name, expectFp, host: row.host },
         { protocol: row.protocol, port: row.port, username: row.username, password: row.password, privateKey: row.privateKey || '', keyPassphrase: row.keyPass || '', jump: row.jump || null },
@@ -6028,6 +6060,7 @@ async function reconcileMonitors() {
   refreshPanel();
   } finally {
     reconcileMonitors._busy = false;
+    if (reconcileMonitors._dirty) { reconcileMonitors._dirty = false; reconcileMonitors(); }
   }
 }
 
@@ -8597,10 +8630,11 @@ function openWebShell(id) {
         host: ov.querySelector('#wsJumpHost').value.trim(),
         port: ov.querySelector('#wsJumpPort').value.trim(),
         username: ov.querySelector('#wsJumpUser').value.trim(),
-        password: ov.querySelector('#wsJumpPass').value
+        password: ov.querySelector('#wsJumpPass').value,
+        expectFp: trustedFpOf(ov.querySelector('#wsJumpHost').value.trim(), ov.querySelector('#wsJumpPort').value.trim())
       };
     }
-    try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
+    cfg.expectFp = trustedFpOf(cfg.host, cfg.port);
     if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
     // 标签恢复：密码加密为 DPAPI 密文随连接参数透传（Shell 窗口保存进恢复列表，明文不落盘）
     try {

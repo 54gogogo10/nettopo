@@ -18,6 +18,8 @@ const { EventEmitter } = require('events');
 const DEFAULT_BLKSIZE = 512;
 const MIN_BLKSIZE = 8;
 const MAX_BLKSIZE = 65464;
+// .part 临时名单调序号：pid+毫秒时间戳在并发同名传输（同 IP 不同源端口 WRQ）同毫秒时会撞名
+let svcTmpSeq = 0;
 const RETRANSMIT_MS = 1000;      // 对端不应答时的重发间隔
 const MAX_RETRIES = 6;           // 连续重发次数上限（超限判定对端已死）
 const SESSION_IDLE_MS = 30000;   // 会话整体空闲上限
@@ -155,7 +157,16 @@ class TftpSession {
       const st = fs.lstatSync(this.finalPath);
       if (!st.isFile() || st.isSymbolicLink()) throw Object.assign(new Error('not file'), { code: 'NOTFILE' });
       if (st.size > this.server.maxFileSize) throw Object.assign(new Error('too large'), { code: 'TOOBIG' });
-      this.readBuf = fs.readFileSync(this.finalPath);
+      // 流式读：readFileSync 一次性同步读会在大文件（上限 32MB）时阻塞主进程事件循环数百毫秒，
+      // 期间所有 IPC/监控采集停摆——改为按块拉取的 ReadStream（发送为锁步：一次只需一块在途）
+      this.rs = fs.createReadStream(this.finalPath, { highWaterMark: Math.max(this.blksize || 512, 512) });
+      this.rsBuf = Buffer.alloc(0);   // 已从流中取出尚未发走的字节
+      this.rsEnded = false;           // 流已到尾（rsBuf 为空时 _readBlock 返回 0 字节块）
+      this.eofSent = false;           // 已发出短块/空块（其 ACK 后会话完成）
+      this.rs.on('data', (d) => { this.rsBuf = Buffer.concat([this.rsBuf, d]); this.rs.pause(); this._rsWake && this._rsWake(); });
+      this.rs.on('end', () => { this.rsEnded = true; this._rsWake && this._rsWake(); });
+      this.rs.on('error', () => this.abort(new Error('读取文件失败')));
+      this.rs.pause();
       return true;
     } catch (e) {
       if (e && e.code === 'TOOBIG') this._sendError(3, 'File too large');
@@ -165,10 +176,30 @@ class TftpSession {
     }
   }
 
+  /** 取下一发送块（恰好 blksize 字节；文件尾为短块；空文件/整块对齐尾为 0 字节块，RFC 1350） */
+  _readBlock() {
+    const need = this.blksize || 512;
+    return new Promise((resolve) => {
+      const take = () => {
+        if (this.rsBuf.length >= need || this.rsEnded) {
+          const chunk = this.rsBuf.slice(0, need);
+          this.rsBuf = this.rsBuf.slice(chunk.length);
+          this._rsWake = null;
+          if (!this.rsEnded && this.rs) this.rs.resume();
+          resolve(chunk);
+        } else {
+          this._rsWake = take;
+          if (this.rs && !this.rsEnded) this.rs.resume();
+        }
+      };
+      take();
+    });
+  }
+
   _openWrite() {
     try {
       fs.mkdirSync(path.dirname(this.finalPath), { recursive: true });
-      this.tmpPath = this.finalPath + '.part-' + process.pid + '-' + Date.now();
+      this.tmpPath = this.finalPath + '.part-' + process.pid + '-' + Date.now() + '-' + (svcTmpSeq++);
       this.ws = fs.createWriteStream(this.tmpPath, { flags: 'w' });
       this.ws.on('error', (e) => this.abort(e));
       this.server._sessionStarted(this);
@@ -192,18 +223,18 @@ class TftpSession {
     this._send(Buffer.concat([Buffer.from([0, 5]), padBuf(code), Buffer.from(String(msg || 'Error') + '\0', 'utf8')]));
   }
 
-  _sendNextData() {
-    const len = this.readBuf ? this.readBuf.length : 0;
-    const off = this.blockCounter * this.blksize;
-    // off === len：文件为空 / 恰好整块对齐——必须补一个 0 字节数据块标记结束（RFC 1350）
-    // off > len：结束块（或其前的短块）已被 ACK，传输完成
-    if (off > len) {
-      this.server._stats.txFiles++;
+  async _sendNextData() {
+    if (this.closed) return;
+    // 上一块已是短块/空块（EOF 标记）且已收到其 ACK：传输完成
+    if (this.eofSent) {
+      this.server.stats.txFiles++; // 字段名是 stats（旧代码误写 _stats，同步路径被 try/catch 吞成统计漏计）
       this.close();
       return;
     }
+    const chunk = await this._readBlock();
+    if (this.closed) return; // 等块期间会话可能已被对端 ERROR/超时中止
     this.blockCounter++;
-    const chunk = off === len ? Buffer.alloc(0) : this.readBuf.slice(off, off + this.blksize);
+    if (chunk.length < (this.blksize || 512)) this.eofSent = true; // 最后一块（含 0 字节空块）
     this._send(this._data(this.blockCounter, chunk));
   }
 
@@ -214,7 +245,9 @@ class TftpSession {
     if (opcode === 4) { // ACK
       if (this.kind !== 'rrq') return;
       const n = buf.readUInt16BE(2);
-      if (n === (this.blockCounter & 0xffff)) this._sendNextData();
+      // _sendNextData 为 async（流式取块）：同步 throw 会变成 rejection 绕过本处的 try/catch，
+      // 补 .catch 走 abort 清理，防 unhandled rejection 崩主进程
+      if (n === (this.blockCounter & 0xffff)) this._sendNextData().catch((e) => this.abort(e));
       // 过期 ACK（重复确认）忽略，等待重发定时器处理
       return;
     }
@@ -257,9 +290,10 @@ class TftpSession {
           }
           // rename 成功才算真正完成：此前写流出错时 abort 仍要负责清理 .part
           this.finished = true;
-          this.server._fileReceived(this);
-          // 先回 ACK 再登记文件（客户端拿到 ACK 即认为推完）
+          // 先回 ACK 再登记文件（客户端拿到 ACK 即认为推完）：emit 的监听器（面板推送/系统通知）
+          // 同步执行会推迟 ACK，设备在重传窗口内收不到最终 ACK 会触发一次无谓重传
           this._send(this._ack(n));
+          this.server._fileReceived(this);
           this.close();
         });
       }
@@ -284,6 +318,7 @@ class TftpSession {
     if (this.closed) return;
     this.closed = true;
     this._stopTimers();
+    if (this.rs) { const r = this.rs; this.rs = null; this._rsWake = null; try { r.destroy(); } catch (e) { /* ignore */ } }
     // 注意：dgram send 后立即 close 会丢弃尚未发出的数据报（最后一个 ACK 客户端收不到会一直重传），
     // 关闭推迟到下一轮事件循环，保证 ACK 先离机
     if (this.sock) { const s = this.sock; this.sock = null; setImmediate(() => { try { s.close(); } catch (e) { /* ignore */ } }); }

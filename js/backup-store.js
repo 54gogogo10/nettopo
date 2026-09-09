@@ -60,7 +60,7 @@ class BackupStore {
         seq++;
         name = `${prefix}${this._ts()}_${seq}.nettopo`;
       }
-      tmpPath = path.join(this.dir, name + '.tmp-' + process.pid);
+      tmpPath = path.join(this.dir, name + '.tmp-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));
       fs.writeFileSync(tmpPath, content, 'utf8');
       fs.renameSync(tmpPath, path.join(this.dir, name));
       this._trim(n);

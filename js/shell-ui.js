@@ -228,7 +228,7 @@ function upsertRestoreEntry(list, entry, cap) {
     ov.querySelector('[data-act=cancel]').onclick = () => decide(false);
     ov.querySelector('[data-act=trust]').onclick = () => decide(true);
     function decide(trust) {
-      if (trust) { try { localStorage.setItem('topoShellFp:' + info.host, info.fp); } catch (e) { /* ignore */ } }
+      if (trust) { try { localStorage.setItem(fpKeyOf(info.host, info.port), info.fp); } catch (e) { /* ignore */ } }
       window.topoShell.trustFingerprint(info.host, trust);
       close();
       // 同主机的排队确认一并出队：trustFingerprint 已放行/拒绝该主机的全部待确认握手
@@ -348,7 +348,13 @@ function upsertRestoreEntry(list, entry, cap) {
       else if (item[0] === 'status') applyStatus(rec, item[1]);
       else if (item[0] === 'end') applyEnd(rec, item[1]);
     }
-    term.onData((d) => { if (!rec.ended) window.topoShell.sendData(sid, d); });
+    term.onData((d) => {
+      if (rec.ended) return;
+      // 主进程 shell:data 单次限长 1MB：粘贴整段大配置时 onData 一次性携带全部文本，超限被
+      // 静默丢弃（内容完全不发送且无提示）——按 512KB 分片下发
+      if (d.length <= 512 * 1024) { window.topoShell.sendData(sid, d); return; }
+      for (let off = 0; off < d.length; off += 512 * 1024) window.topoShell.sendData(sid, d.slice(off, off + 512 * 1024));
+    });
     // 选中即复制（PuTTY 风格）
     term.onSelectionChange(() => {
       try {
@@ -560,8 +566,8 @@ function upsertRestoreEntry(list, entry, cap) {
     if (tx) tx.textContent = on ? '录制中…' : '录制';
   };
   const recPush = (data) => { if (recActive && recBuf.length < 20000) recBuf.push({ t: Date.now() - recStart, dir: 'out', d: data }); };
-  const recFlush = async () => {
-    if (!recActive || !recBuf.length) return;
+  const recFlush = async (force) => {
+    if ((!recActive && !force) || !recBuf.length) return;
     const lines = recBuf.map(e => JSON.stringify(e)).join('\n');
     recBuf = [];
     try {
@@ -586,7 +592,8 @@ function upsertRestoreEntry(list, entry, cap) {
     if (!recActive) return;
     recActive = false;
     if (recTimer) { clearInterval(recTimer); recTimer = null; }
-    await recFlush();
+    // 强制冲刷（force）：此时 recActive 已置 false，不冲会把距上次 800ms 周期之后的尾段静默丢弃
+    await recFlush(true);
     let r;
     try { r = await window.topoShell.recordStop(); } catch (e) { r = null; }
     setRecBtnState(false);
@@ -639,7 +646,12 @@ function upsertRestoreEntry(list, entry, cap) {
     ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
     ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
     ov.querySelector('[data-act=close]').onclick = close;
-    playBtn.onclick = () => { paused = !paused; playBtn.textContent = paused ? '▶ 继续' : '⏸ 暂停'; };
+    playBtn.onclick = () => {
+      // 回放已结束（play 循环退出）：主按钮承担「重播」语义，否则只切换暂停
+      if (!playing) { play(); return; }
+      paused = !paused;
+      playBtn.textContent = paused ? '▶ 继续' : '⏸ 暂停';
+    };
     ov.querySelector('#rpRestart').onclick = () => { paused = false; playBtn.textContent = '⏸ 暂停'; play(); };
     speedEl.onchange = () => { /* 速度即时生效，无需重启 */ };
     const play = async () => {
@@ -1421,14 +1433,23 @@ function upsertRestoreEntry(list, entry, cap) {
     } else list.push(clean);
     saveBookmarks(list);
   };
+  /* 指纹记忆键：非默认端口（≠22）含端口后缀（与 ssh known_hosts 口径一致——同 IP 不同端口
+   *  是 NAT 映射多设备的常见形态，只按 host 存储会互相挤掉）；读取兼容旧版 host-only 键 */
+  const fpKeyOf = (host, port) => 'topoShellFp:' + host + (port && Number(port) !== 22 ? ':' + Number(port) : '');
+  const fpReadOf = (host, port) => {
+    try {
+      const fp = localStorage.getItem(fpKeyOf(host, port)) || localStorage.getItem('topoShellFp:' + host) || '';
+      return fp.indexOf('SHA256:') === 0 ? fp : '';
+    } catch (e) { return ''; }
+  };
   async function connectBookmark(b) {
     const cfg = { protocol: b.protocol, host: b.host, port: b.port, username: b.username, encoding: b.encoding, title: b.name || b.host };
-    try { const fp = localStorage.getItem('topoShellFp:' + b.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
+    cfg.expectFp = fpReadOf(b.host, b.port);
     if (b.passwordEnc && window.topoSecure && window.topoSecure.decryptSecret) {
       try { const r = await window.topoSecure.decryptSecret(b.passwordEnc); if (r && r.ok && r.text) cfg.password = r.text; } catch (e) { /* 解密失败按无密码连接 */ }
     }
     if (b.jump) {
-      cfg.jump = { host: b.jump.host, port: b.jump.port, username: b.jump.username };
+      cfg.jump = { host: b.jump.host, port: b.jump.port, username: b.jump.username, expectFp: fpReadOf(b.jump.host, b.jump.port) };
       if (b.jump.passwordEnc && window.topoSecure && window.topoSecure.decryptSecret) {
         try { const r = await window.topoSecure.decryptSecret(b.jump.passwordEnc); if (r && r.ok && r.text) cfg.jump.password = r.text; } catch (e) { /* ignore */ }
       }
@@ -1727,10 +1748,11 @@ function upsertRestoreEntry(list, entry, cap) {
           host: ov.querySelector('#wsJumpHost').value.trim(),
           port: ov.querySelector('#wsJumpPort').value.trim(),
           username: ov.querySelector('#wsJumpUser').value.trim(),
-          password: ov.querySelector('#wsJumpPass').value
+          password: ov.querySelector('#wsJumpPass').value,
+          expectFp: fpReadOf(ov.querySelector('#wsJumpHost').value.trim(), ov.querySelector('#wsJumpPort').value.trim())
         };
       }
-      try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
+      cfg.expectFp = fpReadOf(cfg.host, cfg.port);
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
       // 标签恢复登记用：密码加密为 DPAPI 密文随建连参数透传（明文不落盘）
       try {
@@ -1743,6 +1765,8 @@ function upsertRestoreEntry(list, entry, cap) {
           if (rj && rj.ok && rj.cipher) cfg.jumpPwdEnc = rj.cipher;
         }
       } catch (e) { /* 加密失败仅影响恢复列表 */ }
+      // 加密/书签保存等 await 之后弹窗可能已被 Esc/点背景关闭：用户已取消，中止发起连接
+      if (!document.body.contains(ov)) return;
       try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username, encoding: cfg.encoding })); } catch (e) {}
       // 保存为书签（同键覆盖；勾选「记住密码」时密码经 DPAPI 加密后保存）
       if (ov.querySelector('#wsSaveBm').checked) {

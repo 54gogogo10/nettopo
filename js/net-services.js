@@ -241,7 +241,8 @@ class NetServices extends EventEmitter {
     const name = String((p && p.name) || '').trim();
     // 冒号一并拒收：Windows 上 "file.txt:ads" 形态会命中 NTFS 交替数据流（与全库清洗口径一致）
     if (!name || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('..') >= 0 || name.indexOf(':') >= 0 || name.length > 200) return null;
-    if (ip && (ip.indexOf('/') >= 0 || ip.indexOf('\\') >= 0 || ip.indexOf('..') >= 0 || ip.length > 80)) return null;
+    // ip 段同口径拒冒号（"c:" 跨盘相对形态）与单点（resolve 回库根绕过子目录语义）
+    if (ip && (ip.indexOf('/') >= 0 || ip.indexOf('\\') >= 0 || ip.indexOf('..') >= 0 || ip.indexOf(':') >= 0 || ip === '.' || ip.length > 80)) return null;
     const base = path.resolve(root) + path.sep;
     const sub = ip || '.';                 // 来源 IP 子目录（已过分隔符/穿越白名单）或库根
     const dir = path.resolve(root, sub);

@@ -74,7 +74,7 @@ class ConfigBackupStore {
         seq++;
         name = 'cfg_' + ts() + '_' + seq + '.cfg';
       }
-      tmpPath = path.join(dir, name + '.tmp-' + process.pid);
+      tmpPath = path.join(dir, name + '.tmp-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));
       fs.writeFileSync(tmpPath, content, 'utf8');
       fs.renameSync(tmpPath, path.join(dir, name));
       const trimFailed = this._trim(device, host);

@@ -11,17 +11,22 @@
 'use strict';
 const crypto = require('crypto');
 
-const OID_USM_UNKNOWN_ENGINE_IDS = '1.3.6.1.6.3.15.1.1.4.0';
-const OID_USM_NOT_IN_TIME_WINDOWS = '1.3.6.1.6.3.15.1.1.2.0';
-const OID_USM_UNKNOWN_USER_NAMES = '1.3.6.1.6.3.15.1.1.5.0';
-const OID_USM_WRONG_DIGESTS = '1.3.6.1.6.3.15.1.1.6.0';
+/* RFC 3414 §5 usmStats 各计数器 OID（真机 net-snmp 实测核对：
+ * 未知用户回 .3.0、认证口令错误回 .5.0、解密失败 .6.0 静默丢包不回 Report） */
 const OID_USM_UNSUPPORTED_SEC_LEVELS = '1.3.6.1.6.3.15.1.1.1.0';
+const OID_USM_NOT_IN_TIME_WINDOWS = '1.3.6.1.6.3.15.1.1.2.0';
+const OID_USM_UNKNOWN_USER_NAMES = '1.3.6.1.6.3.15.1.1.3.0';
+const OID_USM_UNKNOWN_ENGINE_IDS = '1.3.6.1.6.3.15.1.1.4.0';
+const OID_USM_WRONG_DIGESTS = '1.3.6.1.6.3.15.1.1.5.0';
+const OID_USM_DECRYPTION_ERRORS = '1.3.6.1.6.3.15.1.1.6.0';
 
 /* ---------------- 基础 BER 编解码（与 monitor.js 同款风格） ---------------- */
 function berLenOf(n) {
   if (n < 128) return Buffer.from([n]);
   if (n < 256) return Buffer.from([0x81, n]);
-  return Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
+  if (n < 65536) return Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
+  if (n < 16777216) return Buffer.from([0x83, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
+  return Buffer.from([0x84, (n >>> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
 }
 function berTlv(tag, body) { return Buffer.concat([Buffer.from([tag]), berLenOf(body.length), body]); }
 function berInt(n) {
@@ -54,7 +59,7 @@ function tlvWalk(buf, start) {
   let hs = 2;
   if (len & 0x80) {
     const n = len & 0x7f;
-    if (n > 2 || start + 2 + n > buf.length) return null;
+    if (n > 4 || start + 2 + n > buf.length) return null;
     len = 0;
     for (let i = 0; i < n; i++) len = len * 256 + buf[start + 2 + i];
     hs = 2 + n;
@@ -198,7 +203,10 @@ function buildV3Message(opts) {
 
   let msgData;
   if (user.level === 'authPriv') {
-    const kul = passwordToKey(user.authPass, engineID, user.authProto);
+    // RFC 3414 §1.4.3/§2.6：隐私密钥由「隐私口令」经口令-密钥本地化派生（哈希仍用认证协议的
+    // MD5/SHA-1）——此前误用认证口令派生，认证/隐私口令不同的设备（华为/思科最佳实践）必现
+    // usmStatsDecryptionErrors（真机 net-snmp 实测复现）
+    const privKul = passwordToKey(user.privPass, engineID, user.authProto);
     const iv8 = Buffer.alloc(8);
     iv8.writeUInt32BE(boots >>> 0, 0);
     iv8.writeUInt32BE(time >>> 0, 4);
@@ -209,11 +217,11 @@ function buildV3Message(opts) {
       iv16.writeUInt32BE(boots >>> 0, 0);
       iv16.writeUInt32BE(time >>> 0, 4);
       privSalt.copy(iv16, 8);
-      encrypted = encryptAES(kul.subarray(0, 16), iv16, scoped); // AES 用 Kul 前 16 字节（RFC 3826）
+      encrypted = encryptAES(privKul.subarray(0, 16), iv16, scoped); // AES 用本地化密钥前 16 字节（RFC 3826）
     } else {
-      // DES：IV = salt ⊕ boots‖time；密钥 = Kul 前 8 字节（RFC 3414：Kul 前 16 字节中取前 8）
+      // DES：IV = salt ⊕ boots‖time；密钥 = 本地化密钥前 8 字节（RFC 3414：Kul 前 16 字节中取前 8）
       for (let i = 0; i < 8; i++) iv8[i] = iv8[i] ^ privSalt[i];
-      const desKey = kul.subarray(0, 8);
+      const desKey = privKul.subarray(0, 8);
       encrypted = encryptDES(desKey, iv8, scoped);
     }
     msgData = berOct(encrypted);
@@ -298,8 +306,8 @@ function parseVbs(seqT) {
 
 /** 解析 SNMPv3 消息（响应/Report/Trap）。校验认证（若配置了用户与密钥）并按需解密。
  *  opts: { user(本端配置), expectEngineID(hex串|Buffer|空) }
- *  返回 { ok, engineID(hex), boots, time, userName, pduTag, varbinds:[{oid,value}], rid,
- *          report: {oid}|null, authenticated, decrypted } 或 { ok:false, reason } */
+ *  返回 { ok, engineID(hex), boots, time, userName, pduTag, varbinds:[{oid,value}], rid(PDU request-id),
+ *          msgID(header msgID), report: {oid}|null, authenticated, decrypted } 或 { ok:false, reason } */
 function parseV3Message(buf, opts) {
   opts = opts || {};
   try {
@@ -365,11 +373,17 @@ function parseV3Message(buf, opts) {
     const authParams = uf[4].body;
     const privParams = uf.length > 5 ? uf[5].body : Buffer.alloc(0);
 
+    // 本端配置了用户时，包内用户名必须一致（明文/noAuth 包同样校验；空用户名视作通配——
+    // 个别设备 USM 错误 Report 回空名）：否则按序试解多用户的接收方（TrapServer）会把
+    // 别人的明文包错配到 authPriv 用户头上被安全级别检查误杀——真机 net-snmp noAuthNoPriv
+    // trap 实测复现（v3noauth 用户的合法包被 v3test 配置吞掉）
+    if (opts.user && userName && opts.user.user !== userName) return { ok: false, reason: 'v3 用户不匹配（' + userName + '）' };
+
     // 认证校验必须先于解密/解析（不可信数据先验签）：包声称已认证但本端无对应密钥 → 拒绝
     let authenticated = false;
     if (wantAuth) {
       const u = opts.user;
-      if (!u || !u.authProto || u.user !== userName) return { ok: false, reason: 'v3 认证包无法校验（用户 ' + userName + ' 未配置认证密钥）' };
+      if (!u || !u.authProto) return { ok: false, reason: 'v3 认证包无法校验（用户 ' + userName + ' 未配置认证密钥）' };
       if (authParams.length !== 12) return { ok: false, reason: 'authParams 长度异常' };
       const kul = passwordToKey(u.authPass, Buffer.from(engineID, 'hex'), u.authProto);
       const masked = Buffer.from(buf);
@@ -390,20 +404,21 @@ function parseV3Message(buf, opts) {
       const u = opts.user;
       if (!u || u.level !== 'authPriv') return { ok: false, reason: '收到加密 v3 包但未配置 v3 用户' };
       if (u.user !== userName) return { ok: false, reason: 'v3 用户不匹配（' + userName + '）' };
-      const kul = passwordToKey(u.authPass, Buffer.from(engineID, 'hex'), u.authProto);
+      // 隐私密钥由隐私口令派生（与 buildV3Message 同口径，RFC 3414 §2.6）
+      const privKul = passwordToKey(u.privPass, Buffer.from(engineID, 'hex'), u.authProto);
       let plain;
       if (u.privProto === 'aes') {
         const iv16 = Buffer.alloc(16);
         iv16.writeUInt32BE(boots >>> 0, 0);
         iv16.writeUInt32BE(time >>> 0, 4);
         privParams.copy(iv16, 8);
-        plain = decryptAES(kul.subarray(0, 16), iv16, msgDataT.body);
+        plain = decryptAES(privKul.subarray(0, 16), iv16, msgDataT.body);
       } else {
         const iv8 = Buffer.alloc(8);
         iv8.writeUInt32BE(boots >>> 0, 0);
         iv8.writeUInt32BE(time >>> 0, 4);
         for (let i = 0; i < 8; i++) iv8[i] = iv8[i] ^ privParams[i];
-        plain = decryptDES(kul.subarray(0, 8), iv8, msgDataT.body);
+        plain = decryptDES(privKul.subarray(0, 8), iv8, msgDataT.body);
       }
       const scoped = tlvWalk(plain, 0);
       if (!scoped || scoped.tag !== 0x30) return { ok: false, reason: 'scopedPDU 解密后格式异常' };
@@ -444,7 +459,7 @@ function parseV3Message(buf, opts) {
       responseRid = pf.length ? readUInt(pf[0].body) : null;
       for (const vb of parseVbs(pf[3])) if (vb.oid) report = { oid: vb.oid, value: vb.value };
     }
-    return { ok: true, engineID, boots, time, userName, flags, pduTag: pduT.tag, varbinds, rid: responseRid != null ? responseRid : rid, report, authenticated, decrypted, wantAuth, wantPriv };
+    return { ok: true, engineID, boots, time, userName, flags, pduTag: pduT.tag, varbinds, rid: responseRid != null ? responseRid : rid, msgID: rid, report, authenticated, decrypted, wantAuth, wantPriv };
   } catch (e) {
     return { ok: false, reason: 'v3 解析异常：' + String((e && e.message) || e) };
   }
@@ -459,11 +474,14 @@ function reportReason(report) {
     case OID_USM_UNKNOWN_USER_NAMES: return '用户名不存在（设备未配置该 v3 用户）';
     case OID_USM_WRONG_DIGESTS: return '认证失败（认证密码或算法不匹配）';
     case OID_USM_UNSUPPORTED_SEC_LEVELS: return '安全级别不被支持（认证/加密配置与设备不符）';
+    case OID_USM_DECRYPTION_ERRORS: return '解密失败（隐私密码或加密算法不匹配）';
     default: return 'USM 错误：' + report.oid;
   }
 }
 
-/** v3 会话缓存（引擎发现 + 时间同步），模块级：host|port|user → {engineID, boots, time, at} */
+/** v3 会话缓存（引擎发现 + 时间同步），模块级：host|port|user → {engineID, boots, time, at}
+ *  at = 本地获得该 boots/time 的墙钟时刻：RFC 3414 §2.2.3 要求按流逝秒数推进对引擎时间的估计，
+ *  否则超过 ±150s 窗口后每请求都要吃一次 notInTimeWindow Report 再重同步（多一倍往返） */
 const v3Engines = new Map();
 /** priv salt 单调计数器（模块级，31 位回绕）：同引擎并发请求的 IV 唯一性来源 */
 let v3SaltCounter = 0;
@@ -475,13 +493,21 @@ function v3EngineGet(host, port, user) {
   return v3Engines.get(host + '|' + (port || 161) + '|' + (user || '')) || null;
 }
 function v3EngineSet(host, port, user, st) {
+  if (!st) return;
+  if (st.at == null) st.at = Date.now(); // 记录墙钟锚点，供请求侧随时间推进 time
   v3Engines.set(host + '|' + (port || 161) + '|' + (user || ''), st);
+}
+/** 推进缓存的引擎时间（本地估计 = 发现值 + 流逝秒数，RFC 3414 §2.2.3；31 位回绕） */
+function v3EngineTime(st) {
+  if (!st) return { boots: 0, time: 0 };
+  const elapsed = Math.max(0, Math.floor((Date.now() - (st.at || Date.now())) / 1000));
+  return { boots: st.boots, time: (st.time + elapsed) & 0x7fffffff };
 }
 
 module.exports = {
   passwordToKey, authDigest, encryptDES, decryptDES, encryptAES, decryptAES, desAvailable,
   normalizeV3User, buildV3Message, parseV3Message, reportReason,
   berTlv, berInt, berOct, berOid, tlvWalk, decodeOid, decodeValue, readUInt,
-  v3EngineReset, v3EngineGet, v3EngineSet,
-  OID_USM_UNKNOWN_ENGINE_IDS, OID_USM_NOT_IN_TIME_WINDOWS, OID_USM_UNKNOWN_USER_NAMES, OID_USM_WRONG_DIGESTS
+  v3EngineReset, v3EngineGet, v3EngineSet, v3EngineTime,
+  OID_USM_UNKNOWN_ENGINE_IDS, OID_USM_NOT_IN_TIME_WINDOWS, OID_USM_UNKNOWN_USER_NAMES, OID_USM_WRONG_DIGESTS, OID_USM_DECRYPTION_ERRORS
 };

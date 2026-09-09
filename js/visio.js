@@ -21,14 +21,24 @@ function buildVDX(graph, opts) {
   const pageName = opts.pageName || '网络拓扑图';
   const nodes = graph.nodes || [];
   const links = graph.links || [];
+  const regions = graph.regions || [];
+  const texts = graph.texts || [];
   const IN = (v) => Math.round(v * 1000) / 1000;
   const X = (v) => U.escXml(String(v));
 
-  /* ---------- 页面尺寸 ---------- */
+  /* ---------- 页面尺寸（含区域与文本框，与 VSDX/PDF 同口径） ---------- */
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of regions) {
+    minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h);
+  }
   for (const n of nodes) {
     minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
     maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h);
+  }
+  for (const t of texts) {
+    minX = Math.min(minX, t.x); minY = Math.min(minY, t.y);
+    maxX = Math.max(maxX, t.x + (t.w || 160)); maxY = Math.max(maxY, t.y + (t.h || 40));
   }
   if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 800; maxY = 600; }
   const pad = margin / scale;
@@ -101,8 +111,57 @@ function buildVDX(graph, opts) {
       <VerticalAlign>1</VerticalAlign>
     </TextBlock>`;
 
-  /* ---------- 设备形状 ---------- */
+  /* ---------- 区域分组（背景矩形，先于设备形状压入以垫底）+ 设备形状 ---------- */
   const shapeParts = [];
+  for (const r of regions) {
+    // 区域填充：基色调淡到 8%（与 VSDX/PDF 的 0.92 混白同视觉），描边用基色
+    const rgb = /^#?([0-9a-fA-F]{6})$/.exec(String(r.color || '#6366f1'));
+    const hv = rgb ? parseInt(rgb[1], 16) : 0x6366f1;
+    const light = '#' + [(hv >> 16) & 255, (hv >> 8) & 255, hv & 255]
+      .map(v => Math.round(v + (255 - v) * 0.92).toString(16).padStart(2, '0')).join('');
+    const rw = r.w * scale, rh = r.h * scale;
+    const rpx = (r.x + r.w / 2 - minX) * scale;
+    const rpy = Y(r.y + r.h / 2);
+    const rid = sid++;
+    shapeParts.push(`  <Shape ID='${rid}' Type='Shape' NameU='Region${rid}' Name='区域-${X(r.name || '区域')}'>
+    <XForm>
+${c('PinX', rpx, "Unit='IN'")}${c('PinY', rpy, "Unit='IN'")}${c('Width', rw, "Unit='IN'")}${c('Height', rh, "Unit='IN'")}${cF('LocPinX', rw / 2, 'Width*0.5', "Unit='IN'")}${cF('LocPinY', rh / 2, 'Height*0.5', "Unit='IN'")}
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>0</NoFill>
+      <NoLine>0</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+${cF('X', 0, 'Width*0', '')}${cF('Y', 0, 'Height*0', '')}      </MoveTo>
+      <LineTo IX='2'>
+${cF('X', rw, 'Width*1', '')}${cF('Y', 0, 'Height*0', '')}      </LineTo>
+      <LineTo IX='3'>
+${cF('X', rw, 'Width*1', '')}${cF('Y', rh, 'Height*1', '')}      </LineTo>
+      <LineTo IX='4'>
+${cF('X', 0, 'Width*0', '')}${cF('Y', rh, 'Height*1', '')}      </LineTo>
+      <LineTo IX='5'>
+${cF('X', 0, 'Width*0', '')}${cF('Y', 0, 'Height*0', '')}      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>${light}</FillForegnd>
+      <FillBkgnd>${light}</FillBkgnd>
+      <FillPattern>1</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0.01</LineWeight>
+      <LineColor>${X(r.color || '#6366f1')}</LineColor>
+      <LinePattern>2</LinePattern>
+    </Line>
+${charSection(6, X(r.color || '#6366f1'), false, 0.12)}
+${paraMulti(1, 0)}
+${textBlock()}
+    <Text><pp IX='0'/><cp IX='0'/>${X(r.name || '区域')}</Text>
+  </Shape>`);
+  }
   for (const n of nodes) {
     const t = U.getType(n.type);
     const cx = (n.x + n.w / 2 - minX) * scale;
@@ -279,6 +338,57 @@ ${textBlock()}
       return `  <Connect FromSheet='${linkShape.get(l.id)}' FromCell='BeginX' ToSheet='${nodeShape.get(l.a)}' ToCell='PinX'/>\n  <Connect FromSheet='${linkShape.get(l.id)}' FromCell='EndX' ToSheet='${nodeShape.get(l.b)}' ToCell='PinX'/>`;
     })
     .filter(Boolean).join('\n');
+
+  /* ---------- 画布文本框（自定义字体样式，与 VSDX 同口径） ---------- */
+  for (const t of texts) {
+    const tw = (t.w || 160) * scale, th = (t.h || 40) * scale;
+    const tpx = (t.x + (t.w || 160) / 2 - minX) * scale;
+    const tpy = Y(t.y + (t.h || 40) / 2);
+    const size = t.size || 16;
+    const hAlign = t.align === 'center' ? 1 : (t.align === 'right' ? 2 : 0);
+    const textRuns = String(t.text || '').split('\n')
+      .map((ln, i) => `<pp IX='${i}'/>${i === 0 ? "<cp IX='0'/>" : ''}` + X(ln))
+      .join('');
+    const tid = sid++;
+    shapeParts.push(`  <Shape ID='${tid}' Type='Shape' NameU='Text${tid}' Name='文本框-${tid}'>
+    <XForm>
+${c('PinX', tpx, "Unit='IN'")}${c('PinY', tpy, "Unit='IN'")}${c('Width', tw, "Unit='IN'")}${c('Height', th, "Unit='IN'")}${cF('LocPinX', tw / 2, 'Width*0.5', "Unit='IN'")}${cF('LocPinY', th / 2, 'Height*0.5', "Unit='IN'")}
+      <Angle>0</Angle>
+      <FlipX>0</FlipX>
+      <FlipY>0</FlipY>
+      <ResizeMode>0</ResizeMode>
+    </XForm>
+    <Geom IX='0'>
+      <NoFill>1</NoFill>
+      <NoLine>1</NoLine>
+      <NoShow>0</NoShow>
+      <MoveTo IX='1'>
+${cF('X', 0, 'Width*0', '')}${cF('Y', 0, 'Height*0', '')}      </MoveTo>
+      <LineTo IX='2'>
+${cF('X', tw, 'Width*1', '')}${cF('Y', 0, 'Height*0', '')}      </LineTo>
+      <LineTo IX='3'>
+${cF('X', tw, 'Width*1', '')}${cF('Y', th, 'Height*1', '')}      </LineTo>
+      <LineTo IX='4'>
+${cF('X', 0, 'Width*0', '')}${cF('Y', th, 'Height*1', '')}      </LineTo>
+      <LineTo IX='5'>
+${cF('X', 0, 'Width*0', '')}${cF('Y', 0, 'Height*0', '')}      </LineTo>
+    </Geom>
+    <Fill>
+      <FillForegnd>#FFFFFF</FillForegnd>
+      <FillBkgnd>#FFFFFF</FillBkgnd>
+      <FillPattern>0</FillPattern>
+    </Fill>
+    <Line>
+      <LineWeight>0</LineWeight>
+      <LineColor>#FFFFFF</LineColor>
+      <LinePattern>0</LinePattern>
+    </Line>
+${charSection(6, X(t.color || '#1e293b'), !!t.bold, IN(size / 96))}
+${paraMulti(Math.max(String(t.text || '').split('\n').length, 1), hAlign)}
+${textBlock()}
+    <Text>${textRuns}</Text>
+  </Shape>`);
+  }
 
   const xml = `<?xml version='1.0' encoding='UTF-8'?>
 <VisioDocument start='190' metric='0' xml:space='preserve' xmlns='http://schemas.microsoft.com/visio/2003/core'>

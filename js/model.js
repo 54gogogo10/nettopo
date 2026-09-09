@@ -48,7 +48,14 @@ const ROLE_SETS = {
   agg: ['聚合组', '链路聚合', '聚合', '聚合名称', '链路聚合组',
         'agg', 'aggregate', 'lag', 'ethtrunk', 'eth_trunk', 'eth-trunk', 'portchannel', 'port-channel', 'trunkgroup'],
   // 三层 VLAN 接口（SVI）：导出列「VLAN接口」的回读角色——缺了这一项整列导出后无法再导入
-  vlans: ['vlan接口', '三层vlan接口', '三层vlan', 'vlaninterface', 'svi', 'vlan']
+  vlans: ['vlan接口', '三层vlan接口', '三层vlan', 'vlaninterface', 'svi', 'vlan'],
+  // 按端拆列（R8 扩展）：单链路两端各有管理地址/VLAN 接口/设备备注时既单列无法承载
+  sam: ['源管理地址', '源设备管理地址', 'a端管理地址', 'srcmgmt', 'src_mgmt', 'amgmt'],
+  sbm: ['目标管理地址', '目标设备管理地址', 'b端管理地址', 'dstmgmt', 'dst_mgmt', 'bmgmt'],
+  sav: ['源vlan接口', '源设备vlan接口', 'a端vlan接口', 'srcvlan', 'src_vlan', 'avlans'],
+  sbv: ['目标vlan接口', '目标设备vlan接口', 'b端vlan接口', 'dstvlanif', 'dst_vlanif', 'bvlans'],
+  san: ['源设备备注', '源备注', 'a端设备备注', 'srcnote', 'src_note', 'anote'],
+  sbn: ['目标设备备注', '目标备注', 'b端设备备注', 'dstnote', 'dst_note', 'bnote']
 };
 
 const RE_ROLES = [
@@ -105,7 +112,8 @@ function parseRows(rows) {
     roles = headRoles;
     data = rows.slice(1);
   } else {
-    // 无表头：按位置推断 [设备A, 设备B, 接口A, IP A, 接口B, IP B, 带宽, 备注]
+    // 无表头：按位置推断 [设备A, 设备B, 接口A, IP A, 接口B, IP B, 带宽, 备注]——README 契约列序
+    // （与 EXPORT_HEAD 的导出列序不同：删掉表头的本项目导出回读须保留表头才不错位）
     const pos = ['sa', 'sb', 'si', 'sip', 'sii', 'sib', 'bw', 'note'];
     roles = head.map((_, i) => pos[i] || null);
     data = rows;
@@ -120,7 +128,7 @@ function parseRows(rows) {
   };
   data.forEach((cells, ri) => {
     if (!cells || !cells.some(c => String(c).trim() !== '')) return;
-    const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '', vlans: '', sax: '', say: '', sbx: '', sby: '', a2l: '', avlan: '', avm: '', b2l: '', bvlan: '', bvm: '', amask: '', bmask: '', agg: '' };
+    const rec = { _row: ri + 2, sa: '', si: '', sip: '', sb: '', sii: '', sib: '', bw: '', note: '', mgmt: '', vlans: '', sam: '', sbm: '', sav: '', sbv: '', san: '', sbn: '', sax: '', say: '', sbx: '', sby: '', a2l: '', avlan: '', avm: '', b2l: '', bvlan: '', bvm: '', amask: '', bmask: '', agg: '' };
     cells.forEach((c, ci) => {
       const role = roles[ci];
       if (role && rec[role] !== undefined) rec[role] = stripFormulaQuote(c);
@@ -164,10 +172,45 @@ function recordsToGraph(records) {
     return Number.isFinite(f) ? f : NaN;
   };
 
+  // VLAN 接口串 → 结构（格式：10:192.168.10.1/26;20:192.168.10.2，掩码可省略=24）
+  const parseVlanStr = (s) => String(s || '').split(/[;；]+/).map(x => x.trim()).filter(Boolean)
+    .map(x => {
+      const i = x.indexOf(':');
+      if (i <= 0) return null;
+      let ip = x.slice(i + 1).trim();
+      let mask = 24;
+      const j = ip.indexOf('/');
+      if (j > 0) {
+        const m = parseInt(ip.slice(j + 1), 10);
+        if (m > 0 && m <= 32) mask = m;
+        ip = ip.slice(0, j).trim();
+      }
+      return { id: x.slice(0, i).trim(), ip, mask };
+    })
+    .filter(v => v && v.id && v.ip);
+
+  // 按端拆列（源管理地址/目标管理地址/源VLAN接口/目标VLAN接口/源设备备注/目标设备备注）：
+  // 首个非空值生效；旧单列（管理地址/VLAN接口）作为该端未填时的回退
+  const applyMgmt = (n, val) => {
+    if (!n) return;
+    const ms = U.splitMgmts(val);
+    if (ms.length && !U.nodeMgmts(n).length) { U.setNodeMgmts(n, ms); n.h = U.nodeHeightFor(n); }
+  };
+  const applyVlans = (n, val) => {
+    if (!n) return;
+    const vs = parseVlanStr(val);
+    if (vs.length && !(n.vlans && n.vlans.length)) n.vlans = vs;
+  };
+
   for (const r of records) {
     const a = getNode(r.sa, num(r.sax), num(r.say)), b = getNode(r.sb, num(r.sbx), num(r.sby));
-    if (!a || !b) continue;
-    if (a === b) continue; // 自环忽略
+    if (!a && !b) continue;
+    // 新按端列优先（含孤立节点行：仅源端有值，无链路）
+    applyMgmt(a, r.sam); applyMgmt(b, r.sbm);
+    applyVlans(a, r.sav); applyVlans(b, r.sbv);
+    if (r.san && a && !a.note) a.note = r.san;
+    if (r.sbn && b && !b.note) b.note = r.sbn;
+    if (!a || !b || a === b) continue; // 孤立节点行 / 自环：节点数据已应用，不建链路
     const link = {
       id: U.uid('l'),
       a: a.id, b: b.id,
@@ -181,70 +224,51 @@ function recordsToGraph(records) {
       aMask: parseInt(r.amask, 10) > 0 && parseInt(r.amask, 10) <= 32 ? parseInt(r.amask, 10) : 24,
       bMask: parseInt(r.bmask, 10) > 0 && parseInt(r.bmask, 10) <= 32 ? parseInt(r.bmask, 10) : 24
     };
+    // 旧单列回退：源优先、目标其次（两端均已有值时忽略）
     if (r.mgmt) {
-      const ms = U.splitMgmts(r.mgmt);
-      if (ms.length) {
-        if (!U.nodeMgmts(a).length) { U.setNodeMgmts(a, ms); a.h = U.nodeHeightFor(a); }
-        else if (!U.nodeMgmts(b).length) { U.setNodeMgmts(b, ms); b.h = U.nodeHeightFor(b); }
-      }
+      if (!U.nodeMgmts(a).length) applyMgmt(a, r.mgmt);
+      else applyMgmt(b, r.mgmt);
     }
-    // 三层 VLAN 接口（格式：10:192.168.10.1/26;20:192.168.20.1，源端优先，同 mgmt 规则；掩码可省略=24）
     if (r.vlans) {
-      const vs = String(r.vlans).split(/[;；]+/).map(s => s.trim()).filter(Boolean)
-        .map(s => {
-          const i = s.indexOf(':');
-          if (i <= 0) return null;
-          let ip = s.slice(i + 1).trim();
-          let mask = 24;
-          const j = ip.indexOf('/');
-          if (j > 0) {
-            const m = parseInt(ip.slice(j + 1), 10);
-            if (m > 0 && m <= 32) mask = m;
-            ip = ip.slice(0, j).trim();
-          }
-          return { id: s.slice(0, i).trim(), ip, mask };
-        })
-        .filter(v => v && v.id && v.ip);
-      if (vs.length) {
-        const target = !(a.vlans && a.vlans.length) ? a : (!(b.vlans && b.vlans.length) ? b : null);
-        if (target) target.vlans = vs;
-      }
+      if (!(a.vlans && a.vlans.length)) applyVlans(a, r.vlans);
+      else applyVlans(b, r.vlans);
     }
     links.push(link);
-    if (r.note) {
-      if (!a.note) a.note = r.note;
-      else if (!b.note) b.note = r.note;
-    }
   }
   return { nodes, links };
 }
 
 /* ---------- 图 → 表格行 ---------- */
-const EXPORT_HEAD = ['源设备', '源接口', '源IP', '源掩码', '目标设备', '目标接口', '目标IP', '目标掩码', '带宽', '聚合组', '管理地址', 'VLAN接口', '备注', '源二层', '源VLAN', '源VLAN模式', '目标二层', '目标VLAN', '目标VLAN模式', '源设备X', '源设备Y', '目标设备X', '目标设备Y'];
-const EXPORT_KEYS = ['sa', 'si', 'sip', 'amask', 'sb', 'sii', 'sib', 'bmask', 'bw', 'agg', 'mgmt', 'vlans', 'note', 'a2l', 'avlan', 'avm', 'b2l', 'bvlan', 'bvm', 'sax', 'say', 'sbx', 'sby'];
+const EXPORT_HEAD = ['源设备', '源接口', '源IP', '源掩码', '目标设备', '目标接口', '目标IP', '目标掩码', '带宽', '聚合组', '管理地址', '源管理地址', '目标管理地址', 'VLAN接口', '源VLAN接口', '目标VLAN接口', '备注', '源设备备注', '目标设备备注', '源二层', '源VLAN', '源VLAN模式', '目标二层', '目标VLAN', '目标VLAN模式', '源设备X', '源设备Y', '目标设备X', '目标设备Y'];
+const EXPORT_KEYS = ['sa', 'si', 'sip', 'amask', 'sb', 'sii', 'sib', 'bmask', 'bw', 'agg', 'mgmt', 'sam', 'sbm', 'vlans', 'sav', 'sbv', 'note', 'san', 'sbn', 'a2l', 'avlan', 'avm', 'b2l', 'bvlan', 'bvm', 'sax', 'say', 'sbx', 'sby'];
 
 function graphToRecords(nodes, links) {
   const byId = {};
   for (const n of nodes) byId[n.id] = n;
-  // 管理地址按「导入时源优先、目标其次」的规则逆推：
-  // 每个节点的 mgmt 只在它第一次被该规则命中的那条链路上导出一次，
-  // 避免重复/串行导致再导入时数据丢失或错挂到其他设备。
+  const vlanStr = (n) => (n.vlans || []).map(v => v.id + ':' + v.ip + (v.mask && v.mask !== 24 ? '/' + v.mask : '')).join(';');
+  // 每节点的管理地址/VLAN 接口/备注只在它首次出现的链路行导出一次（按端拆列：源管理地址/目标管理地址…），
+  // 同一条链路两端的节点数据互不挤占；「管理地址/VLAN接口」旧单列保留「源优先」语义，
+  // 旧版本软件读新导出仍可回读（新列头旧版不识别、自动忽略）
   const emitted = new Set();
-  return links.map(l => {
+  const emittedNote = new Set();
+  const recs = links.map(l => {
     const a = byId[l.a], b = byId[l.b];
-    let mgmt = ''; let vlans = '';
-    // SVI 掩码非默认 24 时随导出串带上（id:ip/mask），回读不再退化为 /24
-    const vlanStr = (n) => (n.vlans || []).map(v => v.id + ':' + v.ip + (v.mask && v.mask !== 24 ? '/' + v.mask : '')).join(';');
-    if (a && !emitted.has(a.id)) { mgmt = U.nodeMgmts(a).join(','); vlans = vlanStr(a); emitted.add(a.id); }
-    else if (b && !emitted.has(b.id)) { mgmt = U.nodeMgmts(b).join(','); vlans = vlanStr(b); emitted.add(b.id); }
+    let sam = '', sbm = '', sav = '', sbv = '', san = '', sbn = '';
+    if (a && !emitted.has(a.id)) { sam = U.nodeMgmts(a).join(','); sav = vlanStr(a); emitted.add(a.id); }
+    if (b && !emitted.has(b.id)) { sbm = U.nodeMgmts(b).join(','); sbv = vlanStr(b); emitted.add(b.id); }
+    if (a && !emittedNote.has(a.id)) { san = a.note || ''; emittedNote.add(a.id); }
+    if (b && !emittedNote.has(b.id)) { sbn = b.note || ''; emittedNote.add(b.id); }
     return {
       sa: a ? a.name : '', si: l.aIf, sip: l.aIp,
       sb: b ? b.name : '', sii: l.bIf, sib: l.bIp,
       bw: l.bw,
       agg: l.agg || '',
-      mgmt,
-      vlans,
+      mgmt: sam || sbm || '',
+      sam, sbm,
+      vlans: sav || sbv || '',
+      sav, sbv,
       note: l.note,
+      san, sbn,
       amask: l.aMask || 24, bmask: l.bMask || 24,
       a2l: l.aL2 ? '是' : '', avlan: l.aVlan || '', avm: l.aVlanMode || '',
       b2l: l.bL2 ? '是' : '', bvlan: l.bVlan || '', bvm: l.bVlanMode || '',
@@ -252,6 +276,21 @@ function graphToRecords(nodes, links) {
       sbx: b ? Math.round(b.x * 10) / 10 : '', sby: b ? Math.round(b.y * 10) / 10 : ''
     };
   });
+  // 孤立节点（无任何链路）补导出行：仅填源端字段——此前完全不出现在导出里，
+  // 「导出 CSV/Excel → 导入」往返后未连线设备静默丢失（含其管理地址/备注/VLAN 接口）
+  for (const n of nodes) {
+    if (emitted.has(n.id)) continue;
+    recs.push({
+      sa: n.name, si: '', sip: '', sb: '', sii: '', sib: '', bw: '', agg: '',
+      mgmt: U.nodeMgmts(n).join(','), sam: U.nodeMgmts(n).join(','), sbm: '',
+      vlans: vlanStr(n), sav: vlanStr(n), sbv: '',
+      note: '', san: n.note || '', sbn: '',
+      amask: '', bmask: '', a2l: '', avlan: '', avm: '', b2l: '', bvlan: '', bvm: '',
+      sax: Math.round(n.x * 10) / 10, say: Math.round(n.y * 10) / 10, sbx: '', sby: ''
+    });
+    emitted.add(n.id);
+  }
+  return recs;
 }
 
 function graphToTableRows(nodes, links) {
@@ -269,7 +308,9 @@ function textToGraph(text) {
 function xlsxToGraph(buffer) {
   const wb = global.XLSX.read(new Uint8Array(buffer), { type: 'array' });
   const ws = wb.Sheets[wb.SheetNames[0]];
-  const rows = global.XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+  // raw:false 取格式化文本：raw:true 时日期单元格回读为 Excel 序列号（如 45123），
+  // 备注/描述列含日期时语义丢失；General 格式的数值仍输出原样文本（10000 → "10000"）
+  const rows = global.XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
   const rows2 = rows.map(r => Array.isArray(r) ? r.map(v => v == null ? '' : String(v)) : []);
   return recordsToGraph(parseRows(rows2));
 }

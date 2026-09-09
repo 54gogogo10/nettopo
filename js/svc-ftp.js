@@ -18,6 +18,8 @@ const { EventEmitter } = require('events');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const DATA_CONN_TIMEOUT_MS = 30000; // 数据通道建立等待上限
+// .part 临时名单调序号：pid+毫秒时间戳在并发同名传输（两控制连接 STOR 同名）同毫秒时会撞名
+let svcTmpSeq = 0;
 const MAX_CMD_LEN = 2048;           // 单条命令长度上限（防滥用）
 const MAX_WRITE_BACKLOG = 1024 * 1024; // 控制通道写积压上限（客户端只发不读时防用户态缓冲无界膨胀）
 const MAX_CMD_PER_SEC = 300;        // 单连接命令速率上限（防命令洪泛以响应行放大内存）
@@ -183,14 +185,25 @@ class FtpConnection {
       case 'CDUP': this._cmdCwd('..'); break;
       case 'NOOP': this.reply('200 NOOP OK.'); break;
       case 'QUIT': this.reply('221 再见。'); this.destroy(); break;
-      case 'ABOR': this.reply('226 没有正在进行的传输。'); break;
-      case 'PASV': this._cmdPasv(); break;
-      case 'EPSV': this._cmdEpsv(); break;
-      case 'PORT': this._cmdPort(arg); break;
-      case 'STOR': this._cmdStor(arg); break;
-      case 'RETR': this._cmdRetr(arg); break;
-      case 'LIST': this._cmdList(arg, true); break;
-      case 'NLST': this._cmdList(arg, false); break;
+      case 'ABOR': {
+        // 传输进行中：置中止标志并销毁数据连接——close 收尾按 426 处理（清 .part，不入库不广播）；
+        // 无传输如实回 225。此前对进行中的传输谎报「没有传输」，设备 ABOR 后停发并 FIN，
+        // 半截文件仍走正常收尾入库
+        if (this.busy && this._activeData) {
+          this._dataAbort = true;
+          try { this._activeData.destroy(); } catch (e) { /* ignore */ }
+        } else this.reply('225 没有正在进行的传输。');
+        break;
+      }
+      // 数据传输类命令在 busy 时一律拒绝：放行会在传输中销毁/替换数据连接（_closePasv），
+      // 半截文件被当完整传输 rename 入库并广播「已接收」——正是 STOR 收尾防护要防的场景
+      case 'PASV': if (this.busy) { this.reply('425 传输进行中。'); break; } this._cmdPasv(); break;
+      case 'EPSV': if (this.busy) { this.reply('425 传输进行中。'); break; } this._cmdEpsv(); break;
+      case 'PORT': if (this.busy) { this.reply('425 传输进行中。'); break; } this._cmdPort(arg); break;
+      case 'STOR': if (this.busy) { this.reply('425 传输进行中。'); break; } this._cmdStor(arg); break;
+      case 'RETR': if (this.busy) { this.reply('425 传输进行中。'); break; } this._cmdRetr(arg); break;
+      case 'LIST': if (this.busy) { this.reply('425 传输进行中。'); break; } this._cmdList(arg, true); break;
+      case 'NLST': if (this.busy) { this.reply('425 传输进行中。'); break; } this._cmdList(arg, false); break;
       case 'SIZE': this._cmdSize(arg); break;
       case 'MDTM': this._cmdMdtm(arg); break;
       case 'MKD': case 'XMKD': this._cmdMkd(arg); break;
@@ -356,6 +369,9 @@ class FtpConnection {
   _openData() {
     return this._openDataRaw().then((sock) => {
       if (sock) {
+        // 控制连接已断开（PORT 在途 connect 场景）：立即销毁并视为失败——设为 _activeData 后
+        // 无人再销毁（destroy/_closePasv 看不见已断控制连接上的登记），对端不 FIN 即永久泄漏 fd
+        if (this.closed) { try { sock.destroy(); } catch (e) { /* ignore */ } return null; }
         this._activeData = sock;
         sock.on('close', () => { if (this._activeData === sock) this._activeData = null; });
       }
@@ -407,7 +423,7 @@ class FtpConnection {
     this.busy = true;
     this._openData().then((dataSock) => {
       if (this.closed || !dataSock) { this.reply('425 数据连接建立失败。'); this.busy = false; return; }
-      const tmp = full + '.part-' + process.pid + '-' + Date.now();
+      const tmp = full + '.part-' + process.pid + '-' + Date.now() + '-' + (svcTmpSeq++);
       const ws = fs.createWriteStream(tmp, { flags: 'w' });
       let size = 0;
       let failed = false;
@@ -434,8 +450,8 @@ class FtpConnection {
         if (failed) return;
         // 服务端主动断开（421 空闲超时/QUIT/服务 stop）经 destroy() 产生的 close 同样是 hadErr=false，
         // 与客户端正常 FIN 无法区分——若不拦截，半截传输会被当完整收尾 rename 入库并广播「已接收」；
-        // bail 负责清理 .part 临时文件（reply 对已关闭连接自动跳过）
-        if (this.closed) { bail(426, '传输中止：连接已关闭。'); return; }
+        // ABOR 中止同此口径；bail 负责清理 .part 临时文件（reply 对已关闭连接自动跳过）
+        if (this.closed || this._dataAbort) { this._dataAbort = false; bail(426, '传输中止：连接已关闭。'); return; }
         if (hadErr) { bail(426, '数据连接异常关闭。'); return; }
         ws.end(() => {
           if (failed) return;
@@ -477,6 +493,7 @@ class FtpConnection {
       dataSock.on('error', () => { if (!failed) { failed = true; try { rs.destroy(); } catch (e) { /* ignore */ } this.reply(426, '数据连接异常，传输中止。'); this.busy = false; } });
       dataSock.on('close', () => {
         if (failed) return;
+        if (this._dataAbort) { this._dataAbort = false; this.busy = false; return; } // ABOR 中止：不得回 226 传输完成
         this.reply('226 传输完成。');
         this.busy = false;
         this.server.stats.txFiles++;
@@ -510,7 +527,10 @@ class FtpConnection {
     this._openData().then((dataSock) => {
       if (this.closed || !dataSock) { this.reply('425 数据连接建立失败。'); this.busy = false; return; }
       dataSock.end(lines.length ? lines.join('\r\n') + '\r\n' : '');
-      dataSock.on('close', () => { if (!this.closed) { this.reply('226 目录列表发送完成。'); this.busy = false; } });
+      dataSock.on('close', () => {
+        if (this._dataAbort) { this._dataAbort = false; this.busy = false; return; } // ABOR 中止
+        if (!this.closed) { this.reply('226 目录列表发送完成。'); this.busy = false; }
+      });
       dataSock.on('error', () => { if (!this.closed) { this.reply(426, '数据连接异常。'); this.busy = false; } });
     });
   }

@@ -272,6 +272,10 @@ class SyslogServer extends EventEmitter {
   }
 
   _onTcpConn(sock) {
+    // 登记：stop() 必须把已 accept 的连接一并销毁——net.Server.close 只停监听不影响存量连接，
+    // 长连接设备（rsyslog over TCP 等）会继续收日志、继续重建写流落盘，「停止」语义完全失效
+    if (!this._tcpConns) this._tcpConns = new Set();
+    this._tcpConns.add(sock);
     let acc = Buffer.alloc(0);
     // 空闲保护覆盖整个连接生命周期：每收到数据都重置（否则发过一条消息后保护消失，
     // 对端僵死/NAT 重置出的半开 TCP 连接会缓慢累积句柄）
@@ -321,6 +325,7 @@ class SyslogServer extends EventEmitter {
     sock.on('error', () => { if (idle) clearTimeout(idle); });
     sock.on('close', () => {
       if (idle) clearTimeout(idle);
+      if (this._tcpConns) this._tcpConns.delete(sock);
       // 换行 framing 下不少设备发完最后一条即关闭且不带尾部 \n（RFC 6587 未强制）：
       // 不 flush 残留缓冲会丢最后一条日志（日志收集的高频丢包路径）
       if (framing !== 'octet' && acc.length) {
@@ -341,6 +346,11 @@ class SyslogServer extends EventEmitter {
     this.running = false;
     if (this.udp) { const s = this.udp; this.udp = null; try { s.close(); } catch (e) { /* ignore */ } }
     if (this.tcp) { const s = this.tcp; this.tcp = null; try { s.close(); } catch (e) { /* ignore */ } }
+    // 已 accept 的 TCP 连接一并销毁：close() 只停监听不影响存量连接（长连接设备会继续收日志落盘）
+    if (this._tcpConns) {
+      for (const s of this._tcpConns) { try { s.destroy(); } catch (e) { /* ignore */ } }
+      this._tcpConns.clear();
+    }
     for (const st of this.streams.values()) { try { st.end(); } catch (e) { /* ignore */ } }
     this.streams.clear();
   }

@@ -198,6 +198,14 @@ class Updater extends EventEmitter {
     this.emit('status', Object.assign({ state: s }, extra || {}));
   }
 
+  /** 中止进行中的下载（升级包可达数百 MB）：销毁请求后 _download 落入 catch 分支，
+   *  残留文件与状态回 idle 由 downloadAndVerify 统一处理。非下载态调用无害返回。 */
+  cancel() {
+    if (this.state !== 'downloading') return { ok: false, error: '当前没有进行中的下载' };
+    try { if (this._dlAbort) this._dlAbort(); } catch (e) { /* ignore */ }
+    return { ok: true };
+  }
+
   /** 检查更新。返回 {ok, update, current, latest?{version,notes,url}, reason?, error?} */
   async check() {
     if (this.state === 'downloading') return { ok: false, error: '正在下载升级包' };
@@ -272,27 +280,29 @@ class Updater extends EventEmitter {
     const exeName = sanitizeAssetName(info.exe.name);
     const dest = pj(this.updateDir, exeName);
     this._setState('downloading', { name: exeName });
+    // 失败/中止统一清理：exe 与 .sha256 清单都不残留（反复失败的升级不再在 updates/ 累积孤儿文件）
+    let shaFile = null;
+    const cleanup = () => { try { fs.unlinkSync(dest); } catch (e) { /* ignore */ } if (shaFile) { try { fs.unlinkSync(shaFile); } catch (e) { /* ignore */ } } };
     try {
       const total = Math.max(0, Math.floor(Number(info.exe.size) || 0));
       if (total > MAX_ASSET_BYTES) return { ok: false, error: '升级包超出大小上限' };
       const got = await this._download(info.exe.browser_download_url, dest, total);
-      if (got !== total && total > 0) { try { fs.unlinkSync(dest); } catch (e) { /* ignore */ } return { ok: false, error: '下载不完整（' + got + '/' + total + ' 字节）' }; }
-      let shaFile = null;
+      if (got !== total && total > 0) { cleanup(); return { ok: false, error: '下载不完整（' + got + '/' + total + ' 字节）' }; }
       if (info.sha && info.sha.browser_download_url) {
         shaFile = dest + '.sha256';
         const shaTotal = Math.max(0, Math.floor(Number(info.sha.size) || 0));
-        if (shaTotal > 64 * 1024) return { ok: false, error: 'SHA256 清单异常' };
+        if (shaTotal > 64 * 1024) { cleanup(); return { ok: false, error: 'SHA256 清单异常' }; }
         const shaGot = await this._download(info.sha.browser_download_url, shaFile, shaTotal);
-        if (shaGot === 0) return { ok: false, error: 'SHA256 清单下载失败' };
+        if (shaGot === 0) { cleanup(); return { ok: false, error: 'SHA256 清单下载失败' }; }
       }
       if (!shaFile) return { ok: false, error: '发布缺少 SHA256 清单，已取消升级（请到发布页手动下载）' };
       const v = await verifySha256File(dest, shaFile);
-      if (!v.ok) { try { fs.unlinkSync(dest); } catch (e) { /* ignore */ } this._setState('idle'); return { ok: false, error: v.error }; }
+      if (!v.ok) { cleanup(); this._setState('idle'); return { ok: false, error: v.error }; }
       this.pendingFile = dest;
       this._setState('verified', { file: dest });
       return { ok: true, file: dest, sha256: v.sha256 };
     } catch (e) {
-      try { if (dest) fs.unlinkSync(dest); } catch (e2) { /* ignore */ }
+      cleanup();
       this._setState('idle');
       return { ok: false, error: '下载失败：' + String((e && e.message) || e) };
     }

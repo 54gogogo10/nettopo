@@ -114,7 +114,9 @@ function rateBps(curC, prevC, dtSec) {
 function berLen(n) {
   if (n < 128) return Buffer.from([n]);
   if (n < 256) return Buffer.from([0x81, n]);
-  return Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
+  if (n < 65536) return Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
+  if (n < 16777216) return Buffer.from([0x83, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
+  return Buffer.from([0x84, (n >>> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
 }
 function berTlv(tag, body) { return Buffer.concat([Buffer.from([tag]), berLen(body.length), body]); }
 function berInt(n) {
@@ -225,7 +227,7 @@ function tlvWalk(buf, start) {
   let hs = 2;
   if (len & 0x80) {
     const n = len & 0x7f;
-    if (n > 2 || start + 2 + n > buf.length) return null;
+    if (n > 4 || start + 2 + n > buf.length) return null;
     len = 0;
     for (let i = 0; i < n; i++) len = len * 256 + buf[start + 2 + i];
     hs = 2 + n;
@@ -242,8 +244,11 @@ function snmpRequest(pduTag, host, target, oids, timeoutMs, port) {
     try {
       const community = String(target == null ? 'public' : target);
       const seq = (snmpGet._rid = (snmpGet._rid || 0) + 1) & 0x7fff;
-      if (snmpGet._salt == null) snmpGet._salt = Math.floor(Math.random() * 0x8000);
-      const rid = ((snmpGet._salt << 15) | seq) & 0x7fffffff;
+      // 高 16 位每请求随机：固定进程级盐时，嗅探到一个 rid 即可推出盐并预测后续全部 rid
+      // （配合 community 抢答污染监控数据）；随机后不可预测，仍保留 rid 回显校验。
+      // snmpGet._salt 仅测试注入固定 rid 用（生产恒为 null → 每请求随机）
+      const hi16 = snmpGet._salt != null ? snmpGet._salt : Math.floor(Math.random() * 0x10000);
+      const rid = ((hi16 << 15) | seq) & 0x7fffffff;
       const varb = oids.map(oid => berTlv(0x30, Buffer.concat([berOid(oid), Buffer.from([0x05, 0x00])])));
       const pdu = Buffer.concat([berInt(rid), berInt(0), berInt(0), berTlv(0x30, Buffer.concat(varb))]);
       const msg = berTlv(0x30, Buffer.concat([berInt(1) /* v2c */, berTlv(0x04, Buffer.from(community, 'utf8')), berTlv(pduTag, pdu)]));
@@ -307,8 +312,12 @@ async function v3Request(pduTag, host, v3cfg, oids, timeoutMs, port) {
       eng = { engineID: pr.engineID, boots: pr.boots, time: pr.time };
       V3.v3EngineSet(host, p, user.user, eng);
     }
+    // RFC 3414 §2.2.3：本地引擎时间估计随墙钟推进（发现值 + 流逝秒数），避免每 150s 后
+    // 必吃一次 notInTimeWindow Report 重同步
+    const engNow = V3.v3EngineTime(eng);
     const ridv = nextV3Rid();
-    const built = V3.buildV3Message({ pduTag, oids, engineID: Buffer.from(eng.engineID, 'hex'), boots: eng.boots, time: eng.time, user, reportable: true, msgID: nextV3Rid(), rid: ridv });
+    const msgIdv = nextV3Rid();
+    const built = V3.buildV3Message({ pduTag, oids, engineID: Buffer.from(eng.engineID, 'hex'), boots: engNow.boots, time: engNow.time, user, reportable: true, msgID: msgIdv, rid: ridv });
     const r = await v3Transmit(built.msg, host, p, timeoutMs);
     if (!r.ok) return r;
     const pr = V3.parseV3Message(r.buf, { user });
@@ -319,11 +328,14 @@ async function v3Request(pduTag, host, v3cfg, oids, timeoutMs, port) {
     }
     if (pr.engineID !== eng.engineID) return { ok: false, error: 'SNMP v3 引擎 ID 与发现结果不匹配' };
     if (pr.pduTag === 0xa8 && pr.report) {
-      // Report 的 PDU request-id 须回显本次请求（RFC 3412 6.3）：能伪造源 IP 的攻击者可注入
-      // 任意 boots/time 污染引擎缓存（触发持续重发现/认证失败循环），rid 不符直接丢弃
-      if (pr.rid != null && pr.rid !== ridv) return { ok: false, error: 'SNMP v3 Report request-id 不匹配' };
+      // Report 与本请求的绑定：按 header msgID（每请求随机，可防伪造 Report 污染引擎缓存）。
+      // 不能按 PDU request-id 严格校验——net-snmp 等 USM 层失败（无法解密 PDU）时 Report 的
+      // request-id 恒为 0（RFC 3412 §6.7 允许，真机 net-snmp 实测：authPriv + 未知用户即此形态），
+      // 严格校验会让所有 USM 错误（含 notInTimeWindow 重同步）对真实设备永远失败
+      const bound = (pr.msgID != null) ? pr.msgID === msgIdv : (pr.rid == null || pr.rid === ridv);
+      if (!bound) return { ok: false, error: 'SNMP v3 Report 与请求不匹配（msgID/request-id 不符）' };
       if (pr.report.oid === V3.OID_USM_NOT_IN_TIME_WINDOWS && retries < 2) {
-        eng.boots = pr.boots; eng.time = pr.time; V3.v3EngineSet(host, p, user.user, eng); retries++; continue; // 时间窗重同步
+        eng.boots = pr.boots; eng.time = pr.time; eng.at = Date.now(); V3.v3EngineSet(host, p, user.user, eng); retries++; continue; // 时间窗重同步
       }
       if (retries < 2) { V3.v3EngineReset(host, p, user.user); eng = null; retries++; continue; } // 其余 USM 错误：重发现一次再定论
       return { ok: false, error: 'SNMP v3：' + V3.reportReason(pr.report) };
@@ -713,7 +725,12 @@ class MonitorManager extends EventEmitter {
     try {
       const obj = {};
       for (const [h, fp] of this.trusted) obj[h] = fp;
-      fs.writeFileSync(this.trustFile, JSON.stringify(obj, null, 2), 'utf8');
+      // tmp+rename 原子写（与 UptimeStore.flush/backup-store 同口径）：直接覆写在中途崩溃时产生
+      // 截断 JSON，重启后 _loadTrust 当「无记录」吞掉——整个 TOFU 指纹库被静默清空，指纹变化
+      // 拒连保护退化为重新首连，恰是攻击者可利用的窗口
+      const tmp = this.trustFile + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
+      fs.renameSync(tmp, this.trustFile);
     } catch (e) { /* 失败不中断监控 */ }
   }
 
@@ -1063,9 +1080,9 @@ class MonitorManager extends EventEmitter {
     if (job.stopping || !job.enabled) return { ok: false, error: '任务已停止' };
     // 复用监控会话的备份要求会话在线；独立连接模式内部自建会话，断线重连时也能立即备份
     if (job.backup.mode !== 'own' && job.state !== 'monitoring') return { ok: false, error: '监控会话未在线（当前：' + (job.statusText || job.state) + '）' };
-    job._bkResult = null;
-    await this._runBackup(job, job.gen);
-    const r = job._bkResult || {};
+    // 取 _runBackup 的返回值（各中止路径会带 error 的结果对象只放进返回值不写 _bkResult），
+    // 否则会话恰好断开时返回 {ok:true, saved:false, error:null}——UI 误报「命令无输出」
+    const r = (await this._runBackup(job, job.gen)) || job._bkResult || {};
     return { ok: true, saved: !!r.saved, skipped: !!r.skipped, name: r.name || null, error: r.error || null };
   }
 
@@ -1176,6 +1193,9 @@ class MonitorManager extends EventEmitter {
     try { if (fs.lstatSync(devDir).isSymbolicLink()) { job.logStream = null; return; } } catch (e) { /* 不存在则照常创建 */ }
     const dir = path.join(devDir, date);
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
+    // 日期目录与既有文件同样拒符号链接（与 config-backup 两级检查同口径：mkdir recursive 对
+    // 已存在的链接目录不会失败，append 打开会跟随链接把日志引到任意位置）
+    try { if (fs.lstatSync(dir).isSymbolicLink()) { job.logStream = null; return; } } catch (e) { /* ignore */ }
     // 文件名含主机地址：同一设备多个管理口各自独立日志，互不覆盖
     const safe = sanitizeFilename(job.name || job.deviceId);
     const safeHost = sanitizeFilename(job.host || 'unknown');
@@ -1195,6 +1215,7 @@ class MonitorManager extends EventEmitter {
     }
     job.logDate = date;
     job.logPath = path.join(dir, fname);
+    try { if (fs.lstatSync(job.logPath).isSymbolicLink()) { job.logStream = null; job.logPath = ''; return; } } catch (e) { /* 不存在则照常创建 */ }
     try { job.logStream = fs.createWriteStream(job.logPath, { flags: 'a', encoding: 'utf8' }); }
     catch (e) { job.logStream = null; }
     if (job.logStream) {
@@ -1241,6 +1262,9 @@ class MonitorManager extends EventEmitter {
     return out;
   }
   _logLine(job, text) {
+    // 已拆除任务不再写日志：teardown 已关流并移出 jobs，迟到路径（采集/备份 await 期间恰好停止）
+    // 若放行会重开写流——句柄永不关闭泄漏，且已停任务仍写日志/发事件（对照 _fetchSysInfo/_probeOnce 均有守卫）
+    if (!job.enabled || job.stopping) return;
     // 写入前自查跨天滚动：仅读取/仅探测任务没有命令轮次（_runCycle/_runBackupShared 才调
     // _rollLogIfNeeded），不自查会一直往昨天的日期目录里追加
     if (!job.logStream || fmtDateDir() !== job.logDate) this._openLog(job);
@@ -1385,6 +1409,7 @@ class MonitorManager extends EventEmitter {
     } finally {
       job._cycleActive = false; // 中途退出（会话断开/停止）也必须释放，避免命令循环/备份永久等待
     }
+    if (!job.enabled || job.stopping || gen !== job.gen) return; // 命令序列期间任务拆除：迟到样本丢弃
     if (!disks.length && mem == null && load == null) return;
     const sample = { ts: Date.now(), disks: disks.slice(0, 32), mem, swap, load: load || null };
     job.metricHist.push(sample);
@@ -1516,6 +1541,8 @@ class MonitorManager extends EventEmitter {
     let outRoot = OID_IF_HCOUT;
     if (!outCol.ok || !outCol.varbinds.length) { outCol = await snmpWalk(OID_IF_OUT32, host, target, 3000, port); outRoot = OID_IF_OUT32; }
     if (outCol.ok) for (const vb of outCol.varbinds) { const o = ifs.get(vb.oid.slice(outRoot.length + 1)); if (o) o.outC = Number(vb.value); }
+    // 多列 walk 期间任务可能已被拆除：迟到样本不入历史、不写日志、不发事件（句柄/状态一致性）
+    if (!job.enabled || job.stopping) return;
 
     // 3. 组装采样并计算速率（与上次计数器差值）
     const now = Date.now();
@@ -1584,6 +1611,7 @@ class MonitorManager extends EventEmitter {
     // sysUpTime（TimeTicks，1/100 秒）：骤减超过 5 分钟刻度视为设备重启（容忍采样抖动）
     if (job.sysinfo.sysUpTime) {
       const r = await snmpGetValue(host, target, OID_SYSUPTIME, 3000, port);
+      if (!job.enabled || job.stopping) return; // GET 期间任务拆除：迟到结果丢弃
       if (r.ok && Number.isFinite(Number(r.value))) {
         const up = Number(r.value);
         sample.up = up;
@@ -1620,6 +1648,7 @@ class MonitorManager extends EventEmitter {
       }
     }
     if (sample.up == null && sample.cpu == null && sample.mem == null) return;
+    if (!job.enabled || job.stopping) return; // CPU/内存 GET 期间任务拆除：迟到样本丢弃
     job.perfHist.push(sample);
     if (job.perfHist.length > IF_HIST_MAX) job.perfHist.shift();
     this._logLine(job, 'SNMP 性能采集：' + [
@@ -1700,13 +1729,20 @@ class MonitorManager extends EventEmitter {
   _runOnConnect(job, gen) {
     if (!job.enabled || job.stopping || gen !== job.gen || job.state !== 'monitoring' || !job.sid) return;
     const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
+    // 占用命令互斥位：连接时命令常用于 screen-length 0 disable 等初始化，与周期循环/指标采集/
+    // 备份交叉下发会让首轮命令混入分页符或落错视图（对照 _runCycle/_runMetrics/_runBackup 均互斥）
+    job._cycleActive = true;
     (async () => {
-      await this._waitReady(job, gen, READY_TIMEOUT_MS); // 连接时命令同样等会话就绪
-      for (const cmd of job.onConnect) {
-        if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) return;
-        this._logCmd(job, cmd + '（连接时执行）');
-        try { this.shell.write(job.sid, cmd + eol); } catch (e) { /* ignore */ }
-        if (job.cmdDelayMs > 0) await sleep(job.cmdDelayMs);
+      try {
+        await this._waitReady(job, gen, READY_TIMEOUT_MS); // 连接时命令同样等会话就绪
+        for (const cmd of job.onConnect) {
+          if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) return;
+          this._logCmd(job, cmd + '（连接时执行）');
+          try { this.shell.write(job.sid, cmd + eol); } catch (e) { /* ignore */ }
+          if (job.cmdDelayMs > 0) await sleep(job.cmdDelayMs);
+        }
+      } finally {
+        job._cycleActive = false;
       }
     })();
   }
@@ -1856,9 +1892,12 @@ class MonitorManager extends EventEmitter {
       else { job.probeFailSince = null; if (job.statusText.indexOf('探测离线') >= 0) job.statusText = (job.readOnly ? '仅读取中：' : (job.commands.length ? '监控中：' : '仅探测中：')) + job.host + ':' + job.port + '（' + job.protocol.toUpperCase() + '）'; }
       if (changed) {
         this._logLine(job, ok ? '探测恢复：' + job.host + ':' + job.port + '（' + latency + 'ms）' : '警告：探测失败，' + job.host + ':' + job.port + ' 可能离线');
-        this.emit('probe', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok, latencyMs: latency, failSince: job.probeFailSince });
         this._emit(job);
       }
+      // 每次探测都上报（不只变化沿）：UptimeStore 在线率按周期采样分桶，只在变化沿发事件时
+      // 稳定在线设备整周只落 1 桶、闪断一次的设备算出 50% 在线率；通知/时间线仍由
+      // electron-main 的 lastProbeOk 边沿检测去重，渲染层状态更新幂等
+      this.emit('probe', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok, latencyMs: latency, failSince: job.probeFailSince });
       if (job.enabled && !job.stopping && job.state === 'monitoring') this._scheduleProbe(job);
     };
     if (job.probe.type === 'icmp') {
@@ -2086,6 +2125,14 @@ class MonitorManager extends EventEmitter {
       let lineBuf = '';
       let lineChars = 0; // 独立备份输出字节上限：恶意服务端灌输出时按字节丢后续行（与 8MB 单份上限对齐）
       let ownReady = false; // 独立新会话的就绪标志（与监控会话 _ready 互不干扰）
+      // 备份会话中途断开检测：shell.write 对已断会话是静默 no-op，若无此检测，命令序列在设备
+      // 掉线后继续空转并把截断的输出当正常备份入库（对照复用会话路径的 !job.sid 存活检查）
+      let dead = false;
+      const onEnd = (sid2, reason) => {
+        if (sid2 !== sid) return;
+        dead = true;
+        this._finishBackup(job, gen, { ok: false, error: '备份连接中断：' + (reason || '连接已关闭') });
+      };
       const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
       const onOut = (sid2, data) => {
         if (sid2 !== sid) return;
@@ -2108,12 +2155,13 @@ class MonitorManager extends EventEmitter {
         }
       };
       this.shell.on('output', onOut);
+      this.shell.on('end', onEnd);
       (async () => {
         // 空行探测提示符（Telnet 自动登录中跳过，防空行落在登录提示上引发重印干扰应答）
         if (!(job.protocol === 'telnet' && job.password)) { try { this.shell.write(sid, '\r\n'); } catch (e) { /* ignore */ } }
         const t0 = Date.now();
         // 提示符常不带换行结尾（…\r\n> 截止于提示符）：半行残段同样参与就绪判定，否则白等满超时
-        while (!ownReady && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
+        while (!ownReady && !dead && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
           if (lineBuf && PROMPT_RE.test(lineBuf.trim())) { ownReady = true; break; }
           await sleep(200);
         }
@@ -2123,7 +2171,7 @@ class MonitorManager extends EventEmitter {
         lineChars = 0;
         lineBuf = '';
         for (const cmd of job.backup.commands) {
-          if (!job.enabled || job.stopping || gen !== job.gen) break;
+          if (dead || !job.enabled || job.stopping || gen !== job.gen) break;
           try { this.shell.write(sid, cmd + eol); } catch (e) { /* ignore */ }
           await sleep(job.backup.waitMs);
         }
@@ -2133,12 +2181,18 @@ class MonitorManager extends EventEmitter {
         const tail = this._maskSecrets(job, lineBuf.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ''));
         if (tail.trim()) lines.push(tail);
         this.shell.removeListener('output', onOut);
+        this.shell.removeListener('end', onEnd);
         try { this.shell.close(sid); } catch (e) { /* ignore */ }
-        if (!job.enabled || job.stopping || gen !== job.gen) { resolveCmds(); return; }
+        // 会话已断：已收内容是截断的半份配置，不得当正常备份入库（_finishBackup 已带失败结果）
+        if (dead || !job.enabled || job.stopping || gen !== job.gen) { resolveCmds(); return; }
         // 过滤命令回显（含提示符前缀整行/残片）与提示符行：只保留命令执行后的输出内容
         this._saveBackup(job, gen, cleanBackupLines(lines, job.backup.commands).join('\n'));
         resolveCmds();
-      })().catch(() => resolveCmds());
+      })().catch(() => {
+        this.shell.removeListener('output', onOut);
+        this.shell.removeListener('end', onEnd);
+        resolveCmds();
+      });
     });
   }
 

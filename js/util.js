@@ -358,9 +358,9 @@ U.TYPE_ORDER = ['router', 'switch', 'firewall', 'server', 'pc', 'cloud', 'other'
 U.typeOf = (name) => {
   const s = String(name || '').toLowerCase();
   if (/云|internet|互联网|cloud/.test(s)) return 'cloud';
-  if (/防火|fw|firewall/.test(s)) return 'firewall';
-  // 裸缩写一律加边界约束（前后不能是英文字母）：rt/sw/srv/pc 会把 PortChannel1、answer、
-  // support、rpc 这类普通词误判类型（rt 已修，此处同口径补齐 sw/srv/pc）
+  // 裸缩写一律加边界约束（前后不能是英文字母）：rt/sw/srv/pc/fw 会把 PortChannel1、answer、
+  // support、rpc、nfwd-gw 这类普通词误判类型（rt 已修，此处同口径补齐 fw/sw/srv/pc）
+  if (/防火|(?:^|[^a-z])fw(?![a-z])|firewall/.test(s)) return 'firewall';
   if (/路由|router|rtr|(?:^|[^a-z])rt(?![a-z])/.test(s)) return 'router';
   if (/交换|switch|(?:^|[^a-z])sw(?![a-z])/.test(s)) return 'switch';
   if (/服务|server|(?:^|[^a-z])srv(?![a-z])/.test(s)) return 'server';
@@ -641,6 +641,29 @@ U.imageToDataURL = (file) => new Promise((resolve, reject) => {
   fr.readAsDataURL(file);
 });
 
+/* SVG dataURL → PNG dataURL（96×96，供 VSDX 等只接受位图的导出链路光栅化）。
+ * 画布渲染 SVG 原样可用，但 VSDX 的 Foreign 图片形状仅支持位图格式，否则图标在导出中被静默丢弃。
+ * 解析失败返回 null（调用方回退为不带图标导出）。 */
+U.svgDataUrlToPng = (dataUrl) => new Promise((resolve) => {
+  try {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const S = 96;
+        const c = document.createElement('canvas');
+        c.width = S; c.height = S;
+        const ctx = c.getContext('2d');
+        const scale = Math.max(S / img.width, S / img.height) || 1;
+        const w = (img.width || S) * scale, h = (img.height || S) * scale;
+        ctx.drawImage(img, (S - w) / 2, (S - h) / 2, w, h);
+        resolve(c.toDataURL('image/png'));
+      } catch (e) { resolve(null); }
+    };
+    img.onerror = () => resolve(null);
+    img.src = String(dataUrl);
+  } catch (e) { resolve(null); }
+});
+
 /* ---------- SVG 图标（24×24，stroke 风格） ---------- */
 const I = {
   upload: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0l-4.5 4.5M12 4l4.5 4.5"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/></svg>',
@@ -721,6 +744,8 @@ U.fillIcons = () => {
 /* 标注防碰撞：迭代推开重叠的标签框（布局无关）。
  * labels：矩形中心坐标 {x,y,w,h}（x/y 为中心）
  * obstacles：不可压过的矩形，与 DOM 一致用左上角坐标 {x,y,w,h}（x/y 为左上角）
+ * opts.bounds：可选 {x,y,w,h}（左上角坐标）页面/画布边界——推开后钳制回边界内，
+ * 密集拓扑的标注不再被推出可见区（导出图标注丢失）
  */
 U.resolveLabelCollisions = (labels, opts) => {
   opts = opts || {};
@@ -729,6 +754,15 @@ U.resolveLabelCollisions = (labels, opts) => {
   const obstacles = (opts.obstacles || []).map(o => ({
     x: o.x + o.w / 2, y: o.y + o.h / 2, w: o.w, h: o.h
   }));
+  // 边界钳制（中心坐标口径）：每次推开后执行，重叠消解与边界约束共同收敛
+  const b = opts.bounds;
+  const clampBounds = (lb) => {
+    if (!b) return;
+    const hw = lb.w / 2, hh = lb.h / 2;
+    const x0 = b.x + hw, x1 = b.x + b.w - hw, y0 = b.y + hh, y1 = b.y + b.h - hh;
+    if (x1 < x0) lb.x = b.x + b.w / 2; else lb.x = Math.max(x0, Math.min(x1, lb.x));
+    if (y1 < y0) lb.y = b.y + b.h / 2; else lb.y = Math.max(y0, Math.min(y1, lb.y));
+  };
   const MAX_STEP = 200; // 单次最大推开距离，防止振荡
   const push = (a, b, lockB) => {
     const ox = (a.w + b.w) / 2 + pad - Math.abs(a.x - b.x);
@@ -765,6 +799,7 @@ U.resolveLabelCollisions = (labels, opts) => {
         for (const ob of obstacles) {
           if (push(lb, ob, true)) moved = true;
         }
+        clampBounds(lb);
       }
       if (!moved) break;
     }
@@ -799,6 +834,7 @@ U.resolveLabelCollisions = (labels, opts) => {
         if (o.kind === 1) { if (push(labels[i], o.lb, true)) moved = true; }
         else if (o.idx > i) { if (push(labels[i], o.lb, false)) moved = true; }
       }
+      clampBounds(labels[i]);
     }
     if (!moved) break;
   }

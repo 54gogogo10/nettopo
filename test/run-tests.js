@@ -379,6 +379,33 @@ console.log('== 多管理地址 ==');
     const gQ2 = M.textToGraph(csvQ);
     ok(gQ2.nodes.some(n => n.name === '-SW1'), "公式注入 ' 前缀导出→导入不污染文本（'-SW1 → -SW1）");
   }
+  // R8 导出扩展：按端管理地址/设备备注/VLAN 接口列 + 孤立节点行往返
+  {
+    const gE = M.textToGraph('源设备,目标设备,备注,源设备备注,目标设备备注,源管理地址,目标管理地址,源VLAN接口,目标VLAN接口\nSW1,R1,互联备注,交换机备注,路由器备注,10.1.1.1,10.1.1.2,10:192.168.10.1,20:192.168.20.1');
+    const sw = gE.nodes.find(n => n.name === 'SW1'), rt = gE.nodes.find(n => n.name === 'R1');
+    ok(gE.links.length === 1 && gE.links[0].note === '互联备注', '按端列导入：链路备注保持独立');
+    ok(sw && U.nodeMgmts(sw).join(',') === '10.1.1.1' && sw.note === '交换机备注' && sw.vlans.length === 1 && sw.vlans[0].id === '10', '按端列导入：源端管理地址/设备备注/VLAN 接口各归其位');
+    ok(rt && U.nodeMgmts(rt).join(',') === '10.1.1.2' && rt.note === '路由器备注' && rt.vlans.length === 1 && rt.vlans[0].id === '20', '按端列导入：目标端管理地址/设备备注/VLAN 接口各归其位');
+    // 往返：两端各有管理地址 + 设备备注的链路不再互相挤占
+    const csvE = U.buildCSV(M.graphToTableRows(gE.nodes, gE.links));
+    const gE2 = M.textToGraph(csvE);
+    const sw2 = gE2.nodes.find(n => n.name === 'SW1'), rt2 = gE2.nodes.find(n => n.name === 'R1');
+    ok(sw2 && U.nodeMgmts(sw2).join(',') === '10.1.1.1' && sw2.note === '交换机备注', '两端各有管理地址：导出→导入回环（源端不丢）');
+    ok(rt2 && U.nodeMgmts(rt2).join(',') === '10.1.1.2' && rt2.note === '路由器备注', '两端各有管理地址：导出→导入回环（目标端不丢）');
+    ok(gE2.links.length === 1 && gE2.links[0].note === '互联备注', '链路备注不再串位到设备备注');
+  }
+  {
+    // 孤立节点（无链路）导出→导入回环：含管理地址/备注/VLAN 接口
+    const gI = M.textToGraph('源设备,目标设备,带宽\nSW1,R1,1000');
+    const iso = { id: 'n_iso', name: '备用设备', type: 'switch', x: 0, y: 0, w: 160, h: 40, note: '', mgmt: '' };
+    U.setNodeMgmts(iso, ['192.168.50.9']); iso.note = '孤立设备备注'; iso.vlans = [{ id: '30', ip: '192.168.30.1', mask: 24 }];
+    gI.nodes.push(iso);
+    const csvI = U.buildCSV(M.graphToTableRows(gI.nodes, gI.links));
+    const gI2 = M.textToGraph(csvI);
+    const iso2 = gI2.nodes.find(n => n.name === '备用设备');
+    ok(gI2.nodes.length === 3 && gI2.links.length === 1, '孤立节点导出：不产生多余链路（3 节点 1 链路）');
+    ok(iso2 && U.nodeMgmts(iso2).join(',') === '192.168.50.9' && iso2.note === '孤立设备备注' && iso2.vlans && iso2.vlans.length === 1 && iso2.vlans[0].id === '30', '孤立节点行导出→导入：管理地址/备注/VLAN 接口完整保留');
+  }
   // M1：非法/重复 id 与 type 清洗
   const bad = U.sanitizeGraph(
     [{ id: 'n" onload="x', name: 'A', type: 'r" onload="x' }, { id: 'n1', name: 'B' }, { id: 'n1', name: 'C' }],
@@ -1602,6 +1629,19 @@ ok(xml.includes('Microsoft YaHei'), 'VDX 中文字体');
 ok(xml.includes('<Desc>') && !xml.includes('<Description>'), 'VDX 属性名 Desc');
 const wmatch = xml.match(/<PageWidth[^>]*>([^<]+)</);
 ok(wmatch && parseFloat(wmatch[1]) > 5, 'VDX 页面宽度合理（' + (wmatch && wmatch[1]) + ' 英寸）');
+// R8 遗留收尾：区域分组与画布文本框进 VDX（此前只导出设备与连线）
+{
+  const xml2 = V.buildVDX({
+    nodes: nodes2, links: links2,
+    regions: [{ id: 'r1', name: '核心区', x: 0, y: 0, w: 400, h: 300, color: '#6366f1' }],
+    texts: [{ id: 't1', x: 500, y: 500, w: 200, h: 60, text: '说明文字第一行\n第二行', size: 18, color: '#0f172a' }]
+  }, {});
+  ok(xml2.includes("Name='区域-核心区'") && xml2.includes('<LinePattern>2</LinePattern>'), 'VDX 区域分组：背景矩形 + 名称');
+  ok(xml2.indexOf('区域-核心区') < xml2.indexOf("NameU='Label"), 'VDX 区域形状先于设备/连线压入（z 序垫底）');
+  ok(xml2.includes('说明文字第一行') && xml2.includes('第二行'), 'VDX 画布文本框：多行内容导出');
+  const pw2 = parseFloat(/<PageWidth[^>]*>([\d.]+)</.exec(xml2)[1]);
+  ok(pw2 > 5, 'VDX 页宽含区域与文本框范围');
+}
 
 // 官方 2003 schema 校验（需要 python + lxml，不可用则跳过）
 if (!pythonHas('lxml')) { okSkip('VDX 通过官方 visio2003.xsd 校验', 'lxml'); }
@@ -4796,6 +4836,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const pr = V3.parseV3Message(REAL_REPORT, { user: null });
       ok(pr.ok && pr.pduTag === 0xa8 && pr.engineID === '80001f8880664b722e0145a06a00000000' && pr.boots === 1 && pr.time === 3919, 'v3 解析：真实 net-snmp Report（引擎发现回包）');
       ok(pr.report && String(pr.report.oid) === '1.3.6.1.6.3.15.1.1.4.0', 'v3 解析：真实 Report 携带 usmStatsUnknownEngineIDs');
+      // R8-SNMP 真机核对：usmStats OID 映射（.3.0 未知用户 / .5.0 认证失败 / .6.0 解密失败）
+      eq(V3.reportReason({ oid: '1.3.6.1.6.3.15.1.1.3.0' }), '用户名不存在（设备未配置该 v3 用户）', 'v3 reportReason：.3.0 = unknownUserNames');
+      eq(V3.reportReason({ oid: '1.3.6.1.6.3.15.1.1.5.0' }), '认证失败（认证密码或算法不匹配）', 'v3 reportReason：.5.0 = wrongDigests');
+      eq(V3.reportReason({ oid: '1.3.6.1.6.3.15.1.1.6.0' }), '解密失败（隐私密码或加密算法不匹配）', 'v3 reportReason：.6.0 = decryptionErrors');
 
       // mock v3 代理（引擎发现 + 验签解密 + 加密认证响应）全链路：monitor.js snmpGet/snmpWalk
       const USER = { user: 'ops', authProto: 'sha', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' };
@@ -4826,13 +4870,15 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
           if (req.pduTag === 0xa0) { respOid = oid; respVal = TABLE[oid] || ''; }
           else { const keys = Object.keys(TABLE).sort(); const nx = keys.find(o => o > (oid || '')); respOid = nx || '1.3.6.1.2.1.2.0'; respVal = TABLE[nx] || 'next'; } // 兜底 OID 须离开所测子树，walk 才能终止
           const user = V3.normalizeV3User(USER);
-          const kul = V3.passwordToKey(user.authPass, ENG, user.authProto);
+          // 隐私密钥由「隐私口令」派生（RFC 3414 §2.6，与真实 net-snmp 一致；认证/隐私口令不同）
+          const authKul = V3.passwordToKey(user.authPass, ENG, user.authProto);
+          const privKul = V3.passwordToKey(user.privPass, ENG, user.authProto);
           const vbs = V3.berTlv(0x30, V3.berTlv(0x30, Buffer.concat([V3.berOid(respOid), Buffer.from([0x04, Buffer.byteLength(respVal)]), Buffer.from(respVal)])));
           const pdu = V3.berTlv(0xa2, Buffer.concat([V3.berInt(req.rid), V3.berInt(0), V3.berInt(0), vbs]));
           const scopedInner = V3.berTlv(0x30, Buffer.concat([V3.berOct(ENG), V3.berOct(Buffer.alloc(0)), pdu])); // 完整 scoped TLV（与客户端 build 口径一致）
           const salt = Buffer.alloc(8); salt.writeUInt32BE(BOOTS, 0); salt.writeUInt32BE(42, 4);
           const iv16 = Buffer.alloc(16); iv16.writeUInt32BE(BOOTS, 0); iv16.writeUInt32BE(TIME, 4); salt.copy(iv16, 8);
-          const enc = V3.encryptAES(kul.subarray(0, 16), iv16, scopedInner);
+          const enc = V3.encryptAES(privKul.subarray(0, 16), iv16, scopedInner);
           const usmBody = Buffer.concat([V3.berOct(ENG), V3.berInt(BOOTS), V3.berInt(TIME), V3.berOct(user.user), V3.berOct(Buffer.alloc(12)), V3.berOct(salt)]);
           let msg = V3.berTlv(0x30, Buffer.concat([V3.berInt(3), V3.berInt(req.rid), V3.berInt(65507), V3.berOct(Buffer.from([0x03])), V3.berInt(3), V3.berOct(usmBody), V3.berOct(enc)]));
           const root = V3.tlvWalk(msg, 0); let cur = 0; const fields = [];
@@ -4841,7 +4887,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
           while (c < usmT.body.length) { const t = V3.tlvWalk(usmT.body, c); uf.push(t); c = t.next; }
           const off = root.start + root.hs + usmT.start + usmT.hs + uf[4].start + uf[4].hs;
           const masked = Buffer.from(msg); masked.fill(0, off, off + 12);
-          V3.authDigest(masked, kul, user.authProto).copy(msg, off);
+          V3.authDigest(masked, authKul, user.authProto).copy(msg, off);
           mockSock.send(msg, rinfo.port, rinfo.address);
         } catch (e) { /* mock 内部异常忽略 */ }
       });
@@ -4869,7 +4915,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       tsrv3.on('trap', (t) => v3Events.push(t));
       const buildV3TrapPkt = (userCfg, oidTrap, ifIdx) => {
         const eng = Buffer.from('80001f8804aaa1b2c3d4e5f6', 'hex');
-        const kul = V3.passwordToKey(userCfg.authPass, eng, userCfg.authProto);
+        const u = V3.normalizeV3User(userCfg);
+        // 认证密钥用认证口令、隐私密钥用隐私口令派生（RFC 3414，与真实设备口径一致）
+        const authKul = V3.passwordToKey(u.authPass, eng, u.authProto);
+        const privKul = V3.passwordToKey(u.privPass, eng, u.authProto);
         const vbs = V3.berTlv(0x30, Buffer.concat([
           V3.berTlv(0x30, Buffer.concat([V3.berOid('1.3.6.1.2.1.1.3.0'), V3.berTlv(0x43, Buffer.from([0x01, 0xe2, 0x40]))])),   // sysUpTime 123456
           V3.berTlv(0x30, Buffer.concat([V3.berOid('1.3.6.1.6.3.1.1.4.1.0'), V3.berOid(oidTrap)])),
@@ -4879,8 +4928,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         const scoped = V3.berTlv(0x30, Buffer.concat([V3.berOct(eng), V3.berOct(Buffer.alloc(0)), pdu]));
         const salt = Buffer.alloc(8); salt.writeUInt32BE(7, 4);
         const iv16 = Buffer.alloc(16); iv16.writeUInt32BE(1, 0); iv16.writeUInt32BE(2000, 4); salt.copy(iv16, 8);
-        const enc = V3.encryptAES(kul.subarray(0, 16), iv16, scoped);
-        const usmBody = Buffer.concat([V3.berOct(eng), V3.berInt(1), V3.berInt(2000), V3.berOct(userCfg.user), V3.berOct(Buffer.alloc(12)), V3.berOct(salt)]);
+        const enc = V3.encryptAES(privKul.subarray(0, 16), iv16, scoped);
+        const usmBody = Buffer.concat([V3.berOct(eng), V3.berInt(1), V3.berInt(2000), V3.berOct(u.user), V3.berOct(Buffer.alloc(12)), V3.berOct(salt)]);
         let msg = V3.berTlv(0x30, Buffer.concat([V3.berInt(3), V3.berInt(77), V3.berInt(65507), V3.berOct(Buffer.from([0x03])), V3.berInt(3), V3.berOct(usmBody), V3.berOct(enc)]));
         const root = V3.tlvWalk(msg, 0); let cur = 0; const flds = [];
         while (cur < root.body.length) { const t = V3.tlvWalk(root.body, cur); flds.push(t); cur = t.next; }
@@ -4888,7 +4937,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         while (c < usmT.body.length) { const t = V3.tlvWalk(usmT.body, c); uf.push(t); c = t.next; }
         const off = root.start + root.hs + usmT.start + usmT.hs + uf[4].start + uf[4].hs;
         const masked = Buffer.from(msg); masked.fill(0, off, off + 12);
-        V3.authDigest(masked, kul, userCfg.authProto).copy(msg, off);
+        V3.authDigest(masked, authKul, u.authProto).copy(msg, off);
         return msg;
       };
       const us3 = dgram.createSocket('udp4');
@@ -4908,6 +4957,135 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(v3Events.length === 1 && stAfter.v3Unknown === stBefore.v3Unknown + 1 && stAfter.v3AuthFail === stBefore.v3AuthFail, 'v3 Trap：含 s 的未知用户名归入 v3Unknown（分类正则回归）');
       us3.close();
       await tsrv3.stop();
+      // ---- R8-SNMP 真机（net-snmp）回归：Report 绑定按 header msgID（USM 失败时 PDU rid 恒 0） ----
+      {
+        // 纯函数：引擎时间估计随墙钟推进（RFC 3414 §2.2.3）
+        const stX = V3.v3EngineSet ? { engineID: 'aa', boots: 2, time: 100, at: Date.now() - 2500 } : null;
+        eq(V3.v3EngineTime(stX).time, 102, 'v3 引擎时间：随流逝秒数推进（at=2.5s 前 → time+2）');
+        const stY = { engineID: 'bb', boots: 1, time: 50 };
+        V3.v3EngineSet('1.2.3.4', 161, 'u', stY); // at 自动补 now
+        ok(V3.v3EngineGet('1.2.3.4', 161, 'u').at != null && V3.v3EngineTime(stY).time >= 50, 'v3 引擎缓存：v3EngineSet 自动补墙钟锚点 at');
+        // 全链路 mock：首次 authPriv 请求回 notInTimeWindow Report（PDU rid=0，header msgID 回显，
+        // 与真机 net-snmp 同形态），重同步后第二次正常应答
+        const mkV3Mini = (opts) => {
+          const s = dgram.createSocket('udp4');
+          const ENGm = Buffer.from('80001f8804deadbeefcafe', 'hex');
+          const Um = V3.normalizeV3User({ user: 'ops', authProto: 'sha', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' });
+          const authKul = V3.passwordToKey(Um.authPass, ENGm, 'sha');
+          const privKul = V3.passwordToKey(Um.privPass, ENGm, 'sha');
+          let phase = 0;
+          const wrap = (inner, flagsByte, msgID, ridEcho, authKey, privKey) => {
+            const usmBody = Buffer.concat([V3.berOct(ENGm), V3.berInt(3), V3.berInt(888), V3.berOct(Um.user), V3.berOct(Buffer.alloc(12)), flagsByte & 0x02 ? V3.berOct(inner.slice(-8)) : V3.berOct(Buffer.alloc(0))]);
+            let msg = V3.berTlv(0x30, Buffer.concat([V3.berInt(3), V3.berInt(msgID), V3.berInt(65507), V3.berOct(Buffer.from([flagsByte])), V3.berInt(3), V3.berOct(usmBody), flagsByte & 0x02 ? V3.berOct(inner) : inner]));
+            const root = V3.tlvWalk(msg, 0); let cur = 0; const flds = [];
+            while (cur < root.body.length) { const t = V3.tlvWalk(root.body, cur); flds.push(t); cur = t.next; }
+            const usmT = flds[5]; const uf = []; let c = 0;
+            while (c < usmT.body.length) { const t = V3.tlvWalk(usmT.body, c); uf.push(t); c = t.next; }
+            const off = root.start + root.hs + usmT.start + usmT.hs + uf[4].start + uf[4].hs;
+            const masked = Buffer.from(msg); masked.fill(0, off, off + 12);
+            V3.authDigest(masked, authKey || authKul, 'sha').copy(msg, off);
+            return msg;
+          };
+          s.on('message', (buf, rinfo) => {
+            try {
+              let p = V3.parseV3Message(buf, { user: Um });
+              if (!p.ok) p = V3.parseV3Message(buf, { user: null });
+              if (!p.ok) return;
+              if (!p.engineID.length) { // 发现
+                const rvbs = V3.berTlv(0x30, V3.berTlv(0x30, Buffer.concat([V3.berOid(V3.OID_USM_UNKNOWN_ENGINE_IDS), V3.berInt(1)])));
+                const pdu = V3.berTlv(0xa8, Buffer.concat([V3.berInt(0), V3.berInt(0), V3.berInt(0), rvbs])); // net-snmp 发现 Report 亦常见 rid=0
+                const scoped = V3.berTlv(0x30, Buffer.concat([V3.berOct(ENGm), V3.berOct(Buffer.alloc(0)), pdu]));
+                s.send(wrap(scoped, 0x04, p.msgID, 0), rinfo.port, rinfo.address);
+                return;
+              }
+              if (phase === 0) { // 首请求：notInTimeWindow Report，PDU rid=0（真机形态），msgID 正确回显
+                phase = 1;
+                const rvbs = V3.berTlv(0x30, V3.berTlv(0x30, Buffer.concat([V3.berOid(V3.OID_USM_NOT_IN_TIME_WINDOWS), V3.berInt(1)])));
+                const pdu = V3.berTlv(0xa8, Buffer.concat([V3.berInt(0), V3.berInt(0), V3.berInt(0), rvbs]));
+                const scoped = V3.berTlv(0x30, Buffer.concat([V3.berOct(ENGm), V3.berOct(Buffer.alloc(0)), pdu]));
+                s.send(wrap(scoped, 0x04, opts.badMsgID ? p.msgID + 1 : p.msgID, 0), rinfo.port, rinfo.address);
+                return;
+              }
+              // 重同步后的正常 authPriv 应答
+              const oid = p.varbinds.length ? p.varbinds[0].oid : '1.3.6.1.2.1.1.1.0';
+              const vbs = V3.berTlv(0x30, V3.berTlv(0x30, Buffer.concat([V3.berOid(oid), Buffer.from([0x04, 2]), Buffer.from('ok')])));
+              const pdu = V3.berTlv(0xa2, Buffer.concat([V3.berInt(p.rid), V3.berInt(0), V3.berInt(0), vbs]));
+              const scoped = V3.berTlv(0x30, Buffer.concat([V3.berOct(ENGm), V3.berOct(Buffer.alloc(0)), pdu]));
+              const salt = Buffer.alloc(8); salt.writeUInt32BE(9, 4);
+              const iv16 = Buffer.alloc(16); iv16.writeUInt32BE(3, 0); iv16.writeUInt32BE(888, 4); salt.copy(iv16, 8);
+              const enc = V3.encryptAES(privKul.subarray(0, 16), iv16, scoped);
+              const payload = Buffer.concat([enc, salt]); // inner = 密文+盐（wrap 取末 8 字节为 salt）
+              s.send(wrap(payload, 0x03, p.msgID, p.rid), rinfo.port, rinfo.address);
+            } catch (e) { /* ignore */ }
+          });
+          return new Promise((res) => s.bind(0, '127.0.0.1', () => res({ sock: s, port: s.address().port })));
+        };
+        const m1 = await mkV3Mini({});
+        const { snmpGet: sg2, snmpV3Reset: rst2 } = require('../js/monitor.js');
+        rst2();
+        const r1 = await sg2('127.0.0.1', { user: 'ops', authProto: 'sha', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' }, ['1.3.6.1.2.1.1.1.0'], 2000, m1.port);
+        ok(r1.ok && r1.varbinds[0] && r1.varbinds[0].value === 'ok', 'v3 Report(PDU rid=0) 按 header msgID 绑定：notInTimeWindow 重同步后取数成功（' + (r1.error || JSON.stringify(r1.varbinds)) + '）');
+        m1.sock.close();
+        const m2 = await mkV3Mini({ badMsgID: true });
+        rst2();
+        const r2 = await sg2('127.0.0.1', { user: 'ops', authProto: 'sha', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' }, ['1.3.6.1.2.1.1.1.0'], 2000, m2.port);
+        ok(!r2.ok && /不匹配/.test(r2.error || ''), 'v3 Report header msgID 不匹配：伪造 Report 被拒（' + r2.error + '）');
+        m2.sock.close();
+      }
+      // R8-SNMP：Trap 侧 priv 级别强制——authPriv 用户收到「已认证但明文」降级包必须拒收
+      {
+        const tsrv4 = new TrapServer({ baseDir: path.join(tmpSvc, 'trapv4'), v3Users: [{ user: 'trapops', authProto: 'sha', authPass: 'TrapAuth1', privProto: 'aes', privPass: 'TrapPriv1' }] });
+        await tsrv4.start(0);
+        const ev4 = [];
+        tsrv4.on('trap', (t) => ev4.push(t));
+        const eng = Buffer.from('80001f8804aaa1b2c3d4e5f6', 'hex');
+        const u4 = V3.normalizeV3User({ user: 'trapops', authProto: 'sha', authPass: 'TrapAuth1', privProto: 'aes', privPass: 'TrapPriv1' });
+        const authKul4 = V3.passwordToKey(u4.authPass, eng, 'sha');
+        const vbs4 = V3.berTlv(0x30, Buffer.concat([
+          V3.berTlv(0x30, Buffer.concat([V3.berOid('1.3.6.1.2.1.1.3.0'), V3.berTlv(0x43, Buffer.from([0x01, 0xe2, 0x40]))])),
+          V3.berTlv(0x30, Buffer.concat([V3.berOid('1.3.6.1.6.3.1.1.4.1.0'), V3.berOid('1.3.6.1.6.3.1.1.5.3')]))
+        ]));
+        const pdu4 = V3.berTlv(0xa7, Buffer.concat([V3.berInt(9), V3.berInt(0), V3.berInt(0), vbs4]));
+        const scoped4 = V3.berTlv(0x30, Buffer.concat([V3.berOct(eng), V3.berOct(Buffer.alloc(0)), pdu4]));
+        // flags=0x05（auth 无 priv）+ 合法 HMAC + 明文 scopedPDU：合法签名但降级明文
+        const usm4 = Buffer.concat([V3.berOct(eng), V3.berInt(1), V3.berInt(2000), V3.berOct(u4.user), V3.berOct(Buffer.alloc(12)), V3.berOct(Buffer.alloc(0))]);
+        let msg4 = V3.berTlv(0x30, Buffer.concat([V3.berInt(3), V3.berInt(31), V3.berInt(65507), V3.berOct(Buffer.from([0x05])), V3.berInt(3), V3.berOct(usm4), scoped4]));
+        const root4 = V3.tlvWalk(msg4, 0); let cur4 = 0; const flds4 = [];
+        while (cur4 < root4.body.length) { const t = V3.tlvWalk(root4.body, cur4); flds4.push(t); cur4 = t.next; }
+        const usmT4 = flds4[5]; const uf4 = []; let c4 = 0;
+        while (c4 < usmT4.body.length) { const t = V3.tlvWalk(usmT4.body, c4); uf4.push(t); c4 = t.next; }
+        const off4 = root4.start + root4.hs + usmT4.start + usmT4.hs + uf4[4].start + uf4[4].hs;
+        const masked4 = Buffer.from(msg4); masked4.fill(0, off4, off4 + 12);
+        V3.authDigest(masked4, authKul4, 'sha').copy(msg4, off4);
+        const s4 = dgram.createSocket('udp4');
+        await new Promise((res) => s4.send(msg4, tsrv4.port, '127.0.0.1', res));
+        await waitMs(200);
+        ok(ev4.length === 0 && tsrv4.status().v3AuthFail >= 1, 'v3 Trap：authPriv 用户收到明文降级包拒收（v3AuthFail 计数）');
+        s4.close();
+        await tsrv4.stop();
+        // R8-SNMP 真机回归：noAuth 用户 + noAuthNoPriv 明文 trap 不被 authPriv 用户抢先错配吞掉
+        {
+          const tsrv5 = new TrapServer({ baseDir: path.join(tmpSvc, 'trapv5'), v3Users: [
+            { user: 'trapops', authProto: 'sha', authPass: 'TrapAuth1', privProto: 'aes', privPass: 'TrapPriv1' },
+            { user: 'plainops', authProto: '', authPass: '', privProto: '', privPass: '' }
+          ] });
+          await tsrv5.start(0);
+          const ev5 = [];
+          tsrv5.on('trap', (t) => ev5.push(t));
+          const eng5 = Buffer.from('80001f8804aaa1b2c3d4e5f6', 'hex');
+          const vbs5 = V3.berTlv(0x30, V3.berTlv(0x30, Buffer.concat([V3.berOid('1.3.6.1.6.3.1.1.4.1.0'), V3.berOid('1.3.6.1.6.3.1.1.5.3')])));
+          const pdu5 = V3.berTlv(0xa7, Buffer.concat([V3.berInt(9), V3.berInt(0), V3.berInt(0), vbs5]));
+          const scoped5 = V3.berTlv(0x30, Buffer.concat([V3.berOct(eng5), V3.berOct(Buffer.alloc(0)), pdu5]));
+          const usm5 = Buffer.concat([V3.berOct(eng5), V3.berInt(1), V3.berInt(2000), V3.berOct('plainops'), V3.berOct(Buffer.alloc(0)), V3.berOct(Buffer.alloc(0))]);
+          const msg5 = V3.berTlv(0x30, Buffer.concat([V3.berInt(3), V3.berInt(41), V3.berInt(65507), V3.berOct(Buffer.from([0x00])), V3.berInt(3), V3.berOct(usm5), scoped5]));
+          const s5 = dgram.createSocket('udp4');
+          await new Promise((res) => s5.send(msg5, tsrv5.port, '127.0.0.1', res));
+          await waitMs(200);
+          ok(ev5.length === 1 && ev5[0].version === 'v3' && /linkDown/.test(ev5[0].trap), 'v3 Trap：noAuth 用户的明文 trap 正常入库（不被 authPriv 用户错配吞掉）');
+          s5.close();
+          await tsrv5.stop();
+        }
+      }
       // net-services trap v3 配置归一化
       const ncT = normalizeConfig({ trap: { enabled: true, port: 99999, v3: { user: 'v3u', authProto: 'xx', authPass: 'a', privProto: 'yy', privPass: 'p' } } });
       ok(ncT.trap.enabled === true && ncT.trap.port === 162 && ncT.trap.v3.user === 'v3u' && ncT.trap.v3.authProto === 'sha' && ncT.trap.v3.privProto === 'aes', '配置归一化：trap v3 协议钳制');

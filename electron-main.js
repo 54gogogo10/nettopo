@@ -180,7 +180,12 @@ function loadAppSettings() {
 function saveAppSettings() {
   try {
     const fs = require('fs');
-    fs.writeFileSync(getSettingsFile(), JSON.stringify(appSettings || {}, null, 2), 'utf8');
+    // tmp+rename 原子写（与 AiHistoryStore/backup-store 同口径）：直接覆写在中途崩溃/断电时产生
+    // 截断 JSON，重启后 loadAppSettings 静默回退 {}——备份目录、网络服务（含加密口令）、AI 配置
+    // 等全部设置一次性丢失
+    const tmp = getSettingsFile() + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(appSettings || {}, null, 2), 'utf8');
+    fs.renameSync(tmp, getSettingsFile());
   } catch (e) { /* 失败不阻断 */ }
 }
 function defaultBackupDir() {
@@ -719,12 +724,12 @@ ipcMain.handle('shell:connect', (e, opts) => {
     // 不含任何明文凭据。
     const tabInfo = {
       sid: r.id,
-      title: (opts.title || host) + ' · ' + proto + ' ' + host + ':' + (opts.port || (proto === 'TELNET' ? 23 : 22)),
-      host,
+      title: String(opts.title || host).slice(0, 256) + ' · ' + proto + ' ' + host + ':' + (opts.port || (proto === 'TELNET' ? 23 : 22)),
+      host: host.slice(0, 256),
       port: String(opts.port || (proto === 'TELNET' ? 23 : 22)),
       protocol: proto.toLowerCase(),
-      username: String(opts.username || ''),
-      deviceName: String(opts.title || ''),
+      username: String(opts.username || '').slice(0, 128),
+      deviceName: String(opts.title || '').slice(0, 256),
       encoding: opts.encoding === 'gbk' ? 'gbk' : 'utf8'
     };
     if (typeof opts.pwdEnc === 'string' && opts.pwdEnc && opts.pwdEnc.length <= 8192) tabInfo.pwdEnc = opts.pwdEnc;
@@ -1137,6 +1142,7 @@ ipcMain.handle('update:apply', (e) => {
   }
   return r;
 });
+ipcMain.handle('update:cancel', (e) => monitorGuard(e) ? getUpdater().cancel() : { ok: false, error: 'forbidden' });
 ipcMain.handle('update:reveal', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const fs = require('fs');
@@ -1291,6 +1297,9 @@ ipcMain.handle('netsvc:get', (e) => {
 ipcMain.handle('netsvc:set', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const cfg = (p && p.cfg && typeof p.cfg === 'object') ? p.cfg : {};
+  // 渲染层载荷尺寸封顶（纵深）：正常面板载荷 < 4KB，超限视为异常输入直接拒绝，
+  // 防 settings.json 被无界撑大（applyConfig 内各字段本身有白名单归一化）
+  try { if (Buffer.byteLength(JSON.stringify(cfg), 'utf8') > 64 * 1024) return { ok: false, error: '配置载荷过大' }; } catch (err) { return { ok: false, error: '配置载荷无效' }; }
   const status = await netSvc.applyConfig(cfg);
   // 运行态用明文；落盘前把 FTP 口令密文化（与项目「密码经 safeStorage 落盘」惯例对齐，
   // 此前明文写 settings.json，本机其他用户可读）
@@ -1436,7 +1445,7 @@ ipcMain.handle('ai:set-config', (e, p) => {
     s.ai.maxInputKB = (n >= 4 && n <= 2048) ? n : DEFAULT_MAX_INPUT_KB;
   }
   if (p && p.clearApiKey) delete s.ai.apiKeyEnc;
-  else if (p && typeof p.apiKey === 'string' && p.apiKey) s.ai.apiKeyEnc = encryptSecretValue(p.apiKey); // 空串=保持不变
+  else if (p && typeof p.apiKey === 'string' && p.apiKey) s.ai.apiKeyEnc = encryptSecretValue(p.apiKey.slice(0, 4096)); // 空串=保持不变；限长与 secure:encrypt 口径一致
   saveAppSettings();
   const c = aiCfgFromSettings();
   return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
@@ -1476,7 +1485,9 @@ ipcMain.handle('ai:analyze', async (e, p) => {
     : kind === 'daily' ? buildDailyReportPrompt(cut.text, p && p.extra)
     : buildLogPrompt(kind, cut.text, p && p.extra);
   const title = String((p && p.title) || '').slice(0, 200);
-  // 流式增量批量转发主窗口（120ms 合批，避免高频 IPC 淹没渲染层）
+  // 流式增量批量转发主窗口（120ms 合批，避免高频 IPC 淹没渲染层）。
+  // 注意只走 chat 的 onDelta 回调一条通道：AiClient 的 'chunk' 事件对同一批增量也会再发一次，
+  // 两路同时挂会把每段增量重复推送（界面逐句出现两遍直到完成态覆盖）
   const push = (ch, data) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(ch, data); };
   let pend = '';
   let lastFlush = Date.now();
@@ -1485,7 +1496,6 @@ ipcMain.handle('ai:analyze', async (e, p) => {
     const now = Date.now();
     if (now - lastFlush >= 120) { lastFlush = now; if (pend) { push('ai:chunk', { text: pend }); pend = ''; } }
   };
-  client.on('chunk', (c) => { if (c && c.text) onDelta(c.text); });
   aiActiveClient = client;
   let r;
   try { r = await client.chat({ messages, onDelta }); }
@@ -1527,6 +1537,8 @@ ipcMain.handle('ai:shell-chat', async (e, p) => {
   // 设备类型注入（SHELL_DEVICE_TYPES 白名单键，非法值回落 auto 不注入）；生成类型 cmd/config
   const kind = (p && p.kind === 'config') ? 'config' : 'cmd';
   const messages = buildShellPrompt(requirement, cut.text, String((p && p.deviceType) || ''), kind);
+  // 并发上限：渲染层异常时不得同时发起任意数量 LLM 请求（各持 socket/定时器，空耗配额与内存）
+  if (aiShellClients.size >= 4) return { ok: false, error: '命令生成请求过多，请稍候再试' };
   aiShellClients.add(client);
   try {
     const r = await client.chat({ messages, maxTokens: kind === 'config' ? 4096 : 1024 });
@@ -1754,6 +1766,14 @@ app.whenReady().then(() => {
     if (allowedCerts.get(host) === certificate.fingerprint) { callback(true); return; }
     event.preventDefault();
     const id = 'cert' + (++certSeq);
+    // 挂起确认封顶（FIFO 拒最旧）：设备页持坏证书自动重连/重载且用户不处理弹窗时，
+    // pendingCert 与对应挂起的 Chromium 请求句柄会无限累积（慢速内存/句柄泄漏）
+    if (pendingCert.size >= 32) {
+      const oldest = pendingCert.keys().next().value;
+      const rec = oldest != null ? pendingCert.get(oldest) : null;
+      if (oldest != null) pendingCert.delete(oldest);
+      if (rec) { try { rec.callback(false); } catch (e) { /* ignore */ } }
+    }
     pendingCert.set(id, { callback, host, url, error, fp: certificate.fingerprint });
     emitCertError({ id, host, url, error });
   });
