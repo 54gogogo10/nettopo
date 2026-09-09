@@ -1053,9 +1053,10 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const host = String((p && p.host) || '');
   if (!isValidDiagHost(host)) return { ok: false, error: '主机地址无效' };
-  const oid = String((p && p.oid) || '').trim();
+  // 前导点/末尾点容错（厂商文档常写 .1.3.6.1，与监控侧 cleanOid/berOid 口径一致）
+  const oid = String((p && p.oid) || '').trim().replace(/^\.+/, '').replace(/\.+$/, '');
   if (!DIAG_OID_RE.test(oid) || oid.length > 64) return { ok: false, error: 'OID 无效（点分十进制，如 1.3.6.1.2.1.1.1）' };
-  // v2c 团体字（回退 GET 亦用）；v3 时被忽略，走 USM 通道
+  // v2c 团体字；v3 时 target 为用户对象（walk 与回退 GET 均走 USM 通道）
   const community = String((p && p.community) || 'public').trim().slice(0, 64);
   let target = community;
   if (String((p && p.version) || '') === 'v3') {
@@ -1073,9 +1074,10 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
   if (!(port > 0 && port <= 65535)) port = 161;
   const timeoutMs = Math.max(300, Math.min(10000, parseInt(p && p.timeoutMs, 10) || 1500));
   const r = await snmpWalk(oid, host, target, timeoutMs, port, 512);
-  // walk 为空时回退单值 GET（叶子 OID 无子树，GETNEXT 也不命中时给 GET 一次机会）
+  // walk 为空时回退单值 GET（叶子 OID 无子树，GETNEXT 也不命中时给 GET 一次机会）；
+  // 回退必须沿用同一 target——v3 模式下若误用 v2c 团体字，v3-only 设备永远白等一次超时
   if (r.ok && !r.varbinds.length) {
-    const g = await snmpGetValue(host, community, oid, timeoutMs, port);
+    const g = await snmpGetValue(host, target, oid, timeoutMs, port);
     if (g.ok) return { ok: true, varbinds: [{ oid: g.oid, value: g.value }] };
   }
   return { ok: !!r.ok, varbinds: r.varbinds || [], error: r.error || null };

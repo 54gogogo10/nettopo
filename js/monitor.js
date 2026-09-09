@@ -118,9 +118,12 @@ function berLen(n) {
 }
 function berTlv(tag, body) { return Buffer.concat([Buffer.from([tag]), berLen(body.length), body]); }
 function berInt(n) {
+  // 正数首字节高位为 1 时补前导 0x00，否则按补码解读为负数（与 snmp-v3.js 同款修复；
+  // v2c request-id 落在 0x8000~0xFFFF / 0x800000~0xFFFFFF 区间时会被编码成负值）
   const bytes = [];
   let v = n;
   do { bytes.unshift(v & 0xff); v = v >>> 8; } while (v);
+  if (bytes[0] & 0x80) bytes.unshift(0);
   return berTlv(0x02, Buffer.from(bytes));
 }
 function berOid(oid) {

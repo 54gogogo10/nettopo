@@ -2837,6 +2837,26 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       agent.close();
     }
 
+    console.log('== 回归：SNMP v2c request-id 编码（正数高位补零） ==');
+    {
+      const { snmpGet, OID_SYSDESCR } = require('../js/monitor.js');
+      const dgram = require('dgram');
+      const captured = [];
+      const agent = dgram.createSocket('udp4');
+      agent.on('message', (msg) => captured.push(msg));
+      await new Promise((res) => agent.bind(0, '127.0.0.1', res));
+      // 强制 rid 落在 0x8000~0xFFFF 高位区间（salt=1,seq=2 → 0x8002）：
+      // 此前 berInt 缺前导零会把 32770 编码成 02 02 80 02（补码解读为 -32766，协议值错误）
+      snmpGet._salt = 1; snmpGet._rid = 1;
+      await snmpGet('127.0.0.1', 'public', [OID_SYSDESCR], 300, agent.address().port);
+      ok(captured.length === 1, 'v2c 请求已捕获（mock agent 不应答，仅录包）');
+      // 报文内唯一的 3 字节 INTEGER 是 request-id（version/error-status/error-index 均为 1 字节）
+      ok(captured[0].includes(Buffer.from([0x02, 0x03, 0x00, 0x80, 0x02])), 'v2c request-id=0x8002 编码补前导零（02 03 00 80 02）');
+      ok(!captured[0].includes(Buffer.from([0x02, 0x02, 0x80, 0x02])), 'v2c request-id 不再产出负补码形态（02 02 80 02）');
+      snmpGet._salt = null; // 恢复随机盐：后续测试（防伪造抢答等）不受固定 rid 影响
+      agent.close();
+    }
+
     console.log('== 回归：SNMP 响应 rid/community 校验（防伪造抢答） ==');
     {
       const { snmpGet, snmpResponseMeta, OID_SYSDESCR } = require('../js/monitor.js');
@@ -4670,6 +4690,39 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       await sendTrap(informPkt);
       const resp = await respPromise;
       ok(resp && resp[0] === 0x30 && resp.includes(Buffer.from([0xa2])), 'Trap InformRequest 回 GetResponse 应答');
+      // 大包 Inform（varbind 区 > 255 字节）：应答的 SEQUENCE/PDU 长度必须用 0x82 两字节长形式，
+      // 此前 0x81 截断为低 8 位产出坏包（设备按长度解析失败 → 反复重发 inform）
+      const berLen2 = (n) => n < 128 ? Buffer.from([n]) : n < 256 ? Buffer.from([0x81, n]) : Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
+      const tlv2 = (tag, body) => Buffer.concat([Buffer.from([tag]), berLen2(body.length), body]);
+      const bigVbs = tlv2(0x30, Buffer.concat([
+        vbPair('1.3.6.1.2.1.1.3.0', ticksV(8888)),
+        vbPair('1.3.6.1.6.3.1.1.4.1.0', oidOf('1.3.6.1.6.3.1.1.5.4')),
+        vbPair('1.3.6.1.4.1.99999.1.0', tlv2(0x04, Buffer.alloc(600, 0x41)))
+      ]));
+      const bigInform = tlv2(0x30, Buffer.concat([int(1), oct('public'), tlv2(0xa6, Buffer.concat([int(7777), int(0), int(0), bigVbs]))]));
+      const bigRespPromise = new Promise((res) => {
+        us2.once('message', (m) => res(m));
+        setTimeout(() => res(null), 1500);
+      });
+      await sendTrap(bigInform);
+      const bigResp = await bigRespPromise;
+      ok(!!bigResp, '大包 Inform：收到应答');
+      if (bigResp) {
+        const walk = (buf, start) => { // 长形式长度（0x81/0x82）TLV 解析
+          if (start + 2 > buf.length) return null;
+          const tag = buf[start]; let len = buf[start + 1]; let hs = 2;
+          if (len & 0x80) { const n = len & 0x7f; if (start + 2 + n > buf.length) return null; len = 0; for (let i = 0; i < n; i++) len = len * 256 + buf[start + 2 + i]; hs = 2 + n; }
+          if (start + hs + len > buf.length) return null;
+          return { tag, body: buf.subarray(start + hs, start + hs + len), next: start + hs + len };
+        };
+        const t1 = walk(bigResp, 0);
+        ok(t1 && t1.tag === 0x30 && t1.next === bigResp.length, '大包 Inform 应答：顶层 SEQUENCE 长度覆盖整包（0x82 长形式未截断）');
+        const pduT = walk(t1.body, walk(t1.body, walk(t1.body, 0).next).next); // version, community 之后即 PDU
+        ok(pduT && pduT.tag === 0xa2 && pduT.next === t1.body.length, '大包 Inform 应答：GetResponse PDU 长度自洽');
+        const ridT = walk(pduT.body, 0);
+        const ridVal = ridT && ridT.body.length <= 4 ? ridT.body.readUIntBE(0, ridT.body.length) : -1;
+        ok(ridVal === 7777, '大包 Inform 应答：request-id 回显 7777（正数未变负）');
+      }
       // 限速：maxPerSec=3，连发 10 个畸形之外的有效包（第 4 个起丢弃）
       for (let i = 0; i < 10; i++) await sendTrap(pkt2);
       await waitMs(250);
@@ -4847,6 +4900,12 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       await sendV3Trap(buildV3TrapPkt({ user: 'nobody', authProto: 'sha', authPass: 'x', privProto: 'aes', privPass: 'y' }, '1.3.6.1.6.3.1.1.5.1', 1));
       await waitMs(200);
       ok(v3Events.length === 1 && tsrv3.status().v3AuthFail >= 1 && tsrv3.status().v3Unknown >= 1, 'v3 Trap：错误口令/未知用户丢弃并计数');
+      // 含字母 s 的未知用户名：旧分类正则 [^s）] 匹配不到，误计入 v3AuthFail 而非 v3Unknown
+      const stBefore = tsrv3.status();
+      await sendV3Trap(buildV3TrapPkt({ user: 'snmpadmin', authProto: 'sha', authPass: 'x', privProto: 'aes', privPass: 'y' }, '1.3.6.1.6.3.1.1.5.1', 1));
+      await waitMs(200);
+      const stAfter = tsrv3.status();
+      ok(v3Events.length === 1 && stAfter.v3Unknown === stBefore.v3Unknown + 1 && stAfter.v3AuthFail === stBefore.v3AuthFail, 'v3 Trap：含 s 的未知用户名归入 v3Unknown（分类正则回归）');
       us3.close();
       await tsrv3.stop();
       // net-services trap v3 配置归一化

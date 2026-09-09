@@ -433,16 +433,13 @@ function parseV3Message(buf, opts) {
     let varbinds = [];
     let report = null;
     let responseRid = null;
+    // 响应/Trap/请求包：取 PDU 内 request-id（区别于外层 msgID）与 varbinds
     if (pduT.tag === 0xa2 || pduT.tag === 0xa7 || pduT.tag === 0xa0 || pduT.tag === 0xa1) {
       responseRid = pf.length ? readUInt(pf[0].body) : null;
       varbinds = parseVbs(pf[3]);
     } else if (pduT.tag === 0xa8) {
       // Report：varbind 携带 usmStats 错误计数
       for (const vb of parseVbs(pf[3])) if (vb.oid) report = { oid: vb.oid, value: vb.value };
-    } else if (pduT.tag === 0xa0 || pduT.tag === 0xa1) {
-      // 请求包：取 PDU 内 request-id（区别于外层 msgID）与 varbinds（供应答方处理）
-      responseRid = pf.length ? readUInt(pf[0].body) : null;
-      varbinds = parseVbs(pf[3]);
     }
     return { ok: true, engineID, boots, time, userName, flags, pduTag: pduT.tag, varbinds, rid: responseRid != null ? responseRid : rid, report, authenticated, decrypted, wantAuth, wantPriv };
   } catch (e) {

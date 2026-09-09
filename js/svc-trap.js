@@ -359,7 +359,9 @@ class TrapServer extends EventEmitter {
       lastReason = r.reason || '';
     }
     if (!full) {
-      const m = /用户 ([^s）]+) 未配置/.exec(lastReason);
+      // 从「用户 X 未配置认证密钥」提取包内用户名：捕获不能排除字母 s（旧正则 [^s）] 会让
+      // 含 s 的用户名（如 snmpadmin）误入 v3AuthFail 而非 v3Unknown）
+      const m = /用户 (.+) 未配置/.exec(lastReason);
       if (m && !this.v3Users.some(x => x.user === m[1])) this.stats.v3Unknown++; // 包内用户未在本端配置
       else this.stats.v3AuthFail++;                                              // 已配置用户但验签/解密失败
       return;
@@ -411,8 +413,10 @@ class TrapServer extends EventEmitter {
         off = t.next;
       }
       const varb = Buffer.from(pf.body.subarray(off));
-      const uintBytes = (n) => { const b = []; let v = n >>> 0; do { b.unshift(v & 0xff); v = v >>> 8; } while (v); return b; };
-      const berLen = (n) => n < 128 ? Buffer.from([n]) : Buffer.from([0x81, n]);
+      // INTEGER/长度均按最小补码编码：正数首字节高位为 1 时补前导 0；长度 ≥256 需 0x82 两字节
+      // （企业 inform 的 varbind 区常超 255 字节，此前 0x81 截断为低 8 位产出坏包，设备重发不止）
+      const uintBytes = (n) => { const b = []; let v = n >>> 0; do { b.unshift(v & 0xff); v = v >>> 8; } while (v); if (b[0] & 0x80) b.unshift(0); return b; };
+      const berLen = (n) => n < 128 ? Buffer.from([n]) : n < 256 ? Buffer.from([0x81, n]) : Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
       const berTlv = (tag, body) => Buffer.concat([Buffer.from([tag]), berLen(body.length), body]);
       const rid = readUInt(ridT.body) || 0;
       const pdu = Buffer.concat([berTlv(0x02, Buffer.from(uintBytes(rid))), berTlv(0x02, Buffer.from([0])), berTlv(0x02, Buffer.from([0])), varb]);
