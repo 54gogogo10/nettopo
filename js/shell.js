@@ -425,9 +425,11 @@ class ShellManager extends EventEmitter {
         if (info.state === 'connected') {
           connectedOnce = true;
         } else if (info.state === 'fingerprint') {
-          // 无人值守采集的指纹语义与监控一致：首次连接自动信任（TOFU），变化拒绝由渲染层传入 expectFp 严格比对
+          // 无人值守采集的指纹语义与监控一致：首次连接自动信任（TOFU），变化拒绝由渲染层传入 expectFp 严格比对。
+          // port 必须随回执带出：渲染层指纹记忆键按 host:port 拆分（非 22 端口），缺 port 会回落
+          // host-only 键与其它端口的指纹互相挤占，无人值守采集被误拒
           const fh = String((info && info.host) || host);
-          fpOut.v = { host: fh, fp: String(info.fp || '') };
+          fpOut.v = { host: fh, port: info.port, fp: String(info.fp || '') };
           try { this.trustFingerprint(fh, true, 'monitor'); } catch (e) { /* ignore */ }
         } else if (info.state === 'error') {
           if (!connectedOnce) { finish(false, info.text || '连接失败'); return; }

@@ -19,7 +19,10 @@ parentPort.on('message', (job) => {
     // 先报号再执行：主进程超时终止时按最后一个 begin 定位卡死的模式
     parentPort.postMessage({ type: 'begin', id: job.id, index: i });
     try {
-      const re = new RegExp(it.pattern, it.flags || '');
+      // 剥离 g/y 标志：带状态的 test（命中后 lastIndex 前进）在逐行/整段复测间串扰，产生
+      // 静默漏报；scan 本就逐行全覆盖，无需 global 语义
+      const flags = String(it.flags || '').replace(/[gy]/g, '');
+      const re = new RegExp(it.pattern, flags);
       if (it.op === 'scan') {
         // 合规巡检：逐行扫描，命中行号列表（截断到 maxHits）
         const lines = Array.isArray(it.lines) ? it.lines : [];

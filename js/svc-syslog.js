@@ -272,6 +272,8 @@ class SyslogServer extends EventEmitter {
   }
 
   _onTcpConn(sock) {
+    // stop() 竞态守卫：连接回调排在 stop 之后同批执行时（内核已 accept），不得继续收流重建写流
+    if (!this.running) { try { sock.destroy(); } catch (e) { /* ignore */ } return; }
     // 登记：stop() 必须把已 accept 的连接一并销毁——net.Server.close 只停监听不影响存量连接，
     // 长连接设备（rsyslog over TCP 等）会继续收日志、继续重建写流落盘，「停止」语义完全失效
     if (!this._tcpConns) this._tcpConns = new Set();

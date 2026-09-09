@@ -5499,11 +5499,20 @@ function wire() {
       const host = info.host || '';
       const ms = state.monitorStatus[did];
       if (!ms || !ms.perHost || !ms.perHost[host]) return;
-      ms.perHost[host].probeOk = info.ok;
-      ms.perHost[host].probeLatency = info.latencyMs;
-      ms.perHost[host].probeFailSince = info.failSince;
+      const ph = ms.perHost[host];
+      const prev = { state: ms.state, text: ms.text, ok: ph.probeOk };
+      ph.probeOk = info.ok;
+      ph.probeLatency = info.latencyMs;
+      ph.probeFailSince = info.failSince;
       ms.state = aggregateMonitorState(ms.perHost);
       ms.text = aggregateMonitorText(ms.perHost);
+      // probe 事件每周期都发（UptimeStore 在线率按周期采样分桶）：聚合状态与探测结论均未变化时
+      // 不触发面板/覆盖层的全量重建（innerHTML 重挂监听器，N 台×5s 间隔会把渲染层打满）；
+      // 选中卡有「探测时延」展示，选中的正是该设备时单独轻量刷新
+      if (prev.state === ms.state && prev.text === ms.text && prev.ok === info.ok) {
+        if (state.sel && state.sel.kind === 'node' && state.sel.id === did) renderSelCard();
+        return;
+      }
       refreshPanel();
       renderSelCard();
       syncMonOverlay();

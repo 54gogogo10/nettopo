@@ -4,6 +4,9 @@
 (function (global) {
 'use strict';
 
+/* 求最大宽/高：Math.max(...arr) 的 spread 受引擎实参栈上限约束，超大节点数抛 RangeError */
+const maxOf = (arr, f) => { let m = -Infinity; for (const x of arr) { const v = f(x); if (v > m) m = v; } return m; };
+
 /* 力导向模拟：斥力 + 弹簧 + 弱重力，返回每一步的节点位置回调。
  * opts: { steps=520, stepsPerFrame=12, restLen=300, cancel:()=>bool }
  */
@@ -184,8 +187,8 @@ function gridLayout(nodes, opts) {
   const cols = opts.cols || Math.ceil(Math.sqrt(n));
   const gap = opts.gap != null ? opts.gap : 60;
   const sorted = [...nodes].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
-  const cellW = Math.max(...nodes.map(x => x.w)) + gap;
-  const cellH = Math.max(...nodes.map(x => x.h)) + gap;
+  const cellW = maxOf(nodes, x => x.w) + gap;
+  const cellH = maxOf(nodes, x => x.h) + gap;
   const cx0 = opts.cx != null ? opts.cx - ((cols - 1) * cellW) / 2 : 0;
   const cy0 = opts.cy != null ? opts.cy - (Math.ceil(n / cols) - 1) * cellH / 2 : 0;
   sorted.forEach((nd, i) => {
@@ -208,7 +211,7 @@ function layerLayout(nodes, opts) {
   }
   const cx = opts.cx != null ? opts.cx : 0;
   const cy0 = opts.cy != null ? opts.cy : 0;
-  const cellH = Math.max(...nodes.map(x => x.h)) + gap;
+  const cellH = maxOf(nodes, x => x.h) + gap;
   let row = 0;
   for (const type of TYPE_ORDER) {
     const list = (groups.get(type) || []).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
@@ -236,7 +239,7 @@ function tierLayout(nodes, opts) {
   ];
   const cx = opts.cx != null ? opts.cx : 0;
   const cy0 = opts.cy != null ? opts.cy : 0;
-  const cellH = Math.max(...nodes.map(x => x.h)) + gap;
+  const cellH = maxOf(nodes, x => x.h) + gap;
   let row = 0;
   for (const t of tiers) {
     // 自定义类型（不在内置 TYPE_ORDER 内）回退归入接入层：否则这些节点不进任何层，
@@ -341,10 +344,13 @@ function layerTopoLayout(nodes, links, opts) {
     });
   }
 
-  // 碰撞分离（防止层内/层间节点重叠）
-  const pos = nodes.map(nd => ({ x: nd.x + nd.w / 2, y: nd.y + nd.h / 2 }));
-  separateRects(pos, nodes);
-  nodes.forEach((nd, i) => { nd.x = pos[i].x - nd.w / 2; nd.y = pos[i].y - nd.h / 2; });
+  // 碰撞分离（防止层内/层间节点重叠）；大图钳制与 simulate/separateOverlaps 同口径（2500）——
+  // O(n²)×3 的分离在数万节点工程上会冻结渲染主线程数十秒
+  if (nodes.length <= 2500) {
+    const pos = nodes.map(nd => ({ x: nd.x + nd.w / 2, y: nd.y + nd.h / 2 }));
+    separateRects(pos, nodes);
+    nodes.forEach((nd, i) => { nd.x = pos[i].x - nd.w / 2; nd.y = pos[i].y - nd.h / 2; });
+  }
 }
 
 /* 仅推开重叠节点（不改整体布局）：工程 / 部分坐标表格 / 邻居表导入等加载路径的防重合兜底。

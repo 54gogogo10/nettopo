@@ -383,10 +383,13 @@ function parseSseChunk(buf) {
       if (data === '[DONE]') { done = true; continue; }
       let j = null;
       try { j = JSON.parse(data); } catch (e) { continue; } // 非 JSON 数据行：宽容忽略（各家实现差异）
-      if (j && typeof j.usage === 'object' && j.usage) usage = j.usage;
-      else if (j && j.type === 'message_delta' && j.usage && Number.isFinite(j.usage.output_tokens)) {
-        // Claude 流末的 message_delta 只带 output_tokens（prompt 用量在 message_start）
-        usage = { prompt_tokens: (usage && usage.prompt_tokens) || 0, completion_tokens: j.usage.output_tokens };
+      if (j && typeof j.usage === 'object' && j.usage) {
+        // 合并语义（不整体覆盖）：OpenAI 兼容流末单 chunk 完整携带；Claude 的 input 在流头
+        // message_start、output 在流尾 message_delta，两者分属不同 parseSseChunk 调用——
+        // 各自只覆盖自己携带的字段，互不清零
+        usage = Object.assign({}, usage, j.usage);
+      } else if (j && j.type === 'message_delta' && j.usage && Number.isFinite(j.usage.output_tokens)) {
+        usage = Object.assign({}, usage, { completion_tokens: j.usage.output_tokens });
       } else if (j && j.type === 'message_start' && j.message && j.usage && Number.isFinite(j.usage.input_tokens)) {
         usage = Object.assign({}, usage, { prompt_tokens: j.usage.input_tokens });
       }
@@ -673,7 +676,8 @@ class AiClient extends EventEmitter {
           buf += text;
           const r = parseSseChunk(buf);
           buf = r.rest;
-          if (r.usage) streamUsage = r.usage; // 流末 chunk 的真实用量（OpenAI 兼容 / Claude）
+          // 合并而非覆盖：Claude 的 prompt/completion 用量分属流头/流尾的不同 data 事件
+          if (r.usage) streamUsage = Object.assign({}, streamUsage, r.usage);
           for (const d of r.deltas) {
             try { onDelta(d); } catch (e) { /* 回调异常不中断接收 */ }
           }

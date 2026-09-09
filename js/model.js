@@ -308,11 +308,30 @@ function textToGraph(text) {
 function xlsxToGraph(buffer) {
   const wb = global.XLSX.read(new Uint8Array(buffer), { type: 'array' });
   const ws = wb.Sheets[wb.SheetNames[0]];
-  // raw:false 取格式化文本：raw:true 时日期单元格回读为 Excel 序列号（如 45123），
-  // 备注/描述列含日期时语义丢失；General 格式的数值仍输出原样文本（10000 → "10000"）
-  const rows = global.XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-  const rows2 = rows.map(r => Array.isArray(r) ? r.map(v => v == null ? '' : String(v)) : []);
-  return recordsToGraph(parseRows(rows2));
+  // 逐单元格取值：数值保持原始精度（raw:false 的格式化文本会把千分位格式的带宽 10000 读成
+  // "10,000"，normalizeBw/parseFloat 截断为 10——带宽/坐标全错）；仅日期单元格（数字类型 +
+  // 含日期占位的数字格式）改用格式化文本，防备注/描述列的日期以 Excel 序列号（如 45123）回读
+  const XLSX = global.XLSX;
+  const isDateFormat = (z) => {
+    if (typeof z !== 'string' || !z || z === 'General') return false;
+    return /[ymdhs]/i.test(z.replace(/"[^"]*"|\[[^\]]*\]/g, ''));
+  };
+  const rows = [];
+  try {
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    const maxR = Math.min(range.e.r, 5000), maxC = Math.min(range.e.c, 63);
+    for (let r = range.s.r; r <= maxR; r++) {
+      const row = [];
+      for (let c = range.s.c; c <= maxC; c++) {
+        const cell = ws[XLSX.utils.encode_cell({ r, c })];
+        if (!cell) { row.push(''); continue; }
+        if (cell.t === 'n' && isDateFormat(cell.z)) row.push(cell.w != null ? String(cell.w) : String(cell.v));
+        else row.push(cell.v == null ? '' : String(cell.v));
+      }
+      rows.push(row);
+    }
+  } catch (e) { /* 空表/坏引用：按空数据处理 */ }
+  return recordsToGraph(parseRows(rows));
 }
 
 /* ---------- 示例数据 ---------- */
