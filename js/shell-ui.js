@@ -171,6 +171,23 @@ function upsertRestoreEntry(list, entry, cap) {
     return null;
   };
 
+  /* ---- 右侧工具栏收起 / 展开（本地记忆；宽度变化后活动终端需重新排版并上报尺寸） ---- */
+  const SIDE_KEY = 'topoShellSideOff';
+  const applySideOff = (off, remember) => {
+    document.body.classList.toggle('sh-side-off', !!off);
+    const toggleEl = $('#shSideToggle');
+    if (toggleEl) {
+      toggleEl.textContent = off ? '«' : '»';
+      toggleEl.title = off ? '展开工具栏' : '收起工具栏';
+    }
+    if (remember) { try { localStorage.setItem(SIDE_KEY, off ? '1' : '0'); } catch (e) { /* ignore */ } }
+    const a = activeSession();
+    if (a) {
+      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
+      window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows);
+    }
+  };
+
   function applyStatus(s, info) {
     const state = info && info.state;
     s.dotEl.className = 'dot' + (state === 'error' ? ' err' : state === 'connected' ? ' ok' : '');
@@ -523,6 +540,13 @@ function upsertRestoreEntry(list, entry, cap) {
    * 回放：读取录像 → 只读 xterm 按时间轴回放，支持 0.5~8 倍速 / 暂停 / 重播。 */
   const recBtnEl = $('#shRecBtn'), recPlayBtnEl = $('#shRecPlayBtn');
   let recActive = false, recFile = null, recStart = 0, recBuf = [], recTimer = null;
+  // 工具栏按钮为「图标 + 文案」两个节点：只改文案节点，避免整体重写 textContent 打平结构
+  const setRecBtnState = (on) => {
+    if (!recBtnEl) return;
+    recBtnEl.classList.toggle('on', on);
+    const tx = recBtnEl.querySelector('.tx');
+    if (tx) tx.textContent = on ? '录制中…' : '录制';
+  };
   const recPush = (data) => { if (recActive && recBuf.length < 20000) recBuf.push({ t: Date.now() - recStart, dir: 'out', d: data }); };
   const recFlush = async () => {
     if (!recActive || !recBuf.length) return;
@@ -543,7 +567,7 @@ function upsertRestoreEntry(list, entry, cap) {
     if (!r || !r.ok) { toast('录制启动失败：' + ((r && r.error) || '未知错误')); return; }
     recActive = true; recFile = r.name; recStart = Date.now(); recBuf = [];
     recTimer = setInterval(recFlush, 800);
-    if (recBtnEl) { recBtnEl.classList.add('on'); recBtnEl.textContent = '⏺ 录制中…'; }
+    setRecBtnState(true);
     toast('开始录制会话输出（再次点击停止）：' + r.name);
   };
   const stopRecording = async (silent) => {
@@ -553,7 +577,7 @@ function upsertRestoreEntry(list, entry, cap) {
     await recFlush();
     let r;
     try { r = await window.topoShell.recordStop(); } catch (e) { r = null; }
-    if (recBtnEl) { recBtnEl.classList.remove('on'); recBtnEl.textContent = '⏺ 录制'; }
+    setRecBtnState(false);
     if (!silent) toast('录制完成：' + ((r && r.name) || recFile || ''));
     recFile = null;
   };
@@ -1756,6 +1780,13 @@ function upsertRestoreEntry(list, entry, cap) {
     if ($('#shFontDec')) $('#shFontDec').onclick = () => setFontSize(-1);
     if ($('#shFontInc')) $('#shFontInc').onclick = () => setFontSize(1);
     if (fontValEl) fontValEl.textContent = fontSize;
+
+    // 右侧工具栏收起 / 展开（记忆上次状态）
+    const sideToggleEl = $('#shSideToggle');
+    if (sideToggleEl) sideToggleEl.onclick = () => applySideOff(!document.body.classList.contains('sh-side-off'), true);
+    let sideOffSaved = false;
+    try { sideOffSaved = localStorage.getItem(SIDE_KEY) === '1'; } catch (e) { /* ignore */ }
+    applySideOff(sideOffSaved, false);
 
     // 快捷按钮条
     renderBar();

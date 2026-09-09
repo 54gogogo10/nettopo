@@ -1,5 +1,8 @@
 /* ============ NetTopo Web Shell 独立窗口 ============ */
 .sh-body { overflow: hidden; }
+/* 侧栏宽度变量：SFTP 浮层 / 终端留白随展开（136px）/收起（40px）联动 */
+body.shell-body { --sh-side-w: 136px; }
+body.shell-body.sh-side-off { --sh-side-w: 40px; }
 .sh-head {
   display: flex; align-items: center; gap: 8px;
   height: 46px; padding: 0 10px; flex: 0 0 auto;
@@ -10,6 +13,39 @@
 .sh-brand b { font-size: 13px; letter-spacing: .2px; }
 .sh-brand span { font-size: 10px; color: var(--muted); }
 .sh-tabs { display: flex; align-items: flex-end; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; height: 100%; padding: 8px 2px 0; scrollbar-width: thin; }
+
+/* 中部行：终端区 + 右侧竖向工具栏 */
+.sh-mid { display: flex; flex: 1; min-height: 0; }
+.sh-side {
+  flex: none; width: var(--sh-side-w);
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 8px; overflow: hidden;
+  background: var(--panel); border-left: 1px solid var(--border);
+  user-select: none;
+}
+.sh-side-toggle {
+  flex: none; height: 24px; border-radius: 7px;
+  background: var(--panel2); border: 1px solid var(--border);
+  font-size: 13px; color: var(--muted); transition: all .15s;
+}
+.sh-side-toggle:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.sh-side-sep { flex: none; height: 1px; background: var(--border); margin: 2px 1px; }
+/* 竖栏内的工具按钮：图标 + 文案横排，收起时只留图标 */
+.sh-side .sh-cast-btn {
+  display: flex; align-items: center; gap: 7px;
+  width: 100%; height: 30px; padding: 0 9px; margin-right: 0;
+  text-align: left;
+}
+.sh-side .sh-cast-btn .ic { flex: none; width: 16px; text-align: center; font-size: 13px; }
+.sh-side .sh-cast-btn .tx { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-side .sh-cast-btn.on .ic { color: #fff; }
+/* 收起态：40px 图标栏，仅保留开关与图标 */
+body.sh-side-off .sh-side { padding: 8px 5px; gap: 6px; align-items: center; }
+body.sh-side-off .sh-side .tx,
+body.sh-side-off .sh-side .sh-side-sep,
+body.sh-side-off .sh-side .sh-font { display: none; }
+body.sh-side-off .sh-side .sh-cast-btn,
+body.sh-side-off .sh-side .sh-new { width: 28px; min-width: 28px; padding: 0; justify-content: center; }
 .sh-tab {
   display: flex; align-items: center; gap: 6px; flex: 0 1 auto;
   max-width: 240px; min-width: 90px;
@@ -29,10 +65,13 @@
 .sh-tab.active { background: var(--panel); color: var(--text); border-color: var(--accent); font-weight: 600; }
 .sh-tab.active .dot { background: #22c55e; }
 .sh-new {
-  flex: none; height: 30px; padding: 0 12px; border-radius: 8px;
+  flex: none; display: flex; align-items: center; gap: 7px;
+  width: 100%; height: 30px; padding: 0 9px; border-radius: 8px;
   background: var(--panel2); border: 1px solid var(--border);
   font-size: 12.5px; color: var(--text); transition: all .15s;
 }
+.sh-new .ic { flex: none; width: 16px; text-align: center; }
+.sh-new .tx { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sh-new:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 /* overflow:hidden 裁剪 xterm 画布溢出：.sh-terms 是定位元素，画布超出会盖住其后非定位的 AI 输入条/按钮条 */
 .sh-terms { flex: 1; position: relative; min-height: 0; background: #0b1220; overflow: hidden; }
@@ -50,8 +89,8 @@
 .sh-empty .tb { height: 34px; padding: 0 16px; }
 .sh-dialog { width: 430px; }
 
-/* 字号控件 */
-.sh-font { display: flex; align-items: center; gap: 2px; flex: none; margin-right: 2px; }
+/* 字号控件（右侧竖栏底部，横向一行） */
+.sh-font { display: flex; align-items: center; justify-content: center; gap: 2px; flex: none; }
 .sh-font-btn {
   height: 24px; min-width: 24px; padding: 0 6px; border-radius: 6px;
   background: var(--panel2); border: 1px solid var(--border);
@@ -218,9 +257,9 @@
 .sh-rc .sh-rc-reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 .sh-rc .sh-rc-btn { height: 28px; padding: 0 14px; flex: none; }
 
-/* ---- SFTP 文件面板（右侧浮层，随当前 SSH 标签浏览远程目录） ---- */
+/* ---- SFTP 文件面板（右侧浮层，随当前 SSH 标签浏览远程目录；right 随工具栏宽度联动避让） ---- */
 .sh-sftp {
-  position: fixed; right: 8px; top: 54px; bottom: 8px; width: 344px; z-index: 60;
+  position: fixed; right: calc(var(--sh-side-w) + 8px); top: 54px; bottom: 8px; width: 344px; z-index: 60;
   display: flex; flex-direction: column; gap: 6px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
   box-shadow: var(--shadow); padding: 10px; overflow: hidden;
