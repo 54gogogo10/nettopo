@@ -5355,7 +5355,7 @@ function wire() {
         const did = j.deviceId || deviceIdFromMonitorKey(j.key);
         if (!did) continue;
         const ms = { state: null, text: '', perHost: {} };
-        ms.perHost[j.host || ''] = { state: j.state, text: j.statusText || '', since: j.since, probeOk: j.probeOk, alert: j.alert, backup: j.backup };
+        ms.perHost[j.host || ''] = { state: j.state, text: j.text || '', since: j.since, probeOk: j.probeOk, alert: j.alert, backup: j.backup };
         ms.state = aggregateMonitorState(ms.perHost);
         state.monitorStatus[did] = ms;
       }
@@ -5542,7 +5542,8 @@ function wire() {
       const ms = state.monitorStatus[did];
       if (!ms || !ms.perHost || !ms.perHost[host]) return;
       if (info.ok) {
-        ms.perHost[host].backup = { name: info.name, changed: !!info.changed, first: !!info.first, added: info.added, removed: info.removed, error: null };
+        // fileName 才是备份文件名（info.name 是设备名——两通道命名不同，onStatus 侧叫 info.backup.name）
+        ms.perHost[host].backup = { name: info.fileName || null, changed: !!info.changed, first: !!info.first, added: info.added, removed: info.removed, error: null };
       } else {
         ms.perHost[host].backup = { name: null, changed: false, error: info.error || '备份失败' };
       }
@@ -7012,7 +7013,7 @@ function openMonitorCenter() {
     const alerting = jobs.filter(j => !!j.alert);
     lines.push('【概览】巡检时间：' + U.fmtDateTime(new Date()));
     lines.push('监控任务 ' + jobs.length + ' 台：在线 ' + statOk + '，离线 ' + off.length + '，告警中 ' + alerting.length
-      + '，配置备份覆盖 ' + jobs.filter(j => j.backupEnabled).length + ' 台，启用自动合规 ' + jobs.filter(j => j.complianceLast).length + ' 台。');
+      + '，配置备份覆盖 ' + jobs.filter(j => j.backupEnabled).length + ' 台，启用自动合规 ' + jobs.filter(j => j.compliance).length + ' 台。');
     lines.push('');
     lines.push('【设备明细】');
     if (!jobs.length) lines.push('（无监控任务）');
@@ -7022,10 +7023,10 @@ function openMonitorCenter() {
       if (j.probeLatency != null) bits.push('探测时延 ' + j.probeLatency + 'ms');
       if (j.alert) bits.push('命中告警关键字「' + j.alert + '」');
       if (j.backupEnabled) {
-        bits.push('最近备份 ' + (j.backupLast && j.backupLast.at ? U.fmtDateTime(new Date(j.backupLast.at)) : '无')
-          + (j.backupLast && j.backupLast.error ? '（失败：' + j.backupLast.error + '）' : (j.backupLast && j.backupLast.changed ? '（有变化）' : '')));
+        bits.push('最近备份 ' + (j.backup && j.backup.at ? U.fmtDateTime(new Date(j.backup.at)) : '无')
+          + (j.backup && j.backup.error ? '（失败：' + j.backup.error + '）' : (j.backup && j.backup.changed ? '（有变化）' : '')));
       } else bits.push('未启用自动备份');
-      if (j.complianceLast) bits.push('合规 ' + (j.complianceLast.total - j.complianceLast.failed) + '/' + j.complianceLast.total + ' 项通过');
+      if (j.compliance) bits.push('合规 ' + (j.compliance.total - j.compliance.failed) + '/' + j.compliance.total + ' 项通过');
       if (j.lastPerf && (j.lastPerf.cpu != null || j.lastPerf.mem != null)) {
         bits.push('CPU ' + (j.lastPerf.cpu == null ? '—' : j.lastPerf.cpu + '%') + ' / 内存 ' + (j.lastPerf.mem == null ? '—' : j.lastPerf.mem + '%'));
       }

@@ -1580,8 +1580,8 @@ function buildDailySnapshotMain() {
     if (j.probeLatency != null) bits.push('探测时延 ' + j.probeLatency + 'ms');
     if (j.alert) bits.push('命中告警关键字「' + j.alert + '」');
     if (j.backupEnabled) {
-      bits.push('最近备份 ' + (j.backupLast && j.backupLast.at ? fmtDTMain(new Date(j.backupLast.at)) : '无')
-        + (j.backupLast && j.backupLast.error ? '（失败：' + j.backupLast.error + '）' : (j.backupLast && j.backupLast.changed ? '（有变化）' : '')));
+      bits.push('最近备份 ' + (j.backup && j.backup.at ? fmtDTMain(new Date(j.backup.at)) : '无')
+        + (j.backup && j.backup.error ? '（失败：' + j.backup.error + '）' : (j.backup && j.backup.changed ? '（有变化）' : '')));
     }
     if (j.compliance && j.compliance.total) bits.push('合规违规 ' + j.compliance.failed + '/' + j.compliance.total);
     if (j.lastPerf && (j.lastPerf.cpu != null || j.lastPerf.mem != null)) {

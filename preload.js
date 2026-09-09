@@ -94,6 +94,10 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   httpHistory: (key) => ipcRenderer.invoke('monitor:httphistory', { key }),
   onHttp: sub('monitor:http'),
   onReboot: sub('monitor:reboot'),
+  /* 合规巡检结果 / 指标阈值告警 / 证书到期告警的实时推送（监控中心按需订阅） */
+  onCompliance: sub('monitor:compliance'),
+  onMetricAlert: sub('monitor:metric-alert'),
+  onCertAlert: sub('monitor:cert-alert'),
   /* 已信任主机指纹（TOFU 信任库）的查看与撤销：设备换机/重装后可在此重置 */
   trustList: () => ipcRenderer.invoke('monitor:trust-list'),
   trustRevoke: (host) => ipcRenderer.invoke('monitor:trust-revoke', { host }),
@@ -179,6 +183,5 @@ contextBridge.exposeInMainWorld('topoAI', {
   historyRead: (name) => ipcRenderer.invoke('ai:history-read', { name }),
   historyRemove: (name) => ipcRenderer.invoke('ai:history-remove', { name }),
   historyClear: () => ipcRenderer.invoke('ai:history-clear'),
-  onChunk: sub('ai:chunk'),
-  onStatus: sub('ai:status')
+  onChunk: sub('ai:chunk')
 });
