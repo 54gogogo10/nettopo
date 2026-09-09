@@ -359,11 +359,12 @@ U.typeOf = (name) => {
   const s = String(name || '').toLowerCase();
   if (/云|internet|互联网|cloud/.test(s)) return 'cloud';
   if (/防火|fw|firewall/.test(s)) return 'firewall';
-  // rt 加边界约束（前后不能是英文字母）：裸子串会把 PortChannel1 / support / export 误判为路由器
+  // 裸缩写一律加边界约束（前后不能是英文字母）：rt/sw/srv/pc 会把 PortChannel1、answer、
+  // support、rpc 这类普通词误判类型（rt 已修，此处同口径补齐 sw/srv/pc）
   if (/路由|router|rtr|(?:^|[^a-z])rt(?![a-z])/.test(s)) return 'router';
-  if (/交换|sw|switch/.test(s)) return 'switch';
-  if (/服务|srv|server/.test(s)) return 'server';
-  if (/pc|终端|主机|电脑|计算机|办公|client|host|打印机|print/.test(s)) return 'pc';
+  if (/交换|switch|(?:^|[^a-z])sw(?![a-z])/.test(s)) return 'switch';
+  if (/服务|server|(?:^|[^a-z])srv(?![a-z])/.test(s)) return 'server';
+  if (/(?:^|[^a-z])pc(?![a-z])|终端|主机|电脑|计算机|办公|client|host|打印机|print/.test(s)) return 'pc';
   return 'other';
 };
 
@@ -443,19 +444,26 @@ U.sanitizeTypeData = (overrides, customTypes) => {
 /* 文本框可用字体白名单（防止工程文件注入任意字体名/样式串） */
 U.TEXT_FONTS = ['Microsoft YaHei', 'SimSun', 'SimHei', 'DengXian', 'KaiTi', 'Arial', 'Consolas', 'Georgia', 'Times New Roman'];
 
+/* id 白名单与危险键（sanitizeGraph / sanitizeRegions 共用）：
+ * 原型键名（__proto__ 等）可通过 SAFE_ID 但会命中原型 setter（赋值改写原型而非自有属性，干扰下游 byId 映射） */
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const BAD_ID = new Set(['__proto__', 'constructor', 'prototype']);
+const idOk = (s, used) => SAFE_ID.test(s) && !BAD_ID.has(s) && !used.has(s);
+
 /* 清洗工程图数据：保证节点/连线/文本框字段类型正确（防缺失字段、NaN 坐标、畸形数据） */
 U.sanitizeGraph = (nodes, links, texts) => {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
   const coord = (v, d) => Math.max(-1e6, Math.min(1e6, num(v, d))); // 坐标钳制，防超大坐标几何 DoS
   const str = (v) => typeof v === 'string' ? v : String(v == null ? '' : v);
-  const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+  // 掩码位清洗：0-32 整数，否则回退 24（与 vlans.mask 口径一致）
+  const maskBitsOf = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 && n <= 32 ? n : 24; };
   const usedN = new Set(), usedL = new Set(), usedT = new Set();
   const fresh = (prefix, used) => { let id; do { id = U.uid(prefix); } while (used.has(id)); used.add(id); return id; };
   const idMap = new Map(); // 旧 id -> 新 id（仅在不合法/重复时记录）
   const cleanNodes = (Array.isArray(nodes) ? nodes : []).map(n => {
     if (!n || typeof n !== 'object') return null;
     const oldId = str(n.id);
-    const id = SAFE_ID.test(oldId) && !usedN.has(oldId) ? oldId : fresh('n', usedN);
+    const id = idOk(oldId, usedN) ? oldId : fresh('n', usedN);
     usedN.add(id);
     // 记录旧 id → 新 id；重复 id 以首个为准（后续重复的旧 id 不再覆盖）
     if (!idMap.has(oldId)) idMap.set(oldId, id);
@@ -486,7 +494,7 @@ U.sanitizeGraph = (nodes, links, texts) => {
   const cleanLinks = (Array.isArray(links) ? links : []).map(l => {
     if (!l || typeof l !== 'object') return null;
     const oldId = str(l.id);
-    const id = SAFE_ID.test(oldId) && !usedL.has(oldId) ? oldId : fresh('l', usedL);
+    const id = idOk(oldId, usedL) ? oldId : fresh('l', usedL);
     usedL.add(id);
     const a = idMap.get(str(l.a)) || str(l.a);
     const b = idMap.get(str(l.b)) || str(l.b);
@@ -501,13 +509,14 @@ U.sanitizeGraph = (nodes, links, texts) => {
       aL2: !!l.aL2, bL2: !!l.bL2,
       aVlan: str(l.aVlan).trim().slice(0, 16), bVlan: str(l.bVlan).trim().slice(0, 16),
       aVlanMode: vlanModeOf(l.aVlanMode), bVlanMode: vlanModeOf(l.bVlanMode),
-      aMask: num(l.aMask, 24), bMask: num(l.bMask, 24)
+      // 掩码位与 vlans.mask 同口径钳制 0-32：越界值导出回读会被对端钳成 24，掩码静默漂移
+      aMask: maskBitsOf(l.aMask), bMask: maskBitsOf(l.bMask)
     };
   }).filter(Boolean);
   const cleanTexts = (Array.isArray(texts) ? texts : []).map(t => {
     if (!t || typeof t !== 'object') return null;
     const oldId = str(t.id);
-    const id = SAFE_ID.test(oldId) && !usedT.has(oldId) ? oldId : fresh('t', usedT);
+    const id = idOk(oldId, usedT) ? oldId : fresh('t', usedT);
     usedT.add(id);
     return {
       id, x: coord(t.x, 0), y: coord(t.y, 0),
@@ -532,7 +541,7 @@ U.sanitizeRegions = (regions) => {
   return (Array.isArray(regions) ? regions : []).map(r => {
     if (!r || typeof r !== 'object') return null;
     const oldId = typeof r.id === 'string' ? r.id : '';
-    let id = SAFE_ID.test(oldId) && !used.has(oldId) ? oldId : null;
+    let id = idOk(oldId, used) ? oldId : null;
     if (!id) { do { id = U.uid('r'); } while (used.has(id)); }
     used.add(id);
     return {
@@ -1159,6 +1168,7 @@ U.ipv4ToInt = (ip) => {
 U.intToIpv4 = (n) => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
 U.subnetOf = (ip, bits) => {
   bits = bits == null ? 24 : bits;
+  if (!Number.isInteger(bits) || bits < 0 || bits > 32) return null; // 越界位宽不产出非法 CIDR（如 /64 实际按 /32 移位）
   const n = U.ipv4ToInt(ip);
   if (n == null) return null;
   const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
@@ -1573,7 +1583,8 @@ U.generateConfigs = (nodes, links, vendor, opts) => {
   // 直连子网 / 邻居子网（用于静态路由）
   const linkOf = new Map();
   for (const n of nodes) linkOf.set(n.id, []);
-  for (const l of links) { linkOf.get(l.a).push(l); linkOf.get(l.b).push(l); }
+  // 手工编辑的工程 JSON 可能出现悬空链路引用（shortestPath/validateTopology 均有防御，此处同口径）
+  for (const l of links) { if (!linkOf.has(l.a) || !linkOf.has(l.b)) continue; linkOf.get(l.a).push(l); linkOf.get(l.b).push(l); }
   const out = [];
   // 已知非路由设备类型不生成静态路由（与注释语义一致；自定义类型保留推导能力）
   const NON_ROUTE_TYPES = new Set(['switch', 'server', 'pc', 'other']);
@@ -1835,9 +1846,10 @@ U.diffProjects = (a, b) => {
   const keyOf = (n) => n.name || '';
   const linkKey = (l, byName) => {
     const an = byName.get(l.a) || '', bn = byName.get(l.b) || '';
-    const k = [an, bn].sort().join('|');
-    const ifs = [l.aIf || '', l.aIp || '', l.bIf || '', l.bIp || '', String(l.bw || '')].join('/');
-    return k + '#' + ifs;
+    // 接口名天然含 '/'（GE0/0/1）、设备名可含 '|'：用不可见控制符做分隔，展示时再拆回
+    const k = [an, bn].sort().join('\u0001');
+    const ifs = [l.aIf || '', l.aIp || '', l.bIf || '', l.bIp || '', String(l.bw || '')].join('\u0001');
+    return k + '\u0002' + ifs;
   };
   const byNameA = new Map(a.nodes.map(n => [n.id, n.name]));
   const byNameB = new Map(b.nodes.map(n => [n.id, n.name]));
@@ -1853,7 +1865,7 @@ U.diffProjects = (a, b) => {
   const linkSetA = new Set(a.links.map(l => linkKey(l, byNameA)));
   const linkSetB = new Set(b.links.map(l => linkKey(l, byNameB)));
   const addedLinks = [], removedLinks = [];
-  const keyToText = (k) => { const [pair, rest] = k.split('#'); const [x, y] = pair.split('|'); const [aIf, aIp, bIf, bIp, bw] = rest.split('/'); return x + ' ⇄ ' + y + (aIf ? ' ' + aIf + ' ' + aIp + ' / ' + bIf + ' ' + bIp : '') + (bw ? ' ' + bw : ''); };
+  const keyToText = (k) => { const [pair, rest] = k.split('\u0002'); const [x, y] = pair.split('\u0001'); const [aIf, aIp, bIf, bIp, bw] = rest.split('\u0001'); return x + ' ⇄ ' + y + (aIf ? ' ' + aIf + ' ' + aIp + ' / ' + bIf + ' ' + bIp : '') + (bw ? ' ' + bw : ''); };
   for (const k of linkSetB) if (!linkSetA.has(k)) addedLinks.push(keyToText(k));
   for (const k of linkSetA) if (!linkSetB.has(k)) removedLinks.push(keyToText(k));
   return { addedNodes, removedNodes, changedNodes, addedLinks, removedLinks };
@@ -2181,8 +2193,10 @@ U.buildLinkFlow = (nodes, links, traffic, opts) => {
     }
     if (!best) continue;
     const anyDown = cands.some(c => c.s.oper === 'down');
-    // 速率基准：接口 ifSpeed 优先（bps），缺失回退连线带宽（Mbps 换算）
-    const speedBps = best.s.speed > 0 ? best.s.speed : (Number(l.bw) > 0 ? Number(l.bw) * 1e6 : 0);
+    // 速率基准：接口 ifSpeed 优先（bps），缺失回退连线带宽（Mbps 换算）——经 normalizeBw
+    // 解析（'1G'/'100M' 等形态），裸 Number('1G')=NaN 会让利用率恒为 null
+    const bwMbps = U.normalizeBw(l.bw) || 0;
+    const speedBps = best.s.speed > 0 ? best.s.speed : (bwMbps > 0 ? bwMbps * 1e6 : 0);
     out[l.id] = {
       util: speedBps > 0 ? Math.max(best.s.in || 0, best.s.out || 0) / speedBps : null,
       inBps: best.s.in == null ? null : best.s.in,
@@ -2527,9 +2541,12 @@ U.ipPlan = (nodes, links) => {
       const myIp = l.a === n.id ? l.aIp : l.bIp;
       const otIf = l.a === n.id ? l.bIf : l.aIf;
       const otIp = l.a === n.id ? l.bIp : l.aIp; // 对端接口 IP
+      // 接口行按链路掩码归组（/30 互联不应按默认 /24 统计；管理地址保留 /24 默认）
+      const ifMask = l.a === n.id ? l.aMask : l.bMask;
       if (myIp) {
-        rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: myIf || '', IP: myIp, 对端设备: other.name, 对端接口: otIf || '', 对端IP: otIp || '', 带宽: U.formatBw(l.bw), 网段: U.subnetOf(myIp) || '', 备注: l.note || '' });
-        addSubnet(myIp, n.name);
+        rows.push({ 设备: n.name, 类型: typeLabel(n.id), 接口: myIf || '', IP: myIp, 对端设备: other.name, 对端接口: otIf || '', 对端IP: otIp || '', 带宽: U.formatBw(l.bw), 网段: U.subnetOf(myIp, ifMask) || '', 备注: l.note || '' });
+        const s = U.subnetOf(myIp, ifMask);
+        if (s) { if (!subnetMap.has(s)) subnetMap.set(s, new Set()); subnetMap.get(s).add(n.name); }
       }
     }
   }

@@ -18,7 +18,9 @@ const SAFE_NAME = /^[\u4e00-\u9fa5A-Za-z0-9_.-]+\.nettopo$/;
 class BackupStore {
   constructor(dir, opts) {
     opts = opts || {};
-    this.dir = dir;
+    // 统一绝对路径：read/remove 的边界终判按 resolve 比较，dir 为相对路径时
+    // 「相对拼接 vs 绝对前缀」恒不匹配会被全拒（save 却能写），行为分裂
+    this.dir = path.resolve(dir);
     this.maxBytes = opts.maxBytes || MAX_CONTENT_BYTES; // 单份内容上限（测试可调小）
   }
 

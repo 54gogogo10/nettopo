@@ -239,8 +239,10 @@ function tierLayout(nodes, opts) {
   const cellH = Math.max(...nodes.map(x => x.h)) + gap;
   let row = 0;
   for (const t of tiers) {
+    // 自定义类型（不在内置 TYPE_ORDER 内）回退归入接入层：否则这些节点不进任何层，
+    // 布局后原地不动，与已移动节点错乱重叠（layerLayout 的 'other' 回退同口径）
     const list = nodes
-      .filter(nd => t.types.includes(nd.type))
+      .filter(nd => t.types.includes(nd.type) || (t.name === '接入层' && !TYPE_ORDER.includes(nd.type)))
       .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
     if (!list.length) continue;
     const cellW = Math.max(...list.map(x => x.w)) + gap;

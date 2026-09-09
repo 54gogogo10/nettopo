@@ -77,6 +77,7 @@ class TftpSession {
     this.finalPath = null;
     this.readBuf = null;         // RRQ 文件内容
     this.finished = false;
+    this.finishing = false;      // WRQ 收尾窗口：最终块已收（ws.end）但 rename 结果未定
   }
 
   _bumpIdle() {
@@ -224,6 +225,9 @@ class TftpSession {
       const chunk = buf.slice(4);
       const prev = (this.blockCounter & 0xffff); // 最近一次已写盘的块号（0 表示尚未写盘）
       if (n === prev && this.blockCounter > 0) { // 对端重传：只补 ACK
+        // 收尾窗口（最终块已收、rename 结果未定）不提前回 ACK：若随后 rename 失败，
+        // 设备已凭 ACK 认定推送成功而忽略 ERROR，配置实际丢失——静默等 finish 回调统一裁决
+        if (this.finishing) return;
         this._send(this._ack(n));
         return;
       }
@@ -236,10 +240,9 @@ class TftpSession {
         return;
       }
       const isFinal = chunk.length < this.blksize;
-      if (isFinal) this.ws.end(chunk);
+      if (isFinal) { this.finishing = true; this.ws.end(chunk); }
       else { this.ws.write(chunk); this._send(this._ack(n)); }
       if (isFinal) {
-        this.finished = true;
         this._stopTimers();
         this.ws.on('finish', () => {
           let renamed = true;
@@ -252,6 +255,8 @@ class TftpSession {
             this.close();
             return;
           }
+          // rename 成功才算真正完成：此前写流出错时 abort 仍要负责清理 .part
+          this.finished = true;
           this.server._fileReceived(this);
           // 先回 ACK 再登记文件（客户端拿到 ACK 即认为推完）
           this._send(this._ack(n));

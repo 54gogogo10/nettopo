@@ -181,7 +181,9 @@ function buildV3Message(opts) {
   const privSalt = Buffer.alloc(8);
   let saltVal = 0;
   if (user.level === 'authPriv') {
-    saltVal = (opts.saltCounter != null) ? opts.saltCounter : ((Date.now() & 0xffffff) * 2654435761 % 0xffffffff) >>> 0;
+    // RFC 3414 8.1.1.1 / RFC 3826：privParameters salt 每条消息必须唯一（重复即 IV 重用，
+    // 两密文异或泄露明文关系）。单调计数器保证唯一；时间戳派生无此保证且同毫秒乘积超 2^53 有偏
+    saltVal = (opts.saltCounter != null) ? opts.saltCounter : (v3SaltCounter = ((v3SaltCounter + 1) & 0x7fffffff) || 1);
     privSalt.writeUInt32BE(boots >>> 0, 0);
     privSalt.writeUInt32BE(saltVal >>> 0, 4);
   }
@@ -268,7 +270,7 @@ function buildV3Message(opts) {
       authParamsOffset = off;
     }
   }
-  return { msg, authParamsOffset };
+  return { msg, authParamsOffset, saltVal }; // saltVal：本轮 priv 盐值（测试断言唯一性用）
 }
 
 /** 解析 varbind 序列（SEQUENCE of {OID, value}）；畸形行跳过，数量封顶 */
@@ -438,7 +440,8 @@ function parseV3Message(buf, opts) {
       responseRid = pf.length ? readUInt(pf[0].body) : null;
       varbinds = parseVbs(pf[3]);
     } else if (pduT.tag === 0xa8) {
-      // Report：varbind 携带 usmStats 错误计数
+      // Report：varbind 携带 usmStats 错误计数；request-id 同样回显（RFC 3412 6.3），供调用方防伪造重同步
+      responseRid = pf.length ? readUInt(pf[0].body) : null;
       for (const vb of parseVbs(pf[3])) if (vb.oid) report = { oid: vb.oid, value: vb.value };
     }
     return { ok: true, engineID, boots, time, userName, flags, pduTag: pduT.tag, varbinds, rid: responseRid != null ? responseRid : rid, report, authenticated, decrypted, wantAuth, wantPriv };
@@ -462,6 +465,8 @@ function reportReason(report) {
 
 /** v3 会话缓存（引擎发现 + 时间同步），模块级：host|port|user → {engineID, boots, time, at} */
 const v3Engines = new Map();
+/** priv salt 单调计数器（模块级，31 位回绕）：同引擎并发请求的 IV 唯一性来源 */
+let v3SaltCounter = 0;
 function v3EngineReset(host, port, user) {
   if (host != null) v3Engines.delete(host + '|' + (port || 161) + '|' + (user || ''));
   else v3Engines.clear();

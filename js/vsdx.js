@@ -372,7 +372,9 @@ function buildVSDX(graph, opts) {
     const lines = opts.showLabels === false ? [] : U.labelLines(l).map(s => U.truncate(s, 40));
     if (lines.length) {
       const FONT = 10; // pt
-      const tw = Math.max(0.7, U.measureText(lines.reduce((a, b) => a.length > b.length ? a : b, ''), FONT) / 96 + 0.3);
+      // 估宽为 pt 口径（measureText 以 size 为单位宽度），换算英寸须 /72（此前误除 96 低估 25%，
+      // 长标注在 Visio 中溢出文本框且防碰撞间距失真）；0.15 ≈ TextBlock 默认左右边距（各 0.0555in）+ 余量
+      const tw = Math.max(0.7, U.measureText(lines.reduce((a, b) => a.length > b.length ? a : b, ''), FONT) / 72 + 0.15);
       const th = 0.17 * lines.length + 0.10;
       const ux = len > 0.01 ? (ex - bx) / len : 0;
       const uy = len > 0.01 ? (ey - by) / len : 0;

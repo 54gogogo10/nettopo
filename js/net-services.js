@@ -106,8 +106,17 @@ class NetServices extends EventEmitter {
 
   getConfig() { return JSON.parse(JSON.stringify(this.cfg)); }
 
-  /** 应用配置：仅重启参数真正变化的服务；认证类变化热更新不重启 */
-  async applyConfig(cfg) {
+  /** 应用配置：仅重启参数真正变化的服务；认证类变化热更新不重启。
+   *  串行化：并发 applyConfig（启动恢复 vs 面板保存、快速连续保存）会在 await stop 与
+   *  new 替换实例之间交错——被甩掉的实例已 start 成功则监听端口永久泄漏，
+   *  applied 标记又被后完成者覆盖为 null：面板显示未运行、后续重试恒 EADDRINUSE 直到重启 */
+  applyConfig(cfg) {
+    const run = (this._queue || Promise.resolve()).then(() => this._apply(cfg));
+    this._queue = run.catch(() => { /* 队列不断链：失败已体现在各服务 status 里 */ });
+    return run;
+  }
+
+  async _apply(cfg) {
     const n = normalizeConfig(cfg);
     this.cfg = n;
     // TFTP：端口变化或启停才动
@@ -195,7 +204,7 @@ class NetServices extends EventEmitter {
       let names = [];
       try { names = fs.readdirSync(root); } catch (e) { return; }
       for (const n of names) {
-        if (n.includes('.part')) continue;
+        if (n.endsWith('.part') || n.includes('.part-')) continue;
         const full = path.join(root, n);
         let st;
         try { st = fs.lstatSync(full); } catch (e) { continue; }
@@ -205,7 +214,7 @@ class NetServices extends EventEmitter {
           let subs = [];
           try { subs = fs.readdirSync(full); } catch (e) { subs = []; }
           for (const f of subs) {
-            if (f.includes('.part')) continue;
+            if (f.endsWith('.part') || f.includes('.part-')) continue;
             const fp = path.join(full, f);
             let st2;
             try { st2 = fs.lstatSync(fp); } catch (e) { continue; }

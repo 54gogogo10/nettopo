@@ -122,7 +122,8 @@ function buildSvgImage(graph, opts) {
     const x = X(n.x), y = Y(n.y), w = n.w, h = n.h;
     parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="${esc(t.c1)}" stroke="${esc(t.stroke)}" stroke-width="1.5"/>`);
     const cx = x + w / 2, cy = y + h / 2;
-    const hasMgmt = !!(n.mgmt || '').trim();
+    // 管理地址判定与画布/VSDX 同口径走 nodeMgmts：mgmt 单字段为空而 mgmts 有值是合法数据
+    const hasMgmt = U.nodeMgmts(n).length > 0;
     // 超长设备名截断：SVG text 无裁剪直接溢出绘制，200 字符名会压盖相邻设备（画布上有 _fitName，导出同口径收敛）
     parts.push(`<text x="${cx}" y="${hasMgmt ? cy - 11 : cy - 4}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="13.5" font-weight="bold" fill="#ffffff" text-anchor="middle">${esc(U.truncate(n.name, 40))}</text>`);
     parts.push(`<text x="${cx}" y="${hasMgmt ? cy + 5 : cy + 15}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.8)" text-anchor="middle">${esc(t.label)}</text>`);
@@ -137,13 +138,22 @@ function buildSvgImage(graph, opts) {
   if (bwSet.size) {
     const entries = [...bwSet.entries()].sort((a, b) => b[0] - a[0]);
     let lx = 14;
-    parts.push(`<text x="${lx}" y="${H - 22}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#64748b">带宽：</text>`);
+    let ly = H - 22; // 图例基线（超宽折行时整块上移一行，与 VSDX 图例同口径）
+    parts.push(`<text x="${lx}" y="${ly}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#64748b">带宽：</text>`);
     lx += 34;
     for (const [n, color] of entries) {
       const lab = U.formatBw(n);
-      parts.push(`<line x1="${lx}" y1="${H - 18}" x2="${lx + 16}" y2="${H - 18}" stroke="${color}" stroke-width="3"/>`);
-      parts.push(`<text x="${lx + 22}" y="${H - 14}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#334155">${esc(lab)}</text>`);
-      lx += 22 + U.measureText(lab, 10) + 14;
+      const itemW = 22 + U.measureText(lab, 10) + 14;
+      if (lx + itemW > W - 14) { // 折行：normalizeBw 通用分支可产出任意档位（155M/622M/2.5G…），单行横排放不下
+        ly -= 16;
+        lx = 14 + itemW;
+        parts.push(`<line x1="${14 + 0}" y1="${ly + 4}" x2="${14 + 16}" y2="${ly + 4}" stroke="${color}" stroke-width="3"/>`);
+        parts.push(`<text x="${14 + 22}" y="${ly + 8}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#334155">${esc(lab)}</text>`);
+        continue;
+      }
+      parts.push(`<line x1="${lx}" y1="${ly + 4}" x2="${lx + 16}" y2="${ly + 4}" stroke="${color}" stroke-width="3"/>`);
+      parts.push(`<text x="${lx + 22}" y="${ly + 8}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#334155">${esc(lab)}</text>`);
+      lx += itemW;
     }
   }
 

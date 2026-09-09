@@ -25,6 +25,7 @@ const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000; // 认证失败计数窗口
 const AUTH_FAIL_BAN_AFTER = 15;     // 窗口内失败达到该次数即封禁来源 IP
 const BAN_MS = 10 * 60 * 1000;      // 封禁时长
 const MAX_BANS = 500;               // 封禁表上限（防海量伪造源 IP 撑表）
+const MAX_FAILS = 1000;             // 认证失败计数表上限（同上，按插入序淘汰最旧）
 
 const pad2 = (n) => String(n).padStart(2, '0');
 
@@ -117,6 +118,9 @@ class FtpConnection {
     if (this.pasvSrv) { try { this.pasvSrv.close(); } catch (e) { /* ignore */ } this.pasvSrv = null; }
     if (this.pasvPending && this.pasvPending.sock) { try { this.pasvPending.sock.destroy(); } catch (e) { /* ignore */ } }
     this.pasvPending = null;
+    // 已接受、正在传输的数据连接不归 pasvPending 管（accept 后即置 null）：
+    // 服务端断开（421/QUIT/stop）不销毁它会造成半开连接泄漏，STOR 收尾回调永不触发
+    if (this._activeData) { try { this._activeData.destroy(); } catch (e) { /* ignore */ } this._activeData = null; }
   }
 
   _onData(d) {
@@ -160,13 +164,21 @@ class FtpConnection {
         if (/^UTF8\s+ON$/i.test(arg)) { this.utf8 = true; this.reply('200 Always in UTF-8 mode.'); }
         else this.reply('504 不支持的选项。');
         break;
-      case 'TYPE':
-        if (arg === 'I' || arg === 'A' || arg === 'L 8') { this.type = arg === 'I' ? 'I' : 'A'; this.reply('200 切换到 ' + (this.type === 'I' ? '二进制' : 'ASCII') + '模式。'); }
+      case 'TYPE': {
+        // RFC 959 参数大小写不敏感（嵌入式设备常发小写 type i）
+        const t = arg.toUpperCase();
+        if (t === 'I' || t === 'A' || t === 'L 8') { this.type = t === 'I' ? 'I' : 'A'; this.reply('200 切换到 ' + (this.type === 'I' ? '二进制' : 'ASCII') + '模式。'); }
         else this.reply('504 不支持的 TYPE。');
         break;
+      }
       case 'STRU': this.reply(arg.toUpperCase() === 'F' ? '200 OK.' : '504 仅支持 F。'); break;
       case 'MODE': this.reply(arg.toUpperCase() === 'S' ? '200 OK.' : '504 仅支持 S。'); break;
-      case 'PWD': this.reply('257 "' + (this.cwd ? '/' + this.cwd : '/') + '" 是当前目录。'); break;
+      case 'PWD': {
+        // RFC 959：路径内的双引号须加倍转义，否则严格客户端解析 257 回复失败
+        const p = (this.cwd ? '/' + this.cwd : '/').replace(/"/g, '""');
+        this.reply('257 "' + p + '" 是当前目录。');
+        break;
+      }
       case 'CWD': this._cmdCwd(arg); break;
       case 'CDUP': this._cmdCwd('..'); break;
       case 'NOOP': this.reply('200 NOOP OK.'); break;
@@ -266,7 +278,13 @@ class FtpConnection {
     const tryListen = (port) => new Promise((resolve) => {
       if (this.closed) return resolve(false);
       const onErr = () => resolve(false);
-      const onOk = () => { srv.removeListener('error', onErr); resolve(true); };
+      const onOk = () => {
+        srv.removeListener('error', onErr);
+        // listening 成功后须保留持久 error 监听：accept 失败（EMFILE/ENOBUFS 等）会向 server 实例
+        // emit 'error'，无监听即未捕获异常直接崩掉整个主进程
+        srv.on('error', () => this._closePasv());
+        resolve(true);
+      };
       srv.once('error', onErr);
       srv.once('listening', onOk);
       try { srv.listen(port, '0.0.0.0'); }
@@ -332,8 +350,20 @@ class FtpConnection {
     this.reply('200 PORT 命令成功。');
   }
 
-  /** 取一条可用的数据 socket（PASV：等对端连入或复用已连入的；PORT：主动连出） */
+  /** 取一条可用的数据 socket（PASV：等对端连入或复用已连入的；PORT：主动连出）。
+   *  登记活动连接：已接受的数据连接不归 pasvPending 管（accept 后即置 null），
+   *  destroy/_closePasv 须一并销毁，否则服务端断开时半开泄漏、传输收尾回调永不触发 */
   _openData() {
+    return this._openDataRaw().then((sock) => {
+      if (sock) {
+        this._activeData = sock;
+        sock.on('close', () => { if (this._activeData === sock) this._activeData = null; });
+      }
+      return sock;
+    });
+  }
+
+  _openDataRaw() {
     if (this.pasvPending || this.pasvSrv) {
       const p = this.pasvPending;
       if (p && p.sock) { this.pasvPending = null; return Promise.resolve(p.sock); }
@@ -402,9 +432,14 @@ class FtpConnection {
       dataSock.on('error', () => bail(426, '数据连接异常，传输中止。'));
       dataSock.on('close', (hadErr) => {
         if (failed) return;
+        // 服务端主动断开（421 空闲超时/QUIT/服务 stop）经 destroy() 产生的 close 同样是 hadErr=false，
+        // 与客户端正常 FIN 无法区分——若不拦截，半截传输会被当完整收尾 rename 入库并广播「已接收」；
+        // bail 负责清理 .part 临时文件（reply 对已关闭连接自动跳过）
+        if (this.closed) { bail(426, '传输中止：连接已关闭。'); return; }
         if (hadErr) { bail(426, '数据连接异常关闭。'); return; }
         ws.end(() => {
           if (failed) return;
+          if (this.closed) { try { fs.unlinkSync(tmp); } catch (e) { /* ignore */ } this.busy = false; return; }
           // 覆盖语义复核：存在性检查在 STOR 时执行，rename 无条件覆盖——传输窗口内被并发
           // 创建的同名文件会被静默顶替。复核不能消除 TOCTOU，但把窗口缩到毫秒级
           if (!this.server.overwrite) {
@@ -566,6 +601,8 @@ class FtpServer extends EventEmitter {
     if (!rec || now - rec.first > AUTH_FAIL_WINDOW_MS) { rec = { count: 0, first: now }; }
     rec.count++;
     this.fails.set(ip, rec);
+    // fails 随「失败过的不同 IP 数」只增不减：海量伪造源可撑表，按插入序淘汰最旧（与 bans 同口径）
+    if (this.fails.size > MAX_FAILS) { const k = this.fails.keys().next().value; if (k != null) this.fails.delete(k); }
     if (rec.count >= AUTH_FAIL_BAN_AFTER) {
       this.fails.delete(ip);
       if (this.bans.size >= MAX_BANS) { // 防海量伪造源 IP 撑表：清掉最早的封禁

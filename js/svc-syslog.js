@@ -25,6 +25,7 @@ const MAX_MSG_LEN = 8 * 1024;        // 单条消息长度上限（超长截断�
 const MAX_RING = 1000;               // 环形缓冲条数
 const TAIL_MAX = 300;                // 单次返回条数上限
 const MAX_TCP_CONNS = 64;            // TCP 并发连接上限（内核层挂起超限 accept，防句柄耗尽）
+const MAX_HOST_DIRS = 1024;          // 主机目录数上限（HOST 由消息体自报，防伪造 HOST 目录爆炸撑爆磁盘/inode）
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const pad3 = (n) => String(n).padStart(3, '0');
@@ -99,6 +100,9 @@ function parseSyslogMsg(text, peerHost) {
   // 攻击者用来注入自带时间戳/级别的伪造日志行（TCP octet 帧内容允许原始 \n），破坏审计完整性
   msg = msg.replace(/[\r\n]+$/, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').replace(/[\r\n]+/g, ' ');
   if (msg.length > MAX_MSG_LEN) msg = msg.slice(0, MAX_MSG_LEN);
+  // HOST 可来自消息体自报（RFC5424/RFC3164 的 (\S+) 能匹配非换行控制字符）：
+  // 与 msg 同口径剔除，防裸控制字符污染落盘行与检索显示
+  host = String(host).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').slice(0, 128) || 'unknown';
   const facility = pri == null ? null : Math.floor(pri / 8);
   const severity = pri == null ? null : pri % 8;
   return { pri, facility, severity, ts, host, tag, msg };
@@ -190,6 +194,7 @@ class SyslogServer extends EventEmitter {
     this.ring = [];
     this.seq = 0;
     this.streams = new Map();   // 'host\x00date' -> fs.WriteStream
+    this.hostDirs = null;       // 已落盘主机目录名缓存（Set；null=惰性，首条落盘时从磁盘初始化）
     this.lastDay = '';
     this.stats = { rxMsgs: 0, dropped: 0, hosts: 0, alerts: 0 };
     this.alertRules = normalizeAlertRules(null);
@@ -314,7 +319,15 @@ class SyslogServer extends EventEmitter {
       }
     });
     sock.on('error', () => { if (idle) clearTimeout(idle); });
-    sock.on('close', () => { if (idle) clearTimeout(idle); });
+    sock.on('close', () => {
+      if (idle) clearTimeout(idle);
+      // 换行 framing 下不少设备发完最后一条即关闭且不带尾部 \n（RFC 6587 未强制）：
+      // 不 flush 残留缓冲会丢最后一条日志（日志收集的高频丢包路径）
+      if (framing !== 'octet' && acc.length) {
+        try { this._ingest(acc.toString('utf8').replace(/\r$/, ''), peer); } catch (e) { /* ignore */ }
+        acc = Buffer.alloc(0);
+      }
+    });
   }
 
   _bindHint(err) {
@@ -385,6 +398,20 @@ class SyslogServer extends EventEmitter {
     const key = hostDir + '\x00' + day;
     let st = this.streams.get(key);
     if (!st) {
+      // 主机目录数封顶：HOST 由发送方自报，超限的新主机只进环形缓冲不落盘
+      //（限速 200 条/s 内每条换一个伪造 HOST 仍可每秒新建数百目录耗尽目录项）
+      if (this.hostDirs === null) {
+        this.hostDirs = new Set();
+        try {
+          for (const h of fs.readdirSync(base)) {
+            try { if (fs.lstatSync(path.join(base, h)).isDirectory()) this.hostDirs.add(h); } catch (e2) { /* ignore */ }
+          }
+        } catch (e) { /* ignore */ }
+      }
+      if (!this.hostDirs.has(hostDir)) {
+        if (this.hostDirs.size >= MAX_HOST_DIRS) return;
+        this.hostDirs.add(hostDir);
+      }
       try {
         // 纵深：主机目录若被同机攻击者替换为符号链接，跟随写入会把日志写到任意位置
         try { if (fs.lstatSync(dir).isSymbolicLink()) return; } catch (e2) { /* 不存在则照常创建 */ }
@@ -419,6 +446,13 @@ class SyslogServer extends EventEmitter {
           if (fst.mtimeMs > Date.now() - 3600000) continue; // 近 1 小时内有写入的不清（设备时钟错误也会持续写「旧日期」文件）
           const t = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
           if (Number.isFinite(t) && t < cutoff) { try { fs.unlinkSync(full); } catch (e) { /* ignore */ } }
+        }
+        // 清理过期日志后顺手删掉空主机目录（rmdir 仅在目录为空时成功）：过期文件清完目录永久残留，
+        // 既放大伪造 HOST 的目录爆炸，也让每日清理的同步遍历越来越重。有活跃写流的主机跳过
+        let streaming = false;
+        for (const k of this.streams.keys()) { if (k.slice(0, k.indexOf('\x00')) === host) { streaming = true; break; } }
+        if (!streaming) {
+          try { fs.rmdirSync(hd); if (this.hostDirs) this.hostDirs.delete(host); } catch (e) { /* 非空：忽略 */ }
         }
       }
     } catch (e) { /* ignore */ }

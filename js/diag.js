@@ -13,10 +13,11 @@ const net = require('net');
 const dnsPromises = require('dns').promises;
 const { spawn } = require('child_process');
 
-/** 主机地址白名单：IPv4 / IPv6 / 主机名（字母数字点连下划线冒号），供外部命令与探测共用 */
+/** 主机地址白名单：IPv4 / IPv6 / 主机名（字母数字点连下划线冒号），供外部命令与探测共用。
+ *  拒绝 '-' 开头：host 作为 ping/tracert 的最后一个参数直传 spawn，'-…' 会被解释为选项而非主机 */
 function isValidDiagHost(host) {
   const s = String(host == null ? '' : host).trim();
-  return s.length > 0 && s.length <= 253 && /^[A-Za-z0-9_.:-]+$/.test(s);
+  return s.length > 0 && s.length <= 253 && s[0] !== '-' && /^[A-Za-z0-9_.:-]+$/.test(s);
 }
 
 /** 端口列表解析：'22, 80, 8000-8002' → [22,80,8000,8001,8002]；去重升序，总量封顶 256 */

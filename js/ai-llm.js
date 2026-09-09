@@ -505,6 +505,9 @@ class AiClient extends EventEmitter {
         headers['Authorization'] = 'Bearer ' + this.apiKey;
       }
       let settled = false;
+      // idleTimer 须声明在 executor 作用域：fail 闭包在连接错误/超时等「响应回调尚未进入」的
+      // 路径也会执行，引用不到 res 回调内的局部变量会抛 ReferenceError 且 Promise 永不落定
+      let idleTimer = null;
       const fail = (err) => {
         if (settled) return;
         settled = true;
@@ -527,7 +530,7 @@ class AiClient extends EventEmitter {
         headers
       }, (res) => {
         clearTimeout(connectTimer);
-        let idleTimer = setTimeout(() => {
+        idleTimer = setTimeout(() => {
           try { req.destroy(); } catch (e) { /* ignore */ }
           fail(new Error('请求超时（服务器无数据）'));
         }, this.idleTimeoutMs);

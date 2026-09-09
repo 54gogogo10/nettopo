@@ -112,7 +112,7 @@ class Renderer {
   }
 
   bbox() {
-    // 区域容器纳入外框（适应视图 / 导出取景都包含区域）
+    // 区域容器与文本框纳入外框（适应视图 / 导出取景都包含区域；文本框与导出链同口径）
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of this.nodes) {
       x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y);
@@ -122,7 +122,12 @@ class Renderer {
       x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y);
       x1 = Math.max(x1, r.x + r.w); y1 = Math.max(y1, r.y + r.h);
     }
-    if (!this.nodes.length && !this.regions.length) return null;
+    for (const t of this.texts || []) {
+      const tw = t.w || 160, th = t.h || 40;
+      x0 = Math.min(x0, t.x); y0 = Math.min(y0, t.y);
+      x1 = Math.max(x1, t.x + tw); y1 = Math.max(y1, t.y + th);
+    }
+    if (!this.nodes.length && !this.regions.length && !this.texts.length) return null;
     if (x0 === Infinity) return null;
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
@@ -635,7 +640,10 @@ class Renderer {
 
     svg.addEventListener('wheel', (e) => {
       e.preventDefault();
-      const f = Math.exp(-e.deltaY * 0.0016);
+      // deltaMode 归一到像素：Firefox 滚轮为行单位（deltaMode=1，deltaY≈±3），按像素系数
+      // 计算每格仅 ~0.5% 缩放（本项目支持浏览器直接打开 index.html，此路径真实可达）
+      const dy = e.deltaMode === 1 ? e.deltaY * 33 : (e.deltaMode === 2 ? e.deltaY * 300 : e.deltaY);
+      const f = Math.exp(-dy * 0.0016);
       this.zoomBy(f, e.clientX, e.clientY);
     }, { passive: false });
 
@@ -657,11 +665,13 @@ class Renderer {
   _startDrag(e, id) {
     const ids = this.selIds.has(id) && this.selIds.size > 1 ? [...this.selIds] : [id];
     const orig = {};
+    // id→节点引用映射：move 热路径每帧对每个被拖节点线性 find 是 O(N²)，几百台多选拖拽明显掉帧
+    const byId = new Map(this.nodes.map(n => [n.id, n]));
     for (const i of ids) {
-      const nn = this.nodes.find(x => x.id === i);
+      const nn = byId.get(i);
       if (nn) orig[i] = { x: nn.x, y: nn.y };
     }
-    const first = this.nodes.find(x => x.id === id);
+    const first = byId.get(id);
     if (!first) return;
     const w = this.toWorld(e.clientX, e.clientY);
     this._drag = { ids, dx: w.x - first.x, dy: w.y - first.y, moved: false, orig };
@@ -670,7 +680,7 @@ class Renderer {
       if (!this._drag) return;
       const w2 = this.toWorld(ev.clientX, ev.clientY);
       for (const i of this._drag.ids) {
-        const nn = this.nodes.find(x => x.id === i);
+        const nn = byId.get(i);
         if (!nn) continue;
         const o = this._drag.orig[i];
         // 偏移基准必须与 dx/dy 一致取「被抓取节点」（id）：取 ids[0] 时抓非首个选中节点，
@@ -678,7 +688,7 @@ class Renderer {
         nn.x = w2.x - this._drag.dx + (o.x - this._drag.orig[id].x);
         nn.y = w2.y - this._drag.dy + (o.y - this._drag.orig[id].y);
       }
-      const f0 = this.nodes.find(x => x.id === id);
+      const f0 = byId.get(id);
       if (f0 && (Math.abs(f0.x - this._drag.orig[id].x) > 2 || Math.abs(f0.y - this._drag.orig[id].y) > 2)) this._drag.moved = true;
       this.update();
       this.cb.onDrag && this.cb.onDrag(id, f0 && f0.x, f0 && f0.y);
@@ -821,6 +831,7 @@ class Renderer {
         .filter(n => n.x < x1 && n.x + n.w > x0 && n.y < y1 && n.y + n.h > y0)
         .map(n => n.id);
       if (!ids.length) { this.select(null, null); this.cb.onBoxSelect && this.cb.onBoxSelect([]); return; }
+      this.selLinkIds.clear(); // 与 select('node') 同口径：框选设备后旧连线高亮须清（否则高亮集与 Delete 目标不符）
       this.selIds = new Set(ids);
       this.sel = { kind: 'node', id: ids[ids.length - 1] };
       this._syncSelClass();

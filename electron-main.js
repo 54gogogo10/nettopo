@@ -2,6 +2,7 @@
 'use strict';
 const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
@@ -39,9 +40,12 @@ process.on('unhandledRejection', (reason) => logCrash('unhandledRejection', reas
 if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_USERDATA);
 
 /* ---- 单实例锁：双开会产生双托盘、内置 TFTP/FTP/Syslog 端口互抢（第二实例服务全部起不来）、
- *   两边 settings.json 互相覆盖——第二个实例直接退出并唤起已有主窗 */
+ *   两边 settings.json 互相覆盖——第二个实例直接退出并唤起已有主窗。
+ *   app.quit() 是异步的：若不立即退出，后续模块级初始化（ShellManager/MonitorManager 建目录读配置、
+ *   IPC 注册）会在首实例仍在运行时并发执行——第二实例无任何待清理状态，直接同步退出兜底。 */
 if (!app.requestSingleInstanceLock()) {
   app.quit();
+  process.exit(0);
 } else {
   app.on('second-instance', () => {
     if (mainWin && !mainWin.isDestroyed()) {
@@ -337,9 +341,13 @@ function notifyUser(title, body) {
     if (!Notification.isSupported()) return;
     const n = new Notification({ title: title, body: body, silent: false });
     n.on('click', () => { if (mainWin && !mainWin.isDestroyed()) { if (mainWin.isMinimized()) mainWin.restore(); mainWin.focus(); } });
+    // 通知对象须保活至事件触发：局部引用可能被 GC，导致通知不显示/点击失效（告警漏报）
+    liveNotifications.add(n);
+    n.on('close', () => liveNotifications.delete(n));
     n.show();
   } catch (e) { /* 通知失败不阻断 */ }
 }
+const liveNotifications = new Set();
 monitor.on('probe', (info) => {
   sendMonitor('monitor:probe', info);
   const prev = lastProbeOk.get(info.key);
@@ -1110,17 +1118,15 @@ function getUpdater() {
   return updater;
 }
 ipcMain.handle('update:check', (e) => monitorGuard(e) ? getUpdater().check() : { ok: false, error: 'forbidden' });
-ipcMain.handle('update:download', async (e, p) => {
+ipcMain.handle('update:download', async (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const u = getUpdater();
-  let assets = p && p.assets;
-  if (!assets) {
-    // 渲染层未携带资产信息（如经启动通知进入的流程）：重新检查取最新资产
-    const c = await u.check();
-    if (!c.ok || !c.update || !c.assets) return { ok: false, error: (c && c.error) || '当前没有可下载的升级资产' };
-    assets = c.assets;
-  }
-  return u.downloadAndVerify(assets);
+  // 资产信息一律以主进程实时拉取的 release 为准：渲染层回传的 assets 属不可信输入，
+  // 直接采信其中的下载 URL 会让 SHA256 完整性校验退化为自证（exe 与清单都来自同一注入源），
+  // 也绕过 check() 的「仅严格更新版本」约束（降级风险）。check 内部按平台 pickAssets 并核对版本。
+  const c = await u.check();
+  if (!c.ok || !c.update || !c.assets) return { ok: false, error: (c && c.error) || '当前没有可下载的升级资产' };
+  return u.downloadAndVerify(c.assets);
 });
 ipcMain.handle('update:apply', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1174,9 +1180,12 @@ ipcMain.handle('monitor:logs-tree', (e) => {
       const files = [];
       let fnames = [];
       try { fnames = fs.readdirSync(dDir); } catch (err) { fnames = []; }
-      for (const f of fnames.slice(-300)) {
-        // 兼容按天固定文件名（设备_管理口.log）与超限滚动/历史格式（设备_管理口_日期_时间[_n].log）
-        if (!/^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)(?:_\d{8}_\d{6}(?:_\d+)?)?\.log$/.test(f)) continue;
+      // 先按文件名白名单过滤再取量：readdirSync 是目录序（NTFS 近字母序/ext4 哈希序），
+      // 直接触发 slice(-300) 会无差别丢弃白名单内的日志（列表查不到实际存在的文件）
+      const LOG_FILE_RE = /^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)(?:_\d{8}_\d{6}(?:_\d+)?)?\.log$/;
+      fnames = fnames.filter(f => LOG_FILE_RE.test(f));
+      if (fnames.length > 1000) fnames = fnames.slice(-1000); // 病态目录兜底，正常每日滚动远达不到
+      for (const f of fnames) {
         const full = path.join(dDir, f);
         try { st = fs.lstatSync(full); } catch (err) { continue; }
         if (!st.isFile() || st.isSymbolicLink()) continue;
@@ -1450,6 +1459,9 @@ ipcMain.handle('ai:list-models', async (e, p) => {
 });
 ipcMain.handle('ai:analyze', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  // 单飞：分析客户端按次新建，若并发发起，aiActiveClient 会被覆盖、ai:cancel 只能取消最近一次，
+  // 先前的分析无法停止且 chunk 推送交错——与 AiClient 自身的「进行中拒绝新请求」语义保持一致
+  if (aiActiveClient) return { ok: false, error: '已有分析正在进行中，请先取消或等待完成' };
   const kind = String((p && p.kind) || '');
   if (kind !== 'config' && kind !== 'syslog' && kind !== 'monlog' && kind !== 'compliance' && kind !== 'daily') return { ok: false, error: '未知的分析类型' };
   const content = String((p && p.content) == null ? '' : p.content);
@@ -1475,8 +1487,9 @@ ipcMain.handle('ai:analyze', async (e, p) => {
   };
   client.on('chunk', (c) => { if (c && c.text) onDelta(c.text); });
   aiActiveClient = client;
-  const r = await client.chat({ messages, onDelta });
-  aiActiveClient = null;
+  let r;
+  try { r = await client.chat({ messages, onDelta }); }
+  finally { aiActiveClient = null; } // 异常路径同样释放单飞锁，防后续分析被永久拒绝
   if (pend) push('ai:chunk', { text: pend });
   if (r && r.ok) {
     // 成功的分析落历史库（含截断标注），供「分析记录」回看/导出
@@ -1733,7 +1746,8 @@ app.whenReady().then(() => {
   }
   // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
   app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
-    if (webContents.getType() !== 'webview') return; // 仅处理设备管理页内嵌浏览器
+    // 非 webview 目标必须显式回调，否则该请求永久悬挂（既不拒绝也不放行）
+    if (webContents.getType() !== 'webview') return callback(false); // 仅处理设备管理页内嵌浏览器
     let host = '';
     try { host = new URL(url).host; } catch (e) { host = url; }
     // 按证书指纹信任：仅当「本次运行已允许该主机且指纹一致」才静默放行；指纹变化视为证书被替换，重新询问

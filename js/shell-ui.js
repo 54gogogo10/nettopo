@@ -415,6 +415,7 @@ function upsertRestoreEntry(list, entry, cap) {
     try { s.term && s.term.dispose(); } catch (e) { /* ignore */ }
     sessions.delete(sid);
     castSel.delete(sid);
+    sftpPaths.delete(sid); // 会话级目录记忆随标签关闭释放（窗口长开频繁连断不再累积）
     refreshCastCount();
     if (sessions.size === 0) { if (castMode) setCastMode(false); emptyEl.classList.remove('hidden'); }
     else activate([...sessions.keys()][0]);
@@ -437,6 +438,15 @@ function upsertRestoreEntry(list, entry, cap) {
     }
   };
   const liveCount = () => { let n = 0; for (const [, s] of sessions) if (!s.ended) n++; return n; };
+  /** 底部条展开/收起改变终端可用高度：主动重算 fit，防 xterm 画布溢出压住条（群发条/AI 条/AI 结果条共用） */
+  const refitActive = () => {
+    const a = activeSession();
+    if (!a) return;
+    requestAnimationFrame(() => {
+      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
+      try { window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows); } catch (e) { /* ignore */ }
+    });
+  };
   const setCastMode = (on) => {
     castMode = on;
     if (castBtnEl) castBtnEl.classList.toggle('on', on);
@@ -449,6 +459,8 @@ function upsertRestoreEntry(list, entry, cap) {
       refreshCastCount();
       if (castInputEl) castInputEl.focus();
     }
+    // 群发条是 in-flow 子元素，显隐直接改变终端可用高度：与 setAiBar 同口径重算 fit，否则底部行被裁
+    refitActive();
   };
   const toggleCastSel = (sid) => {
     const s = sessions.get(sid);
@@ -782,23 +794,29 @@ function upsertRestoreEntry(list, entry, cap) {
       sftpListEl.appendChild(row);
     }
   }
+  let sftpPending = null; // busy 期间被静默拒绝的最新浏览目标（切标签场景补发，防列表停留旧会话）
+  const sftpFlushPending = () => {
+    const p = sftpPending; sftpPending = null;
+    if (p && !sftpBusy && p.sid === sftpSid) sftpBrowse(p.sid, p.path);
+  };
   async function sftpBrowse(sid, path, opts) {
     if (!sftpListEl || !sid) return;
     const s = sessions.get(sid);
     if (!s) { renderSftpEmpty('会话不存在'); return; }
     if (s.meta.protocol !== 'ssh') { renderSftpEmpty('Telnet 会话不支持 SFTP 文件浏览'); sftpSetStatus(''); return; }
     if (s.ended) { renderSftpEmpty('会话已断开，重新连接后可浏览远程文件'); sftpSetStatus(''); return; }
-    if (sftpBusy) return;
+    if (sftpBusy) { sftpPending = { sid, path: path || '.' }; return; }
     sftpBusy = true;
     if (!opts || !opts.keepList) sftpSetStatus('加载中…');
     let res;
     try { res = await window.topoShell.sftpList({ id: sid, path: path || '.' }); }
     catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
     sftpBusy = false;
-    if (sftpSid !== sid) return; // 期间已切到其他标签：结果作废
+    if (sftpSid !== sid) { sftpFlushPending(); return; } // 期间已切到其他标签：结果作废，补发切标签时被拒的浏览
     if (!res || !res.ok) {
       if (!opts || !opts.keepList) renderSftpEmpty((res && res.error) || '浏览失败');
       sftpSetStatus((res && res.error) || '浏览失败', true);
+      sftpFlushPending();
       return;
     }
     sftpPaths.set(sid, res.path);
@@ -806,6 +824,7 @@ function upsertRestoreEntry(list, entry, cap) {
     sftpSel = null;
     renderSftpList(res.items);
     sftpSetStatus(res.items.length + ' 项 · ' + res.path);
+    sftpFlushPending();
   }
   const sftpCurDir = () => sftpPaths.get(sftpSid) || '.';
   const sftpActiveRow = () => {
@@ -1088,14 +1107,14 @@ function upsertRestoreEntry(list, entry, cap) {
     if (aiEl) aiEl.classList.toggle('hidden', !on);
     if (!on) hideAiResult();
     if (on && aiInputEl) aiInputEl.focus();
-    // 底部条展开/收起改变终端可用高度：主动重算 fit，防 xterm 画布溢出压住条
-    const a = activeSession();
-    if (a) requestAnimationFrame(() => {
-      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
-      try { window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows); } catch (e) { /* ignore */ }
-    });
+    refitActive();
   };
-  const hideAiResult = () => { if (!aiResultEl) return; aiResultEl.classList.add('hidden'); aiResultEl.innerHTML = ''; };
+  const hideAiResult = () => {
+    if (!aiResultEl || aiResultEl.classList.contains('hidden')) return;
+    aiResultEl.classList.add('hidden');
+    aiResultEl.innerHTML = '';
+    refitActive();
+  };
   /** 结果条渲染：notes 为 {text, err} 段落；cmds 为命令 chips（点击复制）；acts 为 {label, primary, act} 按钮 */
   const showAiResult = (notes, cmds, acts) => {
     if (!aiResultEl) return;
@@ -1137,6 +1156,7 @@ function upsertRestoreEntry(list, entry, cap) {
       aiResultEl.appendChild(bar);
     }
     aiResultEl.classList.remove('hidden');
+    refitActive(); // 结果条占高后终端底部行会被裁（.sh-terms overflow:hidden），重算 fit
   };
   /** 逐条下发命令到指定会话：每条追加回车，间隔 400ms 给设备处理时间；中途断开即中止 */
   const sendCommandsToSession = async (sid, cmds) => {

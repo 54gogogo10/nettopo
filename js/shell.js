@@ -284,10 +284,23 @@ class ShellManager extends EventEmitter {
     }
   }
 
-  /** SSH 首次连接指纹确认：用户信任后放行该主机的全部待确认握手（TOFU） */
-  trustFingerprint(host, trust) {
+  /** SSH 首次连接指纹确认：用户信任后放行该主机的全部待确认握手（TOFU）。
+   *  onlyOwner 提供时仅放行/拒绝该归属的握手，其余保持排队：后台（monitor/一次性采集）
+   *  的自动信任不得绕过 UI 会话正在等待的人工确认（用户还没点「信任」连接已建立、
+   *  点「取消」已无效果），反向的用户拒绝也不误杀后台采集 */
+  trustFingerprint(host, trust, onlyOwner) {
     const arr = this._pendingVerify.get(host);
     if (!arr || !arr.length) return false;
+    if (onlyOwner) {
+      let hit = false;
+      const rest = arr.filter((rec) => {
+        if (rec && rec.owner === onlyOwner) { hit = true; try { rec.verify(!!trust); } catch (e) { /* ignore */ } return false; }
+        return true;
+      });
+      if (rest.length) this._pendingVerify.set(host, rest);
+      else this._pendingVerify.delete(host);
+      return hit;
+    }
     this._pendingVerify.delete(host);
     for (const rec of arr) { try { rec.verify(!!trust); } catch (e) { /* ignore */ } }
     return true;
@@ -405,7 +418,7 @@ class ShellManager extends EventEmitter {
           // 无人值守采集的指纹语义与监控一致：首次连接自动信任（TOFU），变化拒绝由渲染层传入 expectFp 严格比对
           const fh = String((info && info.host) || host);
           fpOut.v = { host: fh, fp: String(info.fp || '') };
-          try { this.trustFingerprint(fh, true); } catch (e) { /* ignore */ }
+          try { this.trustFingerprint(fh, true, 'monitor'); } catch (e) { /* ignore */ }
         } else if (info.state === 'error') {
           if (!connectedOnce) { finish(false, info.text || '连接失败'); return; }
           errors.push(String(info.text || '会话错误'));
@@ -651,8 +664,9 @@ class ShellManager extends EventEmitter {
     const client = new Client();
     let stream = null;
     let closed = false;
-    const pendingRec = { verify: null }; // 目标主机的指纹确认记录（结束时只移除自己的，不影响同主机其它会话）
-    const jumpRec = { verify: null };    // 跳板主机的指纹确认记录（独立排队）
+    const recOwner = o.owner === 'monitor' ? 'monitor' : 'ui';
+    const pendingRec = { verify: null, owner: recOwner }; // 目标主机的指纹确认记录（结束时只移除自己的，不影响同主机其它会话）
+    const jumpRec = { verify: null, owner: recOwner };    // 跳板主机的指纹确认记录（独立排队）
     let jumpClient = null;
     let targetStarted = false; // 跳板通道建立后置位：此后跳板断开由目标会话收尾，避免双重 end
     const removeFromPending = (host, rec) => {
@@ -791,7 +805,9 @@ class ShellManager extends EventEmitter {
     }
 
     em.write = (data) => { if (stream && !closed) stream.write(data); };
-    em.resize = (cols, rows) => { if (stream && !closed) stream.setWindow(rows, cols); };
+    // 回写 o.cols/o.rows（与 _telnet 同口径）：reconnect 按首次 connect 的 base 尺寸开新 shell 通道，
+    // 不回写则重连后 pty 停留在最初的 80x24，与本地 xterm 尺寸错位（折行错乱、全屏程序花屏）
+    em.resize = (cols, rows) => { o.cols = cols; o.rows = rows; if (stream && !closed) stream.setWindow(rows, cols); };
     em._close = () => finish('closed');
     em._client = client; // SFTP 复用同一 SSH 连接按需开通道（会话关闭时随 client.end() 一并失效）
     return em;

@@ -319,6 +319,9 @@ async function v3Request(pduTag, host, v3cfg, oids, timeoutMs, port) {
     }
     if (pr.engineID !== eng.engineID) return { ok: false, error: 'SNMP v3 引擎 ID 与发现结果不匹配' };
     if (pr.pduTag === 0xa8 && pr.report) {
+      // Report 的 PDU request-id 须回显本次请求（RFC 3412 6.3）：能伪造源 IP 的攻击者可注入
+      // 任意 boots/time 污染引擎缓存（触发持续重发现/认证失败循环），rid 不符直接丢弃
+      if (pr.rid != null && pr.rid !== ridv) return { ok: false, error: 'SNMP v3 Report request-id 不匹配' };
       if (pr.report.oid === V3.OID_USM_NOT_IN_TIME_WINDOWS && retries < 2) {
         eng.boots = pr.boots; eng.time = pr.time; V3.v3EngineSet(host, p, user.user, eng); retries++; continue; // 时间窗重同步
       }
@@ -869,9 +872,10 @@ class MonitorManager extends EventEmitter {
     const pfOpt = sOpt.perf && typeof sOpt.perf === 'object' ? sOpt.perf : {};
     const cleanOid = (v) => {
       // OID 白名单：点分十进制（最多 20 段——企业 MIB 常见 12~15 段），总长 64 上限；
-      // 容忍厂商文档常见的 .1.3.6.1 前导点/末尾点形态（此前会被静默清空导致 CPU/内存不采集）
+      // 容忍厂商文档常见的 .1.3.6.1 前导点/末尾点形态（此前会被静默清空导致 CPU/内存不采集）。
+      // 每段 ≤ 2^32-1：berOid 按 32 位位运算编码，超出段的值会被 ToUint32 静默截断成错误 OID
       const s = String(v == null ? '' : v).trim().replace(/^\.+/, '').replace(/\.+$/, '');
-      return (/^\d{1,10}(?:\.\d{1,10}){1,19}$/.test(s) && s.length <= 64) ? s : '';
+      return (/^\d{1,10}(?:\.\d{1,10}){1,19}$/.test(s) && s.length <= 64 && s.split('.').every(x => Number(x) <= 4294967295)) ? s : '';
     };
     sysinfo.perf = {
       enabled: !!pfOpt.enabled,
@@ -1204,6 +1208,12 @@ class MonitorManager extends EventEmitter {
   /** 滚动文件数封顶：目录内 .log 按 mtime 保留最新 keep 个，其余删除（lstat 拒符号链接） */
   _pruneLogFiles(dir, keep) {
     try {
+      // 目录 <设备>/<日期> 由同设备多管理口任务共享：删除命中另一任务正持有写流的文件时，
+      // Windows unlink 失败尚可（静默跳过），Linux 会删成功但句柄继续写已 unlink 的 inode，磁盘不释放
+      const active = new Set();
+      for (const j of this.jobs.values()) {
+        if (j.logPath && path.dirname(j.logPath) === dir) active.add(path.basename(j.logPath));
+      }
       const files = fs.readdirSync(dir)
         .map(n => {
           let st = null;
@@ -1212,7 +1222,7 @@ class MonitorManager extends EventEmitter {
         })
         .filter(Boolean)
         .sort((a, b) => b.t - a.t);
-      for (const f of files.slice(keep)) { try { fs.unlinkSync(path.join(dir, f.n)); } catch (e) { /* ignore */ } }
+      for (const f of files.slice(keep)) { if (active.has(f.n)) continue; try { fs.unlinkSync(path.join(dir, f.n)); } catch (e) { /* ignore */ } }
     } catch (e) { /* ignore */ }
   }
   _closeLog(job) {
@@ -1799,7 +1809,7 @@ class MonitorManager extends EventEmitter {
       // 首连自动信任属安全敏感事件：通知主进程弹出系统通知（后续指纹变化仍会拒连）
       this.emit('trust', { key: job.key, deviceId: job.deviceId, name: job.name, host, fp });
     }
-    try { this.shell.trustFingerprint(host, true); } catch (e) { /* ignore */ }
+    try { this.shell.trustFingerprint(host, true, 'monitor'); } catch (e) { /* ignore */ }
   }
 
   _onEnd(sid, reason) {
@@ -2045,13 +2055,15 @@ class MonitorManager extends EventEmitter {
           const host = String((info && info.host) || job.host);
           const fp = String(info.fp || '');
           const known = this.trusted.get(host);
-          if (known && known !== fp) { fail('备份连接：主机指纹变化，已拒绝连接'); return; }
+          // 指纹拒连路径须先摘除 status 监听：shell 是共享 EventEmitter，直接 return 会让
+          // 持有 job/sid 闭包的监听器残留累积（每次拒连泄漏一个）
+          if (known && known !== fp) { this.shell.removeListener('status', onStatus); fail('备份连接：主机指纹变化，已拒绝连接'); return; }
           if (!known) {
             this.trusted.set(host, fp);
             this._saveTrust();
             this.emit('trust', { key: job.key, deviceId: job.deviceId, name: job.name, host, fp });
           }
-          try { this.shell.trustFingerprint(host, true); } catch (e) { /* ignore */ }
+          try { this.shell.trustFingerprint(host, true, 'monitor'); } catch (e) { /* ignore */ }
         } else if (info.state === 'error') {
           this.shell.removeListener('status', onStatus);
           fail(info.text || '备份连接失败');
@@ -2079,6 +2091,13 @@ class MonitorManager extends EventEmitter {
         if (sid2 !== sid) return;
         let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
         lineBuf += text;
+        // 恶意服务端持续灌不含换行的输出时行缓冲无界增长（就绪等待窗最长 15s + 命令执行窗）：
+        // 与 _onOutput 同口径按 256K 强制断行，断行段同样走凭据打码与字节上限
+        if (lineBuf.length > MAX_LINEBUF_CHARS) {
+          const cut = lineBuf.slice(0, MAX_LINEBUF_CHARS).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          if (cut && ownReady && lineChars + cut.length + 1 <= MAX_BACKUP_CAPTURE_CHARS) { lines.push(this._maskSecrets(job, cut)); lineChars += cut.length + 1; }
+          lineBuf = lineBuf.slice(MAX_LINEBUF_CHARS);
+        }
         const parts = lineBuf.split('\n');
         lineBuf = parts.pop(); // 半行留缓冲，等下个事件续拼成整行
         for (const ln of parts) {
@@ -2109,8 +2128,9 @@ class MonitorManager extends EventEmitter {
           await sleep(job.backup.waitMs);
         }
         await sleep(400); // 尾部输出缓冲
-        // 尾部半行（末行无换行/收尾提示符）冲进结果（提示符行由 cleanBackupLines 剔除）
-        const tail = lineBuf.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+        // 尾部半行（末行无换行/收尾提示符）冲进结果（提示符行由 cleanBackupLines 剔除）：
+        // 同样过凭据打码——恶意设备把密码回显留在无换行结尾的尾段时不得明文落入备份文件
+        const tail = this._maskSecrets(job, lineBuf.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ''));
         if (tail.trim()) lines.push(tail);
         this.shell.removeListener('output', onOut);
         try { this.shell.close(sid); } catch (e) { /* ignore */ }

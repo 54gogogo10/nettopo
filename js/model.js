@@ -91,11 +91,13 @@ function mapHeader(raw) {
  * rows: string[][]（含或不含表头）
  */
 function parseRows(rows) {
-  // 是否第一行是表头
+  // 是否第一行是表头：sa/sb 别名表含「设备1/设备2/A/B」这类极常见的设备命名，
+  // 仅凭两端命中会把无表头数据的首行误判为表头吞掉（数据丢失）——
+  // 要求至少再有一个非端点角色列（接口/IP/带宽/备注等）作强佐证（本项目导出与模板均为全列）
   const head = rows[0] || [];
   const headRoles = head.map(mapHeader);
   const headHits = headRoles.filter(Boolean).length;
-  const hasHeader = headHits >= 2 && headRoles.some(r => r === 'sa' || r === 'sb');
+  const hasHeader = headHits >= 3 && headRoles.some(r => r === 'sa' || r === 'sb');
 
   let roles;
   let data;

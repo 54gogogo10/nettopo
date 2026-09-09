@@ -67,7 +67,7 @@ const renderer = new TopoRender($('#svg'), {
     renderSelCard();
     refreshPanel();
   },
-  onDbl(kind, id) { kind === 'node' ? editNode(id) : (kind === 'region' ? editRegion(id) : editLink(id)); },
+  onDbl(kind, id) { kind === 'node' ? editNode(id) : (kind === 'region' ? editRegion(id) : (kind === 'text' ? editText(id) : editLink(id))); },
   onCtx(e, kind, id) { openCtx(e, kind, id); },
   onDrag() {},
   onDragEnd(id, moved) {
@@ -108,8 +108,10 @@ setupAutoBackup(); // 自动备份（若有配置）
 /* ================= 选中 ================= */
 function select(kind, id, opts) {
   opts = opts || {};
-  state.sel = { kind, id };
-  renderer.select(kind, id, opts);
+  // renderer.select 会因 multi 切换/清空而修正最终选中（如 Ctrl 取消后 sel.id 可为 null）：
+  // 以返回值为准同步 state.sel，否则详情卡片与 Delete 作用于「已取消选中」的元素
+  const s = renderer.select(kind, id, opts);
+  state.sel = s || { kind, id };
   renderSelCard();
   if (opts.center && id) {
     centerOn(kind, id);
@@ -205,9 +207,13 @@ function restore(s) {
   refreshAll();
   updateLegend();
   renderSelCard(); // 隐藏可能残留的选中卡
-  // deleteNode 随快照带走的监控配置（含加密口令）：撤销删除时一并放回
+  // deleteNode/deleteNodes 随快照带走的监控配置（含加密口令）：撤销删除时一并放回
   if (s.monitorCfgUndo && s.monitorCfgUndo.cfg) {
     state.monitorCfg[s.monitorCfgUndo.id] = s.monitorCfgUndo.cfg;
+    saveMonitorCfg().catch(() => {});
+  }
+  if (Array.isArray(s.monitorCfgUndoList)) {
+    for (const it of s.monitorCfgUndoList) { if (it && it.cfg) state.monitorCfg[it.id] = it.cfg; }
     saveMonitorCfg().catch(() => {});
   }
   reconcileMonitors(); // 撤销/重做后对齐后台监控
@@ -1160,13 +1166,19 @@ function openPathAnalysis() {
       if (!path) { toast(state.downLinks.size ? '两台设备之间不可达（可能因故障链路导致）' : '两台设备之间不可达'); return; }
       renderer.highlightPath(path.nodeIds, path.linkIds);
       const names = path.nodeIds.map(id => { const n = state.nodes.find(x => x.id === id); return n ? n.name : id; });
-      const ifText = path.linkIds.map((lid, i) => {
-        const l = state.links.find(x => x.id === lid);
-        if (!l) return '';
-        const dir = (l.a === path.nodeIds[i] && l.b === path.nodeIds[i + 1]) || (l.a === path.nodeIds[i + 1] && l.b === path.nodeIds[i]);
-        return dir ? `（${l.aIf || '—'} / ${l.bIf || '—'}）` : '';
-      });
-      const steps = names.map((nm, i) => (i ? ifText[i - 1] + nm : nm)).join(' → ');
+      // 逐跳查找链路而非按下标对应：bestPath 会把聚合组的多条成员链路展开为连续 lid，
+      // linkIds 可能长于 nodeIds-1，按 ifText[i-1] 取值会整体错位导致接口标注丢失
+      let steps = names[0];
+      for (let i = 0; i + 1 < path.nodeIds.length; i++) {
+        const a = path.nodeIds[i], b2 = path.nodeIds[i + 1];
+        const hopLinks = path.linkIds
+          .map(lid => state.links.find(x => x.id === lid))
+          .filter(l => l && ((l.a === a && l.b === b2) || (l.a === b2 && l.b === a)));
+        const ift = hopLinks
+          .map(l => `（${(l.a === a ? l.aIf : l.bIf) || '—'} / ${(l.a === a ? l.bIf : l.aIf) || '—'}）`)
+          .join('');
+        steps += ' → ' + ift + names[i + 1];
+      }
       const bottleneck = Number.isFinite(path.bottleneck) ? U.formatBw(path.bottleneck) : '';
       showPathResult(names.length - 1, steps, bottleneck);
     }
@@ -3477,6 +3489,17 @@ function deleteNodes(ids) {
   const names = state.nodes.filter(n => set.has(n.id)).map(n => n.name);
   const removedLinks = state.links.filter(l => set.has(l.a) || set.has(l.b)).length;
   pushUndo();
+  // 与单删同口径：批量删除也要停止后台监控并清理监控配置（含凭据），
+  // 并随快照带走配置供撤销恢复——否则被删设备的采集任务仍在后台运行、继续写监控日志
+  const cfgUndo = [];
+  for (const id of set) {
+    const cfg = state.monitorCfg[id];
+    if (cfg) cfgUndo.push({ id, cfg: U.clone(cfg) });
+    stopMonitorForNode(id);
+    delete state.monitorCfg[id];
+  }
+  if (cfgUndo.length) state.undoStack[state.undoStack.length - 1].monitorCfgUndoList = cfgUndo;
+  saveMonitorCfg().catch(() => {});
   state.links = state.links.filter(l => !set.has(l.a) && !set.has(l.b));
   state.nodes = state.nodes.filter(n => !set.has(n.id));
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
@@ -3507,7 +3530,8 @@ function batchEditNodes() {
         if (!n) continue;
         if (v.type) n.type = v.type;
         if (ms.length) U.setNodeMgmts(n, ms);
-        if (String(v.web).trim()) n.web = String(v.web).trim();
+        // 与单设备编辑同口径：过 normalizeWebUrl（自动补 http://、拒绝 javascript:/data: 等危险协议与限长）
+        if (String(v.web).trim()) n.web = U.normalizeWebUrl(v.web) || '';
         if (String(v.note).trim()) n.note = String(v.note).trim();
         const nh = U.nodeHeightFor(n);
         if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
@@ -3617,6 +3641,7 @@ function setMode(mode, silent) {
     setHint('放置模式：点击画布空白处放置设备；Esc 或右键取消');
   } else {
     select(null, null);
+    clearTimeout(setHint._t); // 停掉倒计时循环：残留 tick 会在退出模式后继续改写已隐藏的提示条
     if (!silent && prev !== 'normal') toast(`已退出${prev === 'link' ? '连线' : '放置'}模式`);
   }
 }
@@ -3624,10 +3649,19 @@ function setMode(mode, silent) {
 function setHint(msg) {
   const t0 = Date.now();
   const DUR = 3;
+  const show = (left) => {
+    $('#hintBar').innerHTML = `<span class="hb-txt">${U.escHtml(msg)}</span>${left == null ? '' : `<span class="hb-ct">${Math.max(left, 0)}s</span>`}<button class="hb-x" type="button" title="退出当前模式">✕</button>`;
+  };
   const render = () => {
     const left = DUR - Math.floor((Date.now() - t0) / 1000);
-    $('#hintBar').innerHTML = `<span class="hb-txt">${U.escHtml(msg)}</span><span class="hb-ct">${Math.max(left, 0)}s</span><button class="hb-x" type="button" title="退出当前模式">✕</button>`;
-    if (left <= 0) { $('#hintBar').classList.add('hidden'); return; }
+    if (left <= 0) {
+      // 倒计时结束：模式仍激活则保留提示（去掉计时，模式提示不能自动消失——否则用户无感知
+      // 连线/放置仍在生效）；非模式场景（当前无调用方）维持旧的自动隐藏
+      if (state.mode !== 'normal') { show(null); return; }
+      $('#hintBar').classList.add('hidden');
+      return;
+    }
+    show(left);
     setHint._t = setTimeout(render, 500);
   };
   clearTimeout(setHint._t);
@@ -3659,7 +3693,8 @@ function handleModeClick(e, kind, id) {
     if (!state.linkPick) {
       state.linkPick = id;
       renderer.flash('node', id);
-      $('#hintBar').textContent = '再点击目标设备（Esc 取消）';
+      // 走 setHint 重新发起：直接改 textContent 会在 ≤500ms 后被倒计时 tick 用旧文案覆盖
+      setHint('已选源设备，再点击目标设备（Esc 取消）');
     } else {
       const a = state.linkPick, b = id;
       if (a === b) { toast('不能连接到自身'); return; }
@@ -4391,7 +4426,15 @@ function restoreGraph() {
     const raw = localStorage.getItem(GRAPH_KEY);
     if (!raw) return false;
     const d = JSON.parse(raw);
-    if (!d.nodes || !d.nodes.length) return false;
+    // 顶层 nodes 是「当前活动页」本体（可为空数组），其他页数据只在 sheets 里：
+    // 活动页为空但其他页有数据时必须照常恢复——否则 state.sheets 保持 []，刷新后的第一次
+    // saveGraph（滚轮缩放的 500ms 节流保存即触发）会以空 sheets 覆盖 localStorage，他页数据永久丢失
+    const hasSheetData = Array.isArray(d.sheets) && d.sheets.some(sp => sp && Array.isArray(sp.nodes) && sp.nodes.length);
+    const hasTopData = Array.isArray(d.nodes) && d.nodes.length;
+    if (!hasTopData && !hasSheetData) return false;
+    if (!Array.isArray(d.nodes)) d.nodes = [];
+    if (!Array.isArray(d.links)) d.links = [];
+    if (!Array.isArray(d.texts)) d.texts = [];
     const cleaned = U.sanitizeGraph(d.nodes, d.links, d.texts);
     state.nodes = cleaned.nodes;
     state.links = cleaned.links;
@@ -4555,7 +4598,9 @@ function openTypeManager() {
         confirmBox(`删除类型「${U.customTypes.find(t => t.key === key).label}」？`).then(ok => {
           if (!ok) return;
           U.removeCustomType(key);
-          for (const n of state.nodes) {
+          // 跨全部页重写：只改当前页会让其他页节点的 type 悬空，切页后渐变引用失效
+          // （_buildDefs 只为现存类型生成渐变）节点卡片无底色，且悬空 key 随 saveGraph 持久化
+          for (const n of allSheetNodes()) {
             if (n.type === key) { n.type = 'other'; }
           }
           afterChange();
@@ -5461,18 +5506,24 @@ function wire() {
       renderSelCard();
       syncMonOverlay();
     });
-    // SNMP 识别结果自动回填设备「软件版本」（只读，不覆盖手填值——仅当原值为空或与上次识别不同）
+    // SNMP 识别结果自动回填设备「软件版本」：仅当原值为空、或原值仍是上次识别回填的结果
+    // （未被手工修改）时才回填——识别值变化不能覆盖用户手填的版本号
     if (window.topoMonitor.onSysinfo) {
+      const snmpOsverSeen = new Map(); // nodeId -> 上次识别回填的版本（运行期标记，不落盘）
       window.topoMonitor.onSysinfo((info) => {
         if (!info || !info.key) return;
         const did = info.deviceId || deviceIdFromMonitorKey(info.key);
         const n = state.nodes.find(x => x.id === did);
-        if (!n) return;
-        if (info.version && n.osver !== info.version) {
-          n.osver = String(info.version).slice(0, 64); // 钳制：恶意 SNMP 设备可回超长版本串污染图数据/localStorage
-          refreshPanel();
-          saveGraph();
-          toast('已识别「' + n.name + '」软件版本：' + info.version);
+        if (!n || !info.version) return;
+        const ver = String(info.version).slice(0, 64); // 钳制：恶意 SNMP 设备可回超长版本串污染图数据/localStorage
+        if (!n.osver || n.osver === (snmpOsverSeen.get(did) || '')) {
+          snmpOsverSeen.set(did, ver);
+          if (n.osver !== ver) {
+            n.osver = ver;
+            refreshPanel();
+            saveGraph();
+            toast('已识别「' + n.name + '」软件版本：' + ver);
+          }
         }
       });
     }

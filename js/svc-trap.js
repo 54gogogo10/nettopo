@@ -352,10 +352,11 @@ class TrapServer extends EventEmitter {
   _ingestV3(buf, peer) {
     // v3 包的 userName 在签名保护内：逐个本端用户尝试验签/解密（用户数封顶 8）
     let full = null;
+    let matched = null;
     let lastReason = '';
     for (const u of this.v3Users) {
       const r = parseV3Message(buf, { user: u });
-      if (r.ok) { full = r; break; }
+      if (r.ok) { full = r; matched = u; break; }
       lastReason = r.reason || '';
     }
     if (!full) {
@@ -366,6 +367,11 @@ class TrapServer extends EventEmitter {
       else this.stats.v3AuthFail++;                                              // 已配置用户但验签/解密失败
       return;
     }
+    // 安全级别以本端配置为准，不信包内自报：parseV3Message 的是否认证由发送方 flags 决定，
+    // 伪造 flags=0 的 noAuth 包可原样通过明文解析——本端用户要求认证（auth/authPriv）时，
+    // 未认证包一律按验签失败丢弃，否则局域网任意主机可注入 linkDown 等伪造告警
+    //（本端用户显式配置为 noAuth 空口令时照常接收，等价于 v2c 的无认证语义）
+    if (matched.level !== 'noAuth' && !full.authenticated) { this.stats.v3AuthFail++; return; }
     if (full.pduTag !== 0xa7) { this.stats.malformed++; return; } // 仅收 Trap（inform 应答不在 v3 接收范围）
     let trapOid = '';
     let uptimeTicks = null;

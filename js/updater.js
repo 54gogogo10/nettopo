@@ -307,7 +307,14 @@ class Updater extends EventEmitter {
           if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
             res.resume();
             if (++redirects > 5) return reject(new Error('重定向次数过多'));
-            return go(res.headers.location);
+            // 重定向发生在响应回调内：https.get 对非 https 地址会同步抛 ERR_INVALID_PROTOCOL，
+            // 此处未捕获会变成 uncaughtException 且 Promise 永不落定——先校验再跟随
+            let next;
+            try {
+              next = new URL(res.headers.location, u);
+              if (next.protocol !== 'https:') return reject(new Error('重定向到非 HTTPS 地址，已取消'));
+            } catch (e2) { return reject(new Error('重定向地址无效')); }
+            return go(next.href);
           }
           if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
           const len = parseInt(res.headers['content-length'], 10);
