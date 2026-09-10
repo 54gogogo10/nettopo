@@ -6593,6 +6593,37 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(relOpen >= 1 && relOpen === relClose, 'L9：VSDX 各 .rels 部件都有 <Relationships> 根且开关成对（旧实现 page1.xml.rels 无根，OPC 非法）');
       fs.rmSync(r3dir, { recursive: true, force: true });
     }
+    // ================= 厂商 SNMP 参数预设 + 换算语义（本轮新增） ================= 
+    {
+      const { cpuPctOf, memPctOf, MEM_MODES } = require('../js/monitor.js');
+      const vs = U.SNMP_VENDORS;
+      ok(Array.isArray(vs) && vs.length >= 12, '厂商预设：覆盖厂家数 ≥12（当前 ' + vs.length + ' 家）');
+      const keys = vs.map(v => v.key), ents = vs.map(v => v.enterprise);
+      ok(new Set(keys).size === keys.length && new Set(ents).size === ents.length, '厂商预设：key 与企业号均不重复');
+      const oidRe = /^\d{1,10}(?:\.\d{1,10}){1,19}$/;
+      const bad = [];
+      for (const v of vs) {
+        if (!v.label || !Number.isInteger(v.enterprise)) bad.push(v.key + ':label/enterprise');
+        if (v.cpu && (!oidRe.test(v.cpu.oid || '') || ['direct', 'idle100'].indexOf(v.cpu.mode) < 0)) bad.push(v.key + ':cpu');
+        if (v.mem && (!oidRe.test(v.mem.oid || '') || MEM_MODES.indexOf(v.mem.mode) < 0)) bad.push(v.key + ':mem');
+        // 需要 free 的两种模式必须给 freeOid，否则在线采集永远算不出内存占用（静默空值）
+        if (v.mem && v.mem.mode !== 'percent' && !oidRe.test(v.mem.freeOid || '')) bad.push(v.key + ':mem.freeOid');
+      }
+      ok(bad.length === 0, '厂商预设：OID 语法 / 换算模式 / 必填 freeOid 全部合法' + (bad.length ? ' → ' + bad.join(',') : ''));
+      ok(vs.filter(v => v.verified === 'lab').length >= 3, '厂商预设：≥3 家标注真机实测（华为 / 思科 / Linux UCD）');
+      ok(vs.filter(v => !v.cpu && !v.mem).every(v => v.verified === 'none'), '厂商预设：只给企业号识别、没给 OID 的厂商一律标为未核实（不冒充可用）');
+      ok(U.snmpVendorOf('1.3.6.1.4.1.2011.2.23.70', '').key === 'huawei', '厂商识别：sysObjectID 企业号 2011 → 华为');
+      ok(U.snmpVendorOf('', 'Cisco IOS Software, CAT9K_IOSXE Version 17.6.4').key === 'cisco', '厂商识别：sysDescr 关键词兜底 → 思科');
+      ok(U.snmpVendorOf('', 'Linux R3-Access-03 6.17.0-generic Ubuntu').key === 'ucd', '厂商识别：Linux/net-snmp → UCD');
+      ok(U.snmpVendorOf('1.3.6.1.4.1.99999.1', 'unknown device') === null, '厂商识别：未知企业号且无关键词 → 空（不乱认）');
+      ok(cpuPctOf('direct', 37) === 37 && cpuPctOf('idle100', 99) === 1, 'CPU 换算：direct 直取 / idle100 取补（Linux UCD）');
+      ok(cpuPctOf('direct', 150) === 100 && cpuPctOf('direct', -5) === 0, 'CPU 换算：越界钳制到 0~100');
+      ok(cpuPctOf('direct', 'abc') === null, 'CPU 换算：非数值 → null（不产出误导性的 0）');
+      ok(memPctOf('percent', 60) === 60, '内存换算：百分比型直取（华为/华三）');
+      ok(memPctOf('usedfree', 30, 70) === 30, '内存换算：已用/(已用+空闲)（思科字节型）');
+      ok(memPctOf('totalavail', 100, 40) === 60, '内存换算：(总量−可用)/总量（Linux UCD）');
+      ok(memPctOf('usedfree', 30, NaN) === null && memPctOf('totalavail', 0, 0) === null, '内存换算：free 缺失/总量为 0 → null');
+    }
 })().then(() => {
   console.log('');
   console.log(`结果：${pass} 通过，${fail} 失败` + (skipped ? `，${skipped} 跳过（本机缺 python 依赖，未真正校验）` : ''));

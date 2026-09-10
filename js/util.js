@@ -449,6 +449,75 @@ U.sanitizeTypeData = (overrides, customTypes) => {
   return { overrides: ov, customTypes: ct };
 };
 
+/* ---------- 厂商 SNMP 参数预设（CPU / 内存采集） ----------
+ * 语义（monitor.js 的 _collectPerf 按此换算，纯函数 cpuPctOf/memPctOf）：
+ *   cpuMode 'direct'    → OID 值即利用率百分比（华为/华三/思科/Juniper/飞塔…）
+ *   cpuMode 'idle100'   → OID 值是无负载占比（Linux UCD ssCpuIdle）→ CPU% = 100 − 值
+ *   memMode 'percent'   → memUsed 值即占用百分比（华为/华三 entity-ext、Juniper、飞塔）
+ *   memMode 'usedfree'  → 已用/(已用+空闲)×100（思科字节型）
+ *   memMode 'totalavail'→ (总量−可用)/总量×100（Linux UCD memTotalReal/memAvailReal）
+ * 表型 OID 一律填**基础前缀**（不带实例号）：monitor 的 snmpGetValue 在 GET 未命中时自动
+ * GETNEXT 取子树首个实例，因此前缀形式对「标量 .0」与「表列 .idx」两种设备都成立。
+ * verified 标注置信度：lab = 已在本仓 FRR 真机实验室实测取到有效值（含换算结果）；
+ * doc = 按厂商公开 MIB 填写，不同型号/固件版本可能不同，面板已提示先 snmpwalk 核对。
+ * 只填企业号的厂商仅用于「按 sysObjectID 识别厂商」，不给出未经核实的 OID。 */
+U.SNMP_VENDORS = [
+  { key: 'huawei', label: '华为 VRP / CE 系列（百分比型）', enterprise: 2011, verified: 'lab',
+    cpu: { oid: '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5', mode: 'direct' },
+    mem: { oid: '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7', mode: 'percent' } },
+  { key: 'h3c', label: '华三 H3C Comware V7（百分比型）', enterprise: 25506, verified: 'doc',
+    cpu: { oid: '1.3.6.1.4.1.25506.2.6.1.1.1.1.8', mode: 'direct' },
+    mem: { oid: '1.3.6.1.4.1.25506.2.6.1.1.1.1.9', mode: 'percent' } },
+  { key: 'cisco', label: '思科 IOS / IOS-XE（内存为字节型 used+free）', enterprise: 9, verified: 'lab',
+    cpu: { oid: '1.3.6.1.4.1.9.2.1.58', mode: 'direct' },
+    mem: { oid: '1.3.6.1.4.1.9.9.48.1.1.1.5', freeOid: '1.3.6.1.4.1.9.9.48.1.1.1.6', mode: 'usedfree' } },
+  { key: 'ucd', label: 'Linux / net-snmp UCD（总量+可用）', enterprise: 2021, verified: 'lab',
+    cpu: { oid: '1.3.6.1.4.1.2021.11.11.0', mode: 'idle100' },
+    mem: { oid: '1.3.6.1.4.1.2021.4.5.0', freeOid: '1.3.6.1.4.1.2021.4.6.0', mode: 'totalavail' } },
+  { key: 'juniper', label: 'Juniper Junos（百分比型）', enterprise: 2636, verified: 'doc',
+    cpu: { oid: '1.3.6.1.4.1.2636.3.1.13.1.8', mode: 'direct' },
+    mem: { oid: '1.3.6.1.4.1.2636.3.1.13.1.11', mode: 'percent' } },
+  { key: 'fortinet', label: '飞塔 FortiGate（百分比型）', enterprise: 12356, verified: 'doc',
+    cpu: { oid: '1.3.6.1.4.1.12356.101.4.1.3.0', mode: 'direct' },
+    mem: { oid: '1.3.6.1.4.1.12356.101.4.1.4.0', mode: 'percent' } },
+  /* 以下仅按企业号识别厂商（不给 OID 预设，避免给出未经核实的值）：面板会提示按设备手册填写 */
+  { key: 'ruijie', label: '锐捷 Ruijie RGOS（需按手册填 OID）', enterprise: 4881, verified: 'none' },
+  { key: 'zte', label: '中兴 ZTE ZXR（需按手册填 OID）', enterprise: 3902, verified: 'none' },
+  { key: 'arista', label: 'Arista EOS（需按手册填 OID）', enterprise: 30065, verified: 'none' },
+  { key: 'hpe', label: 'HPE / Aruba（需按手册填 OID）', enterprise: 11, verified: 'none' },
+  { key: 'extreme', label: 'Extreme（需按手册填 OID）', enterprise: 1916, verified: 'none' },
+  { key: 'paloalto', label: 'Palo Alto PAN-OS（需按手册填 OID）', enterprise: 25461, verified: 'none' },
+  { key: 'mikrotik', label: 'MikroTik RouterOS（需按手册填 OID）', enterprise: 14988, verified: 'none' },
+  { key: 'f5', label: 'F5 BIG-IP（需按手册填 OID）', enterprise: 3375, verified: 'none' }
+];
+
+/** 按企业号取该条厂商定义；找不到返回 null */
+U.snmpVendorByEnterprise = (n) => U.SNMP_VENDORS.find(v => v.enterprise === Number(n)) || null;
+/** 按 key 取厂商定义 */
+U.snmpVendorByKey = (k) => U.SNMP_VENDORS.find(v => v.key === String(k || '')) || null;
+
+/** 从 sysObjectID / sysDescr 识别厂商（SNMP 识别结果回填面板用）。
+ *  先用标准 sysObjectID 的企业号（最可靠）；缺失或非标准时按 sysDescr 关键词兜底
+ *  （同一厂商不同型号未必带标准企业号，如各类「Linux 服务器」） */
+U.snmpVendorOf = (objectId, descr) => {
+  const m = String(objectId == null ? '' : objectId).match(/^\.?1\.3\.6\.1\.4\.1\.(\d+)/);
+  if (m) { const v = U.snmpVendorByEnterprise(m[1]); if (v) return v; }
+  const d = String(descr == null ? '' : descr).toLowerCase();
+  const KW = [
+    ['huawei', /huawei|versatile routing|\bvrp\b/],
+    ['h3c', /h3c|comware|hp comware/],
+    ['cisco', /cisco|ios[ -]?xe|ios software|cat9k|nexus/],
+    ['juniper', /juniper|junos/],
+    ['fortinet', /fortigate|fortinet/],
+    ['ruijie', /ruijie|\brgos\b/],
+    ['zte', /\bzte\b|zxr|zxros/],
+    ['arista', /arista|\beos\b/],
+    ['ucd', /linux|net-snmp|ubuntu|debian|centos|red hat/]
+  ];
+  for (const [key, re] of KW) if (re.test(d)) return U.snmpVendorByKey(key);
+  return null;
+};
+
 /* 文本框可用字体白名单（防止工程文件注入任意字体名/样式串） */
 U.TEXT_FONTS = ['Microsoft YaHei', 'SimSun', 'SimHei', 'DengXian', 'KaiTi', 'Arial', 'Consolas', 'Georgia', 'Times New Roman'];
 

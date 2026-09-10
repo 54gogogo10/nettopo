@@ -113,6 +113,36 @@ const OID_IF_OUT32 = '1.3.6.1.2.1.2.2.1.16';
 const OID_IF_HCIN = '1.3.6.1.2.1.31.1.1.1.6';
 const OID_IF_HCOUT = '1.3.6.1.2.1.31.1.1.1.7';
 /* 接口流量历史容量（每次采样一条；默认 60s 间隔约覆盖 2 小时） */
+/* ---- CPU/内存利用率换算（纯函数，按厂商预设的 mode 选择语义；可单测） ----
+ * 各厂商 SNMP 给出的量纲并不一致，这里把差异收敛到 mode 上（预设表见 js/util.js 的 U.SNMP_VENDORS）：
+ *   cpuMode 'direct'   值即百分比（华为/华三/思科/Juniper/飞塔…）
+ *   cpuMode 'idle100'  值是无负载占比（Linux UCD ssCpuIdle）→ 100 − 值
+ *   memMode 'percent'  值即占用百分比（华为/华三 entity-ext、Juniper、飞塔）
+ *   memMode 'usedfree' 已用/(已用+空闲)（思科字节型）
+ *   memMode 'totalavail' (总量−可用)/总量（Linux UCD memTotalReal/memAvailReal）
+ * 解析不出数值一律返回 null（不产出 0 这种误导性的「正常」值）。 */
+const MEM_MODES = ['percent', 'usedfree', 'totalavail'];
+const pct1 = (v) => Math.max(0, Math.min(100, Math.round(v * 10) / 10));
+function cpuPctOf(mode, value) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return null;
+  return pct1(String(mode) === 'idle100' ? 100 - v : v);
+}
+function memPctOf(mode, used, free) {
+  const u = Number(used);
+  if (!Number.isFinite(u)) return null;
+  const f = Number(free);
+  if (String(mode) === 'usedfree') {
+    if (!Number.isFinite(f) || u + f <= 0) return null;
+    return Math.round(u / (u + f) * 1000) / 10;
+  }
+  if (String(mode) === 'totalavail') {
+    if (!Number.isFinite(f) || u <= 0) return null; // u 在此语义下是「总量」
+    return pct1((u - f) / u * 100);
+  }
+  return pct1(u);
+}
+
 const IF_HIST_MAX = 120;
 /** 计算速率（bps）：计数器差值 × 8 / 秒；计数器回绕/重置（负差）返回 null */
 function rateBps(curC, prevC, dtSec) {
@@ -906,7 +936,11 @@ class MonitorManager extends EventEmitter {
     sysinfo.snmpPort = (snmpPort > 0 && snmpPort <= 65535) ? snmpPort : 161;
     sysinfo.sysUpTime = !!sOpt.sysUpTime; // 重启检测：定时 GET sysUpTime，数值骤减 → reboot 事件
     // CPU/内存采集 OID（点分十进制白名单；GET 失败自动 GETNEXT 兜底表型 OID）。
-    // memFreeOid 留空 = memUsedOid 的值直接是百分比（华为/华三 entity-ext）；填写 = 按 used/(used+free) 计算（思科字节型）。
+    // 换算语义由 cpuMode/memMode 决定（见 cpuPctOf/memPctOf）：
+    //   cpuMode  direct  = OID 值即百分比；idle100 = 值是无负载占比（Linux UCD ssCpuIdle）
+    //   memMode  percent = memUsedOid 值即百分比；usedfree = used/(used+free)（思科字节型）；
+    //            totalavail = (总量−可用)/总量（Linux UCD memTotalReal/memAvailReal）
+    // 未显式给 mode 时按旧口径推导：有 memFreeOid 即 usedfree，否则 percent——老配置行为完全不变。
     const pfOpt = sOpt.perf && typeof sOpt.perf === 'object' ? sOpt.perf : {};
     const cleanOid = (v) => {
       // OID 白名单：点分十进制（最多 20 段——企业 MIB 常见 12~15 段），总长 64 上限；
@@ -915,11 +949,17 @@ class MonitorManager extends EventEmitter {
       const s = String(v == null ? '' : v).trim().replace(/^\.+/, '').replace(/\.+$/, '');
       return (/^\d{1,10}(?:\.\d{1,10}){1,19}$/.test(s) && s.length <= 64 && s.split('.').every(x => Number(x) <= 4294967295)) ? s : '';
     };
+    const cpuOid = cleanOid(pfOpt.cpuOid);
+    const memUsedOid = cleanOid(pfOpt.memUsedOid);
+    const memFreeOid = cleanOid(pfOpt.memFreeOid);
+    const cpuMode = String(pfOpt.cpuMode) === 'idle100' ? 'idle100' : 'direct';
+    let memMode = String(pfOpt.memMode || '');
+    if (MEM_MODES.indexOf(memMode) < 0) memMode = memFreeOid ? 'usedfree' : 'percent'; // 旧配置兼容
+    // 需要 free 的两种模式缺 freeOid 时退回 percent（否则永远算不出内存占用，静默空值）
+    if (memMode !== 'percent' && !memFreeOid) memMode = 'percent';
     sysinfo.perf = {
       enabled: !!pfOpt.enabled,
-      cpuOid: cleanOid(pfOpt.cpuOid),
-      memUsedOid: cleanOid(pfOpt.memUsedOid),
-      memFreeOid: cleanOid(pfOpt.memFreeOid)
+      cpuOid, memUsedOid, memFreeOid, cpuMode, memMode
     };
     // ---- 服务器指标采集（SSH，可选）：复用监控会话执行 df/free 等命令并解析数值，
     //      磁盘/内存超阈值告警（仅读取模式下禁用——与「只记录不写命令」语义冲突） ----
@@ -1671,27 +1711,24 @@ class MonitorManager extends EventEmitter {
         job.upPrev = up;
       }
     }
-    const clampPct = (v) => Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v * 10) / 10)) : null;
-    // CPU 利用率（%）
+    // 换算语义就地兜底推导：perf 可能未经 _validate（如直接构造的 job/旧配置），
+    // 缺 mode 时按「有 freeOid 即 usedfree，否则 percent」——与旧版本行为逐字一致
+    const cpuMode = perf.cpuMode === 'idle100' ? 'idle100' : 'direct';
+    const memMode = MEM_MODES.indexOf(perf.memMode) >= 0 ? perf.memMode : (perf.memFreeOid ? 'usedfree' : 'percent');
+    // CPU 利用率（%）：换算语义见 cpuPctOf（direct / idle100）
     if (perf.enabled && perf.cpuOid) {
       const r = await snmpGetValue(host, target, perf.cpuOid, 3000, port);
-      if (r.ok) sample.cpu = clampPct(Number(r.value));
+      if (r.ok) sample.cpu = cpuPctOf(cpuMode, r.value);
     }
-    // 内存占用：memFreeOid 已配置 → used/(used+free)（思科字节型）；未配置 → memUsedOid 值即百分比（华为/华三）
+    // 内存占用：换算语义见 memPctOf（percent / usedfree / totalavail）
     if (perf.enabled && perf.memUsedOid) {
       const ru = await snmpGetValue(host, target, perf.memUsedOid, 3000, port);
       if (ru.ok) {
-        const used = Number(ru.value);
-        if (Number.isFinite(used)) {
-          if (perf.memFreeOid) {
-            const rf = await snmpGetValue(host, target, perf.memFreeOid, 3000, port);
-            const free = rf.ok ? Number(rf.value) : NaN;
-            sample.mem = (Number.isFinite(free) && used + free > 0)
-              ? Math.round(used / (used + free) * 1000) / 10
-              : null;
-          } else {
-            sample.mem = clampPct(used);
-          }
+        if (memMode === 'percent') {
+          sample.mem = memPctOf('percent', ru.value);
+        } else if (perf.memFreeOid) {
+          const rf = await snmpGetValue(host, target, perf.memFreeOid, 3000, port);
+          sample.mem = memPctOf(memMode, ru.value, rf.ok ? rf.value : NaN);
         }
       }
     }
@@ -2361,5 +2398,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
 

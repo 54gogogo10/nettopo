@@ -5610,6 +5610,13 @@ function wire() {
         if (!info || !info.key) return;
         const did = info.deviceId || deviceIdFromMonitorKey(info.key);
         const n = state.nodes.find(x => x.id === did);
+        // 厂商识别（sysObjectID 企业号优先，sysDescr 关键词兜底）：结果只做运行期标记，
+        // 供「监控配置」弹窗按厂商预填 CPU/内存 OID；首次识别提示一次，避免反复弹
+        const vd = U.snmpVendorOf(info.objectId, info.descr);
+        if (vd && n && MON_VENDOR_SEEN.get(did) !== vd) {
+          MON_VENDOR_SEEN.set(did, vd);
+          toast('已识别「' + n.name + '」厂商：' + vd.label + (vd.cpu || vd.mem ? '（监控配置可按此预填 CPU/内存 OID）' : '（OID 需按设备手册填写）'));
+        }
         if (!n || !info.version) return;
         const ver = String(info.version).slice(0, 64); // 钳制：恶意 SNMP 设备可回超长版本串污染图数据/localStorage
         if (!n.osver || n.osver === (snmpOsverSeen.get(did) || '')) {
@@ -5768,6 +5775,16 @@ function normCmds(v, def) {
   return out.length ? out : (def || []);
 }
 
+/** CPU/内存换算方式 → 面板提示（与 js/monitor.js 的 cpuPctOf/memPctOf 同一套语义）：
+ *  显式 mode 优先；未给时可从「是否填了空闲 OID」推断（与 monitor 的旧配置兼容口径一致） */
+function snmpModeLabel(cpuMode, memMode, freeOid) {
+  const cpuTxt = cpuMode === 'idle100' ? 'CPU：100−空闲占比' : 'CPU：直接百分比';
+  const m = ['percent', 'usedfree', 'totalavail'].indexOf(memMode) >= 0 ? memMode : (freeOid ? 'usedfree' : 'percent');
+  const memTxt = m === 'usedfree' ? '内存：已用/(已用+空闲)'
+    : (m === 'totalavail' ? '内存：(总量−可用)/总量' : '内存：直接百分比');
+  return cpuTxt + ' · ' + memTxt;
+}
+
 /** 管理地址行：host + 各自连接方式（协议/端口/用户名/密码）+ 各自执行命令 + 仅读取开关 */
 function monitorRow(host, saved) {
   saved = saved || {};
@@ -5805,6 +5822,8 @@ function monitorRow(host, saved) {
     snmpCpuOid: typeof saved.snmpCpuOid === 'string' ? saved.snmpCpuOid : '',
     snmpMemUsedOid: typeof saved.snmpMemUsedOid === 'string' ? saved.snmpMemUsedOid : '',
     snmpMemFreeOid: typeof saved.snmpMemFreeOid === 'string' ? saved.snmpMemFreeOid : '',
+    snmpCpuMode: saved.snmpCpuMode === 'idle100' ? 'idle100' : 'direct',
+    snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(saved.snmpMemMode) >= 0 ? saved.snmpMemMode : '',
     backupCommand: normCmds(saved.backupCommand, ['display current-configuration']),
     backupMode: saved.backupMode === 'own' ? 'own' : 'session',
     backupSkipSame: !!saved.backupSkipSame,
@@ -5869,6 +5888,8 @@ function normalizeMonitorHosts(cfg) {
         snmpCpuOid: typeof h.snmpCpuOid === 'string' ? h.snmpCpuOid.trim().slice(0, 64) : '',
         snmpMemUsedOid: typeof h.snmpMemUsedOid === 'string' ? h.snmpMemUsedOid.trim().slice(0, 64) : '',
         snmpMemFreeOid: typeof h.snmpMemFreeOid === 'string' ? h.snmpMemFreeOid.trim().slice(0, 64) : '',
+        snmpCpuMode: h.snmpCpuMode === 'idle100' ? 'idle100' : 'direct',
+        snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(h.snmpMemMode) >= 0 ? h.snmpMemMode : '',
         backupCommand: normCmds(h.backupCommand, ['display current-configuration']),
         backupMode: h.backupMode === 'own' ? 'own' : 'session',
         backupSkipSame: !!h.backupSkipSame,
@@ -5945,12 +5966,31 @@ function openSnmpV3SecretDialog(init, onDone) {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#sv3ak').focus(); }, 250);
 }
 
-/** 监控配置弹窗预填：已保存的 hosts 优先，否则用设备全部管理地址，否则留空一行 */
-function monitorHostsForPrefill(saved, mgmts) {
-  const rows = normalizeMonitorHosts(saved);
-  if (rows.length) return rows;
-  const all = (mgmts || []).map(h => String(h).trim()).filter(Boolean);
-  return all.length ? all.map(h => monitorRow(h, saved)) : [monitorRow('', saved)];
+/* SNMP 识别到的厂商（运行期标记，不落盘）：nodeId -> U.SNMP_VENDORS 条目。
+ * 用途见 monitorHostsForPrefill：打开监控配置时按识别结果预填 CPU/内存 OID 与换算方式。 */
+const MON_VENDOR_SEEN = new Map();
+
+/** 监控配置弹窗预填：已保存的 hosts 优先，否则用设备全部管理地址，否则留空一行。
+ *  nodeId 已知且该设备识别出厂商时，对**仍为空**的 CPU/内存 OID 按厂商预设预填（含换算方式）——
+ *  识别→采集不必手抄 OID；已有值一律不动（用户手填优先）。 */
+function monitorHostsForPrefill(saved, mgmts, nodeId) {
+  const vd = nodeId ? MON_VENDOR_SEEN.get(nodeId) : null;
+  const fillByVendor = (r) => {
+    if (!vd) return r;
+    if (vd.cpu && !r.snmpCpuOid) { r.snmpCpuOid = vd.cpu.oid || ''; r.snmpCpuMode = vd.cpu.mode || 'direct'; }
+    if (vd.mem && !r.snmpMemUsedOid) {
+      r.snmpMemUsedOid = vd.mem.oid || '';
+      r.snmpMemFreeOid = vd.mem.freeOid || '';
+      r.snmpMemMode = vd.mem.mode || 'percent';
+    }
+    return r;
+  };
+  let rows = normalizeMonitorHosts(saved);
+  if (!rows.length) {
+    const all = (mgmts || []).map(h => String(h).trim()).filter(Boolean);
+    rows = all.length ? all.map(h => monitorRow(h, saved)) : [monitorRow('', saved)];
+  }
+  return rows.map(fillByVendor);
 }
 
 function monitorBadgeHtml(nodeId) {
@@ -5998,7 +6038,7 @@ async function applyMonitor(id, cfg, enabled) {
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
           { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', snmpPort: r.snmpPort || '', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '' } } },
+        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', snmpPort: r.snmpPort || '', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '', cpuMode: r.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: r.snmpMemMode || '' } } },
         { metrics: { enabled: !!r.metricsEnabled, command: r.metricsCommands, intervalSec: r.metricsIntervalSec, diskWarn: r.metricsDiskWarn, diskCrit: r.metricsDiskCrit, memWarn: r.metricsMemWarn, memCrit: r.metricsMemCrit } },
         { httpProbe: { enabled: !!r.httpEnabled, url: r.httpUrl, intervalSec: r.httpIntervalSec, alertDays: r.httpAlertDays, keyword: r.httpKeyword } }
         ));
@@ -6104,7 +6144,7 @@ async function reconcileMonitors() {
         { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
         // 与 applyMonitor 的完整载荷同口径：缺 sysUpTime/perf 会让重启检测与 CPU/内存采集
         // 在软件重启/恢复工程后静默失效（monitor 侧按缺省 false 处理）
-        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', snmpPort: row.snmpPort || '', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '' } } },
+        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', snmpPort: row.snmpPort || '', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '', cpuMode: row.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: row.snmpMemMode || '' } } },
         { metrics: { enabled: !!row.metricsEnabled, command: row.metricsCommands, intervalSec: row.metricsIntervalSec, diskWarn: row.metricsDiskWarn, diskCrit: row.metricsDiskCrit, memWarn: row.metricsMemWarn, memCrit: row.metricsMemCrit } },
         { httpProbe: { enabled: !!row.httpEnabled, url: row.httpUrl, intervalSec: row.httpIntervalSec, alertDays: row.httpAlertDays, keyword: row.httpKeyword } }
       ));
@@ -6201,7 +6241,7 @@ function openMonitorConfig(id) {
   const listEl = ov.querySelector('#monHostList');
   const protoOpts = '<option value="ssh">SSH</option><option value="telnet">Telnet</option>';
   const rowHtml = (r) => `
-    <div class="mon-host-row" data-v3-auth-proto="${U.escHtml(r.snmpV3AuthProto || 'sha')}" data-v3-auth-pass="${U.escHtml(r.snmpV3AuthPass || '')}" data-v3-priv-proto="${U.escHtml(r.snmpV3PrivProto || 'aes')}" data-v3-priv-pass="${U.escHtml(r.snmpV3PrivPass || '')}">
+    <div class="mon-host-row" data-cpu-mode="${r.snmpCpuMode === 'idle100' ? 'idle100' : 'direct'}" data-mem-mode="${U.escHtml(r.snmpMemMode || '')}" data-v3-auth-proto="${U.escHtml(r.snmpV3AuthProto || 'sha')}" data-v3-auth-pass="${U.escHtml(r.snmpV3AuthPass || '')}" data-v3-priv-proto="${U.escHtml(r.snmpV3PrivProto || 'aes')}" data-v3-priv-pass="${U.escHtml(r.snmpV3PrivPass || '')}">
       <input class="mh-host" type="text" placeholder="管理地址" value="${U.escHtml(r.host)}" autocomplete="off"/>
       <select class="mh-proto">${protoOpts.replace('value="ssh"', 'value="ssh"' + (r.protocol === 'ssh' ? ' selected' : '')).replace('value="telnet"', 'value="telnet"' + (r.protocol === 'telnet' ? ' selected' : ''))}</select>
       <input class="mh-port" type="number" min="1" max="65535" placeholder="端口" value="${U.escHtml(r.port)}"/>
@@ -6266,14 +6306,14 @@ function openMonitorConfig(id) {
         <input class="mh-si-v3user" type="text" style="display:none" title="SNMP v3 用户名（USM）" placeholder="v3 用户名" value="${U.escHtml(r.snmpV3User || '')}" autocomplete="off" spellcheck="false"/>
         <button type="button" class="tb mh-si-v3btn" style="display:none;padding:2px 8px;font-size:11px">v3 口令…</button>
         <div class="mh-perf-wrap" hidden>
-          <select class="mh-si-preset" title="按厂家预填常用 OID（可手动修改；不同型号可能不同，建议先用 snmpwalk 验证）">
+          <select class="mh-si-preset" title="按厂家预填 CPU/内存 OID 与换算方式（可手动修改；同厂商不同型号/固件可能不同，建议先用 snmpwalk 核对）">
             <option value="">OID 预设（选厂家自动填充）…</option>
-            <option value="hw">华为/华三（百分比型）</option>
-            <option value="cisco">思科（字节型 used/free）</option>
+            ${U.SNMP_VENDORS.map(v => '<option value="' + U.escHtml(v.key) + '">' + U.escHtml(v.label) + (v.verified === 'lab' ? '（已实测）' : '') + '</option>').join('')}
           </select>
-          <input class="mh-si-cpu" type="text" placeholder="CPU 利用率 OID" title="GET 失败自动 GETNEXT 取该子树首个实例，表型 OID 填基础前缀即可" value="${U.escHtml(r.snmpCpuOid || '')}" autocomplete="off" spellcheck="false"/>
-          <input class="mh-si-mused" type="text" placeholder="内存占用 OID（% 或已用字节）" title="内存占用：若下方「内存空闲 OID」留空，此处值直接视为百分比（华为/华三 entity-ext）；填写空闲 OID 则按 已用/(已用+空闲) 换算（思科字节型）" value="${U.escHtml(r.snmpMemUsedOid || '')}" autocomplete="off" spellcheck="false"/>
-          <input class="mh-si-mfree" type="text" placeholder="内存空闲 OID（可选，思科字节型填此）" value="${U.escHtml(r.snmpMemFreeOid || '')}" autocomplete="off" spellcheck="false"/>
+          <input class="mh-si-cpu" type="text" placeholder="CPU 利用率 OID" title="表型 OID 填基础前缀即可：GET 未命中会自动 GETNEXT 取该子树首个实例" value="${U.escHtml(r.snmpCpuOid || '')}" autocomplete="off" spellcheck="false"/>
+          <input class="mh-si-mused" type="text" placeholder="内存 OID（量纲见右侧提示）" title="量纲由右侧「换算」提示决定：直接百分比 / 已用+空闲 / 总量+可用" value="${U.escHtml(r.snmpMemUsedOid || '')}" autocomplete="off" spellcheck="false"/>
+          <input class="mh-si-mfree" type="text" placeholder="空闲/可用 OID（可选）" title="思科字节型填 Free、Linux UCD 填 memAvailReal；华为/华三百分比型留空" value="${U.escHtml(r.snmpMemFreeOid || '')}" autocomplete="off" spellcheck="false"/>
+          <span class="mh-si-mode" title="CPU/内存换算方式（选厂家预设会自动带上；手动改 OID 时请确认量纲一致）">${U.escHtml(snmpModeLabel(r.snmpCpuMode, r.snmpMemMode, r.snmpMemFreeOid))}</span>
         </div>
         <div class="mh-sep">服务器指标采集（SSH）</div>
         <label class="mh-si" title="复用监控会话按间隔执行 df/free 等命令并解析数值：磁盘/内存超阈值时记入事件时间线并弹通知（仅读取模式下不执行）"><input type="checkbox" class="mh-mt-cb"${r.metricsEnabled ? ' checked' : ''}/>磁盘/内存</label>
@@ -6397,17 +6437,30 @@ function openMonitorConfig(id) {
     const applyPfUi = () => { pfWrap.hidden = !pfCb.checked; };
     pfCb.addEventListener('change', applyPfUi);
     applyPfUi();
-    const OID_PRESETS = {
-      hw:   { cpu: '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5', used: '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7', free: '' },
-      cisco:{ cpu: '1.3.6.1.4.1.9.2.1.58.0', used: '1.3.6.1.4.1.9.9.48.1.1.1.5.1', free: '1.3.6.1.4.1.9.9.48.1.1.1.6.1' }
+    // 厂家预设直接来自 U.SNMP_VENDORS（js/util.js）：加厂商/改 OID 只动数据表，不动这里
+    const vm = (k) => U.snmpVendorByKey(k);
+    const syncModeHint = () => {
+      const el = rowEl.querySelector('.mh-si-mode');
+      if (el) el.textContent = snmpModeLabel(rowEl.dataset.cpuMode, rowEl.dataset.memMode, rowEl.querySelector('.mh-si-mfree').value.trim());
     };
     rowEl.querySelector('.mh-si-preset').addEventListener('change', (e) => {
-      const p = OID_PRESETS[e.target.value];
-      if (!p) return;
-      rowEl.querySelector('.mh-si-cpu').value = p.cpu;
-      rowEl.querySelector('.mh-si-mused').value = p.used;
-      rowEl.querySelector('.mh-si-mfree').value = p.free;
+      const p = vm(e.target.value);
+      if (!p || (!p.cpu && !p.mem)) return;
+      if (p.cpu) {
+        rowEl.querySelector('.mh-si-cpu').value = p.cpu.oid || '';
+        rowEl.dataset.cpuMode = p.cpu.mode || 'direct';
+      }
+      if (p.mem) {
+        rowEl.querySelector('.mh-si-mused').value = p.mem.oid || '';
+        rowEl.querySelector('.mh-si-mfree').value = p.mem.freeOid || '';
+        rowEl.dataset.memMode = p.mem.mode || 'percent';
+      }
+      syncModeHint();
+      // 未实测过的厂商预设只是按 MIB 文档填的值：明确提示先核对，避免「填了就信」
+      if (p.verified !== 'lab') toast('「' + p.label + '」OID 按厂商 MIB 预填，建议先用 snmpwalk 核对再启用');
     });
+    // 空闲 OID 会改变换算语义（有 free 才谈得上 used+free / 总量−可用），输入即刷新提示
+    rowEl.querySelector('.mh-si-mfree').addEventListener('input', syncModeHint);
     // 服务器指标采集折叠区：勾选展开；Linux 预设一键填充
     const mtCb = rowEl.querySelector('.mh-mt-cb');
     const mtWrap = rowEl.querySelector('.mh-mt-wrap');
@@ -6435,7 +6488,7 @@ function openMonitorConfig(id) {
     wireRow(rowEl);
     return rowEl;
   };
-  const prefillRows = monitorHostsForPrefill(saved, mgmts);
+  const prefillRows = monitorHostsForPrefill(saved, mgmts, id); // id：按 SNMP 识别到的厂商预填 OID
   if (!prefillRows.length) prefillRows.push(monitorRow('', saved));
   for (const r of prefillRows) addRow(r);
   const addBtn = ov.querySelector('[data-act=addHost]');
@@ -6500,6 +6553,8 @@ function openMonitorConfig(id) {
         snmpCpuOid: rowEl.querySelector('.mh-si-cpu').value.trim().slice(0, 64),
         snmpMemUsedOid: rowEl.querySelector('.mh-si-mused').value.trim().slice(0, 64),
         snmpMemFreeOid: rowEl.querySelector('.mh-si-mfree').value.trim().slice(0, 64),
+        snmpCpuMode: rowEl.dataset.cpuMode === 'idle100' ? 'idle100' : 'direct',
+        snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(rowEl.dataset.memMode) >= 0 ? rowEl.dataset.memMode : '',
         snmpCommunity: rowEl.querySelector('.mh-si-comm').value.trim().slice(0, 64),
         snmpPort: (() => { const v = parseInt(rowEl.querySelector('.mh-si-sp').value, 10); return (v > 0 && v <= 65535) ? String(v) : ''; })(),
         snmpVersion: rowEl.querySelector('.mh-si-sec').value === 'v3' ? 'v3' : 'v2c',
