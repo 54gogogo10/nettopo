@@ -15,7 +15,7 @@ U.spreadMinMax = (arr) => {
 };
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260910a';
+U.APP_VERSION = 'v20260911a';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
