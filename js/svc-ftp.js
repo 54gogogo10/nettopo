@@ -14,12 +14,20 @@
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const DATA_CONN_TIMEOUT_MS = 30000; // 数据通道建立等待上限
 // .part 临时名单调序号：pid+毫秒时间戳在并发同名传输（两控制连接 STOR 同名）同毫秒时会撞名
 let svcTmpSeq = 0;
+/** 定长字符串常量时间比较（口令/用户名比对不做早退，消除基于前缀匹配耗时的侧信道） */
+function timingSafeStrEq(a, b) {
+  const ba = Buffer.from(String(a == null ? '' : a), 'utf8');
+  const bb = Buffer.from(String(b == null ? '' : b), 'utf8');
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
 const MAX_CMD_LEN = 2048;           // 单条命令长度上限（防滥用）
 const MAX_WRITE_BACKLOG = 1024 * 1024; // 控制通道写积压上限（客户端只发不读时防用户态缓冲无界膨胀）
 const MAX_CMD_PER_SEC = 300;        // 单连接命令速率上限（防命令洪泛以响应行放大内存）
@@ -224,7 +232,7 @@ class FtpConnection {
 
   _cmdPass(arg) {
     if (!this.pendingUser) { this.reply('503 请先 USER。'); return; }
-    if (this.pendingUser === this.server.username && String(arg) === this.server.password) {
+    if (timingSafeStrEq(this.pendingUser, this.server.username) && timingSafeStrEq(String(arg), this.server.password)) {
       this.authed = true;
       this.failCount = 0;
       this.reply('230 登录成功。');

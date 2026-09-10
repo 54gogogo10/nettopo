@@ -345,6 +345,17 @@ function buildClaudeRequestBody(model, messages, opts) {
   return JSON.stringify(body);
 }
 
+/** 合并服务端返回的 usage 对象：只取保留字段，忽略 __proto__/constructor/prototype。
+ *  服务端 JSON 的 usage 可能携带 `__proto__` 自有键，Object.assign 的 Set 语义会触发原型
+ *  setter（把结果对象原型指向服务端控制的对象）——此处显式白名单拷贝规避。 */
+const USAGE_KEYS = ['prompt_tokens', 'completion_tokens', 'total_tokens', 'input_tokens', 'output_tokens'];
+function mergeUsage(prev, next) {
+  if (!next || typeof next !== 'object') return prev;
+  const out = Object.assign({}, prev);
+  for (const k of USAGE_KEYS) if (Object.prototype.hasOwnProperty.call(next, k)) out[k] = next[k];
+  return out;
+}
+
 /** 解析 Anthropic Messages 非流式响应：content 文本块拼接，
  *  usage 归一为 { prompt_tokens, completion_tokens } 与 OpenAI 口径一致（界面展示不变） */
 function parseClaudeResponse(j) {
@@ -387,11 +398,11 @@ function parseSseChunk(buf) {
         // 合并语义（不整体覆盖）：OpenAI 兼容流末单 chunk 完整携带；Claude 的 input 在流头
         // message_start、output 在流尾 message_delta，两者分属不同 parseSseChunk 调用——
         // 各自只覆盖自己携带的字段，互不清零
-        usage = Object.assign({}, usage, j.usage);
+        usage = mergeUsage(usage, j.usage);
       } else if (j && j.type === 'message_delta' && j.usage && Number.isFinite(j.usage.output_tokens)) {
-        usage = Object.assign({}, usage, { completion_tokens: j.usage.output_tokens });
+        usage = mergeUsage(usage, { completion_tokens: j.usage.output_tokens });
       } else if (j && j.type === 'message_start' && j.message && j.usage && Number.isFinite(j.usage.input_tokens)) {
-        usage = Object.assign({}, usage, { prompt_tokens: j.usage.input_tokens });
+        usage = mergeUsage(usage, { prompt_tokens: j.usage.input_tokens });
       }
       const ch = j && Array.isArray(j.choices) && j.choices[0];
       const d = ch && ch.delta;
@@ -419,9 +430,12 @@ function parseChatResponse(j) {
   return { ok: true, text, usage: j.usage || null, model: String(j.model || '') };
 }
 
-/** HTTP 状态码 → 中文错误提示（附服务端响应体摘要辅助排查） */
+/** HTTP 状态码 → 中文错误提示。
+ *  **不回显服务端响应体**：baseUrl 可由渲染层逐次指定（ai:list-models），而渲染层自身被 CSP
+ *  connect-src 禁止出网——把响应体摘要回传等于给渲染层开了一条「借主进程读任意 HTTP 响应」的
+ *  SSRF 读回通道（内网探测/信息读取）。改为只回状态码 + 固定排查指引。 */
 function httpErrorMessage(code, bodyText, notFoundHint) {
-  const detail = bodyText ? '：' + String(bodyText).slice(0, 300) : '';
+  const detail = ''; // 有意丢弃响应体（见上），保留形参以兼容既有调用点
   if (code === 401 || code === 403) return '认证失败（' + code + '）：请检查 API Key 是否正确' + detail;
   if (code === 404) return '接口不存在（404）：' + (notFoundHint || '请检查 API 地址是否包含 /v1（例如 https://api.deepseek.com/v1）') + detail;
   if (code === 429) return '请求过于频繁（429）：已触发服务端限流，请稍后再试' + detail;
@@ -677,7 +691,7 @@ class AiClient extends EventEmitter {
           const r = parseSseChunk(buf);
           buf = r.rest;
           // 合并而非覆盖：Claude 的 prompt/completion 用量分属流头/流尾的不同 data 事件
-          if (r.usage) streamUsage = Object.assign({}, streamUsage, r.usage);
+          if (r.usage) streamUsage = mergeUsage(streamUsage, r.usage);
           for (const d of r.deltas) {
             try { onDelta(d); } catch (e) { /* 回调异常不中断接收 */ }
           }
@@ -700,7 +714,7 @@ class AiClient extends EventEmitter {
           // 流式收尾：处理无结束空行的残余事件
           if (buf) {
             const r = parseSseChunk(buf + '\n\n');
-            if (r.usage) streamUsage = r.usage;
+            if (r.usage) streamUsage = mergeUsage(streamUsage, r.usage);
             for (const d of r.deltas) {
               try { onDelta(d); } catch (e) { /* ignore */ }
             }

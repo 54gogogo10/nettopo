@@ -28,6 +28,7 @@ class RegexLab {
    * 返回与 items 等长的结果数组：
    *   test → { ok, hit:boolean, line:string|null }
    *   scan → { ok, hits:number[] }
+   *   规则非法/执行失败 → { ok:false, error:string }（与「跑了但没命中」区分开，调用方据此按无法评估处理）
    *   被拉黑/线程失败 → { ok:false, blocked:true, hit:false, hits:[] }
    * 单个模式超时只拉黑该模式，其余结果仍然返回。
    */
@@ -50,7 +51,9 @@ class RegexLab {
         const outIdx = remaining[k];
         const r = res.results[k];
         if (r) {
-          out[outIdx] = { ok: true, blocked: false, hit: !!r.hit, line: r.line || null, hits: r.hits || [] };
+          // worker 对非法/执行失败的正则返回 { ok:false, error }：必须原样透出，否则调用方无法区分
+          // 「跑了没命中」与「规则坏了」（monitor.js 的「无法评估」分支会成死代码）
+          out[outIdx] = { ok: r.ok !== false, blocked: false, hit: !!r.hit, line: r.line || null, hits: r.hits || [], error: r.error || null };
         } else if (k === res.badIndex) {
           // 该项执行超时被处决：拉黑并标记
           this.blocked.add(String(list[outIdx].pattern));

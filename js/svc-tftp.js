@@ -22,7 +22,14 @@ const MAX_BLKSIZE = 65464;
 let svcTmpSeq = 0;
 const RETRANSMIT_MS = 1000;      // 对端不应答时的重发间隔
 const MAX_RETRIES = 6;           // 连续重发次数上限（超限判定对端已死）
+// 首块（对端从未应答过）的重传上限：RRQ 是无握手的盲请求，源地址可伪造，服务端会直接把 DATA1
+// 发往伪造地址并按 MAX_RETRIES 重发——16 字节请求换来 7×512B ≈ 3.5KB（放大 225×，标准 UDP 反射面）。
+// 对端一次都没应答时只发 1 次重传（合计 2 包 ≈ 1KB，放大降到 64×）；一旦收到过应答即证明对端真实
+// 可达，恢复常规重传次数（不影响正常传输的可靠性）
+const MAX_RETRIES_INITIAL = 1;
 const SESSION_IDLE_MS = 30000;   // 会话整体空闲上限
+// 握手期空闲上限：尚未发生任何数据交换的会话只给这么长时间（旧值 30s 让伪造源占住的槽位存活过久）
+const HANDSHAKE_IDLE_MS = 5000;
 const MAX_NAME_LEN = 120;
 
 /** 文件名安全化：白名单外的字符替换，拒绝穿越成分（返回 null 表示整个请求拒收） */
@@ -80,11 +87,15 @@ class TftpSession {
     this.readBuf = null;         // RRQ 文件内容
     this.finished = false;
     this.finishing = false;      // WRQ 收尾窗口：最终块已收（ws.end）但 rename 结果未定
+    // 「已进展」= 与本会话真正交换过数据（WRQ 收到 DATA / RRQ 收到 ACK）。伪造源地址永远做不到，
+    // 因此只有它会占用握手期短超时；真实传输一旦进展就转入常规空闲超时
+    this.progressed = false;
   }
 
   _bumpIdle() {
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => this.abort(new Error('会话空闲超时')), SESSION_IDLE_MS);
+    this.idleTimer = setTimeout(() => this.abort(new Error('会话空闲超时')),
+      this.progressed ? SESSION_IDLE_MS : HANDSHAKE_IDLE_MS);
     this.idleTimer.unref();
   }
 
@@ -100,7 +111,8 @@ class TftpSession {
 
   _retransmit() {
     if (this.closed) return;
-    if (++this.retries > MAX_RETRIES) { this.abort(new Error('重传超限')); return; }
+    const cap = this.progressed ? MAX_RETRIES : MAX_RETRIES_INITIAL; // 对端从未应答：不做长重传（防反射放大）
+    if (++this.retries > cap) { this.abort(new Error('重传超限')); return; }
     this._send(this.lastSent);
   }
 
@@ -245,6 +257,7 @@ class TftpSession {
     if (opcode === 4) { // ACK
       if (this.kind !== 'rrq') return;
       const n = buf.readUInt16BE(2);
+      this.progressed = true; // 对端真实可达（伪造源收不到我们的包，也就回不了 ACK）
       // _sendNextData 为 async（流式取块）：同步 throw 会变成 rejection 绕过本处的 try/catch，
       // 补 .catch 走 abort 清理，防 unhandled rejection 崩主进程
       if (n === (this.blockCounter & 0xffff)) this._sendNextData().catch((e) => this.abort(e));
@@ -265,6 +278,7 @@ class TftpSession {
         return;
       }
       if (n !== ((this.blockCounter + 1) & 0xffff)) return; // 乱序：丢弃等待重传
+      this.progressed = true; // 收到按序数据块 = 对端真实可达
       this.blockCounter++;
       this.bytes += chunk.length;
       if (this.bytes > this.server.maxFileSize) {
@@ -342,8 +356,22 @@ class TftpServer extends EventEmitter {
     this.running = false;
     this.lastError = '';
     this.sessions = new Map(); // 'addr:port' -> TftpSession
-    this.stats = { rxFiles: 0, rxBytes: 0, txFiles: 0, denied: 0 };
+    this.stats = { rxFiles: 0, rxBytes: 0, txFiles: 0, denied: 0, evicted: 0 };
     try { fs.mkdirSync(this.rootDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
+  }
+
+  /** 逐出「尚未进展」的最久会话（腾出一个会话槽）。返回是否成功逐出。
+   *  未进展 = 从未与本服务交换过数据（WRQ 未收到 DATA / RRQ 未收到 ACK），UDP 伪源无法做到；
+   *  这让伪造源占用槽位的效果只是瞬时的，真实设备永远能进来（与 syslog/trap 的 LRU 名额同思路）。 */
+  _evictStalledSession() {
+    for (const [key, s] of this.sessions) {
+      if (s.progressed || s.closed) continue;
+      this.sessions.delete(key);
+      this.stats.evicted++;
+      try { s.abort(new Error('会话槽不足，逐出未进展的会话')); } catch (e) { /* ignore */ }
+      return true;
+    }
+    return false;
   }
 
   /** 解析请求包：opcode / 文件名 / 模式 / 扩展选项。返回 null 表示包非法 */
@@ -428,13 +456,20 @@ class TftpServer extends EventEmitter {
       return;
     }
     if (this.sessions.size >= this.maxSessions) {
-      this.stats.denied++;
-      this._sendErrorTo(rinfo, 4, 'Too many sessions');
-      return;
+      // 满员时**优先逐出「尚未进展」的最久会话**（伪造源地址占的槽永远不会进展）——
+      // 旧实现直接回 ERROR 4，攻击者只要用 2 个伪源每 30 秒补发 8 个包即可无限期占满全部槽位，
+      // 真实设备的 copy running-config tftp 恒失败（单来源 IP 配额对 UDP 伪源无效，正是被这点绕过）。
+      // 无可逐出者（全部会话都已真实交换过数据）才如实拒绝。
+      if (!this._evictStalledSession()) {
+        this.stats.denied++;
+        this._sendErrorTo(rinfo, 4, 'Too many sessions');
+        return;
+      }
     }
-    // 单来源 IP 配额：一个主机最多占 maxSessionsPerIp 个会话槽，防慢会话饿死其它设备
+    // 单来源 IP 配额：一个真实主机最多占 maxSessionsPerIp 个会话槽（防同一台设备开过多慢会话）；
+    // 注意它只对「真实来源」有意义，防伪源依赖上面的逐出机制
     let perIp = 0;
-    for (const s of this.sessions.values()) { if (s.peer.address === rinfo.address) perIp++; }
+    for (const s of this.sessions.values()) { if (s.peer.address === rinfo.address && s.progressed) perIp++; }
     if (perIp >= this.maxSessionsPerIp) {
       this.stats.denied++;
       this._sendErrorTo(rinfo, 4, 'Too many sessions for this host');
@@ -472,7 +507,8 @@ class TftpServer extends EventEmitter {
   status() {
     return {
       running: this.running, port: this.port, error: this.lastError,
-      sessions: this.sessions.size, rxFiles: this.stats.rxFiles, rxBytes: this.stats.rxBytes, denied: this.stats.denied
+      sessions: this.sessions.size, rxFiles: this.stats.rxFiles, rxBytes: this.stats.rxBytes,
+    denied: this.stats.denied, evicted: this.stats.evicted
     };
   }
 }

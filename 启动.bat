@@ -1,6 +1,6 @@
 @echo off
 title NetTopo Network Topology Designer
-cd /d %~dp0
+cd /d "%~dp0"
 
 echo ============================================
 echo   NetTopo Network Topology Designer

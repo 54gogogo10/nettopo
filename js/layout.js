@@ -216,7 +216,7 @@ function layerLayout(nodes, opts) {
   for (const type of TYPE_ORDER) {
     const list = (groups.get(type) || []).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
     if (!list.length) continue;
-    const cellW = Math.max(...list.map(x => x.w)) + gap;
+    const cellW = maxOf(list, x => x.w) + gap;
     const totalW = (list.length - 1) * cellW;
     list.forEach((nd, i) => {
       nd.x = cx - totalW / 2 + i * cellW;
@@ -248,7 +248,7 @@ function tierLayout(nodes, opts) {
       .filter(nd => t.types.includes(nd.type) || (t.name === '接入层' && !TYPE_ORDER.includes(nd.type)))
       .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'));
     if (!list.length) continue;
-    const cellW = Math.max(...list.map(x => x.w)) + gap;
+    const cellW = maxOf(list, x => x.w) + gap;
     const totalW = (list.length - 1) * cellW;
     list.forEach((nd, i) => {
       nd.x = cx - totalW / 2 + i * cellW;

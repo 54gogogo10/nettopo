@@ -260,6 +260,12 @@ class ShellManager extends EventEmitter {
     const s = this.sessions.get(id);
     if (s) s.write(data);
   }
+  /** 会话归属（'ui' | 'monitor'）：IPC 侧据此只允许操作 Web Shell 窗口自己的 UI 会话，
+   *  防 Shell 窗渲染层向后台监控/独立采集会话注入命令或掐断连接（越过 readOnly 语义）。 */
+  ownerOf(id) {
+    const base = this._params.get(id);
+    return base ? (base.owner === 'monitor' ? 'monitor' : 'ui') : null;
+  }
   resize(id, cols, rows) {
     const s = this.sessions.get(id);
     if (!s) return;
@@ -298,6 +304,13 @@ class ShellManager extends EventEmitter {
    *  onlyOwner 提供时仅放行/拒绝该归属的握手，其余保持排队：后台（monitor/一次性采集）
    *  的自动信任不得绕过 UI 会话正在等待的人工确认（用户还没点「信任」连接已建立、
    *  点「取消」已无效果），反向的用户拒绝也不误杀后台采集 */
+  /** 注入指纹信任裁决（由 electron-main 接到 MonitorManager.verifyFingerprint）。
+   *  无人值守采集没有渲染层介入，必须由主进程的权威信任库裁决「已钉扎且变化 ⇒ 拒」。
+   *  未注入时（纯 Node 单测/独立使用）保持 TOFU 放行语义。 */
+  setTrustGate(fn) {
+    this._trustGate = typeof fn === 'function' ? fn : null;
+  }
+
   trustFingerprint(host, trust, onlyOwner) {
     const arr = this._pendingVerify.get(host);
     if (!arr || !arr.length) return false;
@@ -425,11 +438,26 @@ class ShellManager extends EventEmitter {
         if (info.state === 'connected') {
           connectedOnce = true;
         } else if (info.state === 'fingerprint') {
-          // 无人值守采集的指纹语义与监控一致：首次连接自动信任（TOFU），变化拒绝由渲染层传入 expectFp 严格比对。
-          // port 必须随回执带出：渲染层指纹记忆键按 host:port 拆分（非 22 端口），缺 port 会回落
-          // host-only 键与其它端口的指纹互相挤占，无人值守采集被误拒
+          // 无人值守采集的指纹语义与监控一致：首次连接自动信任（TOFU）、**变化即拒**。
+          // 变化判定必须问主进程的权威信任库（MonitorManager，经 setTrustGate 注入）——此前这里
+          // 无条件放行，于是「已钉扎主机的指纹变化」被静默接受，采集到的指纹还会被渲染层反写成
+          // 长期钉扎值，此后真实设备反而被拒（钉扎语义被一次采集反转）
+          // port 必须随回执带出：渲染层指纹记忆键按 host:port 拆分（非 22 端口）
           const fh = String((info && info.host) || host);
-          fpOut.v = { host: fh, port: info.port, fp: String(info.fp || '') };
+          const fpv = String(info.fp || '');
+          fpOut.v = { host: fh, port: info.port, fp: fpv };
+          let verdict = null;
+          if (typeof this._trustGate === 'function') {
+            try { verdict = this._trustGate(fh, info.port, fpv); } catch (e) { verdict = null; }
+          }
+          if (verdict && verdict.ok === false) {
+            // 顺序要紧：先 finish 把**明确的中文原因**定为本次结果，再以「不信任」释放挂起的握手。
+            // 反过来的话，verify(false) 会同步触发 ssh2 的 error 事件，把结果写成它自己的
+            // "Host denied (verification failed)"，用户看不到「可能为中间人攻击」这一关键提示
+            finish(false, verdict.error || '主机指纹变化，已拒绝连接');
+            try { this.trustFingerprint(fh, false, 'monitor'); } catch (e) { /* ignore */ }
+            return;
+          }
           try { this.trustFingerprint(fh, true, 'monitor'); } catch (e) { /* ignore */ }
         } else if (info.state === 'error') {
           if (!connectedOnce) { finish(false, info.text || '连接失败'); return; }

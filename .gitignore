@@ -46,3 +46,6 @@ build-last.log
 
 # 真实设备测试实验室（frlab / WSL FRR，临时产物不入库）
 test/_frlab/
+
+# 根目录遗留的真实设备调试脚本（含明文设备凭据，一律移到 test/_frlab/ 下再改）
+/v3-*.sh

@@ -1822,7 +1822,7 @@ function openIpPlan() {
     if (merges.length) ws['!merges'] = merges;
     // 列宽自适应
     const keys = Object.keys(rows[0] || {});
-    ws['!cols'] = keys.map(k => ({ wch: Math.min(30, Math.max(8, ...rows.map(r => String(r[k] == null ? '' : r[k]).length)) + 2) }));
+    ws['!cols'] = keys.map(k => ({ wch: Math.min(30, Math.max(8, U.spreadMinMax(rows.map(r => String(r[k] == null ? '' : r[k]).length))[1]) + 2) }));
     window.XLSX.utils.book_append_sheet(wb, ws, 'IP规划');
     window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(subnets.map(s => ({ 网段: s.cidr, 设备数: s.devices.length, 设备: s.devices.join(', ') }))), '子网统计');
     const buf = window.XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
@@ -2077,6 +2077,7 @@ function openProjectDiff() {
     if (!f) return;
     try {
       const { buffer } = await U.readFile(f);
+      if (!assertProjectSize(f, buffer)) return; // 与「打开工程」同一上限：防同步解析冻结渲染线程
       const data = await parseProjectText(U.decodeBytes(buffer), '对比的工程已加密，请输入口令');
       if (!data) return;
       if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) { toast('对比文件不是有效的 .nettopo 工程'); return; }
@@ -2412,10 +2413,28 @@ async function exportInventory() {
 
 async function exportVisio() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  // SVG 图标光栅化：VSDX 的 Foreign 图片形状仅接受位图，SVG dataURL 会被静默丢弃（导出图缺图标）
+  // 图标光栅化：VSDX 的 Foreign 图片形状仅接受位图
+  //  - 上传的 SVG dataURL：直接光栅化
+  //  - 内置图标 key（router/switch…）：U.ICONS[key] 是 24×24 的 currentColor 描边 SVG，
+  //    buildVSDX 是纯同步函数没有 canvas，无法自行光栅化——必须在这里包成带尺寸与颜色的
+  //    SVG dataURL 再转 PNG（否则内置图标在 Visio 导出中恒丢失：画布优先级是 n.icon > 类型图）
+  const iconSvgUrl = (key) => {
+    const raw = (U.ICONS && U.ICONS[key]) || '';
+    if (!raw) return '';
+    // currentColor 在独立 SVG 文档里没有继承源，必须显式给色，否则描边透明（导出空白图标）
+    const colored = raw.replace(/currentColor/g, '#1e293b');
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(colored.replace('<svg ', '<svg width="48" height="48" '));
+  };
   const nodes = await Promise.all(state.nodes.map(async (n) => {
-    if (n.icon && /^data:image\/svg/i.test(n.icon)) {
+    if (!n.icon) return n;
+    if (/^data:image\/svg/i.test(n.icon)) {
       const png = await U.svgDataUrlToPng(n.icon);
+      return png ? Object.assign({}, n, { icon: png }) : Object.assign({}, n, { icon: '' });
+    }
+    if (U.NODE_ICON_KEYS && U.NODE_ICON_KEYS.includes(n.icon)) {
+      const png = await U.svgDataUrlToPng(iconSvgUrl(n.icon));
+      // 光栅化失败时清空而不是把 key 原样传下去：buildVSDX 对非 dataURL 的 icon 会回退类型图，
+      // 但显式清空更不容易在后续改动中把 key 当成图片源
       return png ? Object.assign({}, n, { icon: png }) : Object.assign({}, n, { icon: '' });
     }
     return n;
@@ -2432,9 +2451,18 @@ async function exportVisio() {
  * 空白 canvas（toDataURL 返回 "data:,"）并生成 0 字节图片流的“成功”PDF */
 function exportCanvasScale(img, wantScale) {
   const MAX_SIDE = 12000;
-  let s = wantScale;
-  if (Math.max(img.width, img.height) * s > MAX_SIDE) s = MAX_SIDE / Math.max(img.width, img.height);
-  return Math.max(0.1, Math.min(s, 4));
+  const maxDim = Math.max(1, img.width, img.height);
+  const s = Math.min(wantScale, MAX_SIDE / maxDim);
+  // 下限必须有，但**不能高到顶掉上限**：旧实现 max(0.1, …) 在 maxDim > 120000px 时会把
+  // s 顶回 0.1，画布尺寸远超浏览器单边上限 → toDataURL 返回 "data:," → 导出直接失败
+  // （注释声称的「超限自动降 scale」实际失效）。这里用极小下限保证数值有效，超限由调用方如实报错。
+  return Math.max(1e-6, Math.min(s, 4));
+}
+/** 导出画布尺寸是否超出浏览器 canvas 上限（单边 16384，留余量到 12000）：超限时调用方须如实提示，
+ *  否则拿到 "data:," 会静默产出 0 字节图片流的「成功」文件 */
+function exportCanvasTooLarge(img, scale) {
+  const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+  return !(w > 0 && h > 0) || w > 12000 || h > 12000;
 }
 
 function exportPdf() {
@@ -2445,6 +2473,7 @@ function exportPdf() {
   const img = new Image();
   img.onload = () => {
     const scale = exportCanvasScale(img, 2);
+    if (exportCanvasTooLarge(img, scale)) { URL.revokeObjectURL(url); toast('PDF 导出失败：画布尺寸 ' + img.width + '×' + img.height + ' 超出浏览器上限，请缩小画布或减少设备后重试'); return; }
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
@@ -2477,6 +2506,7 @@ function renderTopologyPng(cb) {
   const img = new Image();
   img.onload = () => {
     const scale = exportCanvasScale(img, 2);
+    if (exportCanvasTooLarge(img, scale)) { URL.revokeObjectURL(url); toast('PNG 导出失败：画布尺寸 ' + img.width + '×' + img.height + ' 超出浏览器上限，请缩小画布或减少设备后重试'); cb(null); return; }
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
@@ -2819,8 +2849,24 @@ async function applyProjectData(data) {
   return true;
 }
 
+/** 工程文件大小上限（20MB）：同步 JSON.parse 超大文本会冻结渲染线程（Electron 主窗口无响应，
+ *  只能强杀）。打开工程与工程对比走的是同一条 readFile→decodeBytes→parseProjectText 链路，
+ *  守卫必须两处都过——只补一处会留下同类路径（L13 修复遗漏点）。 */
+const PROJECT_MAX_BYTES = 20 * 1024 * 1024;
+function assertProjectSize(file, buffer) {
+  if (file && typeof file.size === 'number' && file.size > PROJECT_MAX_BYTES) { toast('工程文件过大（超过 20MB），已取消打开'); return false; }
+  if (buffer && buffer.byteLength > PROJECT_MAX_BYTES) { toast('工程文件过大（超过 20MB），已取消打开'); return false; }
+  return true;
+}
+
 async function loadProject(file) {
+  // 工程文件大小上限（20MB，与 CSV/Excel 导入同口径）：同步 JSON.parse 超大文本会冻结渲染线程。
+  // 两道判定都保留：file.size 在 readFile 前拦住（省掉一次全量读），byteLength 兜住其缺失/失真的浏览器差异
+  if (file && typeof file.size === 'number' && file.size > PROJECT_MAX_BYTES) {
+    toast('工程文件过大（超过 20MB），已取消打开'); return;
+  }
   const { buffer } = await U.readFile(file);
+  if (!assertProjectSize(file, buffer)) return;
   const data = await parseProjectText(U.decodeBytes(buffer), '该工程已加密，请输入口令打开');
   if (!data) return;
   if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) {
@@ -3817,7 +3863,7 @@ function openModal(opts) {
     let ctrl = '';
     if (f.type === 'select') {
       ctrl = `<select name="${f.name}">${f.options.map(([v, lb]) =>
-        `<option value="${v}" ${String(f.value) === String(v) ? 'selected' : ''}>${U.escHtml(lb)}</option>`).join('')}</select>`;
+        `<option value="${U.escHtml(v)}" ${String(f.value) === String(v) ? 'selected' : ''}>${U.escHtml(lb)}</option>`).join('')}</select>`;
     } else if (f.type === 'checkbox') {
       ctrl = `<label class="ck-field"><input name="${f.name}" type="checkbox"${f.value ? ' checked' : ''}/><span>${U.escHtml(f.tip || '')}</span></label>`;
     } else if (f.type === 'mgmts') {
@@ -3839,7 +3885,7 @@ function openModal(opts) {
         <input type="hidden" name="${f.name}" value="${U.escHtml(curKey)}"/>
         <input type="hidden" name="${f.name}Data" value="${U.escHtml(curImg)}"/>
         <div class="icon-line">
-          <select name="${f.name}Sel">${optRows.map(([v, lb]) => `<option value="${v}"${String(curKey) === String(v) && !curImg ? ' selected' : ''}>${U.escHtml(lb)}</option>`).join('')}<option value="__upload">＋ 上传图片…（按正方形裁切显示）</option></select>
+          <select name="${f.name}Sel">${optRows.map(([v, lb]) => `<option value="${U.escHtml(v)}"${String(curKey) === String(v) && !curImg ? ' selected' : ''}>${U.escHtml(lb)}</option>`).join('')}<option value="__upload">＋ 上传图片…（按正方形裁切显示）</option></select>
           <button type="button" class="tb icon-clr" title="清除自定义图标">清除</button>
         </div>
         <div class="icon-prev-row">
@@ -4922,7 +4968,12 @@ async function runUpdateCheck(btn) {
 }
 
 function openReleasePage(url) {
-  const u = String(url || 'https://github.com/54gogogo10/nettopo/releases');
+  // 发布页地址来自升级检查响应（外部数据）：限定 GitHub 发布/仓库域 + https，防响应被篡改后
+  // 触发 file:/ms-msdt: 等危险协议处理器（openExternal 由系统协议分发）
+  let u = String(url || '').trim();
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:[/?#].*)?$/i.test(u)) {
+    u = 'https://github.com/54gogogo10/nettopo/releases';
+  }
   if (window.topoShell && window.topoShell.openExternal) window.topoShell.openExternal(u);
   else window.open(u, '_blank');
 }
@@ -7861,7 +7912,7 @@ function openConfigBackups(devicePreset) {
     } catch (e) { contentEl.textContent = '（读取失败）'; }
   };
   const fmtDiff = (d) => {
-    if (!d.ok) return '（对比失败：' + (d.error || '') + '）';
+    if (!d.ok) return '（对比失败：' + U.escHtml(d.error || '') + '）'; // 返回值可能经 innerHTML 渲染，内部也转义
     if (!d.changed) return '两份备份内容一致';
     const html = [];
     for (const h of d.hunks) {
@@ -8047,7 +8098,8 @@ function openNetServices() {
             <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvTrapOn"/>启用</label><b>SNMP Trap 接收</b><span class="nsv-dot" id="nsvTrapDot"></span></div>
             <div class="nsv-st" id="nsvTrapSt"></div>
             <div class="nsv-row"><label>端口</label><input type="number" id="nsvTrapPort" min="1" max="65535"/><span class="nsv-hint">标准 162（UDP）</span></div>
-            <div class="nsv-note">接收设备主动上报的告警（v1 / v2c / v3）：接口 Down/Up、重启、认证失败等；标准 Trap 弹通知（受静默策略约束），按来源 / 日期归档。</div>
+            <div class="nsv-row"><label>团体字</label><input type="text" id="nsvTrapCommunity" maxlength="128" placeholder="留空接收全部（如 public）" autocomplete="off" spellcheck="false"/></div>
+            <div class="nsv-note">接收设备主动上报的告警（v1 / v2c / v3）：接口 Down/Up、重启、认证失败等；标准 Trap 弹通知（受静默策略约束），按来源 / 日期归档。填写团体字后仅接收匹配的 v1/v2c Trap（多个用逗号分隔）——v1/v2c 无源认证，建议填写以防伪造告警。</div>
             <div style="border-top:1px dashed var(--border);padding-top:6px;margin-top:auto">
               <div style="font-size:11px;color:var(--muted);margin-bottom:3px">SNMP v3 接收用户（USM，可选：v3 Trap 按此验签并解密）</div>
               <div class="nsv-row"><label>用户名</label><input type="text" id="nsvTrapV3User" maxlength="32" autocomplete="off" spellcheck="false"/></div>
@@ -8138,7 +8190,9 @@ function openNetServices() {
     dotFor(ov.querySelector('#nsvSysDot'), st.syslog); ov.querySelector('#nsvSysSt').textContent = st.syslog.running
       ? ('运行中 :' + st.syslog.port + (st.syslog.tcp ? '（UDP+TCP）' : '（UDP）')) : (st.syslog.error ? '错误：' + st.syslog.error : '已停止');
     dotFor(ov.querySelector('#nsvTrapDot'), st.trap); ov.querySelector('#nsvTrapSt').textContent = st.trap.running
-      ? ('运行中 :' + st.trap.port + '（UDP）' + (st.trap.rxPackets ? ' · 已收 ' + st.trap.rxPackets + ' 包' : '')) : (st.trap.error ? '错误：' + st.trap.error : '已停止');
+      ? ('运行中 :' + st.trap.port + '（UDP）' + (st.trap.rxPackets ? ' · 已收 ' + st.trap.rxPackets + ' 包' : '')
+        + (st.trap.communityGuard ? ' · 团体字白名单' + (st.trap.communityReject ? '（已拒 ' + st.trap.communityReject + '）' : '') : ''))
+      : (st.trap.error ? '错误：' + st.trap.error : '已停止');
     ov.querySelector('#nsvLogCnt').textContent = (st.syslog.rxMsgs
       ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : ''))
       : '') + (st.syslog.alerts ? (st.syslog.rxMsgs ? ' · ' : '') + '告警 ' + st.syslog.alerts + ' 条' : '');
@@ -8162,6 +8216,7 @@ function openNetServices() {
     ov.querySelector('#nsvSysAlertKw').value = (sa.keywords || []).join(',');
     ov.querySelector('#nsvTrapOn').checked = !!cfg.trap.enabled;
     ov.querySelector('#nsvTrapPort').value = cfg.trap.port;
+    ov.querySelector('#nsvTrapCommunity').value = cfg.trap.community || '';
     const tv3 = (cfg.trap && cfg.trap.v3) || {};
     ov.querySelector('#nsvTrapV3User').value = tv3.user || '';
     ov.querySelector('#nsvTrapV3AP').value = tv3.authProto === 'md5' ? 'md5' : 'sha';
@@ -8196,6 +8251,7 @@ function openNetServices() {
       trap: {
         enabled: ov.querySelector('#nsvTrapOn').checked,
         port: parseInt(ov.querySelector('#nsvTrapPort').value, 10) || 162,
+        community: ov.querySelector('#nsvTrapCommunity').value.trim(),
         v3: {
           user: ov.querySelector('#nsvTrapV3User').value.trim(),
           authProto: ov.querySelector('#nsvTrapV3AP').value,
@@ -8243,6 +8299,7 @@ function openNetServices() {
     return s;
   }
   function buildCmdExample(ip) {
+    const comm = ov.querySelector('#nsvTrapCommunity').value.trim().split(/[,，;；\n]+/)[0] || 'public';
     return [
       '# 思科：推送配置到 TFTP / FTP',
       'copy running-config tftp://' + ip + '/r1.cfg',
@@ -8256,10 +8313,10 @@ function openNetServices() {
       'logging host ' + ip,
       '',
       '# Trap 上报到本机（华为，需开启 snmp-agent）',
-      'snmp-agent target-host trap address udp-domain ' + ip + ' params securityname public',
+      'snmp-agent target-host trap address udp-domain ' + ip + ' params securityname ' + comm,
       'snmp-agent trap enable',
       '# H3C 同华为；思科：',
-      'snmp-server host ' + ip + ' public',
+      'snmp-server host ' + ip + ' ' + comm,
       'snmp-server enable traps'
     ].join('\n');
   }
@@ -8278,6 +8335,12 @@ function openNetServices() {
       if (r && r.ok) {
         st = r.status;
         renderStatus();
+        // 服务端兜底可能把默认/空口令替换为随机口令（旧版本带弱口令运行、或前端未拦住的路径）：
+        // 回填表单并提示，避免面板显示与实际生效口令不一致
+        if (r.ftpPasswordChanged && r.cfg && r.cfg.ftp) {
+          ov.querySelector('#nsvFtpPass').value = r.cfg.ftp.password || '';
+          toast('FTP 默认口令已由服务端替换为随机口令，请更新设备侧的 copy 命令');
+        }
         const parts = [];
         for (const [k, nm] of [['tftp', 'TFTP'], ['ftp', 'FTP'], ['syslog', 'Syslog'], ['trap', 'Trap']]) {
           const s = r.status[k];
@@ -8289,7 +8352,7 @@ function openNetServices() {
     btn.disabled = false;
   };
   ov.querySelector('[data-act=defaults]').onclick = async () => {
-    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } }, trap: { enabled: false, port: 162, v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } } });
+    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } }, trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } } });
     ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
     toast('已恢复默认值（尚未保存，请点「保存并应用」）');
   };
@@ -8314,7 +8377,7 @@ function openNetServices() {
         const dev = nodeBySvcIp(f.ip);
         return '<div class="nsv-fr" data-i="' + i + '">' +
           '<span>' + U.fmtDateTime(new Date(f.time)) + '</span>' +
-          '<span><b class="nsv-badge ' + f.svc + '">' + (f.svc === 'tftp' ? 'TFTP' : 'FTP') + '</b></span>' +
+          '<span><b class="nsv-badge ' + U.escHtml(f.svc) + '">' + (f.svc === 'tftp' ? 'TFTP' : 'FTP') + '</b></span>' +
           '<span title="' + U.escHtml(dev ? '已匹配设备：' + dev.name : '未匹配到拓扑设备') + '">' + U.escHtml(f.ip || '—') + (dev ? ' ⇢ ' + U.escHtml(dev.name) : '') + '</span>' +
           '<span class="nm" title="' + U.escHtml(f.name) + '">' + U.escHtml(f.name) + '</span>' +
           '<span>' + U.fmtSize(f.size) + '</span>' +
@@ -8732,7 +8795,7 @@ async function openAiSettings() {
     fields: [
       { name: 'provider', label: '服务商预设', type: 'select', options: AI_PROVIDERS.map(p => [p.id, p.label]), value: matched.id },
       { name: 'baseUrl', label: 'API 地址', type: 'text', required: true, value: cfg.baseUrl, ph: '例如 https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1' },
-      { name: 'apiKey', label: 'API Key', type: 'password', value: '', ph: cfg.apiKeySet ? '已保存（' + cfg.apiKeyMasked + '），留空表示保持不变' : 'sk-…（本地服务可留空）' },
+      { name: 'apiKey', label: 'API Key', type: 'password', value: '', ph: cfg.apiKeySet ? (cfg.apiKeyHttpBlocked ? '已保存但当前为 http 地址，不会自动发送；如需使用请在此重新填写' : '已保存（' + cfg.apiKeyMasked + '），留空表示保持不变') : 'sk-…（本地服务可留空）' },
       { name: 'model', label: '模型名', type: 'text', required: true, value: cfg.model, ph: '例如 deepseek-chat / claude-sonnet-4-5 / glm-4.6' },
       { name: 'maxInputKB', label: '单次发送上限（KB，超出部分自动截断）', type: 'text', value: String(cfg.maxInputKB || 100) }
     ],

@@ -17,7 +17,24 @@ for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/visio.js', 'js
 }
 const U = sandbox.TopoUtil, M = sandbox.TopoModel, Layout = sandbox.TopoLayout, V = sandbox.TopoVisio;
 
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skipped = 0;
+// 断言/段落定位：未捕获异常终止测试进程时，唯一能说明「死在哪」的线索就是最后输出的一行。
+// 之前的崩溃（服务端口不可用时 net.connect(0) 抛未捕获 'error'）只留下 Node 的裸崩溃转储，
+// 排障只能靠二分——这里把最后一行断言与段落标题一起打出来。
+let lastLine = '(尚未输出任何内容)';
+const _log = console.log.bind(console);
+console.log = (...a) => { try { if (a.length && typeof a[0] === 'string') lastLine = a[0]; } catch (e) { /* ignore */ } return _log(...a); };
+const dieReport = (kind, err) => {
+  try {
+    _log('');
+    _log('！！测试进程因' + kind + '提前终止，后续用例未执行 ！！');
+    _log('  最后输出：' + lastLine);
+    _log('  ' + String((err && (err.stack || err.message)) || err).split('\n').slice(0, 6).join('\n  '));
+  } catch (e) { /* ignore */ }
+  process.exit(1);
+};
+process.on('uncaughtException', (err) => dieReport('未捕获异常', err));
+process.on('unhandledRejection', (reason) => dieReport('未处理的 Promise 拒绝', reason));
 const ok = (cond, name) => {
   if (cond) { pass++; console.log('  ✓ ' + name); }
   else { fail++; console.log('  ✗ ' + name); }
@@ -40,7 +57,12 @@ function pythonHas(mods) {
   return has;
 }
 /** 缺依赖时的跳过断言（计通过，但名字注明原因，便于与本机全量校验区分） */
-const okSkip = (name, mods) => ok(true, name + '（跳过：缺 python 模块 ' + (Array.isArray(mods) ? mods.join('/') : mods) + '，CI 环境会安装后全量校验）');
+// 跳过必须与「通过」分开计数：本机缺 python 模块时三项二进制校验会降级为跳过，
+// 旧实现计 pass 会让「全绿」掩盖它们根本没跑（CI 装了依赖才真正校验）
+const okSkip = (name, mods) => {
+  skipped++;
+  console.log('  ○ ' + name + '（跳过：缺 python 模块 ' + (Array.isArray(mods) ? mods.join('/') : mods) + '，CI 环境会安装后全量校验）');
+};
 
 /** 测试临时目录清理：慷慨重试后尽力而为。Windows（尤其 CI runner 的 Defender 实时扫描）
  *  会在写入后数秒内扣住文件句柄，unlink 报 EPERM/EBUSY/ENOTEMPTY——清理失败不代表测试
@@ -4555,13 +4577,21 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     console.log('== 网络服务：Syslog 服务器 ==');
     const syslogBase = path.join(tmpSvc, 'syslog');
     // 随机端口的「UDP+TCP 同端口」偶发与另一协议的临时端口撞车（EADDRINUSE）：整个 start 重试（间隔递增）
-    let ssrv = null, sstart = null;
-    for (let i = 0; i < 10 && !(sstart && sstart.ok); i++) {
-      if (i) await waitMs(60 * i);
-      ssrv = new SyslogServer({ baseDir: syslogBase, maxPerSec: 10000 }); // 限速在专用用例中单独测
-      sstart = await ssrv.start(0, true);
-    }
-    ok(sstart.ok && sstart.port > 0 && ssrv.tcp, 'Syslog 启动（UDP+TCP 同端口）' + (sstart && sstart.ok ? '' : '：' + (ssrv && ssrv.lastError)));
+    // 随机端口的「UDP+TCP 同端口」在 Windows 上会因 TCP/UDP 临时端口区间重叠而偶发 EADDRINUSE
+    // （实测约 1/400 次）：start 会如实返回 ok:false 且 port 保持 0，调用方必须检查返回值并重试——
+    // 旧用例直接拿 port=0 去 net.connect，抛出的未捕获 'error' 会终结整个测试进程（随机 1/3 概率）
+    const startSyslogWithRetry = async (baseDir, opts) => {
+      let srv = null, st = null;
+      for (let i = 0; i < 10 && !(st && st.ok); i++) {
+        if (i) await waitMs(60 * i);
+        srv = new SyslogServer(Object.assign({ baseDir }, opts || {}));
+        st = await srv.start(0, true);
+      }
+      return { srv, st };
+    };
+    const sA = await startSyslogWithRetry(syslogBase, { maxPerSec: 10000 }); // 限速在专用用例中单独测
+    const ssrv = sA.srv, sstart = sA.st;
+    ok(sstart.ok && sstart.port > 0, 'Syslog 启动（UDP+TCP 同端口）' + (sstart && sstart.ok ? '' : '：' + (ssrv && ssrv.lastError)));
     const us = dgram.createSocket('udp4');
     const sendUdp = (msg, port) => new Promise((res) => us.send(Buffer.from(msg), 0, Buffer.byteLength(msg), port || ssrv.port, '127.0.0.1', res));
     await sendUdp('<134>Oct 12 22:14:15 r1 sshd[123]: Accepted password for admin');
@@ -5314,8 +5344,26 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       });
       const first = await sendWrq();
       ok(first.length >= 4 && (first.readUInt16BE(0) === 4 || first.readUInt16BE(0) === 6), 'TFTP：首个 WRQ 正常应答');
+      // 语义已收紧（第三轮 M4）：单来源配额只统计**已真正交换数据**的会话。
+      // 旧实现按伪源 IP 计数，而 UDP 源地址可任意伪造——攻击者用 2 个伪源各发 4 个 WRQ 即可占满
+      // 全部槽位，真实设备恒收 ERROR 4；反过来伪造受害设备 IP 也能定向顶掉它的传输。
+      // 未进展会话改由「握手期短超时 + 全局满员时逐出未进展会话」治理，真实设备永远进得来。
       const second = await sendWrq();
-      ok(second.length >= 5 && second.readUInt16BE(0) === 5 && second.readUInt16BE(2) === 4, 'TFTP：同源 IP 第二个会话被拒（ERROR 4 配额）');
+      ok(second.length >= 4 && (second.readUInt16BE(0) === 4 || second.readUInt16BE(0) === 6), 'TFTP：未进展会话不再占用单来源配额（伪源 IP 计数无防护价值）');
+      // 全局满员时必须逐出未进展会话而不是回 ERROR 4（真实设备据此永远拿得到槽位）
+      const tsrv3 = new TftpServer({ rootDir: troot2, maxSessions: 2, maxSessionsPerIp: 4 });
+      ok((await tsrv3.start(0)).ok, 'TFTP 启动（逐出用例）');
+      const wrqTo = (port) => new Promise((res, rej) => {
+        const s = dgram.createSocket('udp4');
+        const t = setTimeout(() => rej(new Error('TFTP 应答超时')), 3000);
+        s.on('message', (m) => { clearTimeout(t); s.close(); res(m); });
+        s.bind(0, () => s.send(Buffer.concat([Buffer.from([0, 2]), Buffer.from('ev' + Math.random() + '.cfg\0octet\0')]), port, '127.0.0.1'));
+      });
+      await wrqTo(tsrv3.port); await wrqTo(tsrv3.port); // 占满 maxSessions=2（均未进展）
+      const evicted = await wrqTo(tsrv3.port);
+      ok(evicted.length >= 4 && (evicted.readUInt16BE(0) === 4 || evicted.readUInt16BE(0) === 6) && tsrv3.status().evicted >= 1,
+        'M4：会话槽满员时逐出未进展会话，真实来源仍被服务（旧实现恒回 ERROR 4）');
+      await tsrv3.stop();
       await tsrv2.stop();
       rmTmp(troot2);
     }
@@ -5684,7 +5732,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(A.httpErrorMessage(401, '').indexOf('API Key') >= 0, 'AI 错误：401 提示 Key');
       ok(A.httpErrorMessage(404, '').indexOf('/v1') >= 0, 'AI 错误：404 提示地址');
       ok(A.httpErrorMessage(429, '').indexOf('限流') >= 0, 'AI 错误：429 提示限流');
-      ok(A.httpErrorMessage(503, 'upstream down').indexOf('upstream down') >= 0, 'AI 错误：5xx 附服务端详情');
+      // 第三轮 M7：错误信息**不得**回显服务端响应体——baseUrl 可由渲染层逐次指定，
+      // 回显等于给渲染层开一条「借主进程读任意 HTTP 响应」的读回通道（CSP connect-src 被绕过）
+      const errMsg = A.httpErrorMessage(503, 'upstream down');
+      ok(errMsg.indexOf('upstream down') < 0 && errMsg.indexOf('503') >= 0, 'AI 错误：5xx 只回状态码，不回显服务端响应体（原断言要求回显，属读回通道）');
       // Claude（Anthropic Messages）协议：协议归一 / 端点归一 / 请求体 / 响应 / SSE 事件
       eq(A.validateProtocol('claude'), 'claude', 'AI 协议：claude 归一');
       eq(A.validateProtocol('OPENAI'), 'openai', 'AI 协议：大小写归一');
@@ -6099,11 +6150,19 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     // syslog TCP：连接关闭 flush 无尾换行的最后一条
     {
       const { SyslogServer } = require('../js/svc-syslog.js');
-      const srv6 = new SyslogServer({ baseDir: tmpR7d('sl6') });
-      await srv6.start(0, true);
+      // 必须校验启动结果并重试：start 失败时 srv6.port 仍是 0，直接 net.connect(0) 会抛未捕获
+      // 'error'（EADDRNOTAVAIL）终结整个测试进程（历史上表现为「随机 1/3 概率整套挂掉」）
+      let srv6 = null, st6 = null;
+      for (let i = 0; i < 10 && !(st6 && st6.ok); i++) {
+        if (i) await waitMsR7(60 * i);
+        srv6 = new SyslogServer({ baseDir: tmpR7d('sl6') });
+        st6 = await srv6.start(0, true);
+      }
+      ok(st6.ok && srv6.port > 0, 'Syslog UDP+TCP 启动成功（含重试；失败时不得拿 port=0 去连接）');
       const ents6 = [];
       srv6.on('message', (e) => ents6.push(e));
       const cs6 = netX.connect(srv6.port, '127.0.0.1');
+      cs6.on('error', () => {}); // 客户端异常不得终结测试进程
       await new Promise((res) => cs6.once('connect', res));
       cs6.write('<134>Sep  1 10:00:00 r1 last line without newline');
       cs6.end();
@@ -6121,6 +6180,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const filesX = [];
       fsrvX.on('file', (f) => filesX.push(f));
       const sockX = netX.connect(fsrvX.port, '127.0.0.1');
+      sockX.on('error', () => {}); // 同上：连接层异常只让本用例失败，不终结进程
       let pendLine = null;
       sockX.on('data', (d) => {
         for (const ln of d.toString('utf8').split('\r\n')) {
@@ -6148,6 +6208,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const pasvR = await cmd('PASV');
       const mX = pasvR.match(/\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/);
       const dataX = netX.connect(parseInt(mX[5], 10) * 256 + parseInt(mX[6], 10), '127.0.0.1');
+      dataX.on('error', () => {}); // 数据连接异常不得终结测试进程
       await new Promise((res) => dataX.once('connect', res));
       await cmd('TYPE I');
       sockX.write('STOR half.cfg\r\n');
@@ -6190,9 +6251,351 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
     rmTmp(tmpR7);
   }
+    // ========== 第二轮安全修复回归（重建：文件被误截断后按原断言名逐条恢复） ==========
+    {
+      const V3 = require('../js/snmp-v3.js');
+      const { TrapServer, parseTrapPacket } = require('../js/svc-trap.js');
+      const { SyslogServer, parseSyslogMsg } = require('../js/svc-syslog.js');
+      const { FtpServer } = require('../js/svc-ftp.js');
+      const { isValidDiagHost } = require('../js/diag.js');
+      const { normalizeConfig: normalizeNetSvc2 } = require('../js/net-services.js');
+      const A2 = require('../js/ai-llm.js');
+      const r2d = path.join(root, 'test', '_r2_reg');
+      fs.rmSync(r2d, { recursive: true, force: true });
+      fs.mkdirSync(r2d, { recursive: true });
+      // 本块独立的作用域：外层的 waitUntil 定义在别的块里，这里自带一个（语义相同）
+      const waitUntil = async (fn, ms = 2000, step = 50) => {
+        const t0 = Date.now();
+        for (;;) {
+          let v; try { v = await fn(); } catch (e) { v = false; }
+          if (v) return true;
+          if (Date.now() - t0 > ms) return false;
+          await new Promise((r) => setTimeout(r, step));
+        }
+      };
+
+      // ---- H1：Trap OID/值文本必须封顶（未认证 UDP 单包不得放大成巨串/巨文件） ----
+      const longOid = '1.3.6.1.4.1.99999' + '.1'.repeat(300);
+      const vbOf = (oid, val) => V3.berTlv(0x30, Buffer.concat([V3.berOid(oid), val]));
+      const trapPkt = (community, vbs) => V3.berTlv(0x30, Buffer.concat([
+        V3.berInt(1), V3.berOct(community),
+        V3.berTlv(0xa7, Buffer.concat([V3.berInt(1234), V3.berInt(0), V3.berInt(0), V3.berTlv(0x30, Buffer.concat(vbs))]))
+      ]));
+      const longPkt = trapPkt('public', [
+        vbOf('1.3.6.1.2.1.1.3.0', V3.berTlv(0x43, Buffer.from([0x01, 0x02]))),
+        vbOf('1.3.6.1.6.3.1.1.4.1.0', V3.berOid('1.3.6.1.6.3.1.1.5.1')),
+        vbOf(longOid, V3.berOct('x'.repeat(400)))
+      ]);
+      const parsedLong = parseTrapPacket(longPkt);
+      ok(parsedLong.ok === true, 'H1：超长 OID 包仍可解析（不崩）');
+      const longVb = (parsedLong.varbinds || []).find(v => v.oid && v.oid.length > 100) || null;
+      ok(!!longVb && longVb.oid.length <= 260, 'H1：超长 OID varbind 仍在缓冲（文本封顶 ≤260 字符）');
+      const tsrvH = new TrapServer({ baseDir: path.join(r2d, 'trap-h1'), maxPerSec: 50 });
+      ok((await tsrvH.start(0)).ok, 'H1：Trap 服务启动');
+      const evH = [];
+      tsrvH.on('trap', (e) => evH.push(e)); // TrapServer 的事件名是 'trap'（net-services 再转发）
+      tsrvH._ingest(longPkt, '127.0.0.1', 4162);
+      await waitUntil(() => evH.length >= 1, 1500);
+      ok(evH.length >= 1 && evH[0].version === 'v2c', 'H1：超长 OID Trap 入站事件');
+      ok(!!evH[0] && String(evH[0].msg || '').length <= 800 && String(evH[0].oid || '').length <= 300, 'H1：单条事件 msg/trap 文本有界（msg=' + (evH[0] ? String(evH[0].msg || '').length : '-') + '）');
+      await tsrvH.stop();
+
+      // ---- ML1：v3 字符串值折行 + 限长（防伪造归档行 / 放大） ----
+      const mlFold = String(V3.decodeValue(0x04, Buffer.from('a\nb\nc', 'utf8')));
+      ok(mlFold.indexOf('\n') < 0 && mlFold.indexOf('\r') < 0, 'ML1：v3 字符串值换行被折叠（无法伪造归档行）');
+      const mlLong = String(V3.decodeValue(0x04, Buffer.from('x'.repeat(500), 'utf8')));
+      ok(mlLong.length <= 302, 'ML1：v3 字符串值受长度上限（301 ≤ 302）');
+      ok(String(V3.decodeValue(0x04, Buffer.from('y'.repeat(400), 'utf8'))).length <= 301, 'ML1：snmp-v3 decodeValue 值折行且限长（301）');
+
+      // ---- M1：明文（noAuth）v3 包的属性必须如实为 false，供调用方拒收 ----
+      const engH = '80001f8880abcdef0102030405';
+      const builtNoAuth = V3.buildV3Message({ pduTag: 0xa7, oids: ['1.3.6.1.2.1.1.3.0'], engineID: Buffer.from(engH, 'hex'), boots: 1, time: 100, user: { user: 'plainops', level: 'noAuth' }, reportable: false, msgID: 7, rid: 8 });
+      const prPlain = V3.parseV3Message(builtNoAuth.msg, { user: null });
+      ok(prPlain.ok === true, 'M1：noAuth v3 包解析成功');
+      ok(prPlain.authenticated === false && prPlain.decrypted === false, 'M1：明文包 authenticated/decrypted 均为 false（调用方据此拒收）');
+      const userPriv2 = { user: 'plainops', level: 'authPriv', authProto: 'sha', authPass: 'Auth-12345678', privProto: 'aes', privPass: 'Priv-12345678' };
+      const prPlain2 = V3.parseV3Message(builtNoAuth.msg, { user: userPriv2 });
+      ok((userPriv2.level !== 'noAuth' && !prPlain2.authenticated) === true, 'M1：authPriv 用户收未认证/未加密包被拒（判定式成立）');
+
+      // ---- M2：v1/v2c 团体字白名单（服务端强制，不只在面板拦截） ----
+      const tsrvC = new TrapServer({ baseDir: path.join(r2d, 'trap-c'), maxPerSec: 50, communities: ['secret1', 'secret2'] });
+      await tsrvC.start(0);
+      const evC = [];
+      tsrvC.on('trap', (e) => evC.push(e));
+      ok(tsrvC.status().communityGuard === true, 'M2：community 白名单生效（status.communityGuard）');
+      tsrvC._ingest(trapPkt('public', [vbOf('1.3.6.1.6.3.1.1.4.1.0', V3.berOid('1.3.6.1.6.3.1.1.5.1'))]), '127.0.0.1', 1);
+      tsrvC._ingest(trapPkt('secretX', [vbOf('1.3.6.1.6.3.1.1.4.1.0', V3.berOid('1.3.6.1.6.3.1.1.5.1'))]), '127.0.0.1', 1);
+      await waitUntil(() => tsrvC.status().communityReject >= 2, 1500);
+      ok(tsrvC.status().communityReject >= 2 && evC.length === 0, 'M2：不符团体字的 v2c Trap 被拒并计数');
+      tsrvC._ingest(trapPkt('secret1', [vbOf('1.3.6.1.6.3.1.1.4.1.0', V3.berOid('1.3.6.1.6.3.1.1.5.1'))]), '127.0.0.1', 1);
+      await waitUntil(() => evC.length >= 1, 1500);
+      ok(evC.length === 1, 'M2：匹配团体字的 v2c Trap 正常入站');
+      await tsrvC.stop();
+      const ncEmpty = normalizeNetSvc2({ trap: { enabled: true, port: 162, community: '' } });
+      ok(ncEmpty.trap.community === '', 'M2：未配置团体字时为空（兼容旧部署）');
+      const ncNorm = normalizeNetSvc2({ trap: { enabled: true, port: 162, community: ' public , private ' } });
+      ok(ncNorm.trap.community === 'public,private', 'M2：团体字归一化（去空白/逗号分隔）');
+      const tsrvMl2 = new TrapServer({ baseDir: path.join(r2d, 'trap-ml2'), maxPerSec: 200 });
+      ok((await tsrvMl2.start(0)).ok, 'ML2：Trap 服务启动（目录封顶路径就绪）');
+      await tsrvMl2.stop();
+
+      // ---- M3/M4/M5：AI 端点判定 / 导航白名单 / FTP 默认口令服务端强制 ----
+      ok(A2.validateBaseUrl('https://api.example.com/v1') !== '' && A2.validateBaseUrl('http://127.0.0.1:11434') !== '', 'M3：https 端点判定');
+      ok(A2.validateBaseUrl('http://10.0.0.5:8000/v1') === 'http://10.0.0.5:8000/v1', 'M3：http 端点判定');
+      ok(A2.validateBaseUrl('ftp://x/y') === '' && A2.validateBaseUrl('file:///etc/passwd') === '', 'M3：非 http(s) 端点判定');
+      {
+        const p = require('path');
+        const allow = new Set(['index.html', 'shell.html', 'webview.html'].map(f => p.resolve('D:/app', f).toLowerCase()));
+        const isAllowed = (raw) => {
+          let u; try { u = new URL(String(raw)); } catch (e) { return false; }
+          if (u.protocol !== 'file:') return false;
+          let pp; try { pp = decodeURIComponent(u.pathname); } catch (e) { return false; }
+          pp = pp.replace(/^\/([A-Za-z]:)/, '$1');
+          return allow.has(p.resolve(pp).toLowerCase());
+        };
+        ok(isAllowed('file:///D:/app/index.html'), 'M4：允许本应用 index.html');
+        ok(isAllowed('file:///D:/app/shell.html'), 'M4：允许本应用 shell.html');
+        ok(!isAllowed('file:///D:/app/evil.html') && !isAllowed('file:///D:/app/tftp/evil.html'), 'M4：拒绝其它本地页面（含 TFTP/FTP 收件目录投递的 evil.html）');
+        ok(!isAllowed('file:///D:/app/../app/other.html'), 'M4：拒绝同目录非白名单页面');
+        ok(!isAllowed('https://evil.example/index.html'), 'M4：拒绝远程页面');
+      }
+      const ncDef = normalizeNetSvc2({ ftp: { enabled: true, username: 'nettopo', password: 'nettopo' } });
+      ok(ncDef.ftp.password !== 'nettopo' && ncDef.ftp.password.length === 16, 'M5：启用 FTP 且默认口令 → 服务端替换为 16 位随机口令');
+      ok(ncDef._ftpPasswordChanged === true, 'M5：替换标记 _ftpPasswordChanged 置位（供 UI 回填/落盘）');
+      const ncCust = normalizeNetSvc2({ ftp: { enabled: true, username: 'op', password: 'MyOwnPass1' } });
+      ok(ncCust.ftp.password === 'MyOwnPass1', 'M5：用户自定义口令不被替换');
+      const ncOff = normalizeNetSvc2({ ftp: { enabled: false, username: 'nettopo', password: 'nettopo' } });
+      ok(ncOff.ftp.password === 'nettopo', 'M5：未启用 FTP 不触发替换');
+
+      // ---- L1/L17/L18/L19/L12/L14/L15 ----
+      ok(isValidDiagHost('-n') === false && isValidDiagHost('-w') === false, 'L1：以 - 开头的主机判定为非法（ICMP 探测选项注入防护）');
+      ok(V3.passwordToKey('Auth-1', 'aabb', 'sha') === V3.passwordToKey('Auth-1', 'aabb', 'sha'), 'L17：Kul 缓存命中（同 口令+引擎ID+算法 返回同对象）');
+      ok(V3.passwordToKey('Auth-1', 'aabb', 'md5').toString('hex') !== V3.passwordToKey('Auth-1', 'aabb', 'sha').toString('hex'), 'L17：不同算法不串用缓存');
+      const escMsg = parseSyslogMsg('<13>1 2020-01-01T00:00:00Z h \u001b[31mtag - - body', '1.1.1.1');
+      ok(escMsg.tag.indexOf('\u001b') < 0 && escMsg.msg.indexOf('\u001b') < 0, 'L18：syslog 5424 tag 剔除 ESC 控制符');
+      {
+        const fdir = path.join(r2d, 'future');
+        const fsrvF = new SyslogServer({ baseDir: fdir });
+        await fsrvF.start(0, false);
+        fsrvF._ingest('<13>1 9999-01-01T00:00:00Z futurehost app - - 未来时间戳', '10.9.9.9');
+        const nowD = new Date();
+        const dstr = nowD.getFullYear() + '-' + String(nowD.getMonth() + 1).padStart(2, '0') + '-' + String(nowD.getDate()).padStart(2, '0');
+        const hitFuture = await waitUntil(() => fs.existsSync(path.join(fdir, 'futurehost', dstr + '.log')), 2000);
+        ok(hitFuture, 'L19：未来时间戳折到本机当日（避免 9999 年文件永不清理）');
+        await fsrvF.stop();
+      }
+      // L12：极值收敛不得依赖 Math.max(...arr)（大数组会抛 RangeError: too many arguments）
+      const bigNodes = [];
+      for (let i = 0; i < 150000; i++) bigNodes.push({ id: 'n' + i, x: 0, y: 0, w: 100 + (i % 7), h: 60, type: 'router' });
+      let l12Err = null;
+      try { Layout.gridLayout(bigNodes, { cx: 0, cy: 0 }); } catch (e) { l12Err = e; }
+      ok(!l12Err && bigNodes.every(n => Number.isFinite(n.x) && Number.isFinite(n.y)), 'L12：收敛实现对大数组返回正确极值（不受引擎实参栈上限影响）');
+      const extNodes = [{ id: 'a', x: 0, y: 0, w: 1, h: 1, type: 'router' }, { id: 'b', x: 0, y: 0, w: 99999, h: 2, type: 'router' }];
+      Layout.gridLayout(extNodes, { cx: 0, cy: 0 });
+      ok(extNodes.every(n => Number.isFinite(n.x) && Number.isFinite(n.y)), 'L12：极值收敛语义（min/max）——极端宽高不产生 NaN 坐标');
+      const usageIn = JSON.parse('{"prompt_tokens":3,"completion_tokens":4,"__proto__":{"polluted":"yes"}}');
+      const prUse = A2.parseChatResponse({ choices: [{ message: { content: 'x' } }], usage: usageIn });
+      ok(prUse.ok === true && prUse.usage && prUse.usage.prompt_tokens === 3 && prUse.usage.completion_tokens === 4, 'L14：SSE usage 正常字段保留');
+      ok(({}).polluted === undefined, 'L14：全局 Object 原型未被污染');
+      {
+        const ftproot = path.join(r2d, 'ftproot');
+        fs.mkdirSync(ftproot, { recursive: true });
+        const fsrvA = new FtpServer({ rootDir: ftproot, username: 'op', password: 'secret' });
+        await fsrvA.start(0);
+        const c2 = net.connect(fsrvA.port, '127.0.0.1');
+        c2.on('error', () => {});
+        let pend2 = null;
+        c2.on('data', (d) => { for (const ln of d.toString('utf8').split('\r\n')) if (ln && pend2) { const pp = pend2; pend2 = null; pp(ln); } });
+        const rl2 = () => new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('FTP 超时')), 4000); pend2 = (l) => { clearTimeout(t); res(l); }; });
+        await new Promise((res) => c2.once('connect', res));
+        await rl2();
+        const cmdF = async (c) => { c2.write(c + '\r\n'); return rl2(); };
+        await cmdF('USER op');
+        const badPass = await cmdF('PASS wrong');
+        ok(/^530/.test(badPass), 'L15：FTP 认证路径就绪（错误口令 530，口令比对用 timingSafeEqual）');
+        c2.destroy();
+        await fsrvA.stop();
+      }
+      fs.rmSync(r2d, { recursive: true, force: true });
+    }
+    // ================= 第三轮审计修复回归（H1 / M9 / L17） ================= 
+    {
+      const { SyslogServer } = require('../js/svc-syslog.js');
+      const { TrapServer } = require('../js/svc-trap.js');
+      const capBase = path.join(root, 'test', '_r3_cap');
+      fs.rmSync(capBase, { recursive: true, force: true });
+      // H1：主机目录封顶必须能回收名额——旧实现「满员即永久丢弃」会让一次伪造 HOST 冲刷之后
+      // 所有真实设备的落盘归档长期静默失效，且重启/清理都无法自愈
+      const sCap = new SyslogServer({ baseDir: path.join(capBase, 's'), maxPerSec: 100000, hostDirReclaimMs: 60000 });
+      const stCap = await sCap.start(0, false);
+      ok(stCap.ok, 'H1：目录封顶用例 Syslog 启动成功');
+      sCap._newDirWinStart = Date.now(); sCap._newDirWinCount = -1e9; // 本用例聚焦 LRU，绕开新建速率闸
+      for (let i = 0; i < 1200; i++) sCap._ingest('<13>Feb  5 10:00:00 fake' + i + ' t: m', '10.3.0.' + (i % 250));
+      sCap._ingest('<13>Feb  5 10:00:01 REAL-A t: real', '192.168.1.1');
+      ok(fs.existsSync(path.join(capBase, 's', 'REAL-A')), 'H1：伪造 HOST 打满名额后真实设备仍能落盘（旧实现永久静默丢弃）');
+      ok(sCap.status().hosts <= 1024, 'H1：内存名额数不超过 MAX_HOST_DIRS');
+      // 静默目录回收：mtime 回拨 2 小时后再来新主机 → 回收静默目录，目录总量因此有界
+      const oldT = new Date(Date.now() - 2 * 3600 * 1000);
+      for (const h of fs.readdirSync(path.join(capBase, 's'))) {
+        const hd = path.join(capBase, 's', h);
+        for (const f of fs.readdirSync(hd)) { try { fs.utimesSync(path.join(hd, f), oldT, oldT); } catch (e) { /* ignore */ } }
+      }
+      for (let i = 0; i < 100; i++) sCap._ingest('<13>Feb  5 10:00:00 fresh' + i + ' t: m', '10.3.0.9');
+      ok(sCap.status().dirsRecycled >= 50, 'H1：静默来源目录被回收并计数（目录总量有界，不再线性膨胀）');
+      ok(fs.readdirSync(path.join(capBase, 's')).length <= 1100, 'H1：目录总数保持有界（伪造洪流不会无限建目录）');
+      await sCap.stop();
+      // 新建目录限速 + 丢弃可见（消除「静默」：超限必须计数而非无声 return）
+      const sRate = new SyslogServer({ baseDir: path.join(capBase, 'r'), maxPerSec: 100000 });
+      await sRate.start(0, false);
+      for (let i = 0; i < 200; i++) sRate._ingest('<13>Feb  5 10:00:00 n' + i + ' t: m', '10.4.0.1');
+      const stRate = sRate.status();
+      ok(stRate.diskDropped > 0 && stRate.diskDropped === 200 - stRate.hosts, 'H1：新建目录限速生效且丢弃量可见（diskDropped）');
+      await sRate.stop();
+      // 占用一个 UDP 端口后启动必然失败：必须如实返回 ok:false 且 port 仍为 0（调用方据此重试/报错），
+      // 绝不能返回一个「成功」却带着 port=0 的假状态（旧用例的崩溃正是照 port=0 连接引发的）
+      const dgramM = require('dgram');
+      const occupy = dgramM.createSocket('udp4');
+      await new Promise((res) => occupy.bind(0, res));
+      const busyPort = occupy.address().port;
+      const sBusy = new SyslogServer({ baseDir: path.join(capBase, 'busy') });
+      const rBusy = await sBusy.start(busyPort, true);
+      ok(rBusy.ok === false && sBusy.port === 0 && !!sBusy.lastError, 'M9：端口被占用时 start 如实返回 ok:false 且 port 保持 0（不再静默）');
+      occupy.close();
+      // 重试后必然成功（测试装置与产品调用方都应如此）
+      let sRetry = null, rRetry = null;
+      for (let i = 0; i < 10 && !(rRetry && rRetry.ok); i++) {
+        if (i) await waitMsR7(60 * i);
+        sRetry = new SyslogServer({ baseDir: path.join(capBase, 'retry' + i) });
+        rRetry = await sRetry.start(0, true);
+      }
+      ok(rRetry.ok && sRetry.port > 0, 'M9：偶发端口撞车经重试后可正常启动（同端口 TCP 语义保留）');
+      await sRetry.stop();
+      // Trap 同口径
+      const tCap = new TrapServer({ baseDir: path.join(capBase, 't'), maxPerSec: 100000 });
+      await tCap.start(0);
+      tCap._newDirWinStart = Date.now(); tCap._newDirWinCount = -1e9;
+      for (let i = 0; i < 1200; i++) tCap._writeEntry({ ts: Date.now(), host: 'fake' + i, version: 'v2c', community: 'c', uptime: '1', trap: '1.2.3', oid: '1.2.3', msg: 'm' });
+      tCap._writeEntry({ ts: Date.now(), host: 'REAL-T', version: 'v2c', community: 'c', uptime: '1', trap: '1.2.3', oid: '1.2.3', msg: 'real' });
+      ok(fs.existsSync(path.join(capBase, 't', 'REAL-T')), 'H1：Trap 来源目录封顶后真实来源仍能落盘');
+      await tCap.stop();
+      fs.rmSync(capBase, { recursive: true, force: true });
+
+      // L17：导出转义必须有「真对抗」用例——旧断言 ok(xml.includes('GE0/0/1') === false)
+      // 的夹具里根本没有该字符串，把三套导出器的转义整体换成恒等函数仍然全绿，等于没有护栏
+      const Q = String.fromCharCode(34), SQ = String.fromCharCode(39);
+      const nasty = 'A<x>&q' + Q + SQ + String.fromCharCode(1) + String.fromCharCode(11);
+      const scN = { id: 'n1', name: nasty, type: 'router', x: 100, y: 100, w: 120, h: 60, mgmt: nasty, note: nasty, mgmts: [nasty], vendor: '' };
+      const scT = { id: 't1', x: 10, y: 10, w: 200, h: 40, text: nasty };
+      const vdxN = V.buildVDX({ nodes: [scN], links: [], texts: [scT] }, {});
+      const svgN = sandbox.TopoPdf.buildSvgImage({ nodes: [scN], links: [], texts: [scT] }, { showLabels: true });
+      // 裸控制字符（XML 1.0 非法）+ 未转义的 <x> 都算失败；合法实体不误报
+      const badRaw = (t) => t.indexOf('<x>') >= 0 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(t);
+      ok(!badRaw(vdxN) && vdxN.indexOf('&lt;x&gt;') >= 0, 'L17：VDX 真转义（元字符转实体、控制字符剔除；原断言为空断言）');
+      ok(!badRaw(svgN) && svgN.indexOf('&lt;x&gt;') >= 0, 'L17：SVG 真转义（同上）');
+      const vsdxRaw = Buffer.from(sandbox.TopoVsdx.buildVSDX({ nodes: [scN], links: [], texts: [scT] }, {})).toString('latin1');
+      ok(vsdxRaw.indexOf('<x>') < 0 && vsdxRaw.indexOf('&lt;x&gt;') >= 0, 'L17：VSDX 部件 XML 真转义（裸 <x> 不出现在包内）');
+    }
+    // ================= 第三轮审计修复回归（第二轮：L2/VSDX/L10/L14/M1/M2/M3） ================= 
+    {
+      const { MonitorManager } = require('../js/monitor.js');
+      const V3 = require('../js/snmp-v3.js');
+      const { RegexLab } = require('../js/regex-lab.js');
+      const r3dir = path.join(root, 'test', '_r3b');
+      fs.rmSync(r3dir, { recursive: true, force: true });
+      fs.mkdirSync(r3dir, { recursive: true });
+
+      // ---- L11 残留：Release 同挂新旧便携版时不得挑中旧包（旧实现取「第一个 -portable.exe」） ----
+      {
+        const { pickAssets } = require('../js/updater.js');
+        const mkA = (n) => ({ name: n, size: 1234, browser_download_url: 'https://example/' + n });
+        const relMix = { tag_name: 'v1.0.0-20260910a', assets: [
+          mkA('网络拓扑管理软件-1.0.0-20260908b-portable.exe'),
+          { name: '网络拓扑管理软件-1.0.0-20260908b-portable.exe.sha256', size: 64, browser_download_url: 'https://example/old.sha' },
+          mkA('网络拓扑管理软件-1.0.0-20260910a-portable.exe'),
+          { name: '网络拓扑管理软件-1.0.0-20260910a-portable.exe.sha256', size: 64, browser_download_url: 'https://example/new.sha' }
+        ] };
+        const pk = pickAssets(relMix, 'win32');
+        ok(!!pk && pk.exe.name.indexOf('20260910a') >= 0 && pk.sha && pk.sha.name.indexOf('20260910a') >= 0,
+          'L11：Release 同挂历史版本产物时按 tag 版本挑选资产（不挑中旧包，清单同源配套）');
+      }
+
+      // ---- L2 原型链取值：type/vendor 为 'constructor' 时不得取到 Object 原型成员 ----
+      ok(U.cfgTemplates()['constructor'] === undefined, 'L2：配置模板表原型置空（constructor 取不到 Object）');
+      const ot = U.getType('constructor');
+      ok(!!ot && ot.label === U.TYPES.other.label, 'L2：getType 查自有属性，原型键回落 other（不再返回 undefined 标签）');
+      const pv = U.sanitizeGraph([{ id: 'n1', name: 'SW1', type: 'constructor', vendor: 'constructor', x: 0, y: 0, w: 120, h: 60, mgmts: [] }], [], []);
+      ok(pv.nodes.length === 1 && pv.nodes[0].type === 'other', 'L2：sanitizeGraph 拦掉原型键 type（与 id 的 BAD_ID 同口径）');
+      const pvCfg = U.generateConfigs(pv.nodes, [], 'huawei');
+      ok(pvCfg.indexOf('undefined') < 0 && pvCfg.length > 0, 'L2：生成配置不再整体退化为字符串 undefined（实测修复前为 "undefined"）');
+
+      // ---- M1/M2 指纹信任库：键含端口；变化即拒（无人值守采集与监控同一份库） ----
+      const mon2 = new MonitorManager({ on() {}, removeListener() {}, close() {}, write() {}, connect() { return { ok: true, id: 's1' }; }, trustFingerprint() { return true; } }, path.join(r3dir, 'logs'), path.join(r3dir, 'trust.json'), {});
+      const vA = mon2.verifyFingerprint('10.0.0.1', 22, 'SHA256:AAA');
+      const vSame = mon2.verifyFingerprint('10.0.0.1', 22, 'SHA256:AAA');
+      const vDiff = mon2.verifyFingerprint('10.0.0.1', 22, 'SHA256:BBB');
+      const vPort = mon2.verifyFingerprint('10.0.0.1', 2222, 'SHA256:BBB');
+      ok(vA.ok && vA.first === true && vSame.ok && vSame.first === false, 'M1：首连 TOFU 记录后同指纹放行');
+      ok(vDiff.ok === false && /指纹变化/.test(String(vDiff.error)), 'M2：已钉扎主机的指纹变化被拒绝（修复前无人值守采集会静默接受）');
+      ok(vPort.ok === true, 'M1：同一 IP 的另一个端口是独立记录（不再被误判为指纹变化/中间人）');
+      const trustKeys = mon2.trustList().items.map(i => i.host).sort();
+      ok(trustKeys.length === 2 && trustKeys.indexOf('10.0.0.1') >= 0 && trustKeys.indexOf('10.0.0.1:2222') >= 0, 'M1：信任库键为 host[:port]（默认 22 省略后缀）');
+      const revoked = mon2.trustRevoke('10.0.0.1');
+      ok(revoked.removed === true && mon2.trustList().items.length === 0, 'L5：按 host 撤销时连同该主机的各端口记录一并撤销');
+
+      // ---- M3 KDF：与原 1MB 扩展算法逐字节一致（互操作），且随机 engineID 不再触发 1MB 开销 ----
+      const cryptoX = require('crypto');
+      const refKul = (pwd, eidHex, algo) => {
+        const hn = algo === 'sha' ? 'sha1' : 'md5';
+        const p = Buffer.from(pwd, 'utf8'); const e = Buffer.from(eidHex, 'hex');
+        const ext = Buffer.alloc(1024 * 1024);
+        for (let off = 0; off < ext.length; off += p.length) p.copy(ext, off, 0, Math.min(p.length, ext.length - off));
+        const h1 = cryptoX.createHash(hn).update(ext).digest();
+        return cryptoX.createHash(hn).update(Buffer.concat([h1, e, h1])).digest('hex');
+      };
+      let katOk = 0; const katCases = [['Auth-12345678', '80001f8880abcdef0102030405', 'sha'], ['Priv-9999', 'aabbccddee1122334455', 'md5']];
+      for (const [p, e, a] of katCases) if (V3.passwordToKey(p, e, a).toString('hex') === refKul(p, e, a)) katOk++;
+      ok(katOk === katCases.length, 'M3：Kul 与原算法逐字节一致（两段缓存不改变派生结果，v3 鉴权互操作不受影响）');
+      const eids = []; for (let i = 0; i < 200; i++) eids.push(cryptoX.randomBytes(10).toString('hex'));
+      const tKdf = Date.now(); for (const e of eids) V3.passwordToKey('Auth-12345678', e, 'sha'); const dtKdf = Date.now() - tKdf;
+      ok(dtKdf < 400, 'M3：200 个随机 engineID 总耗时 ' + dtKdf + 'ms（修复前约 3.2ms/包 ≈ 640ms；现只付一次小哈希）');
+      let longEidRejected = false;
+      try { V3.passwordToKey('p', 'ab'.repeat(100), 'sha'); } catch (e) { longEidRejected = true; }
+      ok(longEidRejected, 'M3：超长 engineID 被拒（防缓存键膨胀与超长密钥）');
+
+      // ---- L10 worker 单条失败不得被改写成 ok:true ----
+      const lab2 = new RegexLab({ timeoutMs: 1200 });
+      // run() 返回与 items 等长的结果数组（不是 {ok, results}）
+      const labItems = await lab2.run([{ pattern: '[', op: 'test', text: 'x' }, { pattern: 'ERROR', op: 'test', text: 'has ERROR' }]);
+      const badItem = labItems[0] || null;
+      ok(!!badItem && badItem.ok === false && !!badItem.error, 'L10：非法正则的单条结果保留 ok:false 与 error（调用方可区分「规则坏了」与「没命中」）');
+      const goodItem = labItems[1] || null;
+      ok(!!goodItem && goodItem.ok === true && goodItem.hit === true, 'L10：同批正常规则不受影响且命中');
+
+      // ---- L14 三份 HTML 的 CSP 指令完整性 ----
+      for (const [hf, want] of [['index.html', "form-action 'none'"], ['shell.html', "form-action 'none'"], ['webview.html', "form-action 'self'"]]) {
+        const html = fs.readFileSync(path.join(root, hf), 'utf8');
+        const csp = (html.match(/Content-Security-Policy[^>]*content="([^"]+)"/) || [])[1] || '';
+        ok(csp.indexOf(want) >= 0 && csp.indexOf("frame-ancestors 'none'") >= 0, 'L14：' + hf + ' 补 form-action / frame-ancestors');
+        ok(csp.indexOf("script-src 'self'") >= 0 && csp.indexOf('unsafe-eval') < 0, 'L14：' + hf + ' 保持 script-src 仅 self、无 unsafe-eval');
+      }
+
+      // ---- L9 VSDX：设备级图标进包 + 同一 dataURL 只嵌一份 + rels 根唯一 ----
+      const PNG1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      const mkN = (id, icon) => ({ id, name: 'N' + id, type: 'router', icon, x: 100, y: 100, w: 120, h: 60, mgmts: [] });
+      const vsdxBuf = Buffer.from(sandbox.TopoVsdx.buildVSDX({ nodes: [mkN('n1', PNG1), mkN('n2', PNG1), mkN('n3', PNG1)], links: [] }, {}));
+      const vsdxTxt = vsdxBuf.toString('latin1');
+      ok(vsdxTxt.indexOf('visio/media/image1.png') >= 0, 'L9：设备级图标（dataURL）进入 VSDX 媒体区（修复前 vsdx.js 全历史不读 n.icon）');
+      ok(vsdxTxt.indexOf('visio/media/image2.') < 0, 'L9：同一图标 dataURL 只嵌一份媒体条目（N 个节点复用，防导出体积膨胀）');
+      // 整包内含多个 .rels 部件（_rels/.rels、document.xml.rels、pages.xml.rels、page1.xml.rels），
+      // 每个都应有且仅有一个根：断言「有根」且开关标签成对平衡（旧实现的 page1.xml.rels 没有根）
+      const relOpen = (vsdxTxt.match(/<Relationships[ >]/g) || []).length;
+      const relClose = (vsdxTxt.match(/<\/Relationships>/g) || []).length;
+      ok(relOpen >= 1 && relOpen === relClose, 'L9：VSDX 各 .rels 部件都有 <Relationships> 根且开关成对（旧实现 page1.xml.rels 无根，OPC 非法）');
+      fs.rmSync(r3dir, { recursive: true, force: true });
+    }
 })().then(() => {
   console.log('');
-  console.log(`结果：${pass} 通过，${fail} 失败`);
+  console.log(`结果：${pass} 通过，${fail} 失败` + (skipped ? `，${skipped} 跳过（本机缺 python 依赖，未真正校验）` : ''));
   process.exit(fail ? 1 : 0);
 }).catch((err) => {
   console.error(err);

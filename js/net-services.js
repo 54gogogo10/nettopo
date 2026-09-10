@@ -10,6 +10,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const { TftpServer } = require('./svc-tftp.js');
 const { FtpServer } = require('./svc-ftp.js');
@@ -25,7 +26,7 @@ function defaultConfig() {
     tftp: { enabled: false, port: 69 },
     ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true },
     syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } },
-    trap: { enabled: false, port: 162, v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } }
+    trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } }
   };
 }
 
@@ -44,6 +45,16 @@ function cleanCred(v, dft) {
   return s || dft;
 }
 
+const DEFAULT_FTP_PASSWORD = 'nettopo';
+/** 随机 FTP 口令（16 位，排除易混字符；与面板自动生成同口径） */
+function randomFtpPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const buf = crypto.randomBytes(16);
+  let s = '';
+  for (let i = 0; i < buf.length; i++) s += chars[buf[i] % chars.length];
+  return s;
+}
+
 /** 配置归一化：非法值回退默认；返回新配置对象（不抛错，保证任何输入都得到可用配置） */
 function normalizeConfig(cfg) {
   const dft = defaultConfig();
@@ -56,7 +67,16 @@ function normalizeConfig(cfg) {
   out.ftp.enabled = clampB(f.enabled, dft.ftp.enabled);
   out.ftp.port = clampPort(f.port, dft.ftp.port);
   out.ftp.username = cleanCred(f.username, dft.ftp.username);
+  // 服务端强制改弱口令：FTP 面向全网段监听且明文传输，默认口令 nettopo 等同无认证。
+  // 面板保存路径已生成随机口令，但旧版本启用后未再打开面板的用户会带着默认口令运行——
+  // 此处兜底：开启 FTP 且口令仍为默认值的，一律换成随机口令（_ftpPasswordChanged 标记供
+  // electron-main 落盘新口令、渲染层回填表单）。
   out.ftp.password = cleanCred(f.password, dft.ftp.password);
+  out._ftpPasswordChanged = false;
+  if (out.ftp.enabled && out.ftp.password === DEFAULT_FTP_PASSWORD) {
+    out.ftp.password = randomFtpPassword();
+    out._ftpPasswordChanged = true;
+  }
   let pmin = Math.floor(Number(f.pasvMin) || 0), pmax = Math.floor(Number(f.pasvMax) || 0);
   if (!(pmin >= 1024 && pmax >= pmin && pmax - pmin <= 2000)) { pmin = 0; pmax = 0; }
   out.ftp.pasvMin = pmin;
@@ -70,6 +90,9 @@ function normalizeConfig(cfg) {
   const tr = cfg.trap && typeof cfg.trap === 'object' ? cfg.trap : {};
   out.trap.enabled = clampB(tr.enabled, dft.trap.enabled);
   out.trap.port = clampPort(tr.port, dft.trap.port);
+  // v1/v2c 团体字白名单（逗号分隔，最多 16 个）：控制字符已由 cleanCred 剔除
+  out.trap.community = String(tr.community == null ? '' : tr.community).split(/[,，;；\n]+/)
+    .map(x => cleanCred(x, '')).filter(Boolean).slice(0, 16).join(',');
   const tv = tr.v3 && typeof tr.v3 === 'object' ? tr.v3 : {};
   out.trap.v3 = {
     user: cleanCred(tv.user, ''),
@@ -162,10 +185,10 @@ class NetServices extends EventEmitter {
     if (!n.trap.enabled) {
       if (this.applied.trap) { await this.trap.stop(); this.applied.trap = null; }
     } else {
-      const v3sig = JSON.stringify(n.trap.v3);
+      const v3sig = JSON.stringify(n.trap.v3) + '|' + n.trap.community;
       if (!this.applied.trap || this.applied.trap.port !== n.trap.port || this.applied.trap.v3sig !== v3sig) {
         await this.trap.stop();
-        this.trap = new TrapServer({ baseDir: this.trapDir, v3Users: n.trap.v3.user ? [n.trap.v3] : [] });
+        this.trap = new TrapServer({ baseDir: this.trapDir, v3Users: n.trap.v3.user ? [n.trap.v3] : [], communities: n.trap.community ? n.trap.community.split(',') : [] });
         this.trap.on('trap', (t) => this.emit('trap', t));
         const r = await this.trap.start(n.trap.port);
         this.applied.trap = (r && r.ok) ? { port: n.trap.port, v3sig } : null;

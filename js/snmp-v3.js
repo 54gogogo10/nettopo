@@ -20,6 +20,21 @@ const OID_USM_UNKNOWN_ENGINE_IDS = '1.3.6.1.6.3.15.1.1.4.0';
 const OID_USM_WRONG_DIGESTS = '1.3.6.1.6.3.15.1.1.5.0';
 const OID_USM_DECRYPTION_ERRORS = '1.3.6.1.6.3.15.1.1.6.0';
 
+const MAX_TEXT = 300;      // 单值文本上限（与 svc-trap.js 同口径：防超长字符串放大内存/日志）
+const MAX_OID_LEN = 256;   // OID 文本上限（正常 OID 远小于此；超长 body 不得放大为巨串）
+const MAX_OID_ARCS = 128;  // OID 子标识符个数上限
+
+/** 控制字符剔除 + 换行折叠 + 截断（与 svc-trap.js cleanText 同口径）。
+ *  v3 的 OCTET STRING 同为设备可控数据：不折行可伪造归档审计行，不限长可放大内存。 */
+function cleanText(s) {
+  let t = String(s == null ? '' : s)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
+  if (t.length > MAX_TEXT) t = t.slice(0, MAX_TEXT) + '…';
+  return t;
+}
+
 /* ---------------- 基础 BER 编解码（与 monitor.js 同款风格） ---------------- */
 function berLenOf(n) {
   if (n < 128) return Buffer.from([n]);
@@ -73,9 +88,11 @@ function decodeOid(b) {
   let v = 0;
   for (let i = 1; i < b.length; i++) {
     v = (v << 7) | (b[i] & 0x7f);
-    if (!(b[i] & 0x80)) { arr.push(v); v = 0; }
+    if (!(b[i] & 0x80)) { arr.push(v); v = 0; if (arr.length >= MAX_OID_ARCS) break; }
   }
-  return arr.join('.');
+  let s = arr.join('.');
+  if (s.length > MAX_OID_LEN) s = s.slice(0, MAX_OID_LEN) + '…';
+  return s;
 }
 function readUInt(b) {
   if (!b || !b.length || b.length > 8) return null;
@@ -84,7 +101,7 @@ function readUInt(b) {
 function decodeValue(tag, body) {
   switch (tag) {
     case 0x02: { const n = readUInt(body); return n == null ? '' : String(n); }
-    case 0x04: return body.toString('utf8').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ');
+    case 0x04: return cleanText(body.toString('utf8'));
     case 0x05: return '';
     case 0x06: return decodeOid(body);
     case 0x40: return body && body.length === 4 ? [...body].join('.') : '';
@@ -95,6 +112,20 @@ function decodeValue(tag, body) {
 }
 
 /* ---------------- RFC 3414 密码学原语 ---------------- */
+/* ---- 本地化密钥派生（Kul）——**两段缓存**，这是抗远程放大的关键 ----
+ *  RFC 3414 A.2 的 1MB 口令扩展与 engineID **无关**，只有末尾的 Kul = H(x‖engineID‖x) 才用到它。
+ *  旧实现把 engineID 一并放进唯一的缓存键，于是 Trap 侧只要每包换一个 engineID（该字段完全由发送
+ *  方自报）就必然缓存未命中，每包重做 1MB 分配 + 两次哈希（实测 3.2ms/包，100pps 限速下约 32% 单核，
+ *  且发生在 HMAC 比对**之前**、无需任何凭据）。现拆成两段：
+ *    _kdfBaseCache：(算法, 口令) → 1MB 扩展结果 h1     ← 昂贵，与 engineID 无关，可长期复用
+ *    _kulCache    ：(算法, h1, engineID) → Kul          ← 只有一次小哈希，engineID 变化也不贵
+ *  两处都是有界 FIFO，防内存无界增长；键用 h1/sha256 摘要而非口令原文，避免明文口令在键里多存一份。 */
+const _kulCache = new Map();
+const _KUL_CACHE_MAX = 64;
+const _kdfBaseCache = new Map();
+const _KDF_BASE_CACHE_MAX = 16;
+const MAX_ENGINE_ID_LEN = 64;   // engineID 上限：超限直接拒（防超长密钥与缓存键膨胀；RFC 3414 建议 5..32，取更宽松的 64 保互操作）
+
 /** 口令 → 本地化密钥 Kul（RFC 3414 A.1）：
  *  口令按 UTF-8 反复填充至恰好 1MB，逐 64 字节块迭代 x = H(x‖chunk)（x0 = H(空串)），
  *  Kul = H(x‖engineID‖x)。algo: 'md5' | 'sha'（SHA-1），输出 16 / 20 字节。 */
@@ -104,13 +135,28 @@ function passwordToKey(password, engineID, algo) {
   if (!pwd.length) throw new Error('SNMP v3 口令为空');
   const eid = Buffer.isBuffer(engineID) ? engineID : Buffer.from(String(engineID || ''), 'hex');
   if (!eid.length) throw new Error('SNMP v3 引擎 ID 为空，无法本地化密钥');
-  const LIMIT = 1024 * 1024;
-  const ext = Buffer.alloc(LIMIT);
-  for (let off = 0; off < LIMIT; off += pwd.length) {
-    pwd.copy(ext, off, 0, Math.min(pwd.length, LIMIT - off));
+  if (eid.length > MAX_ENGINE_ID_LEN) throw new Error('SNMP v3 引擎 ID 过长');
+  // 第一段：与 engineID 无关的 1MB 扩展（键用口令摘要，不把口令原文放进缓存键）
+  const baseKey = hashName + '\u0000' + crypto.createHash('sha256').update(pwd).digest('base64');
+  let h1 = _kdfBaseCache.get(baseKey);
+  if (!h1) {
+    const LIMIT = 1024 * 1024;
+    const ext = Buffer.alloc(LIMIT);
+    for (let off = 0; off < LIMIT; off += pwd.length) {
+      pwd.copy(ext, off, 0, Math.min(pwd.length, LIMIT - off));
+    }
+    h1 = crypto.createHash(hashName).update(ext).digest();
+    if (_kdfBaseCache.size >= _KDF_BASE_CACHE_MAX) _kdfBaseCache.delete(_kdfBaseCache.keys().next().value);
+    _kdfBaseCache.set(baseKey, h1);
   }
-  const h1 = crypto.createHash(hashName).update(ext).digest();
-  return crypto.createHash(hashName).update(Buffer.concat([h1, eid, h1])).digest();
+  // 第二段：Kul = H(h1‖engineID‖h1)，一次小哈希；engineID 每包变化也只付这一份代价
+  const ck = baseKey + '\u0000' + h1.toString('hex') + '\u0000' + eid.toString('hex');
+  const cached = _kulCache.get(ck);
+  if (cached) return cached;
+  const kul = crypto.createHash(hashName).update(Buffer.concat([h1, eid, h1])).digest();
+  if (_kulCache.size >= _KUL_CACHE_MAX) _kulCache.delete(_kulCache.keys().next().value);
+  _kulCache.set(ck, kul);
+  return kul;
 }
 
 /** 整包 HMAC 签名：msg 中 authParams 12 字节置零后计算，取前 96 位 */
@@ -392,7 +438,8 @@ function parseV3Message(buf, opts) {
         uf[4].start + uf[4].hs;
       masked.fill(0, off, off + 12); // authParams 置零后重算整包 HMAC（RFC 3414 7.2.4）
       const expect = authDigest(masked, kul, u.authProto);
-      if (!expect.equals(Buffer.from(authParams))) return { ok: false, reason: 'v3 认证失败（签名不匹配，认证密码或算法不符）' };
+      const got = Buffer.from(authParams);
+      if (expect.length !== got.length || !crypto.timingSafeEqual(expect, got)) return { ok: false, reason: 'v3 认证失败（签名不匹配，认证密码或算法不符）' };
       authenticated = true;
     }
 

@@ -6,6 +6,7 @@
  *   - 几何用 RelMoveTo/RelLineTo（相对 0..1）
  *   - 文本为 <Text> 混合内容，&#10; 换行
  *   - 连线标注用独立的 2D 文本框形状（Angle=0，永远水平）
+ *   - 设备图标：n.icon（图片 dataURL）优先于类型图片，同一 dataURL 只嵌一份媒体条目
  * 零依赖：内置 store 模式 ZIP 写入器 + CRC32。
  * 纯函数 buildVSDX(graph, opts) → Uint8Array，可在 Node 中测试。
  * ============================================================ */
@@ -131,22 +132,51 @@ function b64ToBytes(b64) {
   }
   return new Uint8Array(out);
 }
+// 可嵌入的位图格式：扩展名 → OPC ContentType + ForeignData CompressionType。
+// webp/gif 与 U.isValidImg 的白名单对齐，否则工程文件里带 WebP/GIF 图标时画布能显示、导出却静默丢图。
+// CompressionType 在 MS-VSDX 中是 xsd:token，故 WebP 可写 'WEBP'（Visio 2013/2016 不认 WebP 图片，需较新版本）。
+const IMG_TYPES = {
+  png: { ct: 'image/png', comp: 'PNG' },
+  jpg: { ct: 'image/jpeg', comp: 'JPEG' },
+  gif: { ct: 'image/gif', comp: 'GIF' },
+  webp: { ct: 'image/webp', comp: 'WEBP' }
+};
 function parseDataUrl(dataUrl) {
   const m = /^data:([^;]+);base64,(.*)$/s.exec(String(dataUrl || ''));
   if (!m) return null;
   const mime = m[1].toLowerCase();
-  const ext = mime.indexOf('png') >= 0 ? 'png' : mime.indexOf('jpeg') >= 0 || mime.indexOf('jpg') >= 0 ? 'jpg' : null;
-  if (!ext) return null;
+  // 只认位图（Foreign 图片形状不接受 SVG）；jpeg/jpg 统一成 jpg 扩展名
+  const ext = mime.indexOf('png') >= 0 ? 'png'
+    : (mime.indexOf('jpeg') >= 0 || mime.indexOf('jpg') >= 0) ? 'jpg'
+      : mime.indexOf('webp') >= 0 ? 'webp'
+        : mime.indexOf('gif') >= 0 ? 'gif' : null;
+  if (!ext || !IMG_TYPES[ext]) return null;
   return { bytes: b64ToBytes(m[2]), mime, ext };
+}
+/* 选图：设备级图标 icon 优先于类型图片 typeImg（与画布 render.js 的 n.icon > 类型图 一致）。
+ * 只有 parseDataUrl 认得的位图 dataURL 才算数——内置图标 key（如 'router'）不是 dataURL，自然回退类型图。
+ * seen = 已嵌入图片的 Map：命中即复用，避免每个节点重复解码同一张大图。
+ * 是 data:image/* 却解析不了的（svg/bmp 等）记进 dropped，供上层感知「有图没能嵌入」。 */
+function pickIconSrc(icon, typeImg, seen, dropped) {
+  for (const src of [icon, typeImg]) {
+    if (typeof src !== 'string' || !src) continue;
+    if (seen.has(src) || parseDataUrl(src)) return src;
+    if (/^data:image\//i.test(src)) dropped.add(src.slice(0, 24));
+  }
+  return '';
 }
 
 /* ================= XML 工具 ================= */
 const X = (v) => U.escXml(String(v));
 // 与 escXml 保持同一转义集合（& < > " ' + 换行 + 非法控制字符），避免文本节点内容破坏 XML
 const XRAW = (v) => U.escXml(String(v == null ? '' : v));
-// cell 属性值转义：v 当前仅接受数值/白名单颜色/硬编码公式，转义属纵深防御
+// cell 属性值转义：v 当前仅接受数值/白名单颜色/硬编码公式，转义属纵深防御。
+// 末尾剔除 XML 1.0 非法控制字符（与 U.escXml 同口径）：否则 \x01 之类会原样进属性，让 page1.xml
+// 非良构——lxml 解析失败、Visio 拒开整包。不直接复用 escXml：它还会把 \n 转成 &#10; 并丢掉 \r，
+// 属性值规范化后换行语义随之改变，与既有行为不一致。
 const ATTR = (v) => String(v == null ? '' : v)
-  .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
+  .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;')
+  .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
 const cell = (n, v, extra) => `<Cell N='${n}' V='${ATTR(v)}'${extra ? ' ' + extra : ''}/>`; // extra 仅允许硬编码字面量
 const ROW_REL = (t, ix, x, y) =>
   `<Row T='${t}' IX='${ix}'><Cell N='X' V='${x}'/><Cell N='Y' V='${y}'/></Row>`;
@@ -238,28 +268,31 @@ function buildVSDX(graph, opts) {
   }
 
   // 设备
-  const imageParts = new Map(); // dataURL -> {rId, idx, ext, bytes}
+  const imageParts = new Map(); // dataURL -> {rId, idx, ext, bytes}（按内容去重）
+  const droppedIcons = new Set(); // 解析不了的图标格式（仅用于导出后给上层可感知信号）
   for (const n of nodes) {
     const t = U.getType(n.type);
     const cx = (n.x + n.w / 2 - minX) * scale;
     const cy = Y(n.y + n.h / 2);
     const w = n.w * scale, h = n.h * scale;
     const id = nodeShape.get(n.id);
-    // 自定义类型图片：以 Foreign 图片形状叠加在设备图标区（左上 6px、宽 44px、垂直居中）
-    if (t && t.img) {
-      const parsed = parseDataUrl(t.img);
-      if (parsed) {
-        let part = imageParts.get(t.img);
-        if (!part) {
-          const idx = imageParts.size + 1;
-          part = { rId: 'rIdImg' + idx, idx, ext: parsed.ext, bytes: parsed.bytes };
-          imageParts.set(t.img, part);
-        }
-        const imgW = 44 * scale, imgH = (n.h - 12) * scale;
-        const pinX = (n.x - minX) * scale + 28 * scale; // 图标中心 x = 左边界 + 28px
-        const pinY = cy; // 图标垂直居中
-        const isid = sid++;
-        shapes.push(`    <Shape ID='${isid}' Type='Foreign' LineStyle='0' FillStyle='0' TextStyle='0'>
+    // 设备图标：以 Foreign 图片形状叠加在设备图标区（左上 6px、宽 44px、垂直居中）。
+    // 取图优先级同画布：设备级图标 n.icon > 类型上传图片；SVG 形态的 n.icon 由 app.js 上游光栅化兜底。
+    const iconSrc = pickIconSrc(n.icon, t && t.img, imageParts, droppedIcons);
+    // 同一 dataURL 只嵌一份媒体条目（多个 shape 复用同一个 rel）——内置/上传图标常被成百设备共用，
+    // 逐节点各嵌一份会让包体爆炸
+    let part = iconSrc ? imageParts.get(iconSrc) : null;
+    if (iconSrc && !part) {
+      const parsed = parseDataUrl(iconSrc);
+      part = { rId: 'rIdImg' + (imageParts.size + 1), idx: imageParts.size + 1, ext: parsed.ext, bytes: parsed.bytes };
+      imageParts.set(iconSrc, part);
+    }
+    if (part) {
+      const imgW = 44 * scale, imgH = (n.h - 12) * scale;
+      const pinX = (n.x - minX) * scale + 28 * scale; // 图标中心 x = 左边界 + 28px
+      const pinY = cy; // 图标垂直居中
+      const isid = sid++;
+      shapes.push(`    <Shape ID='${isid}' Type='Foreign' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(pinX))}
       ${cell('PinY', IN(pinY))}
       ${cell('Width', IN(imgW))}
@@ -294,9 +327,8 @@ function buildVSDX(graph, opts) {
         ${ROW_REL('RelLineTo', 4, 0, 1)}
         ${ROW_REL('RelLineTo', 5, 0, 0)}
       </Section>
-      <ForeignData ForeignType='Bitmap' CompressionType='${part.ext === 'jpg' ? 'JPEG' : 'PNG'}'><Rel r:id='${part.rId}'/></ForeignData>
+      <ForeignData ForeignType='Bitmap' CompressionType='${IMG_TYPES[part.ext].comp}'><Rel r:id='${part.rId}'/></ForeignData>
     </Shape>`);
-      }
     }
     shapes.push(`    <Shape ID='${id}' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
       ${cell('PinX', IN(cx))}
@@ -339,6 +371,11 @@ function buildVSDX(graph, opts) {
       </Section>
       <Text><cp IX='0'/><pp IX='0'/>${XRAW(U.truncate(n.name, 40))}${U.nodeMgmts(n).length ? '\r\n管理: ' + XRAW(U.truncate(U.nodeMgmts(n).join(', '), 60)) : ''}\r\n</Text>
     </Shape>`);
+  }
+
+  // 画布上显示得出、却嵌不进 VSDX 的图标格式（如 svg/bmp）：给上层一个可感知的信号
+  if (droppedIcons.size && typeof console !== 'undefined' && console.warn) {
+    console.warn('[vsdx] 以下图标格式无法嵌入 VSDX，已跳过：' + [...droppedIcons].join('、'));
   }
 
   // 连线（纯线，无文本）+ 独立文本框；双链路文本框垂直错开避免重叠
@@ -642,7 +679,7 @@ function buildVSDX(graph, opts) {
   const contentTypes = `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
-${[...new Set([...imageParts.values()].map(p => p.ext))].map(ext => `<Default Extension="${ext}" ContentType="${ext === 'jpg' ? 'image/jpeg' : 'image/png'}"/>`).join('')}
+${[...new Set([...imageParts.values()].map(p => p.ext))].map(ext => `<Default Extension="${ext}" ContentType="${IMG_TYPES[ext].ct}"/>`).join('')}
 <Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>
 <Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
 <Override PartName="/visio/pages/page1.xml" ContentType="application/vnd.ms-visio.page+xml"/>
@@ -776,8 +813,11 @@ ${connects}
     entry('visio/pages/_rels/pages.xml.rels', pagesRels),
     entry('visio/pages/page1.xml', page1),
     ...(imageParts.size ? [
-      entry('visio/pages/_rels/page1.xml.rels', [...imageParts.values()].map(p =>
-        `<Relationship Id="${p.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${p.idx}.${p.ext}"/>`).join('\n')),
+      // 必须带 Relationships 根（OPC 规范）：此前只拼 <Relationship/> 列表，多图时成多个根元素、
+      // 单图时根名也不对，整个 rels 部件非法——Visio 解析不到图片关系，图标全部丢失
+      entry('visio/pages/_rels/page1.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+${[...imageParts.values()].map(p => `<Relationship Id="${p.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${p.idx}.${p.ext}"/>`).join('\n')}
+</Relationships>`),
       ...[...imageParts.values()].map(p => entry(`visio/media/image${p.idx}.${p.ext}`, p.bytes))
     ] : []),
     entry('visio/windows.xml', windowsXml)

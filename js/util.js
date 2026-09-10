@@ -6,6 +6,14 @@
 
 const U = {};
 
+/* 数组极值：Math.min/max(...arr) 的 spread 受引擎实参栈上限约束，超大节点数组会抛 RangeError。
+ * 返回 [min, max]；空数组返回 [Infinity, -Infinity]（调用方均保证非空）。 */
+U.spreadMinMax = (arr) => {
+  let mn = Infinity, mx = -Infinity;
+  for (const v of arr) { if (v < mn) mn = v; if (v > mx) mx = v; }
+  return [mn, mx];
+};
+
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
 U.APP_VERSION = 'v20260910a';
 
@@ -470,7 +478,8 @@ U.sanitizeGraph = (nodes, links, texts) => {
     const rawType = typeof n.type === 'string' ? n.type : '';
     return {
       id, name: str(n.name).slice(0, 200),
-      type: SAFE_ID.test(rawType) ? rawType : 'other',
+      // 原型键（constructor/toString…）能过 SAFE_ID 但会命中原型链，与 id 的 BAD_ID 口径对齐
+      type: (SAFE_ID.test(rawType) && !BAD_ID.has(rawType)) ? rawType : 'other',
       vendor: str(n.vendor).slice(0, 64), // 设备级图标：内置 key 或图片 dataURL
       icon: (typeof n.icon === 'string' && U.NODE_ICON_KEYS.includes(n.icon)) ? n.icon
         : (U.isValidImg(n.icon, { svg: true }) ? n.icon : ''), // 设备级图标：内置 key 或白名单 dataURL（与 isValidImg 同口径）
@@ -600,10 +609,14 @@ U.removeCustomType = (key) => {
   U.saveTypeOverrides();
 };
 
-/* 取类型（内置或自定义 + 用户覆盖），未知回退 other */
+/* 取类型（内置或自定义 + 用户覆盖），未知回退 other。
+ *  取值必须查**自有属性**：U.TYPES['constructor'] 会返回 Object 构造函数（truthy），
+ *  U.typeOverrides['constructor'] 同理——工程文件里的 type:"constructor" 会让节点类型退化成
+ *  {label:undefined}（画布文字变 "undefined"、渐变引用失效），与 BAD_ID 只拦 id 的口径不一致。 */
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
 U.getType = (key) => {
-  const base = U.TYPES[key] || U.customTypes.find(t => t.key === key) || U.TYPES.other;
-  const ov = U.typeOverrides[key];
+  const base = (hasOwn(U.TYPES, key) ? U.TYPES[key] : null) || U.customTypes.find(t => t.key === key) || U.TYPES.other;
+  const ov = hasOwn(U.typeOverrides, key) ? U.typeOverrides[key] : null;
   if (!ov) return base;
   return {
     key: base.key,
@@ -1403,10 +1416,14 @@ U.subnetGroups = (nodes, links, names) => {
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
     .map((g, i) => {
       const rects = g.nodeIds.map(id => nodes.find(n => n.id === id)).filter(Boolean);
-      const x0 = Math.min(...rects.map(r => r.x)) - pad;
-      const y0 = Math.min(...rects.map(r => r.y)) - pad;
-      const x1 = Math.max(...rects.map(r => r.x + r.w)) + pad;
-      const y1 = Math.max(...rects.map(r => r.y + r.h)) + pad;
+      const [rx0] = U.spreadMinMax(rects.map(r => r.x));
+      const [ry0] = U.spreadMinMax(rects.map(r => r.y));
+      const [, rx2] = U.spreadMinMax(rects.map(r => r.x + r.w));
+      const [, ry2] = U.spreadMinMax(rects.map(r => r.y + r.h));
+      const x0 = (rects.length ? rx0 : 0) - pad;
+      const y0 = (rects.length ? ry0 : 0) - pad;
+      const x1 = (rects.length ? rx2 : 0) + pad;
+      const y1 = (rects.length ? ry2 : 0) + pad;
       const custom = names[g.key];
       const n = g.nodeIds.length;
       return {
@@ -1565,7 +1582,10 @@ U.CONFIG_TEMPLATES = {
     vlanLine: 'vlan {vlan}'
   }
 };
-U.cfgTemplates = () => Object.assign({}, U.CONFIG_TEMPLATES, U.customCfgTemplates || {});
+// 原型置空（Object.create(null)）：n.vendor 来自工程文件，'constructor'/'toString' 之类的键
+// 在普通对象上会取到原型成员（Object 构造函数 → 「生成配置」整体退化成字符串 "undefined"），
+// 置空后这类键一律取不到，自动回落到全局模板
+U.cfgTemplates = () => Object.assign(Object.create(null), U.CONFIG_TEMPLATES, U.customCfgTemplates || {});
 U.getCfgTemplate = (key) => U.cfgTemplates()[key] || U.cfgTemplates().huawei;
 U.saveCustomCfgTemplates = () => {
   try { localStorage.setItem('nettopo.cfgTemplates', JSON.stringify(U.customCfgTemplates || {})); } catch (e) {}
@@ -2740,8 +2760,10 @@ U.renumberIp = (ip, oldCidr, newCidr) => {
 U.alignNodes = (nodes, mode) => {
   if (!nodes || nodes.length < 2) return;
   const xs = nodes.map(n => n.x), ys = nodes.map(n => n.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs.map((x, i) => x + nodes[i].w));
-  const minY = Math.min(...ys), maxY = Math.max(...ys.map((y, i) => y + nodes[i].h));
+  const [minX] = U.spreadMinMax(xs);
+  const maxX = U.spreadMinMax(xs.map((x, i) => x + nodes[i].w))[1];
+  const [minY] = U.spreadMinMax(ys);
+  const maxY = U.spreadMinMax(ys.map((y, i) => y + nodes[i].h))[1];
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   if (mode === 'left') nodes.forEach(n => { n.x = minX; });
   else if (mode === 'right') nodes.forEach(n => { n.x = maxX - n.w; });

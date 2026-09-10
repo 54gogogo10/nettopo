@@ -31,6 +31,16 @@ function sanitizeFilename(s) {
   return out;
 }
 
+/** 指纹信任库的键：host[:port]（默认 22 端口省略后缀，兼容既有 monitor-trust.json）。
+ *  SSH 主机密钥本就按「主机 + 端口」隔离——同一 IP 经 NAT 转发到 10.0.0.1:22 与 :2222 可能是两台
+ *  完全不同的设备，只按 host 记会让第二台被误判为「指纹变化 = 中间人」，并把监控任务永久置 fatal。
+ *  渲染层早已按 host:port 记忆（app.js fpKeyOf），主进程侧此前不一致。 */
+function fpKeyOf(host, port) {
+  const h = String(host == null ? '' : host).trim();
+  const p = parseInt(port, 10);
+  return (p && p !== 22) ? h + ':' + p : h;
+}
+
 /** 清理备份捕获行：只保留命令执行后的输出内容。
  *  - 输入的命令行（或其终端回显，可能带「提示符+命令」前缀，如 Switch#display current-configuration）一律不保留
  *  - 命令回显被折行/分片（TCP 分包、Telnet 协商字节穿插、终端重打）的残片不保留：
@@ -341,6 +351,11 @@ async function v3Request(pduTag, host, v3cfg, oids, timeoutMs, port) {
       return { ok: false, error: 'SNMP v3：' + V3.reportReason(pr.report) };
     }
     if (pr.pduTag !== 0xa2) return { ok: false, error: 'SNMP v3 响应类型异常' };
+    // 安全级别以本端配置为准，不信包内自报 flags：parseV3Message 的 wantAuth 由包内 flags 决定，
+    // 攻击者嗅探 rid/engineID 后抢答 flags=0 的明文响应即可伪造监控值（假接口 Down/假 CPU/假重启）。
+    // 与 Trap 接收侧同口径：本端用户要求认证时未验签包一律拒收，authPriv 时未解密包一律拒收。
+    if (user.level !== 'noAuth' && !pr.authenticated) return { ok: false, error: 'SNMP v3 响应未认证（安全级别不符）' };
+    if (user.level === 'authPriv' && !pr.decrypted) return { ok: false, error: 'SNMP v3 响应未加密（安全级别不符）' };
     if (pr.rid != null && pr.rid !== ridv) return { ok: false, error: 'SNMP v3 响应 request-id 不匹配' };
     return { ok: true, varbinds: pr.varbinds };
   }
@@ -749,8 +764,9 @@ class MonitorManager extends EventEmitter {
     const protocol = String(opts.protocol || 'ssh').toLowerCase();
     if (protocol !== 'ssh' && protocol !== 'telnet') return { ok: false, error: '不支持的协议：' + protocol };
     // host/username 会写进日志头与审计日志（shell.js）：剔除控制字符，防内嵌换行注入伪造审计行
+    // 另拒绝 '-' 开头：ICMP 探测把 host 作为 ping 最后一个参数直传 spawn，'-t' 等会被当作选项
     const host = String(opts.host || '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
-    if (!host || host.length > 256) return { ok: false, error: '请填写主机地址' };
+    if (!host || host.length > 256 || host[0] === '-') return { ok: false, error: '请填写主机地址' };
     let port = parseInt(opts.port, 10);
     if (!(port > 0)) port = protocol === 'telnet' ? DEFAULTS.telnetPort : DEFAULTS.port;
     if (port < 1 || port > 65535) return { ok: false, error: '端口无效' };
@@ -778,7 +794,9 @@ class MonitorManager extends EventEmitter {
     const cmds = Array.isArray(opts.commands) ? opts.commands : [];
     const commands = [];
     for (const c of cmds) {
-      const s = String(c == null ? '' : c).trim();
+      // 与 host/username 同口径剔除控制字符：命令会写进监控审计日志（_logCmd），中段换行能在
+      // 日志里插出一行可自带时间戳的伪造记录（该注入口此前只堵了 host/username）
+      const s = String(c == null ? '' : c).replace(/[\u0000-\u001f\u007f]/g, '').trim();
       if (!s) continue;
       if (commands.length >= 64) break;
       commands.push(s.length > 512 ? s.slice(0, 512) : s);
@@ -788,7 +806,7 @@ class MonitorManager extends EventEmitter {
     {
       const ocRaw = Array.isArray(opts.onConnect) ? opts.onConnect : String(opts.onConnect == null ? '' : opts.onConnect).split(/\r?\n/);
       for (const c of ocRaw) {
-        const s = String(c == null ? '' : c).trim();
+        const s = String(c == null ? '' : c).replace(/[\u0000-\u001f\u007f]/g, '').trim(); // 同口径：防日志行注入
         if (!s) continue;
         if (onConnectCmds.length >= 16) break;
         onConnectCmds.push(s.length > 512 ? s.slice(0, 512) : s);
@@ -828,6 +846,9 @@ class MonitorManager extends EventEmitter {
       pattern = pattern.trim();
       if (!pattern) continue;
       if (pattern.indexOf('#') >= 0) { const i = pattern.indexOf('#'); note = pattern.slice(i + 1).trim(); pattern = pattern.slice(0, i).trim(); }
+      if (!pattern) continue;
+      // 命中告警时 pattern 会被拼进监控日志与系统通知，中段换行同样能伪造日志行：先剔控制字符
+      pattern = pattern.replace(/[\u0000-\u001f\u007f]/g, '');
       if (!pattern) continue;
       if (pattern.length > 256) pattern = pattern.slice(0, 256);
       // 启发式拒绝嵌套量词（如 (a+)+ / (a?)+ / (a|aa)*）：执行期另有 RegexLab 工作线程超时兜底（非完备防线）
@@ -1107,9 +1128,35 @@ class MonitorManager extends EventEmitter {
   /** 撤销某主机的信任指纹：后续连接按「首次连接」重新走 TOFU 信任流程 */
   trustRevoke(host) {
     host = String(host || '');
-    const removed = this.trusted.delete(host);
+    let removed = this.trusted.delete(host);
+    // 键可能带端口后缀（host:2222）：界面上「撤销某主机」未带端口时，连同该主机的各端口记录一并撤销
+    if (host.indexOf(':') < 0) {
+      for (const k of [...this.trusted.keys()]) {
+        if (k.startsWith(host + ':')) { this.trusted.delete(k); removed = true; }
+      }
+    }
     if (removed) this._saveTrust();
     return { ok: true, removed };
+  }
+
+  /** 无人值守采集（shell.runOneShot）的指纹裁决：与监控会话共用同一份信任库与同一套语义。
+   *  有记录且不一致 → 拒绝；无记录 → TOFU 记录后放行。返回 { ok, first }。
+   *  旧实现在 shell 侧无条件放行，等于「已钉扎主机的指纹变化被静默接受」，且攻击者指纹会被
+   *  渲染层反写成长期钉扎值——此后真实设备反而被拒。 */
+  verifyFingerprint(host, port, fp) {
+    const h = String(host == null ? '' : host).trim();
+    const f = String(fp == null ? '' : fp);
+    if (!h || !f) return { ok: false, error: '指纹信息不完整，已拒绝连接' };
+    const key = fpKeyOf(h, port);
+    const known = this.trusted.get(key);
+    if (known) {
+      // 指纹一致：放行（不重复写库）；变化：拒绝并回明确原因（由调用方转成会话失败）
+      if (known === f) return { ok: true, first: false };
+      return { ok: false, error: '主机指纹变化，可能遭到中间人攻击，已拒绝连接' };
+    }
+    this.trusted.set(key, f);
+    this._saveTrust();
+    return { ok: true, first: true };
   }
 
   /* ---------------- 拆除 ---------------- */
@@ -1517,7 +1564,8 @@ class MonitorManager extends EventEmitter {
     for (const vb of descr.varbinds) {
       const idx = vb.oid.slice(OID_IF_DESCR.length + 1);
       if (!/^\d+$/.test(idx)) continue;
-      ifs.set(idx, { i: parseInt(idx, 10), n: String(vb.value == null ? '' : vb.value).slice(0, 64) });
+      // ifDescr 为设备返回的 OCTET STRING（设备可控）：剔控制字符，防内嵌换行污染事件时间线与 AI 日报
+      ifs.set(idx, { i: parseInt(idx, 10), n: String(vb.value == null ? '' : vb.value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 64) });
     }
     if (!ifs.size) return;
     // 2. 状态 / 速率 / 计数器（各列独立 walk，ifIndex 不在_descr 表的行忽略）
@@ -1826,7 +1874,8 @@ class MonitorManager extends EventEmitter {
     // 事件携带的 host 优先：经跳板连接时目标与跳板各自独立确认，按归属主机放行/记录
     const host = String((info && info.host) || job.host);
     const fp = String(info.fp || '');
-    const known = this.trusted.get(host);
+    const key = fpKeyOf(host, info && info.port); // 键含端口：同 IP 不同端口是不同设备
+    const known = this.trusted.get(key);
     if (known) {
       if (known === fp) {
         this._logLine(job, '主机指纹一致，通过验证。');
@@ -1840,7 +1889,7 @@ class MonitorManager extends EventEmitter {
       }
     } else {
       this._logLine(job, '首次连接，已自动信任主机指纹 SHA256: ' + fp);
-      this.trusted.set(host, fp);
+      this.trusted.set(key, fp);
       this._saveTrust();
       // 首连自动信任属安全敏感事件：通知主进程弹出系统通知（后续指纹变化仍会拒连）
       this.emit('trust', { key: job.key, deviceId: job.deviceId, name: job.name, host, fp });
@@ -2077,6 +2126,11 @@ class MonitorManager extends EventEmitter {
       const fail = (err) => {
         // 连接超时/出错/指纹拒连时连接可能仍在建：主动关闭，防慢设备稍后连上时留下无人认领的会话
         try { this.shell.close(sid); } catch (e) { /* ignore */ }
+        // 必须清掉连接超时定时器：失败路径此前不清，15s 后定时器必然再调一次 fail，
+        // 于是同一轮失败被上报两次（弹两次通知），并把 backupLast.error 覆盖成与实际原因
+        // 无关的「备份连接超时」，排障方向被带偏
+        clearTimeout(connTimer);
+        if (settled) return;
         settle();
         this._finishBackup(job, gen, { ok: false, error: err });
       };
@@ -2093,12 +2147,13 @@ class MonitorManager extends EventEmitter {
           // 否则跳板先到时其指纹会被记到目标主机名下，后续连接全部「指纹变化」误拒
           const host = String((info && info.host) || job.host);
           const fp = String(info.fp || '');
-          const known = this.trusted.get(host);
+          const key = fpKeyOf(host, info && info.port); // 与监控会话同一份信任库、同一套键口径
+          const known = this.trusted.get(key);
           // 指纹拒连路径须先摘除 status 监听：shell 是共享 EventEmitter，直接 return 会让
           // 持有 job/sid 闭包的监听器残留累积（每次拒连泄漏一个）
           if (known && known !== fp) { this.shell.removeListener('status', onStatus); fail('备份连接：主机指纹变化，已拒绝连接'); return; }
           if (!known) {
-            this.trusted.set(host, fp);
+            this.trusted.set(key, fp);
             this._saveTrust();
             this.emit('trust', { key: job.key, deviceId: job.deviceId, name: job.name, host, fp });
           }

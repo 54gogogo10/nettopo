@@ -1234,6 +1234,23 @@ function upsertRestoreEntry(list, entry, cap) {
       showAiResult([{ text: '未能从回复中提取命令', err: true }], [], [{ label: '关闭', act: () => {} }]);
       return;
     }
+    // auto 模式对「破坏性命令」仍强制人工确认：终端上下文（横幅/MOTD）设备可控，可经提示注入
+    // 诱导 LLM 生成删配置/清盘类命令；直接执行无回旋余地，故命中破坏性关键词时降级为确认模式
+    if (aiMode === 'auto' && cmds.some((c) => isDestructiveCmd(c.text))) {
+      showAiResult(
+        [{ text: '检测到可能造成配置/数据丢失的命令（共 ' + cmds.length + ' 条，目标：' + target + '），已从「直接执行」降级为人工确认：', err: true }],
+        cmds,
+        [
+          { label: '执行全部', act: async () => {
+              const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
+              toast('已下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」');
+            } },
+          { label: '复制全部', act: () => { try { window.topoShell.copyText(cmds.map((c) => c.text).join('\n')); toast('命令已复制'); } catch (e) { /* ignore */ } } },
+          { label: '放弃', act: () => {} }
+        ]
+      );
+      return;
+    }
     if (aiMode === 'auto') {
       const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
       showAiResult([{ text: '已直接下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」（模式：直接执行）' }], cmds, [{ label: '关闭', act: () => {} }]);
@@ -1283,7 +1300,7 @@ function upsertRestoreEntry(list, entry, cap) {
     }
     ctxEl.innerHTML = items.map(it => it.sep
       ? '<div class="d-sep"></div>'
-      : `<button class="ci" ${it.disabled ? 'disabled' : ''}>${it.label}</button>`).join('');
+      : `<button class="ci" ${it.disabled ? 'disabled' : ''}>${escAttr(it.label)}</button>`).join('');
     ctxEl.classList.remove('hidden');
     const r = ctxEl.getBoundingClientRect();
     ctxEl.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 6)) + 'px';
@@ -1548,14 +1565,22 @@ function upsertRestoreEntry(list, entry, cap) {
   /* ---- 快速命令面板（Ctrl+P）：快捷按钮 / 连接书签 / 历史命令，模糊搜索回车执行 ---- */
   const CMDH_KEY = 'topoShellCmdHistory';
   const CMDH_CAP = 60;
+  // 凭据类命令不持久化：命令历史明文写 shell 窗 localStorage（Electron 下为 userData 明文 leveldb），
+  // 群发/AI/快捷按钮下发的 `password xxx` / `snmp-server community xxx` / `tacacs key xxx` 等会以明文长期驻留磁盘
+  const SENSITIVE_CMD_RE = /(?:^|[\s;"'])(?:password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key)[\s:=]+\S/i;
+  const isSensitiveCmd = (text) => SENSITIVE_CMD_RE.test(String(text == null ? '' : text));
+  // 破坏性命令（删配置/清盘/重启/格式化）：auto 模式命中时降级为人工确认。
+  // 启发式宁可多拦（多一次确认无损失），覆盖常见网络设备高危动词
+  const DESTRUCTIVE_CMD_RE = /(?:^|[\s;"'|&])(?:erase|format|delete|reset|undo\s+all|reload|reboot|shutdown|factory-?reset|write\s+erase|no\s+(?:interface|vlan|ip\s+route|router\s+\w+))(?:\s|$)/i;
+  const isDestructiveCmd = (text) => DESTRUCTIVE_CMD_RE.test(String(text == null ? '' : text));
   let cmdHistory = (() => {
     try {
       const a = JSON.parse(localStorage.getItem(CMDH_KEY) || '[]');
-      return Array.isArray(a) ? a.filter(x => x && typeof x.text === 'string' && x.text).slice(0, CMDH_CAP) : [];
+      return Array.isArray(a) ? a.filter(x => x && typeof x.text === 'string' && x.text && !isSensitiveCmd(x.text)).slice(0, CMDH_CAP) : [];
     } catch (e) { return []; }
   })();
   const saveCmdHistory = () => { try { localStorage.setItem(CMDH_KEY, JSON.stringify(cmdHistory)); } catch (e) { /* ignore */ } };
-  const recordCmd = (text) => { cmdHistory = mergeCmdHistory(cmdHistory, text, CMDH_CAP); saveCmdHistory(); };
+  const recordCmd = (text) => { if (isSensitiveCmd(text)) return; cmdHistory = mergeCmdHistory(cmdHistory, text, CMDH_CAP); saveCmdHistory(); };
   const palEl = $('#shPal'), palInputEl = $('#shPalInput'), palListEl = $('#shPalList');
   let palItems = [], palSel = 0;
   /** 发送原始文本到当前会话（面板「命令」项执行入口，与快捷按钮同通道） */

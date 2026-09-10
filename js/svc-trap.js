@@ -19,6 +19,12 @@ const MAX_RING = 1000;               // 环形缓冲条数
 const TAIL_MAX = 300;                // 单次返回条数上限
 const MAX_VARBINS = 64;              // 单包解析 varbind 数上限（防畸形包撑爆内存）
 const MAX_TEXT = 300;                // 单值/汇总文本长度上限
+const MAX_OID_LEN = 256;             // OID 文本上限（正常 OID 远小于此；超长 body 不得放大为巨串）
+const MAX_OID_ARCS = 128;            // OID 子标识符个数上限
+const MAX_SUMMARY = 800;             // 单条汇总 varbind 文本上限
+const MAX_HOST_DIRS = 1024;          // 来源目录数上限（来源 IP 可伪造，防 UDP 洪泛撑爆目录项；与 syslog 同口径）
+const MAX_NEW_DIRS_PER_MIN = 60;     // 每分钟新建来源目录数上限（名额可 LRU 回收后仍需限住目录洪流速率）
+const WRITE_BACKLOG_LIMIT = 8 * 1024 * 1024; // 单写流积压上限（慢盘下防用户态缓冲无界增长）
 const UPTIME_OID = '1.3.6.1.2.1.1.3.0';        // sysUpTime.0
 const TRAPOID_OID = '1.3.6.1.6.3.1.1.4.1.0';   // snmpTrapOID.0（v2c 首 varbind 约定）
 const TRAP_BASE = '1.3.6.1.6.3.1.1.5.';        // 标准 Trap 前缀（.1 coldStart … .6 egpNeighborLoss）
@@ -56,9 +62,11 @@ function decodeOid(b) {
   let v = 0;
   for (let i = 1; i < b.length; i++) {
     v = (v << 7) | (b[i] & 0x7f);
-    if (!(b[i] & 0x80)) { arr.push(v); v = 0; }
+    if (!(b[i] & 0x80)) { arr.push(v); v = 0; if (arr.length >= MAX_OID_ARCS) break; }
   }
-  return arr.join('.');
+  let s = arr.join('.');
+  if (s.length > MAX_OID_LEN) s = s.slice(0, MAX_OID_LEN) + '…';
+  return s;
 }
 
 function readUInt(b) {
@@ -73,6 +81,12 @@ function cleanText(s) {
     .trim();
   if (t.length > MAX_TEXT) t = t.slice(0, MAX_TEXT) + '…';
   return t;
+}
+
+/** varbind 列表 → 单行汇总文本（限量 8 条 + 总长截断，防超长 OID/值在环形缓冲与归档中放大） */
+function summarize(vbs) {
+  const s = (vbs || []).slice(0, 8).map(v => v.oid + '=' + v.value).join(' ');
+  return s.length > MAX_SUMMARY ? s.slice(0, MAX_SUMMARY) + '…' : s;
 }
 
 /** 按 ASN.1 应用类型解码 varbind 值 → 可读文本 */
@@ -256,6 +270,10 @@ class TrapServer extends EventEmitter {
     this.maxPerSec = Math.max(5, Math.floor(Number(opts.maxPerSec) || 100));
     // SNMP v3 USM 接收用户（最多 8 个）：v3 Trap 按包内用户名匹配后验签/解密，未匹配或验签失败丢弃计数
     this.v3Users = (Array.isArray(opts.v3Users) ? opts.v3Users : []).map(x => normalizeV3User(x)).filter(Boolean).slice(0, 8);
+    // v1/v2c 团体字白名单（可选，逗号分隔）：非空时 community 不符即丢弃。
+    // v1/v2c 无源认证，任意 LAN 主机可伪造 linkDown 等告警并冒充真实设备——配置白名单可挡（空=收全部，兼容既有部署）
+    this.communities = (Array.isArray(opts.communities) ? opts.communities : String(opts.communities || '').split(','))
+      .map(x => String(x == null ? '' : x).trim()).filter(Boolean).slice(0, 16);
     this.ringMax = Math.max(50, Math.floor(Number(opts.ringMax) || MAX_RING));
     this.udp = null;
     this.port = 0;
@@ -264,8 +282,16 @@ class TrapServer extends EventEmitter {
     this.ring = [];
     this.seq = 0;
     this.streams = new Map();  // 'ip\x00date' -> WriteStream
+    // 已落盘来源目录名缓存（Set，**插入序即 LRU 序**；null=惰性，首条落盘时从磁盘初始化）；
+    // 满员时逐出队首而非永久丢弃——见 _writeEntry 的双闸说明
+    this.hostDirs = null;
+    this._newDirWinStart = 0;
+    this._newDirWinCount = 0;
+    // 目录回收静默期（与 syslog 同口径）：名额满时回收「无活跃写流且已静默」的来源目录，
+    // 使目录总量在伪造源 IP 洪流下有界；回收计数进 stats.dirsRecycled，不做无声删除
+    this.hostDirReclaimMs = Math.max(60000, Math.floor(Number(opts.hostDirReclaimMs) || 30 * 60000));
     this.lastDay = '';
-    this.stats = { rxPackets: 0, malformed: 0, dropped: 0, v3Unknown: 0, v3AuthFail: 0 };
+    this.stats = { rxPackets: 0, malformed: 0, dropped: 0, v3Unknown: 0, v3AuthFail: 0, communityReject: 0, diskDropped: 0, dirsRecycled: 0, hostsOverCap: 0 };
     this._winStart = 0;
     this._winCount = 0;
     try { fs.mkdirSync(this.baseDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
@@ -325,8 +351,10 @@ class TrapServer extends EventEmitter {
       if (r.isV3) { this._ingestV3(buf, peer); return; }
       this.stats.malformed++; return;
     }
+    // v1/v2c 团体字白名单：配置后 community 不符即丢弃（无认证协议的唯一源过滤手段）
+    if (this.communities.length && !this.communities.includes(r.community)) { this.stats.communityReject++; return; }
     if (r.inform) { r._peerAddr = String(peer || '').replace(/^::ffff:/, ''); r._peerPort = peerPort; this._answerInform(r); }
-    const summary = (r.varbinds || []).slice(0, 8).map(v => v.oid + '=' + v.value).join(' ');
+    const summary = summarize(r.varbinds);
     const ent = {
       seq: ++this.seq,
       ts: now,
@@ -386,7 +414,7 @@ class TrapServer extends EventEmitter {
       else rest.push(vb);
     }
     const tn = trapNameOf(trapOid);
-    const summary = rest.slice(0, 8).map(v => v.oid + '=' + v.value).join(' ');
+    const summary = summarize(rest);
     const ent = {
       seq: ++this.seq,
       ts: Date.now(),
@@ -449,8 +477,35 @@ class TrapServer extends EventEmitter {
     const key = hostDir + '\x00' + day;
     let st = this.streams.get(key);
     if (!st) {
+      // 来源目录数封顶：来源 IP 可伪造，UDP 洪泛下每条换一个伪 IP 会持续新建目录耗尽目录项。
+      // 与 syslog 同口径的「LRU 名额 + 新建限速」双闸：满员逐出最久未写的来源（只回收内存名额、
+      // 不删日志），保证真实来源永远拿得到名额；新目录单独限速以防名额回收后仍被目录洪流打满。
+      if (this.hostDirs === null) {
+        this.hostDirs = new Set();
+        try {
+          for (const h of fs.readdirSync(base)) {
+            try { if (fs.lstatSync(path.join(base, h)).isDirectory()) this.hostDirs.add(h); } catch (e2) { /* ignore */ }
+          }
+        } catch (e) { /* ignore */ }
+      }
+      const known = this.hostDirs.has(hostDir);
+      if (known || this.hostDirs.size < MAX_HOST_DIRS) {
+        if (known) {
+          this.hostDirs.delete(hostDir); this.hostDirs.add(hostDir); // 命中即移到队尾（LRU）
+        } else {
+          const nowMs = Date.now();
+          if (nowMs - this._newDirWinStart >= 60000) { this._newDirWinStart = nowMs; this._newDirWinCount = 0; }
+          if (++this._newDirWinCount > MAX_NEW_DIRS_PER_MIN) { this.stats.diskDropped++; return; }
+          this.hostDirs.add(hostDir);
+        }
+      } else {
+        // 满员：回收「最久未写且已静默」的来源目录（攻击者自造的目录会被自己的洪流优先回收）；
+        // 找不到可回收目标时仍放行写入，绝不永久饿死新来源，并计入 hostsOverCap
+        if (!this._reclaimHostDir(base)) this.stats.hostsOverCap++;
+        this.hostDirs.add(hostDir);
+      }
       try {
-        try { if (fs.lstatSync(dir).isSymbolicLink()) return; } catch (e2) { /* 不存在则照常创建 */ }
+        try { if (fs.lstatSync(dir).isSymbolicLink()) { this.stats.diskDropped++; return; } } catch (e2) { /* 不存在则照常创建 */ }
         fs.mkdirSync(dir, { recursive: true });
         st = fs.createWriteStream(path.join(dir, day + '.log'), { flags: 'a' });
         st.on('error', () => { this.streams.delete(key); });
@@ -459,14 +514,49 @@ class TrapServer extends EventEmitter {
           const keys = [...this.streams.keys()].slice(0, 32);
           for (const k of keys) { const old = this.streams.get(k); this.streams.delete(k); try { old.end(); } catch (e) { /* ignore */ } }
         }
-      } catch (e) { return; }
+      } catch (e) { this.stats.diskDropped++; return; }
     }
     const line = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
       + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) + '.' + pad3(d.getMilliseconds())
       + ' [' + ent.version + '] community=' + (ent.community || '-') + ' uptime=' + (ent.uptime || '-')
       + ' trap=' + ent.trap + ' oid=' + (ent.oid || '-')
       + (ent.msg ? ' ' + ent.msg : '');
-    try { st.write(line + '\n'); } catch (e) { /* ignore */ }
+    // 写流背压：写不动时丢弃本条并计数（环形缓冲与实时推送不受影响），积压过高直接重建该流
+    try {
+      if (!st.write(line + '\n')) {
+        this.stats.diskDropped++;
+        if (st.writableLength > WRITE_BACKLOG_LIMIT) { this.streams.delete(key); try { st.destroy(); } catch (e) { /* ignore */ } }
+      }
+    } catch (e) { this.stats.diskDropped++; }
+  }
+
+  /** 名额满时回收一个「已静默」的来源目录（按 LRU 序尝试；条件与 syslog 同口径）：
+   *  无活跃写流 + 目录内无符号链接 + 最新文件 mtime 早于 hostDirReclaimMs。成功返回目录名。 */
+  _reclaimHostDir(base) {
+    if (!this.hostDirs) return null;
+    const nowMs = Date.now();
+    for (const h of this.hostDirs) {
+      let active = false;
+      for (const k of this.streams.keys()) { if (k.slice(0, k.indexOf('\x00')) === h) { active = true; break; } }
+      if (active) continue;
+      const hd = path.join(base, h);
+      if (!hd.startsWith(base + path.sep)) continue; // 纵深：只动库内目录
+      let newest = 0, ok = true;
+      try {
+        for (const f of fs.readdirSync(hd)) {
+          const fst = fs.lstatSync(path.join(hd, f));
+          if (fst.isSymbolicLink()) { ok = false; break; }
+          if (fst.mtimeMs > newest) newest = fst.mtimeMs;
+        }
+      } catch (e) { ok = false; }
+      if (!ok) continue;
+      if (nowMs - newest < this.hostDirReclaimMs) continue;
+      try { fs.rmSync(hd, { recursive: true, force: true }); } catch (e) { continue; }
+      this.hostDirs.delete(h);
+      this.stats.dirsRecycled++;
+      return h;
+    }
+    return null;
   }
 
   /** 删除超过 keepDays 天的日期文件（按文件名日期判定，与 syslog 同口径） */
@@ -488,6 +578,14 @@ class TrapServer extends EventEmitter {
           const t = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
           if (Number.isFinite(t) && t < cutoff) { try { fs.unlinkSync(full); } catch (e) { /* ignore */ } }
         }
+        // 清理过期日志后顺手删掉空来源目录（rmdir 仅在目录为空时成功）；有活跃写流的来源跳过
+        let streaming = false;
+        for (const k of this.streams.keys()) { if (k.slice(0, k.indexOf('\x00')) === host) { streaming = true; break; } }
+        if (!streaming) {
+          try { fs.rmdirSync(hd); if (this.hostDirs) this.hostDirs.delete(host); } catch (e) { /* 非空：忽略 */ }
+        }
+        // 目录已在外部被删除时同步剔除内存名额，否则名额被幽灵条目永久占用
+        try { if (!fs.existsSync(hd) && this.hostDirs) this.hostDirs.delete(host); } catch (e) { /* ignore */ }
       }
     } catch (e) { /* ignore */ }
   }
@@ -502,8 +600,11 @@ class TrapServer extends EventEmitter {
   status() {
     return {
       running: this.running, port: this.port, error: this.lastError,
-      rxPackets: this.stats.rxPackets, malformed: this.stats.malformed, dropped: this.stats.dropped, buffered: this.ring.length,
-      v3Users: this.v3Users.length, v3Unknown: this.stats.v3Unknown, v3AuthFail: this.stats.v3AuthFail
+      rxPackets: this.stats.rxPackets, malformed: this.stats.malformed, dropped: this.stats.dropped,
+      diskDropped: this.stats.diskDropped, dirsRecycled: this.stats.dirsRecycled,
+      hostsOverCap: this.stats.hostsOverCap, hosts: this.hostDirs ? this.hostDirs.size : 0, buffered: this.ring.length,
+      v3Users: this.v3Users.length, v3Unknown: this.stats.v3Unknown, v3AuthFail: this.stats.v3AuthFail,
+      communityGuard: this.communities.length > 0, communityReject: this.stats.communityReject
     };
   }
 }

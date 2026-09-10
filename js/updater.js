@@ -65,14 +65,27 @@ function pickAssets(release, platform) {
   const assets = (release && Array.isArray(release.assets)) ? release.assets : [];
   const isExe = (n) => /-portable\.exe$/i.test(n) || (platform === 'win32' && /\.exe$/i.test(n));
   const isAppImage = (n) => /\.AppImage$/i.test(n);
+  // Release 里可能同时挂有历史版本产物（dist/portable 未清理时整目录上传，见 gen-checksums 的清单生成）：
+  // 只按「第一个 -portable.exe」挑会选中旧包，而它的同名 .sha256 天然匹配 → 用户「升级」到旧版本且校验通过。
+  // 因此优先挑文件名含 Release tag 版本号的资产（tag 与当前版本已由 check() 做过严格更新比对）。
+  const tagVer = String((release && (release.tag_name || release.name)) || '').replace(/^v/i, '');
   let exe = null;
   for (const a of assets) {
     const n = String((a && a.name) || '');
     if (!a || !n || !a.browser_download_url || !a.size) continue;
     if (platform === 'win32' && isExe(n)) {
-      if (!exe || (/-portable\.exe$/i.test(n) && !/-portable\.exe$/i.test(exe.name))) exe = a; // 便携版优先
+      const nPortable = /-portable\.exe$/i.test(n);
+      const nTag = !!tagVer && n.indexOf(tagVer) >= 0;
+      if (!exe) { exe = a; continue; }
+      const ePortable = /-portable\.exe$/i.test(exe.name);
+      const eTag = !!tagVer && String(exe.name).indexOf(tagVer) >= 0;
+      // 优先「版本与 tag 一致」，其次「便携版优先」；两者都相同则保持先到者
+      if ((nTag && !eTag) || (nTag === eTag && nPortable && !ePortable)) exe = a;
     } else if (platform === 'linux' && isAppImage(n)) {
-      if (!exe) exe = a;
+      const nTag = !!tagVer && n.indexOf(tagVer) >= 0;
+      if (!exe) { exe = a; continue; }
+      const eTag = !!tagVer && String(exe.name).indexOf(tagVer) >= 0;
+      if (nTag && !eTag) exe = a;
     }
   }
   if (!exe) return null;
