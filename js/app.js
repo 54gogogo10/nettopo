@@ -7317,20 +7317,9 @@ function openMonitorCenter() {
   /* ---------- 接口流量页（SNMP ifTable 采集：最新采样表 + 采样历史趋势线） ---------- */
   let curIfDev = null;                       // 当前查看的任务 key（deviceId@host）
   const ifCache = new Map();                 // key -> 采样历史数组
-  const fmtBps = (v) => {
-    if (v == null) return '—';
-    if (v >= 1e9) return (v / 1e9).toFixed(2) + ' Gbps';
-    if (v >= 1e6) return (v / 1e6).toFixed(1) + ' Mbps';
-    if (v >= 1e3) return (v / 1e3).toFixed(1) + ' Kbps';
-    return Math.round(v) + ' bps';
-  };
-  const fmtSpeed = (bps) => {
-    if (!bps) return '—';
-    if (bps >= 1e9) return (bps / 1e9) + ' G';
-    if (bps >= 1e6) return (bps / 1e6) + ' M';
-    if (bps >= 1e3) return (bps / 1e3) + ' K';
-    return String(bps);
-  };
+  // 直接复用 U.fmtBps / U.fmtSpeed（js/util.js，纯函数已单测）：旧实现在此处直除，
+  // 标称 4.29Gbps 的哨兵值会显示成「4.294967295 G」
+  const fmtBps = U.fmtBps, fmtSpeed = U.fmtSpeed;
   const spark = (vals, color) => {
     const w = 108, h = 20;
     const max = Math.max(1, ...vals.filter(v => v != null));
@@ -7364,6 +7353,8 @@ function openMonitorCenter() {
     if (!last || !last.ifs || !last.ifs.length) {
       rowsHtml = '<div class="mc-empty">正在等待第一次采样（SNMP 轮询约每 60 秒一次）…</div>';
     } else {
+      // 只有 ≥2 次采样才有趋势可看：否则趋势列会白占最宽的 flex 并把接口名挤成「e...」
+      const showSpark = hist.length >= 2;
       // 排序：down 接口置顶，其余按当前收发流量降序
       const rows = last.ifs.map(s => {
         const series = hist.map(sm => {
@@ -7382,19 +7373,24 @@ function openMonitorCenter() {
           ? '<b class="t-ok">UP</b>'
           : (s.oper === 'down' ? '<b class="t-off">DOWN</b>' : '<span class="t-mut">其他</span>');
         const util = s.speed && s.out != null ? ' (' + Math.min(100, Math.round(s.out / s.speed * 100)) + '%)' : '';
+        // 速率缺失（首采样尚无计数器差值）用弱化样式 + 悬停说明，别只丢一个「↓ —」让人猜
+        const rate = (arrow, v) => '<span class="mc-if-rate' + (v == null ? ' mc-none' : '') + '"'
+          + (v == null ? ' title="首次采样只建立计数器基线，收发速率需第二次采样后才有值"' : '') + '>'
+          + arrow + ' ' + fmtBps(v) + '</span>';
         return '<div class="mc-if-row">'
           + '<span class="mc-if-nm" title="' + U.escHtml(s.n) + '">' + U.escHtml(s.n) + '</span>'
           + '<span class="mc-if-op">' + oper + '</span>'
-          + '<span class="mc-if-rate">↓ ' + fmtBps(s.in) + '</span>'
-          + '<span class="mc-if-rate">↑ ' + fmtBps(s.out) + '</span>'
-          + '<span class="mc-if-spd">' + fmtSpeed(s.speed) + util + '</span>'
-          + '<span class="mc-if-spark">' + spark(series.map(f => f && f.in), '#0ea5e9') + spark(series.map(f => f && f.out), '#f59e0b') + '</span>'
+          + rate('↓', s.in) + rate('↑', s.out)
+          + '<span class="mc-if-spd" title="标称带宽（ifSpeed；≥4.29Gbps 链路按 ifHighSpeed 换算）">' + fmtSpeed(s.speed) + util + '</span>'
+          + (showSpark ? '<span class="mc-if-spark">' + spark(series.map(f => f && f.in), '#0ea5e9') + spark(series.map(f => f && f.out), '#f59e0b') + '</span>' : '')
           + '</div>';
       }).join('');
-      rowsHtml = '<div class="mc-if-head"><span>接口</span><span>状态</span><span>入流量</span><span>出流量</span><span>带宽</span><span>近 ' + hist.length + ' 次采样</span></div>' + rowsHtml;
+      rowsHtml = '<div class="mc-if-head"><span>接口</span><span>状态</span><span>入流量</span><span>出流量</span><span>带宽</span>'
+        + (showSpark ? '<span>近 ' + hist.length + ' 次采样</span>' : '') + '</div>' + rowsHtml;
     }
     el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
-      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · 采样间隔约 60 秒 · ↓入 ↑出（设备视角），接口 DOWN 记入事件时间线</div>'
+      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · 采样间隔约 60 秒 · ↓入 ↑出（设备视角），接口 DOWN 记入事件时间线'
+      + (hist.length < 2 ? ' · 首次采样已就绪：收发速率与趋势线需第二次采样后显示' : '') + '</div>'
       + '<div class="mc-if-body">' + rowsHtml + '</div>';
     el.querySelectorAll('.mc-ifdev').forEach(ch => {
       ch.onclick = () => { curIfDev = ch.dataset.key; ifCache.delete(curIfDev); load(); };

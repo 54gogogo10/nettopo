@@ -1045,11 +1045,13 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
   font-size: 12px; border-bottom: 1px solid var(--panel2);
 }
 .mc-if-head { color: var(--muted); font-size: 11px; font-weight: 600; border-bottom: 1px solid var(--border); }
-.mc-if-head span:nth-child(1), .mc-if-nm { flex: 1.6; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-if-head span:nth-child(1), .mc-if-nm { flex: 1.8; min-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-if-head span:nth-child(2), .mc-if-op { flex: 0.6; }
 .mc-if-head span:nth-child(3), .mc-if-head span:nth-child(4), .mc-if-rate { flex: 1; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .mc-if-head span:nth-child(5), .mc-if-spd { flex: 0.8; white-space: nowrap; color: var(--muted); }
-.mc-if-head span:nth-child(6), .mc-if-spark { flex: 2; display: flex; gap: 4px; justify-content: flex-end; }
+.mc-if-head span:nth-child(6), .mc-if-spark { flex: 1.4; min-width: 0; display: flex; gap: 4px; justify-content: flex-end; }
+/* 首采样尚无计数器差值：速率列弱化显示（旧实现只有「↓ —」，看不出是还没采到还是设备不支持） */
+.mc-if-rate.mc-none { color: var(--muted); }
 .mc-if-op .t-ok { color: #16a34a; font-weight: 600; }
 .mc-if-op .t-off { color: #ef4444; font-weight: 600; }
 .mc-if-op .t-mut { color: var(--muted); }

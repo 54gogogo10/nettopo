@@ -107,6 +107,10 @@ const OID_SYSUPTIME = '1.3.6.1.2.1.1.3.0'; // TimeTicks（1/100 秒），骤减�
 /* ifTable（MIB-2 interfaces）：接口名/速率/状态/收发字节计数（64 位优先，32 位兜底） */
 const OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2';
 const OID_IF_SPEED = '1.3.6.1.2.1.2.2.1.5'; // ifSpeed（bps）；.7 是 ifAdminStatus（1/2/3 枚举），勿混用
+// ifHighSpeed（Mbps）：RFC 3635/2863 规定 ifSpeed 上限 4294967295，标称速率 ≥4.29Gbps 的链路一律
+// 报该哨兵值（界面上就成了「4.294967295 G」这种既不好看也不准确的显示），真实速率在 ifHighSpeed
+const OID_IF_HIGHSPEED = '1.3.6.1.2.1.31.1.1.1.15';
+const IF_SPEED_SENTINEL = 4294967295;
 const OID_IF_OPER = '1.3.6.1.2.1.2.2.1.8';
 const OID_IF_IN32 = '1.3.6.1.2.1.2.2.1.10';
 const OID_IF_OUT32 = '1.3.6.1.2.1.2.2.1.16';
@@ -1619,7 +1623,15 @@ class MonitorManager extends EventEmitter {
       }
     };
     await merge(OID_IF_OPER, (o, v) => { o.oper = v === 1 ? 'up' : (v === 2 ? 'down' : 'other'); });
+    await merge(OID_IF_HIGHSPEED, (o, v) => { o.high = Number(v) || 0; }); // Mbps，先取以备哨兵换算
     await merge(OID_IF_SPEED, (o, v) => { o.speed = Number(v) || 0; });
+    // 标称速率换算：ifSpeed 为 0 或哨兵 4294967295 时改用 ifHighSpeed×1e6。
+    // 注意 lo 之类接口可能只报 ifSpeed=10M 而 ifHighSpeed=0，故只在「不可用」时替换，不做无条件覆盖
+    for (const o of ifs.values()) {
+      // 哨兵判等、不可用判 >=：换算后的 10Gbps 是 1e10，比哨兵还大，不能再用「>= 哨兵」当不可用
+      const unusable = !(o.speed > 0) || o.speed >= IF_SPEED_SENTINEL;
+      if (unusable) o.speed = o.high > 0 ? o.high * 1e6 : 0; // 两个都取不到：宁可不显示，也不把哨兵当 4.29G
+    }
     // 64 位计数器优先（ifHCIn/OutOctets），设备不支持（走完无数据）时回退 32 位
     let inCol = await snmpWalk(OID_IF_HCIN, host, target, 3000, port);
     let inRoot = OID_IF_HCIN;

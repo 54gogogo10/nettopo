@@ -70,6 +70,30 @@ U.truncate = (s, n) => {
 
 U.clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
+/* ---------- 带宽 / 速率显示（监控中心「接口流量」与「性能」页共用；纯函数可单测） ---------- */
+/** 小数位收敛并去掉无意义的尾随 0：4.294967295 → 4.29，10.0 → 10 */
+const fmtNum = (n, d) => String(Number(Number(n).toFixed(d)));
+/** 标称带宽 → 紧凑字符串。RFC 3635/2863：ifSpeed 上限 4294967295，≥4.29Gbps 的链路一律报该哨兵值
+ *  （直除会显示成「4.294967295 G」，既难看也不准确）；采集侧已尽量换成 ifHighSpeed，这里再兜一层。 */
+U.fmtSpeed = (bps) => {
+  const v = Number(bps);
+  if (!Number.isFinite(v) || v <= 0) return '—';
+  if (Math.round(v) === 4294967295) return '≥4.29 G'; // 精确等哨兵（32 位 gauge 上限）；10Gbps=1e10 不该命中
+  if (v >= 1e9) return fmtNum(v / 1e9, 2) + ' G';
+  if (v >= 1e6) return fmtNum(v / 1e6, 1) + ' M';
+  if (v >= 1e3) return fmtNum(v / 1e3, 1) + ' K';
+  return Math.round(v) + ' bps';
+};
+/** 实时速率（bps） → 紧凑字符串；无数据返回「—」（首采样尚未有差值时即为此） */
+U.fmtBps = (v) => {
+  const n = Number(v);
+  if (v == null || !Number.isFinite(n) || n < 0) return '—';
+  if (n >= 1e9) return fmtNum(n / 1e9, 2) + ' Gbps';
+  if (n >= 1e6) return fmtNum(n / 1e6, 1) + ' Mbps';
+  if (n >= 1e3) return fmtNum(n / 1e3, 1) + ' Kbps';
+  return Math.round(n) + ' bps';
+};
+
 U.fmtSize = (n) => {
   n = Number(n) || 0;
   if (n < 1024) return n + ' B';

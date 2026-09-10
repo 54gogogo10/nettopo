@@ -6624,6 +6624,26 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(memPctOf('totalavail', 100, 40) === 60, '内存换算：(总量−可用)/总量（Linux UCD）');
       ok(memPctOf('usedfree', 30, NaN) === null && memPctOf('totalavail', 0, 0) === null, '内存换算：free 缺失/总量为 0 → null');
     }
+    // ================= 接口流量显示：带宽/速率格式化（本轮修复） ================= 
+    {
+      // 标称带宽：RFC 3635 哨兵 4294967295（≥4.29Gbps）必须与「换算后的真实速率」区分开——
+      // 换算后的 10Gbps 是 1e10，比哨兵还大，用「>= 哨兵」判定会把它误清成 0（本轮实际踩过这个坑）
+      eq(U.fmtSpeed(4294967295), '≥4.29 G', '带宽：哨兵值 4294967295 显示为 ≥4.29 G');
+      eq(U.fmtSpeed(1e10), '10 G', '带宽：换算后的 10Gbps（1e10）不得被当成哨兵');
+      eq(U.fmtSpeed(10000000), '10 M', '带宽：10000000 bps → 10 M（无尾随 0）');
+      eq(U.fmtSpeed(1e9), '1 G', '带宽：1e9 → 1 G（不显示 1.00 G）');
+      eq(U.fmtSpeed(4294967296), '4.29 G', '带宽：哨兵是精确值——略大于它的合法值按实际值显示（不误判为哨兵）');
+      eq(U.fmtSpeed(0), '—', '带宽：0 → —（不显示 0 bps 这种误导值）');
+      eq(U.fmtSpeed(null), '—', '带宽：null → —');
+      eq(U.fmtSpeed(NaN), '—', '带宽：NaN → —');
+      // 实时速率：无数据显示「—」（首采样只建立计数器基线），有值按 K/M/Gbps 收敛
+      eq(U.fmtBps(null), '—', '速率：null → —（首采样尚无差值）');
+      eq(U.fmtBps(undefined), '—', '速率：undefined → —');
+      eq(U.fmtBps(0), '0 bps', '速率：0 是有效值（接口确实没流量）');
+      eq(U.fmtBps(9800), '9.8 Kbps', '速率：9800 bps → 9.8 Kbps');
+      eq(U.fmtBps(1500000000), '1.5 Gbps', '速率：1.5e9 → 1.5 Gbps');
+      eq(U.fmtBps(4294967295), '4.29 Gbps', '速率：计数器差值不适用哨兵语义（按实际速率显示）');
+    }
 })().then(() => {
   console.log('');
   console.log(`结果：${pass} 通过，${fail} 失败` + (skipped ? `，${skipped} 跳过（本机缺 python 依赖，未真正校验）` : ''));
