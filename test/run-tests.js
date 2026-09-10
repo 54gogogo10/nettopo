@@ -35,6 +35,17 @@ const dieReport = (kind, err) => {
 };
 process.on('uncaughtException', (err) => dieReport('未捕获异常', err));
 process.on('unhandledRejection', (reason) => dieReport('未处理的 Promise 拒绝', reason));
+// 静默截断看门狗：某个 await 永远不落定（如连到端口 0 的 socket 出错被吞、promise 悬空）时，
+// 事件循环会变空 → Node 直接以 **0** 退出，套件在跑到结论行之前就结束——「0 退出码」会把
+// 这种情况伪装成全绿。beforeExit 里检测并置非零退出码 + 打印最后输出，让截断变得可见。
+let suiteFinished = false;
+process.on('beforeExit', () => {
+  if (suiteFinished) return;
+  console.log('');
+  console.log('！！测试在跑到结论行之前就结束了（多半是某个 Promise 永不落定导致事件循环变空）！！');
+  console.log('  最后输出：' + lastLine);
+  process.exitCode = 1;
+});
 const ok = (cond, name) => {
   if (cond) { pass++; console.log('  ✓ ' + name); }
   else { fail++; console.log('  ✗ ' + name); }
@@ -6153,12 +6164,18 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       // 必须校验启动结果并重试：start 失败时 srv6.port 仍是 0，直接 net.connect(0) 会抛未捕获
       // 'error'（EADDRNOTAVAIL）终结整个测试进程（历史上表现为「随机 1/3 概率整套挂掉」）
       let srv6 = null, st6 = null;
+      const startErrs = [];
       for (let i = 0; i < 10 && !(st6 && st6.ok); i++) {
         if (i) await waitMsR7(60 * i);
         srv6 = new SyslogServer({ baseDir: tmpR7d('sl6') });
         st6 = await srv6.start(0, true);
+        if (!st6.ok) startErrs.push(String((srv6 && srv6.lastError) || '?')); // 逐次留痕：复发时能看出是同一原因还是多种
       }
-      ok(st6.ok && srv6.port > 0, 'Syslog UDP+TCP 启动成功（含重试；失败时不得拿 port=0 去连接）');
+      ok(st6.ok && srv6.port > 0, 'Syslog UDP+TCP 启动成功（含重试；失败时不得拿 port=0 去连接）'
+        + (st6 && st6.ok ? '' : '：10 次失败原因 ' + JSON.stringify(startErrs.slice(0, 3))));
+      // 起不来就抛出：原先带着 port=0 继续 net.connect，会让 promise 悬空、事件循环变空、
+      // 整个套件**以 0 退出码静默截断**（比崩溃更隐蔽）；抛出则由外层 catch 以非零码响亮失败
+      if (!st6.ok || !(srv6.port > 0)) throw new Error('Syslog（sl6）10 次重试仍未启动：' + ((srv6 && srv6.lastError) || '未知原因'));
       const ents6 = [];
       srv6.on('message', (e) => ents6.push(e));
       const cs6 = netX.connect(srv6.port, '127.0.0.1');
@@ -6645,6 +6662,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(U.fmtBps(4294967295), '4.29 Gbps', '速率：计数器差值不适用哨兵语义（按实际速率显示）');
     }
 })().then(() => {
+  suiteFinished = true;
   console.log('');
   console.log(`结果：${pass} 通过，${fail} 失败` + (skipped ? `，${skipped} 跳过（本机缺 python 依赖，未真正校验）` : ''));
   process.exit(fail ? 1 : 0);
