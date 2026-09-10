@@ -7463,10 +7463,13 @@ function openMonitorCenter() {
     const lastJob = (jobs || []).find(j => j.key === cur.key) || {};
     const last = hist[hist.length - 1] || (lastJob.lastPerf ? { cpu: lastJob.lastPerf.cpu, mem: lastJob.lastPerf.mem, up: lastJob.lastPerf.up } : null);
     const mlast = mhist.length ? mhist[mhist.length - 1] : null;
+    // 趋势列只在真有 ≥2 次采样时渲染：否则它白占最宽的 flex，行里也只剩一个空格子
+    const maxSamples = Math.max(hist.length, mhist.length, (hrec && hrec.hist || []).length);
+    const showSpark = maxSamples >= 2;
     const perfRow = (name, value, sparkHtml) => '<div class="mc-if-row">'
       + '<span class="mc-if-nm">' + name + '</span>'
       + '<span class="mc-if-rate">' + value + '</span>'
-      + '<span class="mc-if-spark">' + (sparkHtml || '') + '</span>'
+      + (showSpark ? '<span class="mc-if-spark">' + (sparkHtml || '') + '</span>' : '')
       + '</div>';
     let rowsHtml = '';
     if (!hist.length && !last && !mlast && !(hrec && hrec.hist && hrec.hist.length)) {
@@ -7479,7 +7482,8 @@ function openMonitorCenter() {
         rowsHtml += perfRow('内存占用', gauge(last ? last.mem : null), spark(hist.map(s => s.mem), '#0ea5e9'));
       }
       if (showUp) {
-        rowsHtml += perfRow('本次开机时长', '<b class="t-ok">' + U.escHtml(fmtUpTicks(last ? last.up : null)) + '</b>', '');
+        // 开机时长也给趋势：单调上升，重启会归零——一眼能看出「最近有没有重启过」
+        rowsHtml += perfRow('本次开机时长', '<b class="t-ok">' + U.escHtml(fmtUpTicks(last ? last.up : null)) + '</b>', spark(hist.map(s => s.up), '#22c55e'));
       }
       if (lastJob.metrics || mlast) {
         if (mlast && Array.isArray(mlast.disks) && mlast.disks.length) {
@@ -7506,10 +7510,12 @@ function openMonitorCenter() {
           stBits + (hLast && hLast.certDays != null ? ' · 证书 ' + certGauge(hLast.certDays, hrec.alertDays || 14) : ''),
           spark(h.map(s => s.ok === false ? 0 : 1), hLast && hLast.ok === false ? '#ef4444' : '#22c55e'));
       }
-      rowsHtml = '<div class="mc-if-head"><span>指标</span><span>当前值</span><span>近 ' + Math.max(hist.length, mhist.length, (hrec && hrec.hist || []).length) + ' 次采样</span></div>' + rowsHtml;
+      rowsHtml = '<div class="mc-if-head"><span>指标</span><span>当前值</span>'
+        + (showSpark ? '<span>近 ' + maxSamples + ' 次采样</span>' : '') + '</div>' + rowsHtml;
     }
     el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
-      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · CPU/内存为设备视角（≥75% 橙 / ≥90% 红），sysUpTime 骤减判定为设备重启并记入事件时间线；SSH 指标与 HTTP 探测来自「设备监控」勾选项，证书剩余天数低于阈值时告警</div>'
+      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · CPU/内存为设备视角（≥75% 橙 / ≥90% 红），sysUpTime 骤减判定为设备重启并记入事件时间线；SSH 指标与 HTTP 探测来自「设备监控」勾选项，证书剩余天数低于阈值时告警'
+      + (lastJob.perf || (last && (last.cpu != null || last.mem != null)) ? '' : ' · <b>该设备未启用 CPU/内存采集</b>：在「监控 ▾ 设备监控（静默采集）」里勾选「CPU/内存」并填 OID（可选厂家预设）') + '</div>'
       + '<div class="mc-if-body">' + rowsHtml + '</div>';
     el.querySelectorAll('.mc-ifdev').forEach(ch => {
       ch.onclick = () => { curPerfDev = ch.dataset.pkey; perfCache.delete(curPerfDev); metricCache.delete(curPerfDev); httpCache.delete(curPerfDev); load(); };

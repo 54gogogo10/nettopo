@@ -812,7 +812,11 @@ html[data-theme="dark"] .ai-item.sel { border-color: var(--accent2); }
 .cfg-issues .ci-item.ci-err::before { content: '✖'; }
 .cfg-issues .ci-item.ci-warn { color: #f59e0b; }
 /* ============ 监控中心 ============ */
-.mc-dialog .mc-main { display: flex; gap: 10px; height: calc(100% - 130px); min-height: 0; }
+/* 弹层自身改为 flex 列、由 .mc-main 吃掉剩余高度：
+ * 原实现写死 height: calc(100% - 130px) 预留头部，但实际头部（标题+副标题+统计+开机时长+动作行）
+ * 远高于 130px → 内容比弹层高约 200px，整层滚动会把页签/统计一起滚走，页内列表的底部也被截断 */
+.mc-dialog { display: flex; flex-direction: column; min-height: 0; }
+.mc-dialog .mc-main { display: flex; gap: 10px; flex: 1 1 auto; min-height: 0; height: auto; }
 .mc-dialog .mc-stats { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .mc-stat { flex: 1; min-width: 86px; border: 1px solid var(--border); border-radius: 10px; padding: 7px 10px; text-align: center; background: var(--panel2); }
 .mc-stat b { display: block; font-size: 17px; line-height: 1.3; }
