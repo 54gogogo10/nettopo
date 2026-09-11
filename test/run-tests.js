@@ -80,7 +80,11 @@ const startSyslogWithRetry = async (baseDir, opts) => {
   for (let i = 0; i < 10 && !(st && st.ok); i++) {
     if (i) await waitMsR7(60 * i);
     srv = new SyslogServer(Object.assign({ baseDir }, opts || {}));
-    st = await srv.start(await freeTcpPort(), true);
+    // Windows 上 Hyper-V/WSL 会**成片**保留 TCP/UDP 排除段：内核按 TCP 分给我们的端口可能整段
+    // 落在排除区内（UDP bind 直接 EACCES）。重试时按小步长偏移，跳出连续保留段而不是原地再撞一次。
+    const p0 = await freeTcpPort();
+    const port = i ? ((p0 + i * 173) % 40000) + 10000 : p0;
+    st = await srv.start(port, true);
     if (!st.ok) errs.push(String((srv && srv.lastError) || '?'));
   }
   return { srv, st, errs };
@@ -2893,13 +2897,14 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const mon = { n1: { state: 'monitoring', text: '监控中：10.0.0.1:22（SSH）' } };
       const bk = { '核心-R1': { lastAt: Date.now(), count: 3 } };
       const rows = U.buildInventoryRows(nodes, mon, bk);
-      ok(rows[0].join(',') === '设备名,类型,管理地址,设备型号,软件版本,备注,监控状态,最近配置备份,备份份数', '表头完整（含型号/软件版本列）');
+      ok(rows[0].join(',') === '设备名,类型,管理地址,设备型号,软件版本,备注,监控状态,最近配置备份,备份份数,责任人,部门,资产编号,维保到期,机柜,U 位',
+        '表头完整（含型号/软件版本列 + 6 个自定义字段列）');
       ok(rows[1][0] === '核心-R1' && rows[1][1] === '路由器', '内置类型中文标签');
       ok(rows[1][2] === '10.0.0.1' && rows[1][6].indexOf('监控中') === 0, '管理地址与监控状态取值');
       ok(/^\d{8}_\d{4}$/.test(rows[1][7]) && rows[1][8] === '3', '最近备份时间与份数');
       ok(rows[2][2] === '10.0.0.2 / 192.168.1.2', '多管理口斜杠连接');
       ok(rows[2][6] === '未监控', '无监控状态设备回退「未监控」');
-      ok(U.buildInventoryRows(null, null, null)[0].length === 9, '空入参不抛错仅表头（9 列）');
+      ok(U.buildInventoryRows(null, null, null)[0].length === 15, '空入参不抛错仅表头（9 基础列 + 6 自定义列）');
     }
 
     // 本批新功能：直角布线几何 / 工程口令加密 / SNMP 编解码 / 备份自动合规巡检
@@ -3432,6 +3437,527 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         for (const s of socks) s.destroy();
         await new Promise((res) => { server.close(res); setTimeout(res, 500); });
       }
+    }
+
+    // 配置变更下发（监控 ▾ 配置变更下发）：变更集解析 / 安全闸门 / dry-run 预判 / 回滚求逆（纯逻辑）
+    console.log('== 回归：配置变更下发——变更集解析与安全闸门（新功能） ==');
+    {
+      const t1 = U.parseChangeSet([
+        '# SW1  管理: 10.0.0.1  [交换机]',
+        '[SW1]system-view',
+        'interface Vlanif30',
+        ' ip address 10.0.30.1 255.255.255.0',
+        '',
+        ' description TO-CORE',
+        'interface Vlanif30',
+        'return'
+      ].join('\n'));
+      ok(t1.ok === true && t1.lines.length === 3, '解析：注释/空行/模式控制行/末行 return/重复行剥离（剩 ' + t1.lines.length + ' 行）');
+      ok(t1.lines[0].text === 'interface Vlanif30', '解析：粘贴自终端时提示符前缀 [SW1] 被剥离');
+      ok(t1.lines[1].text === ' ip address 10.0.30.1 255.255.255.0' && t1.lines[1].indent === 1, '解析：子命令缩进保留（块归属判据）');
+      ok(t1.lines[1].ctx === 'interface Vlanif30', '解析：子命令记录块上下文（dry-run/回滚要用）');
+      ok(t1.skipped.comment === 1 && t1.skipped.blank === 1 && t1.skipped.dup === 1 && t1.skipped.mode === 2,
+        '解析：跳过计数（注释/空行/重复/模式控制）' + JSON.stringify(t1.skipped));
+      const t2 = U.parseChangeSet('interface GE0/0/1\n shutdown\n quit\ninterface GE0/0/2\n shutdown\nreturn');
+      ok(t2.lines.length === 5, '解析：中段 quit 保留（视图切换）、跨块同名子命令不去重（' + t2.lines.length + ' 行）');
+      ok(U.parseChangeSet('interface GE0/0/1\n shutdown\n shutdown').skipped.dup === 1, '解析：同块内重复子命令去重');
+      ok(U.parseChangeSet('interface Vlanif40\n ip address 10.0.40.1 24\nsave').skipped.save === 1, '解析：save 剥离并单独计数（保存走管道选项）');
+      ok(U.parseChangeSet('a'.repeat(300)).ok === false && /超过 256 字符/.test(U.parseChangeSet('a'.repeat(300)).error), '解析：单行超长整批拒绝');
+      ok(/行上限/.test(U.parseChangeSet(Array.from({ length: 205 }, (_, i) => 'vlan ' + i).join('\n')).error || ''), '解析：超行数整批拒绝');
+      ok(/控制字符/.test(U.parseChangeSet('interface GE0/0/1\n x\u0001y').error || ''), '解析：控制字符整批拒绝（静默剔除会掩盖损坏粘贴）');
+      const cs = U.parseChangeSet('interface Vlanif30\n ip address 10.0.30.1 24').lines;
+      ok(U.checkChangeSet(U.parseChangeSet('reload').lines).ok === false, '闸门：reload 硬拒绝');
+      ok(U.checkChangeSet(U.parseChangeSet('erase startup-config').lines).ok === false, '闸门：erase 硬拒绝');
+      ok(U.checkChangeSet(U.parseChangeSet('write erase').lines).ok === false, '闸门：write erase 硬拒绝');
+      ok(U.checkChangeSet(U.parseChangeSet('delete flash:/vrpcfg.zip').lines).ok === false, '闸门：delete 硬拒绝');
+      const g1 = U.checkChangeSet(U.parseChangeSet('interface GE0/0/1\n undo shutdown\n undo snmp-agent').lines);
+      ok(g1.ok === true && g1.warn.length === 2, '闸门：删除/关闭类放行但要求显式确认（' + g1.warn.length + ' 条告警）');
+      ok(U.checkChangeSet(cs).warn.length === 0 && U.checkChangeSet(cs).ok === true, '闸门：正常配置行无告警');
+    }
+
+    console.log('== 回归：配置变更下发——dry-run 预判与回滚求逆（新功能） ==');
+    {
+      const prev = ['#', 'sysname SW1', '#', 'interface Vlanif10',
+        ' ip address 10.0.10.1 255.255.255.0', ' description OLD', '#',
+        'interface GigabitEthernet0/0/1', ' port link-type access', '#', 'return'].join('\n');
+      const cs = U.parseChangeSet('interface Vlanif10\n ip address 10.0.10.2 255.255.255.0\n description NEW\ninterface Vlanif30\n ip address 10.0.30.1 255.255.255.0').lines;
+      const pv = U.deployPreview(cs, prev, 'huawei', '10.0.10.1');
+      ok(pv.noBaseline === false && pv.count === 5, 'dry-run：基线存在且行数正确');
+      ok(pv.modify === 2 && pv.add === 2 && pv.same === 1, 'dry-run：覆盖 2 / 新增 2 / 幂等 1（' + JSON.stringify({ add: pv.add, modify: pv.modify, same: pv.same, remove: pv.remove }) + '）');
+      ok(/10\.0\.10\.1/.test(pv.rows[1].note), 'dry-run：覆盖行指出被覆盖的旧值');
+      ok(pv.risk.selfLock === true && /管理地址被改写/.test(pv.risk.why[0]), 'dry-run：管理地址被改写 → 自断风险');
+      ok(U.deployPreview(U.parseChangeSet(' undo ip address 10.0.10.1 255.255.255.0').lines, prev, 'huawei', '10.0.10.1').risk.selfLock === true, 'dry-run：删除管理地址行 → 自断风险');
+      ok(U.deployPreview(U.parseChangeSet(' undo ssh server enable').lines, prev, 'huawei', '10.0.10.1').risk.selfLock === true, 'dry-run：关闭 SSH → 自断风险');
+      ok(U.deployPreview(U.parseChangeSet(' undo snmp-agent').lines, prev, 'huawei', '10.0.10.1').risk.selfLock === true, 'dry-run：关闭 SNMP → 自断风险');
+      ok(U.deployPreview(U.parseChangeSet('interface Vlanif40\n ip address 10.0.40.1 24').lines, '', 'huawei', '10.0.10.1').noBaseline === true, 'dry-run：无基线时明确标记（界面据此提示先备份）');
+      ok(U.deployPreview(cs, prev, 'huawei', '10.0.10.1').rows[0].kind === 'same', 'dry-run：已存在的块判为幂等而非新增');
+
+      const rb = U.buildRollback(cs, prev, 'huawei');
+      ok(rb.ok === true, '回滚：生成成功');
+      const rbLines = rb.lines.map(l => l.text);
+      ok(rbLines.indexOf(' undo ip address 10.0.30.1 255.255.255.0') >= 0 && rbLines.indexOf('interface Vlanif30') >= 0,
+        '回滚：新建块的子命令取反删除且保留缩进（块上下文无缩进）');
+      const iSub = rbLines.indexOf(' undo ip address 10.0.30.1 255.255.255.0');
+      ok(iSub >= 0 && rbLines.indexOf('undo interface Vlanif30') === iSub + 1, '回滚：先撤销子命令、再删除新建块（LIFO）');
+      ok(rbLines.indexOf(' ip address 10.0.10.1 255.255.255.0') >= 0, '回滚：覆盖式变更回填变更前原值（含缩进）');
+      ok(rbLines.indexOf(' description OLD') >= 0, '回滚：description 回填原值');
+      ok(/^# 回滚变更单/.test(rb.text), '回滚：文本带表头说明');
+      ok(U.buildRollback(cs, '', 'huawei').ok === false, '回滚：无基线时拒绝生成（前置备份的意义）');
+      const rbNeg = U.buildRollback(U.parseChangeSet('interface GigabitEthernet0/0/1\n undo port link-type access').lines, prev, 'huawei');
+      ok(rbNeg.lines.map(l => l.text).indexOf(' port link-type access') >= 0, '回滚：取反行的逆操作 = 去掉取反（重新启用）');
+      const rbCisco = U.buildRollback(U.parseChangeSet('interface GigabitEthernet0/0/9\n description X').lines, prev, 'cisco');
+      ok(rbCisco.manual.length === 1 && /no interface/.test(rbCisco.manual[0].why), '回滚：思科无法删除接口 → 列入人工项');
+      ok(/#   \[需人工\]/.test(rbCisco.text), '回滚：人工项以注释形式出现在文本里（不会被下发）');
+    }
+
+    console.log('== 回归：配置变更下发——会话状态机 runDeploy（mock Telnet 设备） ==');
+    {
+      /** mock 华为设备：可注入失败行 / 确认行 / 备份报错 */
+      const makeDeployMock = (cfg) => {
+        cfg = cfg || {};
+        const st = { cmds: [], mode: 'user' };
+        const socks = new Set();
+        const server = net.createServer((sock) => {
+          socks.add(sock);
+          sock.on('close', () => socks.delete(sock));
+          sock.on('error', () => {});
+          sock.on('data', (d) => {
+            const s = d.toString('latin1');
+            if (/[\xff\xfe]/.test(s)) return;                 // Telnet 协商帧
+            const cmd = s.replace(/\r\n$/, '').replace(/\r$/, '');
+            st.cmds.push(cmd);
+            const prompt = st.mode === 'config' ? '[SW1]' : '<SW1>';
+            if (cmd === 'screen-length 0 temporary') { sock.write(cmd + '\r\n' + prompt); return; }
+            if (cmd === 'display current-configuration') {
+              if (cfg.showErr) { sock.write(cmd + "\r\nError: Unrecognized command found at '^' position.\r\n" + prompt); return; }
+              sock.write(cmd + '\r\nsysname SW1\r\n#\r\ninterface Vlanif10\r\n ip address 10.0.10.1 255.255.255.0\r\nreturn\r\n' + prompt);
+              return;
+            }
+            if (cmd === 'system-view') { st.mode = 'config'; sock.write(cmd + '\r\nEnter system view, return user view with Ctrl+Z.\r\n[SW1]'); return; }
+            if (cmd === 'return') { st.mode = 'user'; sock.write(cmd + '\r\n<SW1>'); return; }
+            if (cmd === 'save') { sock.write(cmd + '\r\nAre you sure to continue? [Y/N]:'); return; }
+            if (cmd === 'y') { sock.write('y\r\nInfo: The configuration is saved successfully.\r\n<SW1>'); return; }
+            if (cfg.failLine && cmd.trim() === cfg.failLine.trim()) { sock.write(cmd + "\r\nError: Unrecognized command found at '^' position.\r\n" + prompt); return; }
+            if (cfg.confirmLine && cmd.trim() === cfg.confirmLine.trim()) { sock.write(cmd + '\r\nWarning: This operation may cause service interruption. Continue? [Y/N]:'); return; }
+            sock.write(cmd + '\r\n' + prompt);
+          });
+          sock.write('\r\nWelcome to mock device\r\n<SW1>');
+        });
+        return {
+          server, st,
+          close: async () => { for (const s of socks) s.destroy(); await new Promise((res) => { server.close(res); setTimeout(res, 300); }); }
+        };
+      };
+      const { ShellManager: SM } = require('../js/shell.js');
+      const mgr = new SM();
+      const baseO = { protocol: 'telnet', host: '127.0.0.1', username: 'admin', waitMs: 300, cmdTimeoutMs: 3000, readyTimeoutMs: 4000 };
+      const listen = (m) => new Promise((res) => m.server.listen(0, '127.0.0.1', res));
+
+      // 硬守卫（主进程独立于渲染层校验）
+      let m = makeDeployMock();
+      await listen(m);
+      let port = m.server.address().port;
+      const g = (o) => mgr.runDeploy(Object.assign({}, baseO, { port }, o));
+      ok((await g({ lines: ['x'] })).ok === true, 'runDeploy：正常一行下发（mock 链路对照）');
+      ok((await mgr.runDeploy(Object.assign({}, baseO, { host: '', port, lines: ['x'] }))).ok === false, 'runDeploy：空主机拒绝');
+      ok(/未提供要下发的配置行/.test((await g({ lines: [] })).error || ''), 'runDeploy：空配置行拒绝');
+      ok(/控制字符/.test((await g({ lines: ['a\u0001b'] })).error || ''), 'runDeploy：控制字符拒绝');
+      ok(/超过 256 字符/.test((await g({ lines: ['x'.repeat(300)] })).error || ''), 'runDeploy：超长行拒绝');
+      ok(/禁止下发清单/.test((await g({ lines: ['reload'] })).error || ''), 'runDeploy：reload 命中主进程禁止清单');
+      ok(/超过 200 行/.test((await g({ lines: Array.from({ length: 201 }, (_, i) => 'vlan ' + i) })).error || ''), 'runDeploy：超行数拒绝');
+      m.st.cmds.length = 0;
+      await g({ lines: ['x'.repeat(300)] });
+      ok(m.st.cmds.length === 0, 'runDeploy：守卫拦截时不建立会话、不下发任何命令');
+      m.st.cmds.length = 0;
+
+      // 成功路径：备份 → 进配置模式 → 逐行 → 退出 → 保存（自动应答）→ 回采
+      let r = await g({
+        lines: ['interface Vlanif30', ' ip address 10.0.30.1 255.255.255.0', ' description TO-CORE'],
+        showCmd: 'display current-configuration', screenCmd: 'screen-length 0 temporary',
+        enterCmd: 'system-view', exitCmd: 'return', saveCmd: 'save', doSave: true, verify: true
+      });
+      ok(r.ok === true && r.appliedCount === 3 && r.failedAt === -1, 'runDeploy：3 行全部下发成功');
+      ok(r.backup.ok === true && /interface Vlanif10/.test(r.backup.content), 'runDeploy：前置备份取到运行配置');
+      ok(r.saved.ok === true && /saved successfully/.test(r.saved.out), 'runDeploy：保存命令的交互确认被自动应答');
+      ok(r.post.ok === true && /interface Vlanif10/.test(r.post.content), 'runDeploy：回采校验取到配置');
+      const seq = m.st.cmds.map(x => x.replace(/\r?\n/g, ''));
+      ok(seq[0] === 'screen-length 0 temporary' && seq[1] === 'display current-configuration' && seq[2] === 'system-view', 'runDeploy：顺序为 关分页 → 备份 → 进配置模式');
+      ok(seq.indexOf('return') > seq.indexOf(' description TO-CORE'), 'runDeploy：退出配置模式在下发之后');
+      ok(seq.filter(x => x === 'y').length === 1, 'runDeploy：保存提示只应答一次 y（累积文本里的旧提示不重复触发）');
+      await m.close();
+
+      // 失败即停
+      m = makeDeployMock({ failLine: ' ip address 10.0.30.1 255.255.255.0' });
+      await listen(m);
+      port = m.server.address().port;
+      r = await mgr.runDeploy(Object.assign({}, baseO, {
+        port, lines: ['interface Vlanif30', ' ip address 10.0.30.1 255.255.255.0', ' description TO-CORE'],
+        showCmd: 'display current-configuration', screenCmd: 'screen-length 0 temporary',
+        enterCmd: 'system-view', exitCmd: 'return'
+      }));
+      ok(r.ok === false && /第 2 行下发失败/.test(r.error || ''), 'runDeploy：设备报错即停并定位行号');
+      ok(r.applied.length === 2 && r.applied[0].ok === true && r.applied[1].ok === false, 'runDeploy：逐行结果记录成功/失败');
+      ok(/设备报错/.test(r.applied[1].error || '') && /Unrecognized/.test(r.applied[1].error || ''), 'runDeploy：失败原因取自设备报错行');
+      ok(r.remaining === 1 && m.st.cmds.indexOf(' description TO-CORE') < 0, 'runDeploy：失败后的行确实未下发');
+      ok(m.st.cmds.indexOf('return') >= 0, 'runDeploy：失败后仍退出配置模式（不停在配置视图）');
+      ok(m.st.cmds.indexOf('save') < 0, 'runDeploy：未开启保存时不发保存命令');
+      await m.close();
+
+      // 交互确认即中止：变更工具不替人确认未知影响
+      m = makeDeployMock({ confirmLine: 'undo ssh server enable' });
+      await listen(m);
+      port = m.server.address().port;
+      r = await mgr.runDeploy(Object.assign({}, baseO, {
+        port, lines: ['interface Vlanif30', ' description X', 'undo ssh server enable'],
+        showCmd: 'display current-configuration', screenCmd: 'screen-length 0 temporary',
+        enterCmd: 'system-view', exitCmd: 'return'
+      }));
+      ok(r.ok === false && r.failedAt === 2 && /交互确认/.test(r.applied[2].error || ''), 'runDeploy：设备要求确认时中止并给出原因');
+      ok(m.st.cmds.filter(x => x === 'y').length === 0, 'runDeploy：中止时绝不应答 y');
+      await m.close();
+
+      // 前置备份失败即中止（回滚基线是硬前提）
+      m = makeDeployMock({ showErr: true });
+      await listen(m);
+      port = m.server.address().port;
+      r = await mgr.runDeploy(Object.assign({}, baseO, {
+        port, lines: ['interface Vlanif30'], showCmd: 'display current-configuration',
+        screenCmd: 'screen-length 0 temporary', enterCmd: 'system-view', exitCmd: 'return'
+      }));
+      ok(r.ok === false && /前置备份失败/.test(r.error || '') && r.backup.ok === false, 'runDeploy：拿不到基线即中止');
+      ok(m.st.cmds.indexOf('system-view') < 0, 'runDeploy：备份失败时未进入配置模式、未下发配置行');
+      await m.close();
+    }
+
+    console.log('== 回归：配置变更下发——审计记录库 DeployStore（新功能） ==');
+    {
+      const { DeployStore, maskSecrets, deployVendor } = require('../js/config-deploy.js');
+      ok(maskSecrets('local-user admin password cipher %^%#abc').text === 'local-user admin password ****', '打码：password cipher 链式写法整段打码');
+      ok(maskSecrets('snmp-server community public RO').text === 'snmp-server community ****', '打码：community 打码');
+      ok(maskSecrets('set auth-key 123456').text === 'set auth-key ****', '打码：auth-key 打码');
+      ok(maskSecrets('interface Vlanif30').masked === false && maskSecrets(' description -> password-port').masked === false, '打码：普通行与词内 password 不误伤');
+      ok(deployVendor('nope').label === '华为 VRP' && deployVendor('cisco').negate === 'no', '厂家口径表：未知键回退华为、思科取反前缀为 no');
+
+      const tmpD = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-deploy-'));
+      const store = new DeployStore(tmpD);
+      const w = store.save({
+        device: 'SW1', deviceId: 'n1', host: '10.0.0.1', port: 22, protocol: 'ssh', vendor: 'huawei', vendorLabel: '华为 VRP',
+        user: 'admin', plan: 'interface Vlanif30', lines: ['interface Vlanif30', 'local-user admin password cipher %^%#secret'],
+        applied: [{ line: 'interface Vlanif30', ok: true }, { line: 'local-user admin password cipher %^%#secret', ok: false, error: '设备报错' }],
+        result: { ok: false, appliedCount: 1, failedAt: 1, remaining: 0, error: '第 2 行下发失败' },
+        backup: { ok: true, file: 'cfg_20260912_101010.cfg' }, saved: { ok: false }, verify: { ok: true }
+      });
+      ok(w.ok === true && DeployStore.validName(w.name) === true, '记录库：写入且文件名过白名单');
+      const dayDir = path.join(tmpD, /^deploy_(\d{8})_/.exec(w.name)[1], w.name);
+      const rawTxt = fs.readFileSync(dayDir, 'utf8');
+      ok(!/%\^%#secret/.test(rawTxt), '记录库：落盘文件不含明文口令');
+      ok(/password \*\*\*\*/.test(rawTxt) && w.maskedCount >= 1, '记录库：落盘为打码内容并统计打码行数');
+      const rd = store.read(w.name);
+      ok(rd.ok === true && rd.rec.device === 'SW1' && rd.rec.result.appliedCount === 1, '记录库：读取完整记录');
+      ok(rd.rec.applied[1].ok === false && rd.rec.backup.file === 'cfg_20260912_101010.cfg' && rd.rec.verify.ok === true, '记录库：逐行失败/备份文件名/回采结论保留');
+      store.save({ device: 'SW2', host: '10.0.0.2', lines: ['vlan 10'], result: { ok: true, appliedCount: 1 } });
+      const ls = store.list();
+      ok(ls.ok === true && ls.total === 2 && ls.items[0].device === 'SW2', '记录库：列表时间倒序');
+      ok(store.read('../evil.json').ok === false && store.remove('../evil.json').ok === false, '记录库：路径穿越文件名拒绝');
+      ok(store.read('deploy_20260101_000000_zzzz.json').ok === false, '记录库：不存在/坏记录返回失败而非抛错');
+      ok(store.remove(w.name).ok === true && store.list().total === 1, '记录库：删除一条');
+      ok(store.clear().ok === true && store.list().total === 0 && fs.readdirSync(tmpD).filter(x => /^\d{8}$/.test(x)).length === 0, '记录库：清空并移除日期目录');
+    }
+
+    // 拓扑自动发现：邻居管理地址抽取 / 版本识别 / 爬取状态机 / 合并进图（纯逻辑）
+    console.log('== 回归：拓扑自动发现——邻居管理地址与版本识别（新功能） ==');
+    {
+      const hw = [
+        'GigabitEthernet0/0/1 has 1 neighbor(s):',
+        'Neighbor index                :1',
+        'Port ID type                  :Interface name',
+        'Port ID                       :GigabitEthernet0/0/24',
+        'System name                   :SW2',
+        'Management address type       :IPv4',
+        'Management address            :10.0.0.2'
+      ].join('\r\n');
+      const p1 = U.parseNeighbors(hw);
+      ok(p1.ok === true && p1.entries.length === 1, '华为 verbose：解析出 1 条邻居');
+      ok(p1.entries[0].peer === 'SW2' && p1.entries[0].localIf === 'GigabitEthernet0/0/1', '华为 verbose：对端名/本端接口正确');
+      ok(p1.entries[0].peerIf === 'GigabitEthernet0/0/24', '华为 verbose：对端接口取「Port ID」而非「Port ID type: Interface name」（结尾锚定回归）');
+      ok(p1.entries[0].mgmt === '10.0.0.2', '华为 verbose：抽到 Management address（递归下钻依据）');
+      const p2 = U.parseNeighbors(['Local Intf: Gi0/1', 'Port id: Gi0/24', 'System Name: SW3',
+        'System Description: Cisco IOS Software, C2960 Software', 'Management Addresses:', '    IP: 10.0.0.3'].join('\n'));
+      ok(p2.ok === true && p2.entries[0].peer === 'SW3' && p2.entries[0].mgmt === '10.0.0.3', '思科 LLDP detail：抽到 Management Addresses 下的 IP');
+      const p3 = U.parseNeighbors(['Device ID: R2.corp.local', 'Entry address(es):', '  IP address: 10.0.0.4',
+        'Interface: GigabitEthernet0/0/2,  Port ID (outgoing port): GigabitEthernet0/0/1'].join('\n'));
+      ok(p3.ok === true && p3.entries[0].peer === 'R2.corp.local' && p3.entries[0].mgmt === '10.0.0.4', '思科 CDP detail：抽到 IP address');
+      ok(U.parseNeighbors(['Local Intf     Neighbor Dev             Neighbor Intf', 'GE0/0/1        SW9                      GE0/0/2'].join('\n')).entries[0].mgmt === '',
+        '简表无管理地址时不臆造（留空，该邻居不参与下钻）');
+
+      const v1 = U.parseDeviceVersion('Huawei Versatile Routing Platform Software\nVRP (R) software, Version 5.170 (S5720 V200R019C10SPC500)\nHUAWEI S5720-28X-SI Routing Switch uptime is 3 weeks');
+      ok(v1.vendor === 'huawei' && v1.model === 'S5720-28X-SI' && /^5\.170/.test(v1.version), '版本识别：华为（厂家/型号/版本）' + JSON.stringify(v1));
+      const v2 = U.parseDeviceVersion('Cisco IOS Software, C2960X Software, Version 15.2(4)E7\ncisco WS-C2960X-48FPD-L (APM86XXX) processor');
+      ok(v2.vendor === 'cisco' && v2.model === 'WS-C2960X-48FPD-L' && /^15\.2/.test(v2.version), '版本识别：思科' + JSON.stringify(v2));
+      ok(U.parseDeviceVersion('H3C Comware Software, Version 7.1.070, Release 3208P02').vendor === 'h3c', '版本识别：H3C');
+      ok(U.parseDeviceVersion('').vendor === '' && U.parseDeviceVersion('garbage').vendor === '', '版本识别：认不出就留空（不猜）');
+    }
+
+    console.log('== 回归：拓扑自动发现——爬取状态机与合并进图（新功能） ==');
+    {
+      const mk = (arr) => arr.map(x => ({ localIf: x[0], peer: x[1], peerIf: x[2], mgmt: x[3] || '' }));
+      let d = U.createDiscovery({ maxDepth: 2, maxDevices: 10 });
+      d.addSeed({ host: '10.0.0.1', name: 'CORE' });
+      const t1 = d.next();
+      ok(t1 && t1.host === '10.0.0.1' && t1.depth === 0, '种子入队（层 0）');
+      d.submit(t1.id, { ok: true, vendor: 'huawei', entries: mk([['GE0/0/1', 'SW2', 'GE0/0/1', '10.0.0.2'], ['GE0/0/2', 'SW3', 'GE0/0/1', '10.0.0.3']]) });
+      ok(d.stats().devices === 3 && d.stats().links === 2 && d.stats().pending === 2, '提交后新增 2 台设备 / 2 条链路');
+      const t2 = d.next();
+      ok(t2.host === '10.0.0.2' && t2.depth === 1, '下一台是层 1 的邻居');
+      d.submit(t2.id, { ok: true, entries: mk([
+        ['GE0/0/1', 'CORE', 'GE0/0/1', '10.0.0.1'],      // 自环 → 剔除
+        ['GE0/0/2', 'SW3', 'GE0/0/2', '10.0.0.3'],       // 已知 → 复用
+        ['GE0/0/3', 'SW4', 'GE0/0/1', '10.0.0.4'],       // 新设备
+        ['GE0/0/4', 'SW5', 'GE0/0/1', '']               // 无管理地址 → 进结果但不下钻
+      ]) });
+      const devs = d.devices();
+      ok(devs.length === 5 && d.stats().links === 5, '自环剔除 / 已知复用 / 新设备加入' + JSON.stringify(d.stats()));
+      ok(devs.filter(x => x.host === '10.0.0.3')[0].depth === 1, '同一设备被两条路径发现时深度收敛（不重复建）');
+      ok(devs.find(x => x.name === 'SW5') && devs.find(x => x.name === 'SW5').queryable === false, '无管理地址的邻居不可查询（不会下钻）');
+      // 并发取件：claim 标记后不会被第二个 worker 取到
+      const c1 = d.claim(), c2 = d.claim();
+      ok(c1 && c2 && c1.id !== c2.id, 'claim：并发取件互不重复（' + (c1 && c1.host) + ' / ' + (c2 && c2.host) + '）');
+      const c3 = d.claim();
+      ok(c3 === null, 'claim：无更多可查设备时返回 null');
+      d.submit(c1.id, { ok: true, entries: mk([['GE0/0/3', 'SW6', 'GE0/0/1', '10.0.0.5']]) });
+      d.submit(c2.id, { ok: true, entries: [] });
+      ok(!!d.devices().find(x => x.host === '10.0.0.5'), '层 2 设备入队');
+      const t3 = d.next();
+      d.submit(t3.id, { ok: true, entries: mk([['GE0/0/5', 'SW7', 'GE0/0/1', '10.0.0.6']]) });
+      ok(!d.devices().find(x => x.host === '10.0.0.6'), '超过 maxDepth 的邻居不再新增（画布不出现无地址孤点）');
+
+      // 名称键 → 地址键升格：同一台设备不会被算成两台
+      let d2 = U.createDiscovery({ maxDepth: 2 });
+      d2.addSeed({ host: '10.1.1.1', name: 'A' });
+      d2.submit(d2.next().id, { ok: true, entries: mk([['GE0/0/1', 'B', 'GE0/0/1', '']]) });
+      ok(d2.devices().length === 2 && !d2.devices()[1].host, '先以名称发现（暂无地址）');
+      d2.addSeed({ host: '10.1.1.9', name: 'C' });
+      d2.submit(d2.next().id, { ok: true, entries: mk([['GE0/0/2', 'B', 'GE0/0/2', '10.1.1.2']]) });
+      const bs = d2.devices().filter(x => x.name === 'B' || x.host === '10.1.1.2');
+      ok(bs.length === 1 && bs[0].host === '10.1.1.2', '名称键升格为地址键（不重复建同台设备）');
+      ok(d2.links().length === 2, '升格后两条链路都指向同一台设备');
+
+      // 设备数上限
+      const d3 = U.createDiscovery({ maxDepth: 3, maxDevices: 3 });
+      d3.addSeed({ host: '10.2.2.1', name: 'S1' });
+      d3.submit(d3.next().id, { ok: true, entries: mk([['a1', 'N1', 'a1', '10.2.2.2'], ['a2', 'N2', 'a2', '10.2.2.3'], ['a3', 'N3', 'a3', '10.2.2.4']]) });
+      ok(d3.stats().devices === 3 && d3.stats().truncated === true && d3.links().length === 2, '设备数上限生效并标记 truncated');
+      // 接口不齐
+      const d4 = U.createDiscovery({ maxDepth: 2 });
+      d4.addSeed({ host: '10.3.3.1', name: 'X' });
+      d4.submit(d4.next().id, { ok: true, entries: mk([['GE0/0/1', 'Y', '', '10.3.3.2']]) });
+      ok(d4.devices().length === 1 && d4.links().length === 0, '对端接口缺失的邻居不建链路');
+
+      // 合并进图：复用 + 回填 + 幂等
+      const dd = U.createDiscovery({ maxDepth: 2 });
+      dd.addSeed({ host: '10.0.0.1', name: 'CORE' });
+      dd.submit(dd.next().id, { ok: true, vendor: 'huawei', entries: mk([['GE0/0/1', 'SW2', 'GE0/0/1', '10.0.0.2'], ['GE0/0/2', 'SW3', 'GE0/0/1', '10.0.0.3']]) });
+      const nodes = [
+        { id: 'n1', name: 'core', type: 'switch', x: 100, y: 100, w: 160, h: 56, mgmt: '10.0.0.1', note: '' },
+        { id: 'n2', name: 'sw2', type: 'switch', x: 400, y: 100, w: 160, h: 56, mgmt: '', note: '' }
+      ];
+      const links2 = [];
+      const r1 = U.applyDiscovery(nodes, links2, dd, {});
+      ok(r1.ok === true && r1.addedNodes === 1 && nodes.length === 3, '合并：名称/地址匹配已有设备、仅新建 1 台');
+      ok(r1.addedLinks === 2 && links2.length === 2, '合并：新增 2 条链路');
+      ok(r1.filledMgmt === 1 && nodes.find(n => n.id === 'n2').mgmt === '10.0.0.2', '合并：已有设备回填管理地址');
+      ok(r1.filledVendor === 1 && nodes.find(n => n.id === 'n1').vendor === 'huawei', '合并：已有设备回填厂家（不覆盖已填值）');
+      const sw3 = nodes.find(n => n.name === 'SW3');
+      ok(sw3 && sw3.mgmt === '10.0.0.3' && sw3.type === 'switch', '合并：新建设备带管理地址与推断类型');
+      const r2 = U.applyDiscovery(nodes, links2, dd, {});
+      ok(r2.addedNodes === 0 && r2.addedLinks === 0 && nodes.length === 3 && links2.length === 2, '合并：重复执行幂等（不产生重复节点/链路）');
+    }
+
+    // IPAM 闭环比对：规划清单 × 存活扫描 × 设备 ARP/MAC 表（纯逻辑）
+    console.log('== 回归：IPAM 实网核对——观测点展开与分类结论（新功能） ==');
+    {
+      const nodes = [
+        { id: 'c', name: 'CORE', type: 'switch', mgmt: '10.0.0.1', x: 0, y: 0 },
+        { id: 's2', name: 'SW2', type: 'switch', mgmt: '10.0.0.2', x: 300, y: 0 },
+        { id: 's3', name: 'SW3', type: 'switch', mgmt: '10.0.0.3', x: 600, y: 0 }
+      ];
+      const links = [{ id: 'l1', a: 'c', b: 's2', aIf: 'GE0/0/1', aIp: '10.0.10.1', aMask: 24, bIf: 'GE0/0/1', bIp: '10.0.10.2', bMask: 24 }];
+      const data = U.buildIpamData(nodes, links);
+      ok(data.addrs.length === 5 && data.subnets.length === 2, '规划清单：5 个地址 / 2 个网段');
+      const a0 = U.buildIpamAudit(data, {});
+      ok(a0.scanned === false && a0.summary.plannedOnly === 5 && a0.summary.intruder === 0 && a0.summary.missing === 0, '未实测时只输出规划侧（不臆断未在线/黑户）');
+      ok(a0.rows.every(r => r.status === 'planned'), '未实测时每行状态为「仅规划」');
+
+      // 观测点展开：ARP 给 IP→MAC；MAC 表只有 MAC，靠「同 MAC 在别处 ARP 里的 IP」串回 IP
+      const collected = [
+        { devId: 'c', devName: 'CORE', arp: [{ ip: '10.0.0.2', mac: 'bb:bb:bb:00:00:02', ifn: 'GE0/0/2' }, { ip: '10.0.0.2', mac: 'ff:ff:ff:00:00:99', ifn: 'GE0/0/3', vlan: '30' }], mac: [] },
+        { devId: 's3', devName: 'SW3', arp: [], mac: [{ mac: 'bb:bb:bb:00:00:02', vlan: '1', ifn: 'GE0/0/9' }, { mac: 'dd:dd:dd:00:00:01', vlan: '1', ifn: 'GE0/0/7' }] }
+      ];
+      const rs = U.resolveIpMacObservations(collected);
+      ok(rs.ipMac.length === 3 && rs.ipCount === 1, '观测点展开：ARP 直取 + MAC 表按 MAC↔IP 串回（' + rs.ipMac.length + ' 条）');
+      ok(rs.orphanMac === 1, '无 IP 佐证的纯二层 MAC 不参与比对');
+      ok(rs.ipMac.some(x => x.source === 'mac' && x.devName === 'SW3' && x.ifn === 'GE0/0/9'), 'MAC 表行带上观测端口（私接定位就靠它）');
+
+      const alive = [
+        { ip: '10.0.0.1', mac: 'aa:aa:aa:00:00:01' },
+        { ip: '10.0.0.2', mac: 'bb:bb:bb:00:00:02' },
+        { ip: '10.0.0.2', mac: 'ff:ff:ff:00:00:99' },
+        { ip: '10.0.0.99', mac: 'cc:cc:cc:00:00:99' },
+        { ip: '10.0.10.1', mac: 'aa:aa:aa:00:00:01' }
+      ];
+      const a = U.buildIpamAudit(data, { alive, ipMac: rs.ipMac, scanned: true });
+      const st = (ip) => (a.rows.find(r => r.ip === ip) || {}).status;
+      ok(st('10.0.0.1') === 'ok' && st('10.0.10.1') === 'ok', '登记且实测存活 → 登记在用（接口地址同样参与）');
+      ok(st('10.0.0.2') === 'hijack', '同一 IP 出现多个不同 MAC → IP 冲突/私接');
+      ok(/IP 冲突或地址被他人占用/.test(a.rows.find(r => r.ip === '10.0.0.2').note)
+        && /CORE\/GE0\/0\/2/.test(a.rows.find(r => r.ip === '10.0.0.2').note), '冲突行把每个 MAC 归到具体设备接口：' + a.rows.find(r => r.ip === '10.0.0.2').note);
+      ok(st('10.0.0.99') === 'intruder', '未登记却在用 → 黑户');
+      ok(st('10.0.0.3') === 'missing' && st('10.0.10.2') === 'missing', '登记但未实测到 → 登记未在线');
+      ok(a.summary.hijack === 1 && a.summary.intruder === 1 && a.summary.missing === 2 && a.summary.ok === 2, '汇总计数正确');
+      ok(a.rows[0].status === 'hijack', '排序：最严重的结论排最前');
+      ok(a.rows.find(r => r.ip === '10.0.0.2').conflict === null, '实测冲突不会被误标为规划冲突');
+      // 同一 MAC 出现在别台设备上属正常转发路径，不得判为私接
+      const a2 = U.buildIpamAudit(data, {
+        alive: [{ ip: '10.0.0.2', mac: 'bb:bb:bb:00:00:02' }],
+        ipMac: [{ ip: '10.0.0.2', mac: 'bb:bb:bb:00:00:02', devName: 'CORE', ifn: 'GE0/0/2' },
+          { ip: '10.0.0.2', mac: 'bb:bb:bb:00:00:02', devName: 'SW3', ifn: 'GE0/0/9' }], scanned: true
+      });
+      ok(a2.rows.find(r => r.ip === '10.0.0.2').status === 'ok' && /正常转发路径/.test(a2.rows.find(r => r.ip === '10.0.0.2').note),
+        'MAC 在别台设备可见 → 判为正常并说明（避免把正常转发当私接）');
+      // 规划冲突优先
+      const d3 = U.buildIpamData([{ id: 'a', name: 'A', type: 'switch', mgmt: '10.5.0.1' }, { id: 'b', name: 'B', type: 'switch', mgmt: '10.5.0.1' }], []);
+      const a3 = U.buildIpamAudit(d3, { alive: [{ ip: '10.5.0.1', mac: 'aa:aa:aa:00:00:01' }], scanned: true });
+      ok(a3.rows[0].status === 'conflict' && /2 台设备使用同一地址/.test(a3.rows[0].note), '规划冲突优先于实测结论');
+      // 网段汇总：黑户就近归属 + 空闲数
+      const a4 = U.buildIpamAudit(data, { alive: [{ ip: '10.0.0.99', mac: 'cc:cc:cc:00:00:99' }, { ip: '192.168.77.7', mac: 'ee:ee:ee:00:00:01' }], scanned: true });
+      ok(a4.summary.unplannedSubnet === 1, '落在规划网段之外的黑户单独计数');
+      const s0 = a4.subnetAudit.find(x => x.network === '10.0.0.0');
+      ok(s0 && s0.intruder === 1 && s0.free === 251, '网段审计：黑户归属就近网段、空闲数正确');
+    }
+
+    // 三层邻居（BGP/OSPF）：解析 / 状态判定 / 匹配到拓扑与异常清单（纯逻辑）
+    console.log('== 回归：三层邻居 BGP/OSPF——解析与协议视图匹配（新功能） ==');
+    {
+      const hwBgp = ['BGP local router ID : 10.0.0.1', ' Local AS number : 65001',
+        '  Peer            V          AS  MsgRcvd  MsgSent  OutQ  Up/Down       State  PrefRcv',
+        '  10.0.0.2        4       65002      123      120     0  01:23:45 Established       5',
+        '  10.0.0.3        4       65003        0        0     0  00:00:00 Idle              0'].join('\r\n');
+      let r = U.parseProtoNeighbors(hwBgp, 'bgp');
+      ok(r.ok === true && r.entries.length === 2, '华为 display bgp peer：2 个邻居');
+      ok(r.entries[0].peer === '10.0.0.2' && r.entries[0].as === '65002' && r.entries[0].state === 'Established' && r.entries[0].pfx === '5',
+        '华为 BGP：邻居/AS/状态/前缀数');
+      ok(r.entries[1].state === 'Idle', '华为 BGP：Idle 邻居被识别');
+      const ciscoBgp = ['Neighbor        V           AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd',
+        '10.0.0.2        4        65002     100     100        5    0    0 1d02h        12',
+        '10.0.0.4        4        65004       0       0        0    0    0 00:00:00 Active'].join('\n');
+      r = U.parseProtoNeighbors(ciscoBgp, 'bgp');
+      ok(r.ok === true && r.entries[0].state === 'Established' && r.entries[0].pfx === '12',
+        '思科 show ip bgp summary：State/PfxRcd 为数字 → 已建立，前缀数取 AS 列之后的最后一个数字（不是版本列）');
+      ok(r.entries[1].state === 'Active', '思科 BGP：Active 视为未建立');
+      ok(U.protoStateOk('bgp', 'Established') === true && U.protoStateOk('bgp', 'Active') === false, 'BGP 状态判定：仅 Established 正常');
+      ok(U.parseProtoNeighbors('Total number of peers : 3', 'bgp').ok === false, '无邻居行 → 明确失败');
+
+      const hwOspf = ['OSPF Process 1 with Router ID 10.0.0.1', '                 Peer Statistic Information',
+        ' Area Id          Interface                        Neighbor id      State',
+        ' 0.0.0.0          GigabitEthernet0/0/1             10.0.0.2         Full',
+        ' 0.0.0.0          GigabitEthernet0/0/2             10.0.0.3         2-Way'].join('\r\n');
+      r = U.parseProtoNeighbors(hwOspf, 'ospf');
+      ok(r.ok === true && r.entries.length === 2, '华为 display ospf peer brief：2 条（表头行不得被当成邻居）' + r.entries.length);
+      ok(r.entries[0].ifn === 'GigabitEthernet0/0/1' && r.entries[0].peerId === '10.0.0.2' && r.entries[0].area === '0.0.0.0', '华为 OSPF brief：接口/Router ID/区域');
+      const ciscoOspf = ['Neighbor ID     Pri   State           Dead Time   Address         Interface',
+        '10.0.0.2          1   FULL/BDR        00:00:38    10.0.0.2        GigabitEthernet0/0/1',
+        '10.0.0.3          1   INIT/DROTHER    00:00:31    10.0.0.3        GigabitEthernet0/0/2'].join('\r\n');
+      r = U.parseProtoNeighbors(ciscoOspf, 'ospf');
+      ok(r.ok === true && r.entries[0].state === 'FULL/BDR' && U.protoStateOk('ospf', 'FULL/BDR') === true, '思科 OSPF：FULL/BDR 正常');
+      ok(r.entries[0].area === '', '思科 OSPF 表无 Area 列：不得把 Neighbor ID 当成区域');
+      ok(U.protoStateOk('ospf', 'INIT/DROTHER') === false, 'INIT/DROTHER 视为邻居异常');
+      const hwDetail = ['         OSPF Process 1 with Router ID 10.0.0.1', '                 Neighbors',
+        " Area 0.0.0.0 interface GigabitEthernet0/0/1's neighbors",
+        ' Router ID: 10.0.0.2         Address: 10.0.0.2        GR State: Normal',
+        '   State: Full  Mode: Nbr is Master  Priority: 1'].join('\r\n');
+      r = U.parseProtoNeighbors(hwDetail, 'ospf');
+      ok(r.ok === true && r.entries.length === 1 && r.entries[0].peer === '10.0.0.2' && r.entries[0].ifn === 'GigabitEthernet0/0/1' && r.entries[0].state === 'Full',
+        '华为 OSPF 详细键值块：Router ID/Address/State + 段头接口');
+
+      const nodes = [
+        { id: 'r1', name: 'R1', type: 'router', mgmt: '10.0.0.1' },
+        { id: 'r2', name: 'R2', type: 'router', mgmt: '10.0.0.2' },
+        { id: 'r3', name: 'R3', type: 'router', mgmt: '10.0.0.3' }
+      ];
+      const links = [
+        { id: 'k1', a: 'r1', b: 'r2', aIf: 'GigabitEthernet0/0/1', aIp: '10.10.12.1', aMask: 30, bIf: 'GigabitEthernet0/0/1', bIp: '10.10.12.2', bMask: 30 },
+        { id: 'k2', a: 'r1', b: 'r3', aIf: 'GigabitEthernet0/0/2', aIp: '10.10.13.1', aMask: 30, bIf: 'GigabitEthernet0/0/1', bIp: '10.10.13.2', bMask: 30 }
+      ];
+      const pv = U.buildProtoTopology(nodes, links, [
+        { devId: 'r1', devName: 'R1', protocol: 'ospf', entries: U.parseProtoNeighbors(hwOspf, 'ospf').entries },
+        { devId: 'r1', devName: 'R1', protocol: 'bgp', entries: U.parseProtoNeighbors(hwBgp, 'bgp').entries },
+        { devId: 'r2', devName: 'R2', protocol: 'ospf', entries: [{ peer: '10.0.0.9', peerId: '10.0.0.9', ifn: 'GigabitEthernet0/0/9', state: 'Full' }] },
+        { devId: 'r2', devName: 'R2', protocol: 'bgp', entries: [{ peer: '10.0.0.3', peerId: '10.0.0.3', ifn: '', state: 'Established', as: '65003' }] }
+      ]);
+      ok(pv.adj.length === 6 && pv.stats.sessions === 6, '匹配：6 条邻接会话');
+      const o1 = pv.adj.find(x => x.devId === 'r1' && x.peer === '10.0.0.2' && x.protocol === 'ospf');
+      ok(o1 && o1.peerDevId === 'r2' && o1.linkId === 'k1' && o1.matchedBy === 'ip', 'OSPF 邻居按地址匹配到设备与链路');
+      ok(pv.linkBadges.k1 && /OSPF Full/.test(pv.linkBadges.k1.label) && pv.linkBadges.k1.stateOk === true, '连线徽标：正常邻接');
+      ok(pv.linkBadges.k2 && pv.linkBadges.k2.stateOk === false && /2-Way/.test(pv.linkBadges.k2.label), '连线徽标：2-Way 标为异常');
+      ok(pv.stats.state === 2, '状态异常计数（OSPF 2-Way + BGP Idle）');
+      ok(pv.stats.unmatched === 1, '拓扑外邻居计数');
+      ok(pv.stats.unplanned === 1, '规划外邻接计数（R2 与 R3 有 BGP 邻接但拓扑无链路）');
+      ok(pv.linkIds.length === 2 && pv.nodeIds.length === 3, '画布叠加数据：链路与设备集合');
+      const pv2 = U.buildProtoTopology(nodes, links, [
+        { devId: 'r1', devName: 'R1', protocol: 'ospf', entries: [{ peer: '', peerId: '', ifn: 'GigabitEthernet0/0/1', state: 'Full' }] }
+      ]);
+      ok(pv2.adj.length === 1 && pv2.adj[0].matchedBy === 'iface' && pv2.adj[0].peerDevId === 'r2', '邻居地址缺失时按本端接口落到链路另一端');
+      const pv3 = U.buildProtoTopology(nodes, links, [
+        { devId: 'r1', devName: 'R1', protocol: 'ospf', entries: [{ peer: '10.0.0.1', peerId: '10.0.0.1', ifn: '', state: 'Full' }] }
+      ]);
+      ok(pv3.adj[0].peerDevId === '' && pv3.stats.unmatched === 1, '自己认成自己的邻居 → 判为无法匹配（防自邻接噪声）');
+    }
+
+    // 设备自定义字段 + 机柜 U 位视图（纯逻辑）
+    console.log('== 回归：设备自定义字段与机柜 U 位视图（新功能） ==');
+    {
+      const def = U.loadDeviceFields();
+      ok(def.length === 6 && def.map(x => x.key).join(',') === 'owner,dept,asset,warranty,rack,uPos', '默认 6 个字段（责任人/部门/资产编号/维保/机柜/U 位）');
+      const clean = U.cleanDeviceFields([{ key: 'owner', label: '责任人' }, { key: '__proto__', label: 'x' },
+        { key: 'bad key', label: 'y' }, { key: 'owner', label: 'dup' }, { key: 'warranty', label: '维保', type: 'date' }]);
+      ok(clean.length === 2 && clean[1].type === 'date', '字段定义清洗：危险键/非法键/重复键剔除 + type 白名单');
+      ok(U.cleanDeviceFields('x').length === 0 && U.cleanDeviceFields(Array.from({ length: 40 }, (_, i) => ({ key: 'k' + i }))).length === 24, '非数组拒绝、数量上限 24');
+      const cf = U.cleanNodeFields({ owner: ' 张三 ', asset: 12345, 'bad key': 'x', constructor: 'y', empty: '  ', long: 'a'.repeat(300) });
+      ok(cf.owner === '张三' && cf.asset === '12345' && cf.long.length === 200, '字段值：转字符串/去空白/截断 200');
+      ok(!('bad key' in cf) && !Object.prototype.hasOwnProperty.call(cf, 'constructor') && !('empty' in cf), '字段值：非法键/原型键/空值不落盘');
+      ok(U.getNodeField({ fields: { owner: '李四' } }, 'owner') === '李四' && U.getNodeField({}, 'owner') === '', 'getNodeField 取值与缺省');
+      ok(U.sanitizeGraph([{ id: 'n1', name: 'A', fields: { owner: '张三', 'bad key': 'x' } }], [], []).nodes[0].fields.owner === '张三',
+        '工程清洗保留自定义字段（且走同一白名单）');
+
+      ok(U.parseUPos('12', 42).u === 12 && U.parseUPos('12', 42).span === 1, "U 位：'12' → 单 U");
+      ok(U.parseUPos('12-14', 42).span === 3 && U.parseUPos('U12~14', 42).u === 12 && U.parseUPos('12至14', 42).span === 3, "U 位：'12-14' / 'U12~14' / 中文分隔");
+      ok(U.parseUPos('0', 42) === null && U.parseUPos('', 42) === null && U.parseUPos('abc', 42) === null && U.parseUPos('45', 42) === null, 'U 位：非法与越界返回 null');
+      ok(U.parseUPos('41-45', 42).span === 2, 'U 位：跨出上界的跨度钳制到柜内');
+
+      const nodes = [
+        { id: 'a', name: '核心SW1', type: 'switch', fields: { rack: 'A01', uPos: '42' } },
+        { id: 'b', name: '汇聚SW2', type: 'switch', fields: { rack: 'A01', uPos: '40-41' } },
+        { id: 'c', name: '防火墙FW1', type: 'router', fields: { rack: 'A01', uPos: '39' } },
+        { id: 'd', name: '接入SW3', type: 'switch', fields: { rack: 'B02', uPos: '10' } },
+        { id: 'e', name: '未上架SW9', type: 'switch', fields: { owner: '王五' } }
+      ];
+      const rv = U.buildRackView(nodes, { uHeight: 42 });
+      ok(rv.racks.length === 2 && rv.uHeight === 42, '机柜视图：按机柜字段分组（2 个）');
+      const a01 = rv.racks.find(r => r.name === 'A01');
+      ok(a01.devices === 3 && a01.used === 4 && a01.free === 38, 'A01：3 台设备占 4U（42 + 40-41 + 39）');
+      ok(a01.slots[0].u === 39 && a01.slots[2].u === 42, '槽位按 U 位升序');
+      ok(rv.unplaced.length === 1 && rv.unplaced[0].name === '未上架SW9', '缺机柜/U 位的设备进 unplaced');
+      ok(rv.conflicts === 0, '无重叠时 conflicts=0');
+      const ov2 = U.buildRackView([{ id: 'x', name: 'X', type: 'switch', fields: { rack: 'C', uPos: '10-12' } },
+        { id: 'y', name: 'Y', type: 'switch', fields: { rack: 'C', uPos: '12-13' } }]);
+      ok(ov2.conflicts === 1 && ov2.racks[0].slots[1].conflicts.join() === 'X', 'U 位重叠被检出并指出与谁重叠');
+      ok(U.buildRackView(nodes, { uHeight: 24 }).unplaced.length === 4, '机柜高度可调（24U 时越界设备转入未上架）');
+
+      const svg = U.buildRackSvg(a01, { title: '机房 A' });
+      ok(/^<svg /.test(svg) && /<\/svg>$/.test(svg), '机柜立面 SVG：产出完整字符串');
+      ok(svg.includes('机房 A · A01') && svg.includes('核心SW1') && svg.includes('已用 4U'), 'SVG 含标题/设备名/容量摘要');
+      ok(!/undefined|NaN/.test(svg), 'SVG 无 undefined/NaN');
+      ok(/位置重叠/.test(U.buildRackSvg(ov2.racks[0], {})), '冲突在 SVG 中标注');
     }
 
     // SFTP：远程文件浏览/上传/下载（注入 mock SSH client，验证 ShellManager 侧逻辑与路径白名单）

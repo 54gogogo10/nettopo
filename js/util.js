@@ -15,7 +15,7 @@ U.spreadMinMax = (arr) => {
 };
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260912a';
+U.APP_VERSION = 'v20260912b';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -581,6 +581,7 @@ U.sanitizeGraph = (nodes, links, texts) => {
       w: Math.max(Math.min(num(n.w, U.NODE_W), 1e5), 40), h: Math.max(Math.min(num(n.h, U.NODE_H), 1e5), 24),
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note).slice(0, 2000), web: U.normalizeWebUrl(n.web) || '',
       model: str(n.model).slice(0, 64), osver: str(n.osver).slice(0, 64), // 设备型号 / 软件版本（资产清单；SNMP 识别可自动回填版本）
+      fields: U.cleanNodeFields(n.fields), // 自定义字段值（责任人/部门/资产编号/维保到期/机柜/U 位…）
       mgmts: (Array.isArray(n.mgmts) ? n.mgmts : []).map(str).filter(Boolean).slice(0, 20).map(s => s.slice(0, 200)),
       // 三层 VLAN 接口（interface vlan）：[{id, ip}]，最多 32 个
       vlans: (Array.isArray(n.vlans) ? n.vlans : []).map(v => {
@@ -1014,6 +1015,158 @@ U.orderLabelLines = (lines, na, nb) => {
   return (na.y + na.h / 2) < (nb.y + nb.h / 2) ? [lines[1], lines[0]] : lines;
 };
 
+/* ---------- 设备自定义字段（责任人 / 部门 / 资产编号 / 维保到期 / 机柜 / U 位 + 用户自定义） ----------
+ * 字段定义（有哪些字段）存 localStorage；字段值存节点 n.fields = {key: value}，随工程/图纸持久化。
+ * 用途：资产清单导出附加列、机柜 U 位视图（按「机柜」分组、按「U 位」摆放）。 */
+U.DEFAULT_DEVICE_FIELDS = [
+  { key: 'owner', label: '责任人', type: 'text' },
+  { key: 'dept', label: '部门', type: 'text' },
+  { key: 'asset', label: '资产编号', type: 'text' },
+  { key: 'warranty', label: '维保到期', type: 'date' },
+  { key: 'rack', label: '机柜', type: 'text' },
+  { key: 'uPos', label: 'U 位', type: 'text' }
+];
+const DF_KEY_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+const DF_TYPES = ['text', 'date'];
+/** 字段定义白名单重建：丢弃危险键（__proto__/constructor…）、非法键与重复键，最多 24 个 */
+U.cleanDeviceFields = (raw) => {
+  if (!Array.isArray(raw)) return [];
+  const out = [], seen = new Set();
+  for (const f of raw) {
+    if (!f || typeof f !== 'object') continue;
+    const key = String(f.key == null ? '' : f.key).trim();
+    if (!DF_KEY_RE.test(key) || seen.has(key)) continue;
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    seen.add(key);
+    out.push({
+      key,
+      label: String(f.label == null ? key : f.label).trim().slice(0, 24) || key,
+      type: DF_TYPES.includes(f.type) ? f.type : 'text'
+    });
+    if (out.length >= 24) break;
+  }
+  return out;
+};
+/** 读字段定义（localStorage；无/非法时回落内置 6 项） */
+U.loadDeviceFields = () => {
+  let list = [];
+  try { list = U.cleanDeviceFields(JSON.parse(localStorage.getItem('nettopo.deviceFields') || 'null')); }
+  catch (e) { list = []; }
+  U.deviceFieldsCache = list.length ? list : U.DEFAULT_DEVICE_FIELDS.map(x => Object.assign({}, x));
+  return U.deviceFieldsCache;
+};
+U.deviceFields = () => (Array.isArray(U.deviceFieldsCache) && U.deviceFieldsCache.length) ? U.deviceFieldsCache : U.loadDeviceFields();
+/** 保存字段定义；返回清洗后的列表 */
+U.saveDeviceFields = (list) => {
+  const clean = U.cleanDeviceFields(list);
+  U.deviceFieldsCache = clean.length ? clean : U.DEFAULT_DEVICE_FIELDS.map(x => Object.assign({}, x));
+  try { localStorage.setItem('nettopo.deviceFields', JSON.stringify(U.deviceFieldsCache)); } catch (e) { /* ignore */ }
+  return U.deviceFieldsCache;
+};
+/** 节点自定义字段值清洗：键走同一白名单，值一律字符串 ≤200，空值不落盘（工程文件里的脏数据入口） */
+U.cleanNodeFields = (raw) => {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw)) {
+    if (!DF_KEY_RE.test(k) || k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+    const s = String(v == null ? '' : v).trim().slice(0, 200);
+    if (s) out[k] = s;
+  }
+  return out;
+};
+U.getNodeField = (n, key) => (n && n.fields && typeof n.fields === 'object') ? String(n.fields[key] == null ? '' : n.fields[key]) : '';
+
+/* ---------- 机柜 U 位视图（纯函数，Node 测试可调用） ---------- */
+/** U 位解析：'12' → {u:12,span:1}；'12-14' / '12~14' / 'U12-14' → {u:12,span:3}；非法或越界返回 null */
+U.parseUPos = (v, uHeight) => {
+  const s = String(v == null ? '' : v).trim().toUpperCase().replace(/\s+/g, '');
+  const m = /^U?(\d{1,3})(?:[-~至]U?(\d{1,3}))?$/.exec(s);
+  if (!m) return null;
+  const a = parseInt(m[1], 10), b = m[2] ? parseInt(m[2], 10) : a;
+  if (!(a >= 1) || !(b >= a)) return null;
+  const h = (parseInt(uHeight, 10) >= 1 && parseInt(uHeight, 10) <= 60) ? parseInt(uHeight, 10) : 42;
+  if (a > h) return null;
+  return { u: a, span: Math.min(b - a + 1, h - a + 1) };
+};
+/** 机柜视图数据：按「机柜」字段分组、按「U 位」摆放；缺机柜或 U 位的设备进 unplaced。
+ *  opts: {uHeight(默认 42), rackField, uField}
+ *  返回 {racks:[{name,uHeight,slots:[{u,span,node,conflicts}],used,free,devices,occupancy}], unplaced, conflicts, uHeight} */
+U.buildRackView = (nodes, opts) => {
+  opts = opts || {};
+  const hIn = parseInt(opts.uHeight, 10);
+  const uHeight = (hIn >= 1 && hIn <= 60) ? hIn : 42;
+  const rackKey = opts.rackField || 'rack', uKey = opts.uField || 'uPos';
+  const byRack = new Map();
+  const unplaced = [];
+  for (const n of (Array.isArray(nodes) ? nodes : [])) {
+    if (!n) continue;
+    const rack = U.getNodeField(n, rackKey).trim();
+    const pos = U.parseUPos(U.getNodeField(n, uKey), uHeight);
+    if (!rack || !pos) { unplaced.push(n); continue; }
+    if (!byRack.has(rack)) byRack.set(rack, []);
+    byRack.get(rack).push({ u: pos.u, span: pos.span, node: n, conflicts: [] });
+  }
+  const racks = [];
+  let conflicts = 0;
+  for (const [name, items] of byRack) {
+    items.sort((a, b) => (a.u - b.u) || String(a.node.name).localeCompare(String(b.node.name), 'zh'));
+    const occ = new Array(uHeight + 1).fill(null);
+    for (const it of items) {
+      const hit = [];
+      for (let u = it.u; u < it.u + it.span && u <= uHeight; u++) if (occ[u]) hit.push(String(occ[u].node.name));
+      it.conflicts = [...new Set(hit)];
+      if (hit.length) conflicts++;
+      for (let u = it.u; u < it.u + it.span && u <= uHeight; u++) if (!occ[u]) occ[u] = it;
+    }
+    const used = occ.filter(Boolean).length;
+    racks.push({ name, uHeight, slots: items, used, free: uHeight - used, devices: items.length, occupancy: Math.round(used / uHeight * 100) });
+  }
+  racks.sort((a, b) => a.name.localeCompare(b.name, 'zh', { numeric: true }));
+  return { racks, unplaced, conflicts, uHeight };
+};
+/** 机柜立面 SVG（自包含字符串，可直接保存/打印）：U1 在底部、按 U 位向上堆叠。
+ *  opts: {uH(每 U 像素高，默认 22), width(默认 420), title} */
+U.buildRackSvg = (rack, opts) => {
+  opts = opts || {};
+  const esc = (s) => U.escHtml(String(s == null ? '' : s));
+  const uH = (parseInt(opts.uH, 10) >= 8 && parseInt(opts.uH, 10) <= 60) ? parseInt(opts.uH, 10) : 22;
+  const W = (parseInt(opts.width, 10) >= 200 && parseInt(opts.width, 10) <= 1200) ? parseInt(opts.width, 10) : 420;
+  const H = (rack && rack.uHeight) || 42;
+  const padT = 34, padB = 10;
+  const bodyH = H * uH;
+  const totalH = padT + bodyH + padB;
+  const left = 46, right = 12;
+  const bw = W - left - right;
+  const parts = [];
+  parts.push('<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + totalH + '" viewBox="0 0 ' + W + ' ' + totalH + '">');
+  parts.push('<rect x="0" y="0" width="' + W + '" height="' + totalH + '" fill="#ffffff"/>');
+  parts.push('<text x="' + (left) + '" y="20" font-family="sans-serif" font-size="14" font-weight="700" fill="#0f172a">' + esc((opts.title || '机柜') + ' · ' + ((rack && rack.name) || '')) + '</text>');
+  parts.push('<text x="' + (W - right) + '" y="20" text-anchor="end" font-family="sans-serif" font-size="11" fill="#64748b">' + H + 'U · 已用 ' + ((rack && rack.used) || 0) + 'U / 空闲 ' + ((rack && rack.free) || 0) + 'U</text>');
+  parts.push('<rect x="' + left + '" y="' + padT + '" width="' + bw + '" height="' + bodyH + '" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" rx="4"/>');
+  // U 刻度线（每 U 一条，U 号标在左侧）
+  for (let u = 1; u <= H; u++) {
+    const y = padT + (H - u) * uH;
+    parts.push('<line x1="' + left + '" y1="' + y + '" x2="' + (left + bw) + '" y2="' + y + '" stroke="#e2e8f0" stroke-width="1"/>');
+    parts.push('<text x="' + (left - 6) + '" y="' + (y + uH / 2 + 4) + '" text-anchor="end" font-family="sans-serif" font-size="9" fill="#94a3b8">' + u + 'U</text>');
+  }
+  for (const it of ((rack && rack.slots) || [])) {
+    const n = it.node || {};
+    const yTop = padT + (H - (it.u + it.span - 1)) * uH;
+    const hgt = it.span * uH;
+    const color = (U.getType(n.type) || {}).color || '#8fa0b8';
+    const bad = (it.conflicts || []).length > 0;
+    parts.push('<rect x="' + (left + 3) + '" y="' + (yTop + 2) + '" width="' + (bw - 6) + '" height="' + (hgt - 4) + '" rx="3" fill="' + esc(color) + '" fill-opacity="0.18" stroke="' + (bad ? '#dc2626' : esc(color)) + '" stroke-width="' + (bad ? 2 : 1) + '"/>');
+    const label = String(n.name || '') + (n.model ? ' · ' + n.model : '');
+    parts.push('<text x="' + (left + 10) + '" y="' + (yTop + Math.min(hgt / 2 + 4, hgt - 6)) + '" font-family="sans-serif" font-size="11.5" font-weight="600" fill="#0f172a">' + esc(label.slice(0, 42)) + '</text>');
+    const sub = (U.getType(n.type) || {}).label || '';
+    if (sub && hgt >= 26) parts.push('<text x="' + (left + 10) + '" y="' + (yTop + Math.min(hgt / 2 + 19, hgt - 6)) + '" font-family="sans-serif" font-size="10" fill="#475569">' + esc(sub) + '</text>');
+    parts.push('<text x="' + (left + bw - 8) + '" y="' + (yTop + 15) + '" text-anchor="end" font-family="sans-serif" font-size="10" fill="#475569">' + it.u + 'U' + (it.span > 1 ? '-' + (it.u + it.span - 1) + 'U' : '') + '</text>');
+    if (bad) parts.push('<text x="' + (left + bw - 8) + '" y="' + (yTop + hgt - 6) + '" text-anchor="end" font-family="sans-serif" font-size="9.5" fill="#dc2626">与 ' + esc((it.conflicts || []).join('、').slice(0, 24)) + ' 位置重叠</text>');
+  }
+  parts.push('</svg>');
+  return parts.join('\n');
+};
+
 /* ---------- 资产清单行构建（导出 Excel/CSV 用；纯函数，Node 测试可调用） ---------- */
 U.buildInventoryRows = (nodes, monStatus, backupInfo) => {
   nodes = Array.isArray(nodes) ? nodes : [];
@@ -1024,7 +1177,8 @@ U.buildInventoryRows = (nodes, monStatus, backupInfo) => {
     const ct = (Array.isArray(U.customTypes) ? U.customTypes : []).find(x => x && x.key === t);
     return (ct && ct.label) || def.label || String(t || 'other');
   };
-  const rows = [['设备名', '类型', '管理地址', '设备型号', '软件版本', '备注', '监控状态', '最近配置备份', '备份份数']];
+  const rows = [['设备名', '类型', '管理地址', '设备型号', '软件版本', '备注', '监控状态', '最近配置备份', '备份份数']
+    .concat(U.deviceFields().map(f => f.label))];
   for (const n of nodes) {
     if (!n) continue;
     const st = monStatus[n.id] || {};
@@ -1040,7 +1194,7 @@ U.buildInventoryRows = (nodes, monStatus, backupInfo) => {
       String(st.text || st.state || '未监控'),
       bi.lastAt ? U.fmtDate(new Date(bi.lastAt)) : '',
       bi.count != null ? String(bi.count) : ''
-    ]);
+    ].concat(U.deviceFields().map(f => U.getNodeField(n, f.key))));
   }
   return rows;
 };
@@ -2031,6 +2185,16 @@ const nbIsIface = (s) => {
   return /^[A-Za-z][A-Za-z0-9.\/:\-]{0,31}$/.test(t) && /\d/.test(t);
 };
 const nbFirstToken = (v) => String(v == null ? '' : v).trim().split(/[,\s，、（(]/)[0].slice(0, 64);
+/** 从一段文本里取首个合法 IPv4（跳 0.0.0.0 / 255.255.255.255 / 掩码形态）：用于抽取「对端管理地址」。
+ *  「IP: 10.0.0.2」「Management address : 10.0.0.2」「IP address: 10.0.0.2 (interface ...)」都能命中。 */
+const nbFirstIp = (v) => {
+  const m = /(?:^|[^\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])/.exec(String(v == null ? '' : v));
+  if (!m) return '';
+  const ip = m[1];
+  if (ip.split('.').some(o => +o > 255)) return '';
+  if (ip === '0.0.0.0' || ip === '255.255.255.255') return '';
+  return ip;
+};
 const nbIsPeerName = (s) => {
   const t = String(s || '').trim();
   if (!t || t.length > 64) return false;
@@ -2046,7 +2210,7 @@ U.parseNeighbors = (text) => {
     .slice(0, 200 * 1024);                                  // 误粘贴超大文本兜底
   const lines = clean.replace(/\r\n?/g, '\n').split('\n').slice(0, 5000);
 
-  const mk = (localIf, peer, peerIf) => ({ localIf: NB_IFACE_CLEAN(localIf), peer: String(peer || '').trim(), peerIf: peerIf ? NB_IFACE_CLEAN(peerIf) : '' });
+  const mk = (localIf, peer, peerIf, mgmt) => ({ localIf: NB_IFACE_CLEAN(localIf), peer: String(peer || '').trim(), peerIf: peerIf ? NB_IFACE_CLEAN(peerIf) : '', mgmt: String(mgmt || '').trim() });
 
   /* A. 思科 CDP 表格：Device ID / Local Intrfce / Holdtme / Capability / Platform / Port ID */
   const parseCdpTable = () => {
@@ -2125,7 +2289,7 @@ U.parseNeighbors = (text) => {
     let segLocal = ''; // 「has N neighbor(s)」/H3C 段头所在端口：段内多个 Device ID 共用
     const flush = () => {
       if (cur && cur.localIf && cur.peer && nbIsIface(cur.localIf) && nbIsPeerName(cur.peer) && out.length < 2000) {
-        out.push(mk(cur.localIf, cur.peer, cur.peerIf));
+        out.push(mk(cur.localIf, cur.peer, cur.peerIf, cur.mgmt));
       }
       cur = null;
     };
@@ -2152,8 +2316,16 @@ U.parseNeighbors = (text) => {
       if (!m) continue;
       const k = m[1].replace(/\s+/g, ' ').toLowerCase();
       const v = m[2].trim();
-      if (!cur.peer && /^(?:neighbor\s*(?:s?'\s*)?(?:device|system\s*name)|system\s*name|sysname|对端设备|邻居系统名)/.test(k)) cur.peer = nbFirstToken(v);
-      else if (!cur.peerIf && /^(?:neighbors?'\s*port\s*id|neighbor\s*port\s*id|port\s*id(?:\s*\(outgoing\s*port\))?|neighbor\s*intf(?:\s*ace)?|outgoing\s*port|对端接口)/.test(k)) cur.peerIf = nbFirstToken(v);
+      if (!cur.peer && /^(?:neighbor\s*(?:s?'\s*)?(?:device|system\s*name)|system\s*name|sysname|对端设备|邻居系统名)$/.test(k)) cur.peer = nbFirstToken(v);
+      // 结尾锚定必不可少：华为/H3C verbose 的「Port ID type : Interface name」先于「Port ID : X」出现，
+      // 不锚定会把对端接口取成「Interface」（真实设备上必然发生的错配）
+      else if (!cur.peerIf && /^(?:neighbors?'\s*port\s*id|neighbor\s*port\s*id|port\s*id(?:\s*\(outgoing\s*port\))?|neighbor\s*intf(?:\s*ace)?|outgoing\s*port|对端接口)$/.test(k)) cur.peerIf = nbFirstToken(v);
+      // 对端管理地址（拓扑自动发现靠它递归下钻）：华为/H3C「Management address : 1.2.3.4」、
+      // 思科 LLDP detail「Management Addresses:」下的「IP: 1.2.3.4」、CDP detail「IP address: 1.2.3.4」
+      else if (!cur.mgmt && /^(?:management\s+address(?:es)?|ip(?:\s+address)?|ipv4(?:\s+address)?|管理地址)$/.test(k)) {
+        const ip = nbFirstIp(v);
+        if (ip) cur.mgmt = ip;
+      }
       else if (!cur.localIf && /^interface\s*[:：]?/.test(k)) { // CDP detail 的 Interface 行
         // 思科 detail 的 Interface 与 Port ID (outgoing port) 同行：
         // 「Interface: Gi0/1,  Port ID (outgoing port): Gi0/24」——逗号后是对端接口，需二次提取
@@ -2190,6 +2362,233 @@ U.parseNeighbors = (text) => {
     return true;
   });
   return { ok: true, format: best.format, entries, lines: lines.length };
+};
+
+/* ---------- 拓扑自动发现（文件 ▾ 拓扑自动发现…）：爬取状态机（**无 I/O，可 Node 测试**） ----------
+ * 调用方循环 next() 取设备去查、查到结果后 submit()，直到 next() 返回 null。
+ * 状态机只负责「该查谁 / 查到的东西怎么归并」，网络访问由调用方（渲染层 runOneShot）完成。
+ * - 设备身份归一：有管理地址按地址认（同 IP 即同一台）；只有名字时按名称认（大小写、末尾域名归一），
+ *   后续拿到地址时**原地升格**为地址键并继承已有链路（避免同一台设备被算成两台）
+ * - 只有拿到管理地址的邻居才能继续下钻（LLDP/CDP verbose 的 Management address / IP address）；
+ *   拿不到地址的邻居仍会进入结果（作为待补地址的节点），但不会被排入查询队列
+ * - 深度上限、设备数上限在此强制（超限标记 truncated）；同名自环、两端接口不齐、重复链路全部剔除 */
+U.createDiscovery = (opts) => {
+  opts = opts || {};
+  const clampInt = (v, lo, hi, d) => { const n = parseInt(v, 10); return (n >= lo && n <= hi) ? n : d; };
+  const maxDepth = clampInt(opts.maxDepth, 1, 5, 2);
+  const maxDevices = clampInt(opts.maxDevices, 1, 200, 60);
+  // 名称归一：去首尾空白、小写、去末尾点号与常见域名后缀（SW1 / sw1.corp.local 视为同一台）
+  const normName = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\.+$/, '').replace(/\.(?:local|lan|corp|domain|com|cn|net|org)$/, '');
+  const list = [];
+  const byIp = new Map();
+  const byName = new Map();
+  const links = [];
+  const linkSeen = new Set();
+  let seq = 0;
+
+  const register = (host, name, depth, source) => {
+    host = String(host || '').trim();
+    name = String(name || '').trim();
+    let d = host ? byIp.get(host) : null;
+    if (!d && name) d = byName.get(normName(name));
+    if (!d) {
+      d = {
+        id: 'd' + (++seq), host, name, depth, source: source || 'neighbor',
+        queried: false, claimed: false, ok: false, error: '', vendor: '', model: '', version: '', sysName: '',
+        neighborCount: 0, discoveredFrom: ''
+      };
+      list.push(d);
+    } else {
+      if (host && !d.host) d.host = host;                       // 名字键 → 地址键升格
+      if (name && !d.name) d.name = name;
+      if (depth < d.depth) d.depth = depth;                     // 更短路径发现时收敛深度
+      if (source === 'seed') d.source = 'seed';
+    }
+    if (d.host) byIp.set(d.host, d);
+    if (d.name) byName.set(normName(d.name), d);
+    return d;
+  };
+
+  /** 加入种子设备（必须有管理地址才会被查询）。返回设备 id */
+  const addSeed = (seed) => {
+    const d = register(String(seed && seed.host || '').trim(), String(seed && seed.name || '').trim(), 0, 'seed');
+    return d.id;
+  };
+  /** 取下一台待查询设备（有地址、未查过、深度未超限），无则 null */
+  const next = () => {
+    const d = list.find(x => !x.queried && x.host && x.depth <= maxDepth);
+    return d ? { id: d.id, host: d.host, name: d.name, depth: d.depth } : null;
+  };
+  /** 并发安全取件：取一台并立刻标记「查询中」，供多个 worker 并行爬取（next() 不标记，仅单线程用） */
+  const claim = () => {
+    const d = list.find(x => !x.queried && !x.claimed && x.host && x.depth <= maxDepth);
+    if (!d) return null;
+    d.claimed = true;
+    return { id: d.id, host: d.host, name: d.name, depth: d.depth };
+  };
+  const pendingCount = () => list.filter(x => !x.queried && x.host && x.depth <= maxDepth).length;
+  /** 提交一台设备的查询结果：entries 形态与 U.parseNeighbors 一致（额外带 mgmt = 对端管理地址） */
+  const submit = (id, res) => {
+    const d = list.find(x => x.id === id);
+    if (!d) return { ok: false, error: '未知设备' };
+    res = res || {};
+    d.claimed = true;
+    d.queried = true;
+    d.ok = !!res.ok;
+    if (res.error) d.error = String(res.error).slice(0, 200);
+    if (res.vendor) d.vendor = String(res.vendor).slice(0, 32);
+    if (res.model) d.model = String(res.model).slice(0, 64);
+    if (res.version) d.version = String(res.version).slice(0, 64);
+    if (res.sysName) { if (!d.name) d.name = String(res.sysName).slice(0, 64); byName.set(normName(d.name), d); }
+    const entries = Array.isArray(res.entries) ? res.entries : [];
+    d.neighborCount = entries.length;
+    const childDepth = d.depth + 1;
+    let addedDevices = 0, addedLinks = 0, skipped = 0;
+    for (const e of entries) {
+      if (!e || !e.peer) { skipped++; continue; }
+      const eName = String(e.peer).trim();
+      const eHost = String(e.mgmt || '').trim();
+      // 自环：对端名/地址与自身相同
+      if ((eHost && d.host && eHost === d.host) || (eName && d.name && normName(eName) === normName(d.name))) { skipped++; continue; }
+      const aIf = String(e.localIf || '').trim();
+      const bIf = String(e.peerIf || '').trim();
+      if (!aIf || !bIf) { skipped++; continue; }                 // 两端接口不齐：对建图没用
+      const known = (eHost ? byIp.get(eHost) : null) || (eName ? byName.get(normName(eName)) : null);
+      const before = list.length;
+      let peer = known || null;
+      if (peer) {
+        // 已知设备也走 register：把「仅有名字」的条目升格为带管理地址，或补全缺失的名字
+        peer = register(eHost, eName, childDepth, peer.source || 'neighbor');
+      } else if (childDepth <= maxDepth) {
+        if (list.length >= maxDevices) { skipped++; continue; }   // 设备数上限：不再新增，只连已知
+        peer = register(eHost, eName, childDepth, 'neighbor');
+        peer.discoveredFrom = d.host || d.name;
+      }
+      if (!peer) { skipped++; continue; }                        // 超出深度且未知：不画无地址孤点
+      if (list.length > before) addedDevices++;
+      const pairKey = [peer.id, d.id].sort().join('|');
+      const key = pairKey + '|' + [aIf, bIf].sort().join('→');
+      if (linkSeen.has(key)) { skipped++; continue; }
+      linkSeen.add(key);
+      links.push({
+        aId: d.id, bId: peer.id, aIf, bIf, depth: childDepth,
+        aHost: d.host, bHost: peer.host, aName: d.name, bName: peer.name
+      });
+      addedLinks++;
+    }
+    return { ok: true, addedDevices, addedLinks, skipped };
+  };
+  const devices = () => list.map(x => ({
+    id: x.id, host: x.host, name: x.name, depth: x.depth, source: x.source, queried: x.queried, claimed: x.claimed,
+    ok: x.ok, error: x.error, vendor: x.vendor, model: x.model, version: x.version,
+    neighborCount: x.neighborCount, discoveredFrom: x.discoveredFrom,
+    queryable: !!x.host && x.depth <= maxDepth
+  }));
+  const linkList = () => links.slice();
+  const stats = () => ({
+    devices: list.length, queried: list.filter(x => x.queried).length, ok: list.filter(x => x.ok).length,
+    failed: list.filter(x => x.queried && !x.ok).length, pending: pendingCount(), links: links.length,
+    maxDepth, maxDevices, truncated: list.length >= maxDevices
+  });
+  return { addSeed, next, claim, submit, devices, links: linkList, stats, maxDepth, maxDevices };
+};
+
+/** 从「display version / show version」输出识别厂家（高置信关键词）、型号与版本（尽力而为）。
+ *  只填能认出来的字段；认不出就留空（不猜）。用于拓扑自动发现顺带登记厂商/型号。 */
+U.parseDeviceVersion = (text) => {
+  const s = String(text == null ? '' : text).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
+  const out = { vendor: '', model: '', version: '' };
+  if (!s.trim()) return out;
+  if (/H3C|Comware/i.test(s)) out.vendor = 'h3c';
+  else if (/Huawei|Versatile Routing Platform|\bVRP\b/i.test(s)) out.vendor = 'huawei';
+  else if (/Ruijie|RGOS|锐捷/i.test(s)) out.vendor = 'ruijie';
+  else if (/Cisco IOS|IOS-XE|Cisco Systems|Cisco Nexus/i.test(s)) out.vendor = 'cisco';
+  const ver = /VRP\s*\(R\)\s*software,\s*Version\s+([^\r\n]{1,40})/i.exec(s)
+    || /\bVersion\s+([0-9][^\s,);]{1,30})/i.exec(s);
+  if (ver) out.version = ver[1].trim();
+  const model = /HUAWEI\s+([A-Za-z0-9\-\/]{3,24})\s+[^\r\n]{0,24}?uptime is/i.exec(s)
+    || /^cisco\s+(\S{3,24})\s*\(/im.exec(s)
+    || /^\s*H3C\s+(\S{3,24})\s+/im.exec(s);
+  if (model) out.model = model[1].trim();
+  return out;
+};
+
+/** 把拓扑自动发现的结果合并进图（原地修改 nodes/links）。
+ *  与 U.applyNeighbors 同一套匹配语义，但入参是整张发现结果（多设备 + 多链路）：
+ *  - 设备：先按管理地址、再按名称（归一：大小写/域名后缀）匹配已有节点；匹配不到才新建
+ *    （位置摆在「发现它的那台设备」右侧，同批新节点按 8 行铺开）
+ *  - 回填：已有节点缺管理地址时补上发现的地址，缺厂家时补厂家（不覆盖用户已填的值）
+ *  - 链路：同设备对且接口一致则复用并回填空缺接口；两端接口不齐的候选在状态机里已被剔除
+ *  返回 {ok, addedNodes, addedLinks, updatedLinks, filledMgmt, filledVendor, skipped} */
+U.applyDiscovery = (nodes, links, disco, opts) => {
+  opts = opts || {};
+  if (!disco || typeof disco.devices !== 'function') return { ok: false, error: '发现结果不可用' };
+  const normName = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\.+$/, '').replace(/\.(?:local|lan|corp|domain|com|cn|net|org)$/, '');
+  const devs = disco.devices();
+  const dlinks = disco.links();
+  const byName = new Map();
+  const byIp = new Map();
+  const mgmtsOf = (n) => U.nodeMgmts(n).map(x => String(x).trim()).filter(Boolean);
+  for (const n of (nodes || [])) {
+    byName.set(normName(n.name), n);
+    for (const ip of mgmtsOf(n)) byIp.set(ip, n);
+  }
+  const findNode = (host, name) => (host ? byIp.get(host) : null) || (name ? byName.get(normName(name)) : null) || null;
+  const idMap = new Map();
+  let addedNodes = 0, filledMgmt = 0, filledVendor = 0;
+  for (const d of devs) {
+    let node = findNode(d.host, d.name);
+    if (!node) {
+      const src = findNode('', d.discoveredFrom) || byIp.get(d.discoveredFrom) || null;
+      const yOff = (addedNodes % 8) * 70 - 140;
+      const nm = d.name || d.host || '未知设备';
+      node = {
+        id: U.uid('n'), name: nm, type: U.typeOf(nm),
+        x: (Number(src && src.x) || 0) + 260, y: (Number(src && src.y) || 0) + yOff,
+        w: U.nodeWidthForName(nm), h: U.NODE_H, note: '', mgmt: d.host || ''
+      };
+      nodes.push(node);
+      byName.set(normName(node.name), node);
+      if (d.host) byIp.set(d.host, node);
+      addedNodes++;
+    } else {
+      if (d.host && !mgmtsOf(node).length) { node.mgmt = d.host; filledMgmt++; }
+      if (d.vendor && !node.vendor && U.cfgTemplates()[d.vendor]) { node.vendor = d.vendor; filledVendor++; }
+      if (d.model && !node.note) { node.note = '型号 ' + d.model + (d.version ? ' · ' + d.version : ''); }
+    }
+    idMap.set(d.id, node);
+  }
+  let addedLinks = 0, updatedLinks = 0, skipped = 0;
+  for (const l of dlinks) {
+    const A = idMap.get(l.aId), B = idMap.get(l.bId);
+    if (!A || !B || A === B) { skipped++; continue; }
+    const la = String(l.aIf || '').trim(), lb = String(l.bIf || '').trim();
+    if (!la || !lb) { skipped++; continue; }
+    const found = (links || []).find(x => {
+      const ab = x.a === A.id && x.b === B.id;
+      const ba = x.a === B.id && x.b === A.id;
+      if (!ab && !ba) return false;
+      const lIf = ab ? (x.aIf || '') : (x.bIf || '');
+      const pIf = ab ? (x.bIf || '') : (x.aIf || '');
+      if (lIf && pIf) return lIf === la && pIf === lb;
+      return !lIf || lIf === la;
+    });
+    if (found) {
+      const ab = found.a === A.id && found.b === B.id;
+      let changed = false;
+      const fill = (slot, val) => { if (!found[slot] && val) { found[slot] = val; changed = true; } };
+      if (ab) { fill('aIf', la); fill('bIf', lb); }
+      else { fill('bIf', la); fill('aIf', lb); }
+      if (changed) updatedLinks++; else skipped++;
+      continue;
+    }
+    links.push({
+      id: U.uid('l'), a: A.id, b: B.id, aIf: la, aIp: '', bIf: lb, bIp: '', bw: '',
+      note: String(opts.note || ''), agg: ''
+    });
+    addedLinks++;
+  }
+  return { ok: true, addedNodes, addedLinks, updatedLinks, filledMgmt, filledVendor, skipped };
 };
 
 /** 邻居表解析结果合并进图（原地修改 nodes/links；返回 {addedNodes, addedLinks, updatedLinks, skipped}）。
@@ -2389,6 +2788,343 @@ U.checkInspectCommands = (cmds) => {
     if (!ALLOW.some(re => re.test(t))) return { ok: false, error: '非只读白名单命令：' + t };
   }
   return { ok: true };
+};
+
+/* ================= 配置变更下发（监控 ▾ 配置变更下发） =================
+ * 把「生成设备配置」的产物或手工编写的配置片段安全地下发到设备：
+ *   变更集解析 → 安全闸门 → 与变更前配置的 dry-run 预判（新增/覆盖/删除、自断管理面）
+ *   → 逐行下发（失败即停，前置强制备份）→ 依据变更前配置生成回滚变更单。
+ * 全部是纯字符串处理（无网络、无 DOM 依赖），可在 Node 测试中直接调用。
+ * 分工：这里是**渲染层的友好校验与预览**；真正兜底的硬守卫在 shell.runDeploy（主进程），
+ * 两侧口径保持一致但互不依赖（与批量巡检只读白名单的分工相同，纵深防御）。 */
+
+/** 厂家配置模式口径（仅网络设备：Linux 无配置模式概念，不参与下发） */
+U.DEPLOY_VENDORS = {
+  huawei: {
+    label: '华为 VRP', enter: 'system-view', exit: 'return', save: 'save', negate: 'undo',
+    screen: 'screen-length 0 temporary', showCfg: 'display current-configuration'
+  },
+  h3c: {
+    label: 'H3C Comware', enter: 'system-view', exit: 'return', save: 'save force', negate: 'undo',
+    screen: 'screen-length disable', showCfg: 'display current-configuration'
+  },
+  cisco: {
+    label: '思科 IOS', enter: 'configure terminal', exit: 'end', save: 'write memory', negate: 'no',
+    screen: 'terminal length 0', showCfg: 'show running-config'
+  },
+  ruijie: {
+    label: '锐捷', enter: 'configure terminal', exit: 'end', save: 'write memory', negate: 'no',
+    screen: 'terminal length 0', showCfg: 'show running-config'
+  }
+};
+/** 取厂家口径（未知键回退华为，与「生成配置」的默认口径一致） */
+U.deployVendor = (key) => U.DEPLOY_VENDORS[key] || U.DEPLOY_VENDORS.huawei;
+
+U.DEPLOY_MAX_LINES = 200;      // 单次变更集行数上限（与 shell.runDeploy 的硬上限一致）
+U.DEPLOY_MAX_LINE_LEN = 256;   // 单行字符上限（同上）
+
+/** 绝对禁止下发的命令：重启 / 擦除 / 格式化 / 恢复出厂 / 删文件等不可逆动作。
+ *  命中即整批拒绝且**不可覆盖**——本功能的语义是「配置变更」，不是设备维护或清空。 */
+U.DEPLOY_FORBIDDEN = [
+  { re: /^reload\b/i, why: '重启设备' },
+  { re: /^reboot\b/i, why: '重启设备' },
+  { re: /^erase\b/i, why: '擦除存储/配置' },
+  { re: /^format\b/i, why: '格式化存储' },
+  { re: /^factory-reset\b/i, why: '恢复出厂配置' },
+  { re: /^reset\s+saved-configuration\b/i, why: '清空启动配置' },
+  { re: /^write\s+erase\b/i, why: '清空启动配置' },
+  { re: /^undo\s+startup\s+saved-configuration\b/i, why: '清空启动配置' },
+  { re: /^startup\s+saved-configuration\b/i, why: '改写启动配置文件（易自锁）' },
+  { re: /^delete\b/i, why: '删除设备文件' },
+  { re: /^undelete\b/i, why: '恢复已删文件' },
+  { re: /^(rm|rmdir|mkfs|dd|fdisk|parted|mkswap)\b/i, why: '破坏性系统命令' },
+  { re: /^shutdown\s+[-/]/, why: '关机指令' },
+  { re: /^boot\b/i, why: '更改启动项' },
+  { re: /^patch\b/i, why: '打补丁' }
+];
+
+/** 需调用方显式确认才放行的告警类命令：删除 / 关闭 / 清除类。 */
+U.DEPLOY_WARN = [
+  { re: /^(undo|no)\s+/i, why: '删除或关闭类命令' },
+  { re: /^(clear|reset|default)\b/i, why: '清除/复位类命令' },
+  { re: /^shutdown\s*$/i, why: '关闭接口（业务中断）' }
+];
+
+/** 管理面通道关键字：变更里出现对这些对象的删除/关闭时，提示可能自断管理通道 */
+U.DEPLOY_MGMT_RE = /\b(ssh|stelnet|telnet|snmp-agent|snmp-server|ip\s+http|http\s+server|https|web-manager|netconf|restconf|management)\b/i;
+
+/** 保存配置命令（变更集里出现则剥离并计数：保存由下发管道的显式选项决定） */
+U.DEPLOY_SAVE_RE = /^(save(?:\s+force)?|write(?:\s+memory)?|copy\s+running-config\s+startup-config)$/i;
+/** 进入配置模式的命令（由管道显式下发；变更集里出现则剥离，避免重复进入/视图错乱） */
+U.DEPLOY_MODE_RE = /^(system-view|configure\s+terminal|conf\s+t)$/i;
+/** 退出配置模式的行（仅在变更集**末行**时剥离：中段的 return/quit 是视图切换，必须保留） */
+U.DEPLOY_EXIT_RE = /^(return|end|quit|exit)$/i;
+
+/** 单行清洗（两侧共用，避免解析口径分叉）：剔 ANSI 转义与控制字符、Tab → 两空格、去行尾空白 */
+U.cleanCfgLine = (raw) => String(raw == null ? '' : raw)
+  .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+  .replace(/\u001b[()][0-9A-B]/g, '')
+  .replace(/\t/g, '  ')
+  .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+  .replace(/[ ]+$/, '');
+
+/** 剥离粘贴自终端时的设备提示符前缀（`<SW1>`、`[SW1]`、`SW1#`、`SW1(config-if)#`）：
+ *  只剥离「短名字 + 可选 (视图) + # 或 >」或「尖/方括号包裹的短名字」形态，正常配置行不匹配。
+ *  前导空白保留（子命令缩进是块归属的判据）。 */
+U.stripCfgPrompt = (line) => {
+  const s = String(line == null ? '' : line);
+  const lead = /^[ ]*/.exec(s)[0];
+  let body = s.slice(lead.length);
+  const m = /^<[A-Za-z0-9_.\-~]{1,64}>/.exec(body)
+    || /^\[[A-Za-z0-9_.\-~]{1,64}\]/.exec(body)
+    || /^[A-Za-z0-9_.\-]{1,64}(?:\([A-Za-z0-9_.\-/]{1,32}\))?[#>]/.exec(body);
+  if (m) body = body.slice(m[0].length).replace(/^[ ]+/, '');
+  return lead + body;
+};
+
+/** 把配置文本切成 [{text, indent, ctx}]（ctx = 所属块上下文，即最近的上一个缩进为 0 的行）：
+ *  跳过空行与整行注释（# / ! / //），缩进是「块上下文」的判据
+ *  （配置生成器与设备回显都用一层缩进表示子命令）。用于 dry-run 预判与回滚求逆。 */
+U.cfgSplit = (text) => {
+  const out = [];
+  let ctx = '';
+  for (const raw of String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n')) {
+    const s = U.cleanCfgLine(raw);
+    if (!s.trim()) continue;
+    const t = s.trim();
+    if (/^(#|!|\/\/)/.test(t)) continue;
+    const indent = s.length - s.replace(/^[ ]+/, '').length;
+    if (indent === 0) ctx = t;
+    out.push({ text: s, indent, ctx: indent === 0 ? '' : ctx });
+  }
+  return out;
+};
+
+/** 两行的公共 token 前缀长度（大小写不敏感） */
+function cfgCommonPrefix(a, b) {
+  const x = String(a || '').trim().split(/\s+/);
+  const y = String(b || '').trim().split(/\s+/);
+  let n = 0;
+  while (n < x.length && n < y.length && x[n].toLowerCase() === y[n].toLowerCase()) n++;
+  return n;
+}
+/** 同一块的候选旧行里找与 text「同键」的行（公共前缀 ≥2 个 token，或旧行只差最后一个值 token）。
+ *  cands 为 [{raw, trim}]（raw 保留缩进：回滚回填原值必须连缩进一起回去，否则非缩进行会被
+ *  设备当成顶层命令落进错误的视图）。返回 {raw, trim, prefix} 或 null。
+ *  启发式：仅用于 dry-run 提示与回滚取值，不作为安全判据。 */
+function cfgBestMatch(cands, text) {
+  let best = null;
+  for (const c of (cands || [])) {
+    if (c.trim === text) continue;
+    const n = cfgCommonPrefix(c.trim, text);
+    if (n < 1) continue;
+    const candTokens = c.trim.split(/\s+/).length;
+    if (!(n >= 2 || candTokens === n + 1)) continue;
+    if (!best || n > best.prefix) best = { raw: c.raw, trim: c.trim, prefix: n };
+  }
+  return best;
+}
+
+/** 把变更前配置建成检索索引：顶层行集合 + 每块的子命令行。
+ *  byCtx 的值是 [{raw, trim}]——raw 留缩进供回滚回填，trim 供比对。 */
+function cfgIndex(prevLines) {
+  const topSet = new Set();
+  const byCtx = new Map();
+  for (const o of prevLines) {
+    const trim = o.text.trim();
+    if (o.indent === 0) { topSet.add(trim); continue; }
+    if (!byCtx.has(o.ctx)) byCtx.set(o.ctx, []);
+    byCtx.get(o.ctx).push({ raw: o.text, trim });
+  }
+  return { topSet, byCtx };
+}
+
+/** 解析变更集文本为可下发命令行。
+ *  opts: {stripPrompt(默认 true), maxLines}
+ *  返回 {ok, error, lines:[{text, indent, ctx}], skipped:{comment, blank, dup, mode, save}, count}
+ *  - 空行与整行注释不计入（「生成配置」的输出带 {comment} 头，直接粘贴即可）
+ *  - 剥离终端提示符、Tab 归一、去行尾空白；残留控制字符或超长的行整批拒绝
+ *  - 模式控制行（system-view）、保存命令（save/write memory）与末行的 return/end 剥离并计数：
+ *    进出配置模式与保存由下发管道统一处理（中段的 return/quit 属视图切换，必须保留）
+ *  - 去重按「块上下文 + 行」：同一子命令落在不同块（如两个接口都 shutdown）是两条独立变更
+ *  - ctx 记录子命令的块归属，供 dry-run 预判与回滚求逆使用 */
+U.parseChangeSet = (text, opts) => {
+  opts = opts || {};
+  const rawMax = parseInt(opts.maxLines, 10);
+  const maxLines = (rawMax >= 1 && rawMax <= 1000) ? rawMax : U.DEPLOY_MAX_LINES;
+  const out = [];
+  const skipped = { comment: 0, blank: 0, dup: 0, mode: 0, save: 0 };
+  const seen = new Set();
+  let ctx = '';
+  let idx = 0;
+  for (const raw of String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n')) {
+    // 控制字符在清洗前判定并整批拒绝：静默剔除会把「粘贴已损坏」伪装成「看起来正常的变更单」
+    // （Tab 不算控制字符，由 cleanCfgLine 归一为空格）
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(raw)) {
+      return { ok: false, error: '变更集含控制字符（第 ' + (idx + 1) + ' 行），已拒绝', lines: [], skipped, count: 0 };
+    }
+    let s = U.cleanCfgLine(raw);
+    if (opts.stripPrompt !== false) s = U.stripCfgPrompt(s);
+    if (!s.trim()) { skipped.blank++; continue; }
+    const t = s.trim();
+    if (/^(#|!|\/\/)/.test(t)) { skipped.comment++; continue; }
+    if (U.DEPLOY_SAVE_RE.test(t)) { skipped.save++; continue; }
+    if (U.DEPLOY_MODE_RE.test(t)) { skipped.mode++; continue; }
+    idx++;
+    if (s.length > U.DEPLOY_MAX_LINE_LEN) return { ok: false, error: '变更集第 ' + idx + ' 行超过 ' + U.DEPLOY_MAX_LINE_LEN + ' 字符，已拒绝', lines: [], skipped, count: 0 };
+    const indent = s.length - s.replace(/^[ ]+/, '').length;
+    if (indent === 0) ctx = t;
+    const key = (indent === 0 ? '' : ctx) + '\u0001' + t;
+    if (seen.has(key)) { skipped.dup++; continue; }
+    seen.add(key);
+    out.push({ text: s, indent, ctx: indent === 0 ? '' : ctx });
+    if (out.length > maxLines) return { ok: false, error: '变更集超过 ' + maxLines + ' 行上限（按 1 台设备 1 次变更设计，请拆分）', lines: [], skipped, count: 0 };
+  }
+  // 末行的退出配置模式命令：由管道显式下发，剥离（仅末行；中段的属视图切换）
+  while (out.length && U.DEPLOY_EXIT_RE.test(out[out.length - 1].text.trim())) { out.pop(); skipped.mode++; }
+  return { ok: true, error: null, lines: out, skipped, count: out.length };
+};
+
+/** 安全闸门：硬禁止命中即拒绝（不可覆盖）；告警类由调用方确认后放行。
+ *  返回 {ok, error, hard:[{i,line,why}], warn:[{i,line,why}]} */
+U.checkChangeSet = (lines) => {
+  const arr = Array.isArray(lines) ? lines : [];
+  const hard = [], warn = [];
+  arr.forEach((ln, i) => {
+    const t = String(ln && ln.text != null ? ln.text : (ln == null ? '' : ln)).trim();
+    if (!t) return;
+    const h = U.DEPLOY_FORBIDDEN.find(r => r.re.test(t));
+    if (h) { hard.push({ i, line: t, why: h.why }); return; }
+    const w = U.DEPLOY_WARN.find(r => r.re.test(t));
+    if (w) { warn.push({ i, line: t, why: w.why }); return; }
+    if (/^(undo|no)\s+/i.test(t) && U.DEPLOY_MGMT_RE.test(t)) warn.push({ i, line: t, why: '可能关闭本机管理通道（SSH/Telnet/SNMP/HTTP）' });
+  });
+  if (hard.length) return { ok: false, error: '含禁止下发的命令：' + hard[0].line + '（' + hard[0].why + '）', hard, warn };
+  return { ok: true, error: null, hard, warn };
+};
+
+/** dry-run 预判：变更集 × 变更前配置逐行比对，分类为 新增/覆盖/删除/幂等，并预判自断管理面风险。
+ *  prevText 为空（无基线）时 noBaseline=true —— 此时无法预判，界面应提示先做一次前置备份。
+ *  mgmtIp 为该设备管理地址，用于识别「变更把自己的管理地址/管理协议弄丢」。
+ *  返回 {noBaseline, count, add, modify, remove, same, persist, rows:[{text,kind,note}], risk:{selfLock, why:[]}} */
+U.deployPreview = (lines, prevText, vendorKey, mgmtIp) => {
+  const arr = Array.isArray(lines) ? lines : [];
+  const prev = U.cfgSplit(prevText || '');
+  const noBaseline = !prev.length;
+  const prevTexts = prev.map(o => o.text.trim());
+  const { topSet, byCtx } = cfgIndex(prev);
+  const ipRe = mgmtIp ? new RegExp('(^|[^0-9.])' + String(mgmtIp).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^0-9.]|$)') : null;
+  const hasIp = (t) => !!(ipRe && ipRe.test(t));
+  const newCtx = new Set();
+  for (const ln of arr) {
+    const t = String(ln && ln.text != null ? ln.text : '').trim();
+    if (t && ln && ln.indent === 0 && !topSet.has(t)) newCtx.add(t);
+  }
+  const rows = [];
+  const counts = { add: 0, modify: 0, remove: 0, same: 0 };
+  const why = [];
+  let persist = false;
+  for (const ln of arr) {
+    const t = String(ln && ln.text != null ? ln.text : (ln == null ? '' : ln)).trim();
+    if (!t) continue;
+    const indent = (ln && typeof ln.indent === 'number') ? ln.indent : (String(ln).length - String(ln).trimStart().length);
+    const ctx = indent === 0 ? '' : ((ln && ln.ctx) || '');
+    if (/^(save|write(?:\s+memory)?|copy\s+running-config\s+startup-config)\b/i.test(t)) persist = true;
+    const neg = /^(undo|no)\s+(.+)$/i.exec(t);
+    let kind, note = '';
+    if (neg) {
+      kind = 'remove';
+      note = '删除/关闭：' + neg[2];
+      if (hasIp(neg[2])) why.push('删除含管理地址的行：' + t);
+      else if (U.DEPLOY_MGMT_RE.test(neg[2])) why.push('关闭管理通道：' + t);
+    } else if (prevTexts.includes(t)) {
+      kind = 'same';
+      note = '变更前已存在同样一行（幂等重下发）';
+    } else if ((indent === 0 && !topSet.has(t)) || newCtx.has(ctx)) {
+      kind = 'add';
+      if (indent === 0) note = '新建块';
+    } else {
+      const best = cfgBestMatch(byCtx.get(ctx) || [], t);
+      if (best) {
+        kind = 'modify';
+        note = '覆盖变更前：' + best.trim;
+        if (hasIp(best.trim) && !hasIp(t)) why.push('管理地址被改写为不含原地址的取值：' + t);
+      } else kind = 'add';
+    }
+    counts[kind]++;
+    rows.push({ text: t, kind, note });
+  }
+  return {
+    noBaseline, count: arr.length, add: counts.add, modify: counts.modify, remove: counts.remove,
+    same: counts.same, persist, rows, risk: { selfLock: why.length > 0, why }
+  };
+};
+
+/** 生成回滚变更单：以「变更前配置」为基线，对本次变更集逐行求逆、逆序（LIFO）下发。
+ *  - 子命令：变更前同块已有同键行 → 回填原行（覆盖式回退）；否则取反删除（undo/no + 行）
+ *  - 块上下文行：变更前已存在 → 不动；否则取反删除（思科/锐捷的 interface 无法 no 掉，列人工）
+ *  - 变更行本身就是取反（undo/no）→ 逆操作是去掉取反（即重新启用）
+ *  - 无法可靠求逆的行不进入可下发部分，以注释形式出现在 text 里并列入 manual
+ *  返回 {ok, error, text, lines:[{text,kind,why}], manual:[{line,why}], reversible}
+ *  prevText 为空时 ok=false —— 没有基线就谈不上回滚，这正是「强制前置备份」的意义。 */
+U.buildRollback = (lines, prevText, vendorKey) => {
+  const v = U.deployVendor(vendorKey);
+  const prev = U.cfgSplit(prevText || '');
+  if (!prev.length) return { ok: false, error: '没有变更前配置基线，无法生成回滚变更单（请先执行一次前置备份）', text: '', lines: [], manual: [], reversible: 0 };
+  const topSet = new Set(prev.filter(o => o.indent === 0).map(o => o.text.trim()));
+  const { byCtx } = cfgIndex(prev);
+  const arr = (Array.isArray(lines) ? lines : []).map(ln => {
+    const raw = String(ln && ln.text != null ? ln.text : (ln == null ? '' : ln));
+    return { raw, text: raw.trim(), indent: raw.length - raw.trimStart().length };
+  }).filter(o => o.text);
+  const out = [];
+  const manual = [];
+  const push = (text, kind, why) => {
+    if (!text) return;
+    // 只压连续重复（同块上下文重复进入无意义）；不做全局去重——不同块里同样的值行都要下发
+    const last = out[out.length - 1];
+    if (last && last.text === text) return;
+    out.push({ text, kind, why: why || '' });
+  };
+  const ctxAt = (i) => {
+    for (let j = i; j >= 0; j--) if (arr[j].indent === 0) return arr[j].text;
+    return '';
+  };
+  const negRe = /^([ ]*)(undo|no)\s+(.+)$/i;   // 保留前导缩进：逆操作必须与原子命令同缩进（否则会落进错误的视图）
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const raw = arr[i].raw;
+    const text = arr[i].text;
+    const indent = arr[i].indent;
+    const lead = raw.slice(0, indent);
+    const ctx = indent === 0 ? '' : ctxAt(i);
+    const neg = negRe.exec(raw);
+    let inv = '', kind = '', why = '';
+    if (neg) {
+      inv = neg[1] + neg[3].trim(); kind = 'restore'; why = '重新启用（本次为删除/关闭）';
+    } else if (indent === 0) {
+      if (topSet.has(text)) continue;                       // 变更前已有该块 → 无需撤销
+      if (/^interface\b/i.test(text) && v.negate === 'no') {
+        manual.push({ line: text, why: '思科/锐捷无法用 no interface 删除接口，需人工处理（可改用 default interface）' });
+        continue;
+      }
+      inv = v.negate + ' ' + text; kind = 'undo'; why = '删除本次新建的块';
+    } else {
+      const cands = byCtx.get(ctx) || [];
+      if (cands.some(c => c.trim === text)) continue;        // 变更前同块已有同一行 → 无需撤销
+      const best = cfgBestMatch(cands, text);
+      if (best) { inv = best.raw; kind = 'restore'; why = '恢复变更前的取值'; }
+      else { inv = lead + v.negate + ' ' + text; kind = 'undo'; why = '删除本次新增的子命令'; }
+    }
+    if (ctx && indent > 0) push(ctx, 'context', '重新进入所在块');   // 逆序下发：先补块上下文再下发逆操作
+    push(inv, kind, why);
+  }
+  const head = [
+    '# 回滚变更单（自动生成 · ' + v.label + '）',
+    '# 依据：变更前配置基线；可自动回滚 ' + out.filter(o => o.kind !== 'context').length + ' 行、需人工确认 ' + manual.length + ' 行',
+    '# 提示：部分平台不接受带参数的 ' + v.negate + ' 形式，个别行若下发失败请按结果报告手工处理'
+  ].concat(manual.map(m => '#   [需人工] ' + m.line + ' —— ' + m.why));
+  const text = head.join('\n') + '\n' + out.map(o => o.text).join('\n') + '\n';
+  return { ok: true, error: null, text, lines: out, manual, reversible: out.filter(o => o.kind !== 'context').length };
 };
 
 /** 解析 ARP / MAC 地址表输出（多厂家混合文本，可一次粘贴多张表）：
@@ -2603,6 +3339,412 @@ U.buildIpamData = (nodes, links) => {
   })).sort((a, b) => b.utilization - a.utilization || a.network.localeCompare(b.network, 'zh', { numeric: true }));
   addrs.sort((a, b) => a.device.localeCompare(b.device, 'zh') || a.network.localeCompare(b.network, 'zh', { numeric: true }) || a.ip.localeCompare(b.ip, 'zh', { numeric: true }));
   return { addrs, subnets, conflicts };
+};
+
+/* ---------- IPAM 闭环比对（规划 vs 实网；纯函数，Node 测试可调用） ----------
+ * 把「规划清单」（U.buildIpamData：管理口 + 接口 IP）与「实网观测」比对：
+ *   实网观测 = 本机存活扫描（ICMP + 本机 ARP 的 MAC） ∪ 设备侧 ARP/MAC 表采集（U.parseArpMacTables）
+ * 产出五类结论：私接嫌疑 / 规划冲突 / 未登记在用（黑户）/ 登记未在线 / 登记在用（+ 仅规划、空闲）。
+ * 「私接嫌疑」的判据：某登记 IP 的 MAC 出现在**登记设备之外**的设备端口上（设备侧 ARP/MAC 表能定位到端口）。 */
+U.IPAM_AUDIT_STATUS = {
+  hijack: { label: 'IP 冲突/私接', color: 'var(--danger)', order: 0 },
+  conflict: { label: '规划冲突', color: 'var(--danger)', order: 1 },
+  intruder: { label: '未登记在用', color: '#f59e0b', order: 2 },
+  missing: { label: '登记未在线', color: '#f59e0b', order: 3 },
+  ok: { label: '登记在用', color: 'var(--ok, #22c55e)', order: 4 },
+  planned: { label: '仅规划', color: 'var(--muted)', order: 5 }
+};
+/** 规划清单 × 实网观测 → 分类结论。
+ *  opts: { alive:[{ip, mac?, ptr?}],            // 本机存活扫描（U.diag.subnetScan 口径）
+ *          ipMac:[{ip, mac, devId, devName, ifn, vlan, source}], // 设备侧 ARP/MAC 表采集（已带设备归属）
+ *          scanned: 是否做过实测（false 时只输出规划侧，未在线/黑户/私接都不判定） }
+ *  返回 { rows, summary, subnetAudit, scanned }
+ *  rows 每行：{ip, status, network, bits, plannedBy:[设备名], plannedRows, macs, observedOn, conflict, note} */
+U.buildIpamAudit = (data, opts) => {
+  opts = opts || {};
+  data = (data && typeof data === 'object') ? data : { addrs: [], subnets: [], conflicts: [] };
+  const scanned = !!opts.scanned;
+  const planned = new Map();   // ip → {ip, network, bits, devices:Set, rows:[]}
+  for (const a of (Array.isArray(data.addrs) ? data.addrs : [])) {
+    if (!a || !a.ip) continue;
+    let p = planned.get(a.ip);
+    if (!p) { p = { ip: a.ip, network: a.network, bits: a.bits, devices: new Set(), rows: [] }; planned.set(a.ip, p); }
+    p.devices.add(String(a.device || '?'));
+    p.rows.push({ device: String(a.device || '?'), source: a.source, iface: String(a.iface || '') });
+  }
+  const conflictOf = new Map();
+  for (const c of (Array.isArray(data.conflicts) ? data.conflicts : [])) if (c && c.ip) conflictOf.set(c.ip, c);
+  const obs = new Map();       // ip → {ip, alive, macs:Set, on:[{devId,devName,ifn,vlan,source}]}
+  const touch = (ip) => { let o = obs.get(ip); if (!o) { o = { ip, alive: false, macs: new Set(), on: [] }; obs.set(ip, o); } return o; };
+  for (const a of (Array.isArray(opts.alive) ? opts.alive : [])) {
+    if (!a || !a.ip) continue;
+    const o = touch(String(a.ip));
+    o.alive = true;
+    const m = U.normMac(a.mac);
+    if (m) o.macs.add(m);
+  }
+  for (const r of (Array.isArray(opts.ipMac) ? opts.ipMac : [])) {
+    if (!r || !r.ip) continue;
+    const o = touch(String(r.ip));
+    const m = U.normMac(r.mac);
+    if (m) o.macs.add(m);
+    const devName = String(r.devName || r.devId || '');
+    const k = String(r.devId || '') + '|' + String(r.ifn || '') + '|' + m;
+    if (o._seen && o._seen.has(k)) continue;
+    (o._seen || (o._seen = new Set())).add(k);
+    o.on.push({ devId: String(r.devId || ''), devName, ifn: String(r.ifn || ''), vlan: String(r.vlan || ''), source: String(r.source || ''), mac: m });
+  }
+  const where = (o) => o.on.filter(x => x.devName).map(x => x.devName + (x.ifn ? '/' + x.ifn : '')).join('、');
+  const rows = [];
+  const summary = { planned: planned.size, observed: obs.size, ok: 0, missing: 0, intruder: 0, hijack: 0, conflict: 0, plannedOnly: 0, alive: 0 };
+  for (const [ip, p] of planned) {
+    const o = obs.get(ip);
+    const cf = conflictOf.get(ip) || null;
+    const owners = [...p.devices];
+    let status, note = '';
+    if (cf && cf.crossDevice) {
+      status = 'conflict';
+      note = '规划内 ' + owners.length + ' 台设备使用同一地址：' + owners.join('、');
+      summary.conflict++;
+    } else if (!o) {
+      status = scanned ? 'missing' : 'planned';
+      note = scanned ? '实测未发现该地址在线（设备可能未启用或已改址）' : '未做实测（仅规划侧）';
+      if (scanned) summary.missing++; else summary.plannedOnly++;
+    } else {
+      if (o.alive) summary.alive++;
+      // 私接/冲突判据必须可证伪：同一 IP 被观测到**多个不同 MAC** 才是硬证据。
+      // 不能拿「MAC 出现在非登记设备上」当判据——真实网络里下游设备经上联口可见邻居 MAC，这是常态。
+      const macOwners = new Map(o.macs.size ? [...o.macs].map(m => [m, new Set()]) : []);
+      for (const x of o.on) {
+        if (!x.devName || !macOwners.has(x.mac)) continue;
+        macOwners.get(x.mac).add(x.devName + (x.ifn ? '/' + x.ifn : ''));
+      }
+      if (o.macs.size >= 2) {
+        status = 'hijack';
+        note = '同一 IP 实测出现 ' + o.macs.size + ' 个不同 MAC：' + [...macOwners.entries()]
+          .map(([m, devs]) => m + '（' + ([...devs].join('、') || '本机扫描') + '）').join('；') + ' —— IP 冲突或地址被他人占用';
+        summary.hijack++;
+      } else {
+        status = 'ok';
+        note = o.on.length ? ('实测命中：' + where(o)) : (o.alive ? '本机扫描存活' : '设备表中有记录');
+        const others = o.on.filter(x => x.devName && !owners.includes(x.devName));
+        if (others.length) note += '（该 MAC 亦在 ' + others.map(x => x.devName).filter((v, i, a) => a.indexOf(v) === i).join('、') + ' 上可见，属正常转发路径）';
+        summary.ok++;
+      }
+    }
+    rows.push({ ip, status, network: p.network, bits: p.bits, plannedBy: owners, plannedRows: p.rows, macs: o ? [...o.macs] : [], observedOn: o ? o.on : [], conflict: cf, note });
+  }
+  for (const [ip, o] of obs) {
+    if (planned.has(ip)) continue;
+    const net = U.subnetOf(ip, 24) || '';
+    summary.intruder++;
+    rows.push({
+      ip, status: 'intruder', network: net, bits: 24, plannedBy: [], plannedRows: [],
+      macs: [...o.macs], observedOn: o.on, conflict: null,
+      note: (o.on.length ? ('未登记却出现在：' + where(o)) : (o.alive ? '本机扫描存活，规划清单中无此地址' : '设备表中存在该地址，规划清单中无此地址'))
+        + (o.macs.size >= 2 ? '（且出现 ' + o.macs.size + ' 个不同 MAC，IP 冲突）' : '')
+    });
+  }
+  const orderOf = (s) => (U.IPAM_AUDIT_STATUS[s] ? U.IPAM_AUDIT_STATUS[s].order : 9);
+  const ipNum = (ip) => { const n = U.ipv4ToInt(ip); return n == null ? 0 : n; };
+  rows.sort((a, b) => (orderOf(a.status) - orderOf(b.status)) || (a.network === b.network ? ipNum(a.ip) - ipNum(b.ip) : String(a.network).localeCompare(String(b.network), 'zh', { numeric: true })));
+  // 网段级汇总：规划容量与实测命中对比（黑户/私接按就近网段归属）
+  const subnetAudit = (Array.isArray(data.subnets) ? data.subnets : []).map(s => {
+    const mask = s.bits === 0 ? 0 : (0xFFFFFFFF << (32 - s.bits)) >>> 0;
+    const base = U.ipv4ToInt(s.network);
+    const inNet = (ip) => {
+      const n = U.ipv4ToInt(ip);
+      return n != null && base != null && ((n & mask) >>> 0) === ((base & mask) >>> 0);
+    };
+    const mine = rows.filter(r => inNet(r.ip));
+    const cnt = (st) => mine.filter(r => r.status === st).length;
+    return {
+      network: s.network, bits: s.bits, usable: s.usable, used: s.used, deviceCount: s.deviceCount, utilization: s.utilization,
+      ok: cnt('ok'), missing: cnt('missing'), intruder: cnt('intruder'), hijack: cnt('hijack'), conflict: cnt('conflict'),
+      free: Math.max(0, (s.usable || 0) - (s.used || 0))
+    };
+  }).sort((a, b) => (b.hijack + b.intruder + b.conflict) - (a.hijack + a.intruder + a.conflict) || b.utilization - a.utilization);
+  const unrouted = rows.filter(r => r.status === 'intruder' && !subnetAudit.some(s => {
+    const mask = s.bits === 0 ? 0 : (0xFFFFFFFF << (32 - s.bits)) >>> 0;
+    const base = U.ipv4ToInt(s.network);
+    const n = U.ipv4ToInt(r.ip);
+    return n != null && base != null && ((n & mask) >>> 0) === ((base & mask) >>> 0);
+  })).length;
+  summary.free = subnetAudit.reduce((a, s) => a + s.free, 0);
+  summary.unplannedSubnet = unrouted;   // 黑户落在规划网段之外的数量
+  return { rows, summary, subnetAudit, scanned };
+};
+
+/** 把各设备的 ARP/MAC 采集结果展开成「IP → 观测点」列表，供 IPAM 闭环比对使用。
+ *  关键：MAC 地址表行本身只有 MAC 没有 IP，必须把「同一 MAC 在别处 ARP 表里对应的 IP」串起来，
+ *  才能发现「这个 IP 的 MAC 出现在另一台设备的接入端口上」——这正是私接判据的来源。
+ *  入参 collected: [{devId, devName, arp:[{ip,mac,ifn,vlan}], mac:[{mac,vlan,ifn}]}]
+ *  返回 {ipMac:[{ip,mac,devId,devName,ifn,vlan,source}], macCount, ipCount, orphanMac} */
+U.resolveIpMacObservations = (collected) => {
+  const macToIps = new Map();
+  const top = (v) => v == null ? '' : String(v);
+  for (const c of (Array.isArray(collected) ? collected : [])) {
+    for (const a of ((c && c.arp) || [])) {
+      const m = U.normMac(a && a.mac);
+      const ip = top(a && a.ip).trim();
+      if (!m || U.ipv4ToInt(ip) == null) continue;
+      if (!macToIps.has(m)) macToIps.set(m, new Set());
+      macToIps.get(m).add(ip);
+    }
+  }
+  const ipMac = [];
+  const seen = new Set();
+  let macCount = 0, orphanMac = 0;
+  const key = (dev, a, b, c, d) => dev + '|' + a + '|' + b + '|' + c + '|' + d;
+  for (const c of (Array.isArray(collected) ? collected : [])) {
+    if (!c) continue;
+    const devId = top(c.devId);
+    const base = { devId, devName: top(c.devName) };
+    for (const a of (c.arp || [])) {
+      const m = U.normMac(a && a.mac);
+      const ip = top(a && a.ip).trim();
+      if (!m || U.ipv4ToInt(ip) == null) continue;
+      // auto 命令集会同时下发多家方言命令，同一张表可能被解析两次：按「设备+IP+MAC+接口」去重
+      const k = key(devId, 'arp', ip, m, top(a.ifn));
+      if (seen.has(k)) continue;
+      seen.add(k);
+      ipMac.push(Object.assign({ ip, mac: m, ifn: top(a.ifn), vlan: top(a.vlan), source: 'arp' }, base));
+    }
+    for (const r of (c.mac || [])) {
+      const m = U.normMac(r && r.mac);
+      if (!m) continue;
+      macCount++;
+      const ips = macToIps.get(m);
+      if (!ips || !ips.size) { orphanMac++; continue; }   // 没有 IP 佐证的 MAC（纯二层表项）不参与比对
+      for (const ip of ips) {
+        const k = key(devId, 'mac', ip, m, top(r.ifn));
+        if (seen.has(k)) continue;
+        seen.add(k);
+        ipMac.push(Object.assign({ ip, mac: m, ifn: top(r.ifn), vlan: top(r.vlan), source: 'mac' }, base));
+      }
+    }
+  }
+  return { ipMac, macCount, ipCount: new Set(ipMac.map(x => x.ip)).size, orphanMac };
+};
+
+/* ---------- 三层邻居（BGP / OSPF）解析与协议视图（纯函数，Node 测试可调用） ----------
+ * 支持：华为/H3C `display bgp peer`、思科/锐捷 `show ip bgp summary`（BGP 汇总表）；
+ * 华为/H3C `display ospf peer brief`、`display ospf peer`（表 + 键值块）、思科 `show ip ospf neighbor`。
+ * 只取「谁和谁建立了/没建立邻接、什么状态、哪个接口」——不做路由计算。 */
+const PROTO_IPV4 = (t) => {
+  const s = String(t == null ? '' : t).trim();
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(s)) return '';
+  return s.split('.').every(o => +o <= 255) ? s : '';
+};
+const PROTO_IFACE = /^[A-Za-z][A-Za-z0-9.\/:\-]{1,31}$/;
+const PROTO_BGP_STATE = /^(established|idle|active|connect|opensent|openconfirm|administratively[-_ ]?shut|no\s+neighbor|clearing)$/i;
+const PROTO_OSPF_STATE = /^(full|2-?way|init|exstart|exchange|loading|down|attempt)(\/(dr|bdr|drother))?$/i;
+const PROTO_UPTIME = /^(?:\d{1,3}d)?(?:\d{1,2}h)?(?:\d{1,3}m)?(?:\d{1,3}s)?$|^\d{1,2}:\d{2}:\d{2}$/i;
+
+/** 三层邻居状态是否正常：BGP 仅 Established；OSPF 需 Full（FULL/BDR 等也算正常） */
+U.protoStateOk = (protocol, state) => {
+  const s = String(state == null ? '' : state).trim();
+  if (!s) return false;
+  return protocol === 'bgp' ? /^established$/i.test(s) : /^full(\/|$)/i.test(s);
+};
+
+/** 解析三层邻居输出。protocol: 'bgp' | 'ospf'。
+ *  返回 {ok, protocol, entries:[{peer, peerId, ifn, state, as, uptime, pfx, area}], lines, error}
+ *  - BGP：逐行取行首 IPv4 为邻居；AS 取版本列后的数字（无版本列则取首个数字）；
+ *    状态列缺失但末列为纯数字时按思科惯例判为 Established（State/PfxRcd 列给前缀数即已建立）
+ *  - OSPF：表行（area / 接口 / Router ID / 状态，思科表另含 Address）与
+ *    键值块（华为 display ospf peer 的 Router ID / Address / State + 段头接口）两种形态，
+ *    同一邻居的两种形态按 Router ID+接口 合并（优先保留带邻居地址的一条） */
+U.parseProtoNeighbors = (text, protocol) => {
+  protocol = protocol === 'bgp' ? 'bgp' : 'ospf';
+  const clean = String(text == null ? '' : text)
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b[()][0-9A-B]/g, '')
+    .slice(0, 400 * 1024);
+  const lines = clean.replace(/\r\n?/g, '\n').split('\n');
+  const entries = [];
+  if (protocol === 'bgp') {
+    for (const raw of lines) {
+      const t = raw.trim();
+      const m = /^((?:\d{1,3}\.){3}\d{1,3})\b\s*(.*)$/.exec(t);
+      if (!m) continue;
+      const peer = PROTO_IPV4(m[1]);
+      if (!peer) continue;
+      const toks = m[2].split(/\s+/).filter(Boolean);
+      if (!toks.length) continue;
+      let state = '', as = '', uptime = '', pfx = '';
+      let stateIdx = -1;
+      for (let i = 0; i < toks.length; i++) {
+        const tk = toks[i];
+        if (!state && PROTO_BGP_STATE.test(tk)) { state = tk; stateIdx = i; continue; }
+        if (!uptime && (/^\d{1,2}:\d{2}:\d{2}$/.test(tk) || /^\d{1,3}[dhm](\d{1,2}[dhm]){0,2}$/i.test(tk))) { uptime = tk; continue; }
+      }
+      // AS 与 PrefRcv/PfxRcd：华为/H3C 首列是版本（4 / 4+），思科/锐捷无版本列。
+      // 前缀数取「AS 列之后的最后一个纯数字」——不能取第一个数字（那是版本列）
+      const nums = toks.map((t, i) => [t, i]).filter(x => /^\d+$/.test(x[0]));
+      const verFirst = /^\d{1,2}\+?$/.test(toks[0]) && +toks[0] <= 4;
+      const asIdx = verFirst ? 1 : 0;
+      as = nums[asIdx] ? nums[asIdx][0] : '';
+      const afterAs = nums.filter(x => x[1] > (nums[asIdx] ? nums[asIdx][1] : -1));
+      pfx = afterAs.length ? afterAs[afterAs.length - 1][0] : '';
+      if (!state) {
+        // 思科 show ip bgp summary：State/PfxRcd 列为数字即已建立（Idle 等状态会是文字）
+        if (toks.length >= 4 && /^\d+$/.test(toks[toks.length - 1])) state = 'Established';
+        else continue;                                  // 认不出状态的噪声行（如统计表尾）跳过
+      }
+      if (stateIdx >= 0) {
+        const afterState = nums.filter(x => x[1] > stateIdx);
+        pfx = afterState.length ? afterState[afterState.length - 1][0] : '';
+      }
+      entries.push({ peer, peerId: peer, ifn: '', state, as, uptime, pfx, area: '' });
+    }
+  } else {
+    // ① 表行：area? + 接口 + Router ID + 状态 (+ Address)
+    for (const raw of lines) {
+      const t = raw.trim();
+      if (!t || /^-+$/.test(t)) continue;
+      const toks = t.split(/\s+/).filter(Boolean);
+      if (toks.length < 3) continue;
+      const iState = toks.findIndex(x => PROTO_OSPF_STATE.test(x));
+      if (iState < 0) continue;
+      const ips = toks.map((x, i) => [PROTO_IPV4(x), i]).filter(x => x[0]);
+      if (!ips.length) continue;
+      const ifn = toks.find(x => PROTO_IFACE.test(x) && /\d/.test(x)) || '';
+      if (!ifn) continue;                              // 接口是「下钻到哪条链路」的关键，缺了就放弃该行
+      const ifnIdx = toks.indexOf(ifn);
+      const afterIf = ips.filter(x => x[1] > ifnIdx);
+      const peerId = (afterIf[0] || ips[ips.length - 1])[0];
+      // Area 列只在该行首列是 IPv4 且**不是**邻居 ID 时才算（思科表无 Area 列，首列就是 Neighbor ID）
+      const area = (ips[0][1] === 0 && ips[0][0] !== peerId) ? ips[0][0] : '';
+      // 思科表的 Address 列在状态列之后；华为 brief 表只有 Router ID
+      const afterState = ips.filter(x => x[1] > iState).map(x => x[0]);
+      const addr = afterState.find(x => x !== peerId) || '';
+      entries.push({ peer: addr || peerId, peerId, ifn, state: toks[iState], as: '', uptime: '', pfx: '', area });
+    }
+    // ② 键值块：华为/H3C display ospf peer（详细）
+    let cur = null, secIf = '';
+    const flush = () => { if (cur && (cur.peerId || cur.peer)) entries.push(cur); cur = null; };
+    for (const raw of lines) {
+      const t = raw.trim();
+      const sec = /interface\s+([A-Za-z][A-Za-z0-9.\/:\-]{1,31})\b/i.exec(t);
+      if (sec && /neighbor/i.test(t)) secIf = sec[1];
+      // Router ID 必须带冒号才是邻居块的开头——「OSPF Process 1 with Router ID 10.0.0.1」
+      // 这类表头同样含该字样，无冒号约束会把本机 Router ID 当成一条邻居
+      const rid = /Router\s*ID\s*[:：]\s*((?:\d{1,3}\.){3}\d{1,3})/i.exec(t);
+      const addr = /Address\s*[:：]\s*((?:\d{1,3}\.){3}\d{1,3})/i.exec(t);
+      if (rid) { flush(); cur = { peer: addr ? PROTO_IPV4(addr[1]) : '', peerId: PROTO_IPV4(rid[1]), ifn: secIf, state: '', as: '', uptime: '', pfx: '', area: '' }; continue; }
+      if (!cur) continue;
+      if (addr && !cur.peer && PROTO_IPV4(addr[1])) { cur.peer = PROTO_IPV4(addr[1]); continue; }
+      const st = /State\s*[:：]\s*([A-Za-z0-9\/\-]+)/i.exec(t);
+      if (st && !cur.state && PROTO_OSPF_STATE.test(st[1])) cur.state = st[1];
+    }
+    flush();
+  }
+  // 合并同一邻居的多形态记录（Router ID + 接口 为键）：优先保留带邻居地址 / 带状态的一条
+  const merged = new Map();
+  for (const e of entries) {
+    const k = (e.peerId || e.peer) + '|' + (e.ifn || '');
+    const prev = merged.get(k);
+    if (!prev) { merged.set(k, e); continue; }
+    prev.peer = prev.peer && prev.peer !== prev.peerId ? prev.peer : (e.peer || prev.peer);
+    prev.state = prev.state || e.state;
+    prev.area = prev.area || e.area;
+  }
+  const out = [...merged.values()].filter(e => e.peer || e.peerId);
+  const protoName = protocol === 'bgp' ? 'BGP' : 'OSPF';
+  if (!out.length) return { ok: false, protocol, entries: [], lines: lines.length, error: '未识别到' + protoName + '邻居输出（可换厂家命令集或确认设备已配置该协议）' };
+  return { ok: true, protocol, entries: out, lines: lines.length, error: null };
+};
+
+/** 厂家三层邻居采集命令预设（首条为关分页命令；auto 逐条尝试直到解析命中） */
+U.PROTO_PRESETS = {
+  bgp: {
+    auto: ['display bgp peer', 'show ip bgp summary', 'show bgp summary'],
+    huawei: ['screen-length 0 temporary', 'display bgp peer'],
+    h3c: ['screen-length disable', 'display bgp peer'],
+    cisco: ['terminal length 0', 'show ip bgp summary'],
+    ruijie: ['terminal length 0', 'show ip bgp summary']
+  },
+  ospf: {
+    auto: ['display ospf peer brief', 'display ospf peer', 'show ip ospf neighbor'],
+    huawei: ['screen-length 0 temporary', 'display ospf peer brief', 'display ospf peer'],
+    h3c: ['screen-length disable', 'display ospf peer'],
+    cisco: ['terminal length 0', 'show ip ospf neighbor'],
+    ruijie: ['terminal length 0', 'show ip ospf neighbor']
+  }
+};
+
+/** 把三层邻居观测匹配到拓扑：邻接关系、异常清单与画布叠加数据。
+ *  obs: [{devId, devName, protocol, entries}]（直接来自 U.parseProtoNeighbors.entries）
+ *  匹配顺序：① 邻居地址命中某设备的任意 IP（管理口/接口）② Router ID 命中某设备地址
+ *            ③ 兜底：本端接口名命中连线一端接口 → 取该连线另一端设备（OSPF 最常用的判据）
+ *  返回 {adj, anomalies, byLink, stats}
+ *  - anomalies.kind：'state'（状态非 Full/Established——邻居异常）、'unmatched'（认不出邻居是哪台设备
+ *    ——拓扑外邻居）、'unplanned'（认得出设备但拓扑里没有这条链路——规划外邻接） */
+U.buildProtoTopology = (nodes, links, obs) => {
+  const byId = new Map((Array.isArray(nodes) ? nodes : []).map(n => [n.id, n]));
+  const ipToNode = new Map();
+  const addIp = (ip, n) => { const s = String(ip || '').trim(); if (s && !ipToNode.has(s)) ipToNode.set(s, n); };
+  for (const n of (Array.isArray(nodes) ? nodes : [])) for (const ip of U.nodeMgmts(n)) addIp(ip, n);
+  for (const r of U.buildIfTableRows(nodes, links)) { const n = byId.get(r.nodeId); if (n && !r.l2) addIp(r.ip, n); }
+  const adj = [], anomalies = [], byLink = new Map();
+  let okCount = 0, badCount = 0;
+  for (const o of (Array.isArray(obs) ? obs : [])) {
+    const local = byId.get(o && o.devId);
+    if (!local) continue;
+    const protocol = o.protocol === 'bgp' ? 'bgp' : 'ospf';
+    for (const e of (o.entries || [])) {
+      let peerNode = ipToNode.get(String(e.peer || '').trim()) || ipToNode.get(String(e.peerId || '').trim()) || null;
+      if (peerNode && peerNode.id === local.id) peerNode = null;   // 自己认成自己的邻居：判定为无法匹配（防自邻接噪声）
+      let viaLink = null, matchedBy = peerNode ? (ipToNode.get(String(e.peer || '').trim()) ? 'ip' : 'id') : '';
+      // 兜底：按本端接口找连线，再取另一端
+      if (!peerNode && e.ifn) {
+        const sameIf = (a, b) => U.canonIfname(a) === U.canonIfname(b);
+        const l = (Array.isArray(links) ? links : []).find(x => (x.a === local.id && sameIf(x.aIf, e.ifn)) || (x.b === local.id && sameIf(x.bIf, e.ifn)));
+        if (l) { viaLink = l; const other = byId.get(l.a === local.id ? l.b : l.a); if (other) { peerNode = other; matchedBy = 'iface'; } }
+      }
+      if (peerNode && !viaLink) {
+        viaLink = (Array.isArray(links) ? links : []).find(x => (x.a === local.id && x.b === peerNode.id) || (x.b === local.id && x.a === peerNode.id)) || null;
+      }
+      const stateOk = U.protoStateOk(protocol, e.state);
+      const label = protocol === 'bgp' ? ('BGP ' + (e.as ? 'AS' + e.as + ' ' : '') + (e.state || '?')) : ('OSPF ' + (e.state || '?'));
+      const item = {
+        devId: local.id, devName: String(local.name || local.id), protocol,
+        peer: e.peer || '', peerId: e.peerId || '', as: e.as || '', state: e.state || '', ifn: e.ifn || '',
+        peerDevId: peerNode ? peerNode.id : '', peerDevName: peerNode ? String(peerNode.name || peerNode.id) : '',
+        linkId: viaLink ? viaLink.id : '', matchedBy, stateOk, label
+      };
+      adj.push(item);
+      if (stateOk) okCount++; else badCount++;
+      if (viaLink) {
+        const cur = byLink.get(viaLink.id) || { linkId: viaLink.id, labels: [], stateOk: true, count: 0, protocols: new Set() };
+        cur.count++;
+        cur.protocols.add(protocol);
+        cur.labels.push(label);
+        if (!stateOk) cur.stateOk = false;
+        byLink.set(viaLink.id, cur);
+      }
+      if (!stateOk && e.state) {                              // 状态为空（未采到 State 行）不算「异常」，只标未知
+        anomalies.push({
+          kind: 'state', devId: local.id, devName: item.devName, peer: item.peer || item.peerId, protocol,
+          detail: (protocol === 'bgp' ? 'BGP 邻居未建立' : 'OSPF 邻居未达 Full') + '：状态 ' + e.state + (e.ifn ? '（' + e.ifn + '）' : '')
+        });
+      }
+      if (!peerNode) {
+        anomalies.push({ kind: 'unmatched', devId: local.id, devName: item.devName, peer: item.peer || item.peerId, protocol, detail: '邻居 ' + (item.peer || item.peerId) + ' 未匹配到拓扑中的任何设备（可能未纳入拓扑或地址未登记）' });
+      } else if (!viaLink) {
+        anomalies.push({ kind: 'unplanned', devId: local.id, devName: item.devName, peer: item.peer || item.peerId, protocol, detail: '与 ' + item.peerDevName + ' 存在 ' + protocol.toUpperCase() + ' 邻接，但拓扑中没有这条链路（规划外邻接）' });
+      }
+    }
+  }
+  const linkBadges = {};
+  for (const [lid, v] of byLink) linkBadges[lid] = { label: v.labels.join(' / '), stateOk: v.stateOk, count: v.count, protocols: [...v.protocols] };
+  const linkIds = Object.keys(linkBadges);
+  const nodeIds = [...new Set(adj.filter(a => a.linkId || a.peerDevId).flatMap(a => [a.devId, a.peerDevId]).filter(Boolean))];
+  return {
+    adj, anomalies, linkBadges, linkIds, nodeIds,
+    stats: { sessions: adj.length, ok: okCount, bad: badCount, onLinks: linkIds.length, state: anomalies.filter(a => a.kind === 'state').length, unmatched: anomalies.filter(a => a.kind === 'unmatched').length, unplanned: anomalies.filter(a => a.kind === 'unplanned').length }
+  };
 };
 
 /* ---------- 设备批量重命名 ---------- */

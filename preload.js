@@ -127,6 +127,23 @@ contextBridge.exposeInMainWorld('topoConfigBackup', {
   openFolder: () => ipcRenderer.invoke('backupcfg:open')
 });
 
+/* 配置变更下发（监控 ▾ 配置变更下发）：会话、厂家命令口径与安全闸门全在主进程；
+ * 渲染层只提交「厂家键 + 配置行」，模式控制命令由主进程按厂家表决定 */
+contextBridge.exposeInMainWorld('topoDeploy', {
+  run: (p) => ipcRenderer.invoke('deploy:run', p),
+  history: (limit) => ipcRenderer.invoke('deploy:history', { limit }),
+  record: (name) => ipcRenderer.invoke('deploy:record', { name }),
+  recordRemove: (name) => ipcRenderer.invoke('deploy:record-remove', { name }),
+  clear: () => ipcRenderer.invoke('deploy:clear'),
+  openFolder: () => ipcRenderer.invoke('deploy:open-folder'),
+  onDone: sub('monitor:deploy')
+});
+
+/* 三层邻居（BGP/OSPF）异常留痕：采集结果由渲染层给出，主进程写事件时间线并弹通知 */
+contextBridge.exposeInMainWorld('topoProto', {
+  record: (p) => ipcRenderer.invoke('proto:record', p)
+});
+
 /* 密码等机密字段经主进程 safeStorage 加密后落盘（仅主窗口可用，主进程校验） */
 contextBridge.exposeInMainWorld('topoSecure', {
   encryptSecret: (text) => ipcRenderer.invoke('secure:encrypt', text),

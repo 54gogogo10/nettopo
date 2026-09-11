@@ -7,6 +7,7 @@ const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
+const { DeployStore, deployVendor } = require('./js/config-deploy.js');
 const { NetServices } = require('./js/net-services.js');
 const { SEV_NAMES: SYSLOG_SEV_NAMES } = require('./js/svc-syslog.js');
 const { Maintenance, nextDailyRun } = require('./js/maintenance.js');
@@ -79,6 +80,8 @@ const shell = new ShellManager({ logDir: path.join(app.getPath('userData'), 'mon
 
 /* ---- 设备后台静默监控（复用 Web Shell 底层连接，独立监视任务） ---- */
 const configBackup = new ConfigBackupStore(path.join(app.getPath('userData'), 'config-backups'));
+/* ---- 配置变更下发记录库（变更单/逐行结果/回滚留痕；口令打码后落盘） ---- */
+const deployStore = new DeployStore(path.join(app.getPath('userData'), 'deploy-records'));
 const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup });
 // 指纹信任裁决统一收口到 monitor 的权威信任库：无人值守采集（runOneShot）也必须遵守
 // 「首连 TOFU、变化即拒」，否则已钉扎主机的指纹变化会被静默接受并反写渲染层长期钉扎
@@ -1119,6 +1122,106 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
 ipcMain.handle('shell:oneshot', (e, p) => {
   if (!monitorGuard(e)) return Promise.resolve({ ok: false, outputs: [], fingerprint: null, error: 'forbidden', errors: [] });
   return shell.runOneShot(p || {});
+});
+
+/* ---- 配置变更下发（监控 ▾ 配置变更下发）----
+ * 事务顺序（任一步失败都留下明确结论，不静默降级）：
+ *   ① shell.runDeploy：一条会话内 前置备份 → 逐行下发（失败即停）→ 退出配置模式 → 可选保存 → 可选回采
+ *   ② 前置备份正文落配置备份库（回滚基线；下发记录里只留文件名，正文不进审计文件）
+ *   ③ 下发记录落 DeployStore（口令类关键字打码后才落盘）
+ *   ④ 事件时间线 + 系统通知（失败必通知；成功但保存失败也通知）
+ * 模式控制命令（关分页/取配置/进配置模式/退出/保存）由主进程按厂家表决定，渲染层只传厂家键。 */
+const DEPLOY_MAX_LINES = 200;
+function deployTargetOf(p) {
+  const device = String((p && p.device) || '').slice(0, 120);
+  const host = String((p && p.host) || '').trim().slice(0, 120);
+  if (!host || host.indexOf('..') >= 0) return null;
+  return { device: device || host, host };
+}
+ipcMain.handle('deploy:run', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const dh = deployTargetOf(p);
+  if (!dh) return { ok: false, error: '缺少管理地址' };
+  const v = deployVendor(p && p.vendor);
+  const lines = Array.isArray(p && p.lines) ? p.lines.slice(0, DEPLOY_MAX_LINES + 1) : [];
+  if (!lines.length) return { ok: false, error: '未提供要下发的配置行' };
+  if (lines.length > DEPLOY_MAX_LINES) return { ok: false, error: '配置行超过 ' + DEPLOY_MAX_LINES + ' 行上限' };
+  const protocol = String((p && p.protocol) || 'ssh').toLowerCase() === 'telnet' ? 'telnet' : 'ssh';
+  const port = parseInt(p && p.port, 10) || (protocol === 'telnet' ? 23 : 22);
+  const doSave = !!(p && p.doSave);
+  const verify = !!(p && p.verify);
+  const kind = (p && p.kind === 'rollback') ? 'rollback' : 'change';
+  const r = await shell.runDeploy({
+    protocol, host: dh.host, port,
+    username: p && p.username, password: p && p.password,
+    privateKey: p && p.privateKey, keyPassphrase: p && p.keyPassphrase,
+    jump: p && p.jump, encoding: p && p.encoding, expectFp: p && p.expectFp,
+    lines,
+    screenCmd: v.screen, showCmd: v.showCfg, enterCmd: v.enter, exitCmd: v.exit, saveCmd: v.save,
+    doSave, verify,
+    waitMs: p && p.waitMs, cmdTimeoutMs: p && p.cmdTimeoutMs, readyTimeoutMs: p && p.readyTimeoutMs
+  });
+  // ② 前置备份正文入库（这是回滚的唯一基线，入库失败要显式告知）
+  let backupFile = '';
+  if (r.backup && r.backup.ok && r.backup.content) {
+    const sv = configBackup.save(dh.device, dh.host, r.backup.content);
+    if (sv.ok) backupFile = sv.name;
+    else if (!r.backup.error) r.backup.error = '备份正文入库失败：' + sv.error;
+  }
+  // ③ 审计留痕（口令打码）
+  const kindLabel = kind === 'rollback' ? '配置回滚' : '配置变更';
+  const saved = deployStore.save({
+    device: dh.device, deviceId: String((p && p.deviceId) || ''), host: dh.host, port, protocol,
+    vendor: String((p && p.vendor) || ''), vendorLabel: v.label, user: String((p && p.username) || ''),
+    kind, plan: String((p && p.plan) || ''), lines, applied: r.applied,
+    result: { ok: r.ok, appliedCount: r.appliedCount, failedAt: r.failedAt, remaining: r.remaining, error: r.error },
+    backup: { ok: r.backup.ok && !!backupFile, file: backupFile, error: r.backup.error },
+    saved: { ok: r.saved.ok, error: r.saved.error },
+    verify: { ok: r.post.ok, error: r.post.error }
+  });
+  // ④ 事件时间线 + 通知
+  const info = { key: 'deploy:' + dh.host, deviceId: String((p && p.deviceId) || ''), host: dh.host, name: dh.device };
+  const detail = (r.ok ? '下发成功 ' + r.appliedCount + '/' + lines.length + ' 行' : (r.error || '下发失败'))
+    + (backupFile ? '；前置备份 ' + backupFile : '；前置备份未入库')
+    + (doSave ? (r.saved.ok ? '；已保存配置' : '；保存配置失败') : '')
+    + (saved.ok && saved.maskedCount ? '；记录已打码 ' + saved.maskedCount + ' 行' : '');
+  recordMonitorEvent(info, r.ok ? 'deploy' : 'deploy-error', kindLabel + '：' + detail);
+  if (!r.ok) notifyForDevice(info.deviceId, '网络拓扑管理软件 · ' + kindLabel + '失败', dh.device + '（' + dh.host + '）：' + (r.error || '未知错误'));
+  else if (doSave && !r.saved.ok) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 保存配置失败', dh.device + '（' + dh.host + '）：变更已下发但保存配置失败，设备重启后可能丢失');
+  sendMonitor('monitor:deploy', { host: dh.host, deviceId: info.deviceId, ok: r.ok, error: r.error || null, appliedCount: r.appliedCount, kind });
+  return Object.assign({}, r, {
+    backupFile, vendorLabel: v.label,
+    record: saved.ok ? saved.name : '', recordError: saved.ok ? null : saved.error, maskedCount: saved.maskedCount || 0
+  });
+});
+ipcMain.handle('deploy:history', (e, p) => monitorGuard(e) ? deployStore.list(p && p.limit) : { ok: false, error: 'forbidden' });
+ipcMain.handle('deploy:record', (e, p) => monitorGuard(e) ? deployStore.read(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
+ipcMain.handle('deploy:record-remove', (e, p) => monitorGuard(e) ? deployStore.remove(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
+ipcMain.handle('deploy:clear', (e) => monitorGuard(e) ? deployStore.clear() : { ok: false, error: 'forbidden' });
+ipcMain.handle('deploy:open-folder', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  try { fs.mkdirSync(deployStore.baseDir, { recursive: true }); } catch (err) { /* ignore */ }
+  return require('electron').shell.openPath(deployStore.baseDir).then(() => ({ ok: true }), (err) => ({ ok: false, error: String((err && err.message) || err) }));
+});
+
+/* ---- 三层邻居（BGP/OSPF）异常留痕：采集是一次性的，异常写进监控事件时间线并弹通知 ----
+ * 只接受「设备名 + 主机 + 明细」，不做任何采集（采集在渲染层经 shell:oneshot 完成）。 */
+ipcMain.handle('proto:record', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const items = (Array.isArray(p && p.items) ? p.items : []).slice(0, 50);
+  let n = 0;
+  for (const it of items) {
+    const host = String((it && it.host) || '').slice(0, 120);
+    const info = { key: 'proto:' + host, deviceId: String((it && it.deviceId) || ''), host, name: String((it && it.device) || '') .slice(0, 120) };
+    recordMonitorEvent(info, 'proto', String((it && it.detail) || '').slice(0, 300));
+    n++;
+  }
+  const first = items[0];
+  if (first && notifyEnabled()) {
+    notifyForDevice(String(first.deviceId || ''), '网络拓扑管理软件 · 三层邻居异常',
+      String(first.device || first.host || '') + '：共 ' + items.length + ' 条邻居异常（详见事件时间线）');
+  }
+  return { ok: true, recorded: n };
 });
 
 /* ---- 在线升级（仅主窗口可调用）----

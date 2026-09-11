@@ -1189,6 +1189,14 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .flow-badge.down rect { fill: var(--panel2); }
 .flow-badge.down text { fill: var(--muted); text-decoration: line-through; }
 
+/* ---- 拓扑画布三层协议视图徽标（监控 ▾ 三层邻居与协议视图）：正常绿 / 异常红 ---- */
+.proto-badge { pointer-events: none; }
+.proto-badge rect { fill: var(--panel); stroke: var(--border); stroke-width: 1; }
+.proto-badge text { font: 600 10px/1 var(--font-ui, sans-serif); fill: var(--text); }
+.proto-badge.ok rect { fill: rgba(34, 197, 94, .92); stroke: transparent; }
+.proto-badge.bad rect { fill: rgba(239, 68, 68, .92); stroke: transparent; animation: monPulse 1.6s ease-in-out infinite; }
+.proto-badge.ok text, .proto-badge.bad text { fill: #fff; }
+
 /* ---- IP 地址管理视图 ---- */
 .ipam-t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .ipam-t th, .ipam-t td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -1198,3 +1206,16 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .ipam-bar > span { display: block; height: 100%; border-radius: 4px; }
 .ipam-conflict { font-size: 12.5px; background: rgba(220,38,38,.06); border: 1px solid rgba(220,38,38,.25); border-radius: 8px; padding: 6px 10px; }
 .ipam-cip { display: inline-block; font: 12px/1.6 Consolas, monospace; color: var(--danger); font-weight: 600; margin-right: 8px; }
+
+/* ---- 机柜 U 位视图（编辑 ▾ 机柜视图） ---- */
+.rv-wrap { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.rv-rack { border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--panel); min-width: 240px; }
+.rv-hd { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.rv-hd .m-sub { margin: 0; }
+.rv-body { border: 1.5px solid var(--border); border-radius: 6px; overflow: hidden; }
+.rv-u { position: relative; height: 22px; border-bottom: 1px solid var(--panel2); background: var(--panel2); }
+.rv-u:last-child { border-bottom: 0; }
+.rv-u .rv-n { position: absolute; left: 4px; top: 50%; transform: translateY(-50%); font: 9px/1 Consolas, monospace; color: var(--muted); }
+.rv-filled { background: var(--panel); border-left: 3px solid var(--border); }
+.rv-filled.rv-bad { border-color: var(--danger); box-shadow: inset 0 0 0 1px rgba(220,38,38,.5); }
+.rv-dev { position: absolute; left: 30px; top: 3px; font: 600 11.5px/1.3 var(--font-ui, sans-serif); color: var(--text); border-left: 6px solid var(--border); padding-left: 6px; max-width: calc(100% - 40px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
