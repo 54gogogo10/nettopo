@@ -54,3 +54,5 @@ jobs:
       # 应打印说明并以 0 退出（若哪天它误判为失败，CI 会立刻红，不会悄悄跳过）
       - name: 真机集成测试自检（无实验机应安全跳过）
         run: node test/live.js
+      - name: 真机 GUI 集成测试自检（无实验机应安全跳过）
+        run: node test/gui-live.js

@@ -190,7 +190,7 @@ nettopo/
 │   └── app.js         # 主逻辑（UI、弹窗、撤销、面板、导入导出、监控配置）
 ├── lib/               # 内置离线第三方库：xlsx（SheetJS）、xterm + fit/search 插件（终端模拟器）
 ├── build/             # electron-builder 打包配置（Windows 内置 / Linux 交叉）
-└── test/              # 单元测试、无头浏览器 e2e、Electron 冒烟、VDX 校验样例
+└── test/              # 单元测试、无头浏览器 e2e、Electron 冒烟、真机集成测试、VDX 校验样例
 ```
 
 > `js/shell.js`、`js/monitor.js`、`js/config-backup.js`、`js/backup-store.js`、`js/svc-tftp.js`、`js/svc-ftp.js`、`js/svc-syslog.js`、`js/svc-trap.js`、`js/net-services.js`、`js/maintenance.js`、`js/diag.js` 为**主进程纯 Node 模块**（不依赖 Electron），可在 Node 测试中直接调用，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
@@ -220,6 +220,8 @@ NETTOPO_LAB_HOST=192.168.50.148 node test/live.js                  # 部署 → 
 NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --keep           # 保留环境便于排障
 NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --skip-setup     # 用已部署好的环境
 NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --only conn,diag # 只跑指定分组
+NETTOPO_LAB_HOST=192.168.50.148 node test/gui-live.js              # 真机 GUI 集成测试（Electron 界面 + 真实设备）
+NETTOPO_LAB_HOST=192.168.50.148 node test/gui-live.js --only g2,g3 # 只跑指定用例（g1..g12）
 sudo bash test/live-lab.sh up|down|status                          # 在实验机上单独部署/拆除/查看
 ```
 
@@ -241,6 +243,23 @@ sudo bash test/live-lab.sh up|down|status                          # 在实验�
   ```
 
   放行不通时相关用例会**跳过并说明原因**，不会误判为失败。未设置 `NETTOPO_LAB_HOST` 时脚本打印说明并以 0 退出（CI 安全）。
+
+### 真机 GUI 集成测试（test/gui-live.js）
+
+`test/smoke-*.js` 用**本地 mock 服务器**验证界面逻辑；`test/gui-live.js` 把同一套界面接到**真实设备**上，
+验证「界面 → 主进程 → 真实设备」整条链路（启动 Electron + CDP 驱动界面，与冒烟测试同挂具）：
+
+| 用例 | 覆盖 |
+| --- | --- |
+| G1 | 应用启动、桌面专属桥（topoShell/topoMonitor/topoBackup）可用 |
+| G2–G4 | Web Shell：真机 SSH 连接（首次 SHA256 指纹确认 → 信任）、真机命令输出进终端（`uname -s` → Linux、`nt-cli show version` → FRRouting）、两台真机多标签各自独立 |
+| G5–G9 | 设备监控：界面配置真机（SSH + SNMP 团体字/端口 + ifTable + 性能 OID）→ 状态转 monitoring、侧栏在线标记；监控中心概览/接口流量（真实接口名与 up 状态）/性能（真机 CPU·内存·sysUpTime）；监控日志落盘含真机输出与 SNMP 识别 |
+| G10 | 配置备份：界面开启「配置备份」→ 真机运行配置落库（含 hostname 与 router bgp）→「配置备份」弹窗按地址列出来源与文件 |
+| G11 | 网络服务：界面启用 Syslog（含告警关键字）/ Trap / TFTP → 真机真实日志实时入面板并被标记 `s-hit` 告警、真机 snmptrap 入 Trap 区、真实 TFTP 传输进文件区 |
+| G12 | 诊断工具箱：界面发起真机 TCP 端口探测（开放/关闭如实标注）与 SNMP Walk（含真机 sysName） |
+
+需要本机能启动 Electron（`node_modules/electron`）；实验环境、变量、入站放行要求与 `live.js` 完全相同
+（两者都调用 `test/live-lab.sh` 自建自拆，可共用 `--keep`/`--skip-setup`）。未设置 `NETTOPO_LAB_HOST` 同样以 0 退出。
 
 
 ## 说明

@@ -11,6 +11,7 @@ node test/run-tests.js             # 单元测试（纯 Node，当前 1641 项�
 cd test && npm i && node e2e.js    # 无头 Chrome e2e 集成测试（需本机 Chrome）
 node test/gen-e2e.js               # 从 index.html 再生 e2e 挂具（index.html 结构变化后重跑，再跑 e2e.js 验证）
 NETTOPO_LAB_HOST=<实验机IP> node test/live.js   # 真机集成测试：自动在实验机部署多台 FRR 设备后跑全链路（未设变量则打印说明并跳过）
+NETTOPO_LAB_HOST=<实验机IP> node test/gui-live.js  # 真机 GUI 集成测试：同一实验环境上驱动 Electron 界面（未设变量则跳过）
 node test/smoke-shell.js           # Electron 冒烟（需桌面环境）：另有 smoke-backup / smoke-center / smoke-monitor
 npm run build                      # bump-version.js 自动升版本 + electron-builder 便携版打包（dist/portable）
 node bump-version.js --dry-run     # 预览版本变更不写入
@@ -37,6 +38,9 @@ Linux 包由 `build/electron-builder-linux.yml` 交叉打包（产物不入库�
 - 改动涉及真实设备互操作（SSH/SNMP/Syslog/Trap/TFTP/FTP/配置备份）时，另跑 `test/live.js` 真机集成测试：
   它会在 `NETTOPO_LAB_HOST` 指定的实验机上自动部署多台 FRR 设备（netns + sshd + snmpd + telnet vty，见
   `test/live-lab.sh` 头部注释）并跑 A–E 五组全链路；实验环境自建自拆，不动系统策略（AppArmor 用 aa-exec 局部绕过）。
+- 改动涉及**界面**与真实设备的联动（Web Shell/设备监控/监控中心/配置备份/网络服务/诊断工具箱）时，再跑
+  `test/gui-live.js`：同一实验环境上启动 Electron 并用 CDP 驱动界面，验证「界面 → 主进程 → 真实设备」整条链路（G1–G12）。
+  两者共用 `test/lab-lib.js`（环境部署与控制通道）；界面逻辑本身的回归仍由 `test/smoke-*.js`（mock 服务器）覆盖。
 - commit 用中文一句话描述行为变化；一次修复/功能收尾时运行 `npm run build` 升版本，并单独提交「版本升级 vA → vB …」。
 - `test/_*.js` 及 debug/repro 脚本为临时调试产物（多已 gitignore），不是正式测试用例。
 

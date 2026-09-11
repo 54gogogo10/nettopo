@@ -10,6 +10,7 @@
     "start": "electron .",
     "test": "node test/run-tests.js",
     "test:live": "node test/live.js",
+    "test:gui-live": "node test/gui-live.js",
     "build": "node bump-version.js && electron-builder --config build/electron-builder.yml && node gen-checksums.js"
   },
   "devDependencies": {
