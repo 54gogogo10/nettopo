@@ -382,7 +382,7 @@ case "$CMD" in
   up)     setup ;;
   down)   teardown ;;
   status) need_root; status_report ;;
-  inv)    inventory; exit 0 ;;
+  inv)    echo "NETTOPO_LAB_INVENTORY=$(inventory)"; exit 0 ;;
   *)      die "未知子命令：$CMD（可用 up / down / status / inv）" ;;
 esac
 echo "NETTOPO_LAB_INVENTORY=$(inventory)"
