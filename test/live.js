@@ -295,13 +295,18 @@ async function groupConn(devs, d1, hostKeys, tmp) {
       commands: ['show version', 'show ip route'], waitMs: 1200
     });
     const gt = joined(good);
-    ok(good.ok && /FRRouting/i.test(gt), 'Telnet 登录真实设备 CLI（show version 返回 FRRouting）', gt.match(/FRRouting[^\n]{0,40}/) ? String(gt.match(/FRRouting[^\n]{0,40}/)[0]) : '');
-    ok(/Codes: K - kernel route/i.test(gt) || /10\.99\./.test(gt), 'Telnet 会话中 show ip route 返回真实路由');
+    // 登录横幅本身也含 "FRRouting"：用 CLI 专有输出（带主机名与内核行）判定，避免假阳性
+    const cliLine = new RegExp('FRRouting \\d[\\d.]* \\(' + d.name + '\\) on Linux');
+    ok(good.ok && cliLine.test(gt), 'Telnet 登录真实设备 CLI（show version 的 CLI 输出带主机名与内核信息）',
+      (gt.match(/FRRouting \d[\d.]* \([^)]+\)[^\n]{0,20}/) || ['(未见 CLI 输出)'])[0]);
+    // 路由表图例是 CLI 专有输出，登录横幅/口令提示里不会出现
+    ok(/Codes: K - kernel route/i.test(gt), 'Telnet 会话中 show ip route 返回真实路由表',
+      (gt.match(/(?:Codes:[^\n]{0,40})/) || [''])[0]);
     const bad = await shell.runOneShot({
       protocol: 'telnet', host: d.host, port: d.telnetPort, username: '', password: 'wrong-pass',
       commands: ['show version'], waitMs: 1200
     });
-    ok(bad.ok === false || !/FRRouting/i.test(joined(bad)), 'Telnet 错误口令被拒（不返回 CLI 输出）', bad.error || '');
+    ok(bad.ok === false || !/Codes: K - kernel route/i.test(joined(bad)), 'Telnet 错误口令被拒（拿不到 CLI 输出）', bad.error || '');
   }
 
   // A4 批量巡检（只读白名单）对真实设备执行；配置类命令被白名单拦截
