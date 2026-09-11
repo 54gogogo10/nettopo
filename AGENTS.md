@@ -39,7 +39,7 @@ Linux 包由 `build/electron-builder-linux.yml` 交叉打包（产物不入库�
   它会在 `NETTOPO_LAB_HOST` 指定的实验机上自动部署多台 FRR 设备（netns + sshd + snmpd + telnet vty，见
   `test/live-lab.sh` 头部注释）并跑 A–E 五组全链路；实验环境自建自拆，不动系统策略（AppArmor 用 aa-exec 局部绕过）。
 - 改动涉及**界面**与真实设备的联动（Web Shell/设备监控/监控中心/配置备份/网络服务/诊断工具箱）时，再跑
-  `test/gui-live.js`：同一实验环境上启动 Electron 并用 CDP 驱动界面，验证「界面 → 主进程 → 真实设备」整条链路（G1–G12）。
+  `test/gui-live.js`：同一实验环境上启动 Electron 并用 CDP 驱动界面，验证「界面 → 主进程 → 真实设备」整条链路（G1–G18）。
   两者共用 `test/lab-lib.js`（环境部署与控制通道）；界面逻辑本身的回归仍由 `test/smoke-*.js`（mock 服务器）覆盖。
 - commit 用中文一句话描述行为变化；一次修复/功能收尾时运行 `npm run build` 升版本，并单独提交「版本升级 vA → vB …」。
 - `test/_*.js` 及 debug/repro 脚本为临时调试产物（多已 gitignore），不是正式测试用例。

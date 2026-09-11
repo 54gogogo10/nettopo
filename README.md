@@ -221,7 +221,7 @@ NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --keep           # 保留环�
 NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --skip-setup     # 用已部署好的环境
 NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --only conn,diag # 只跑指定分组
 NETTOPO_LAB_HOST=192.168.50.148 node test/gui-live.js              # 真机 GUI 集成测试（Electron 界面 + 真实设备）
-NETTOPO_LAB_HOST=192.168.50.148 node test/gui-live.js --only g2,g3 # 只跑指定用例（g1..g12）
+NETTOPO_LAB_HOST=192.168.50.148 node test/gui-live.js --only g13,g14 # 只跑指定用例（g1..g18）
 sudo bash test/live-lab.sh up|down|status                          # 在实验机上单独部署/拆除/查看
 ```
 
@@ -257,6 +257,12 @@ sudo bash test/live-lab.sh up|down|status                          # 在实验�
 | G10 | 配置备份：界面开启「配置备份」→ 真机运行配置落库（含 hostname 与 router bgp）→「配置备份」弹窗按地址列出来源与文件 |
 | G11 | 网络服务：界面启用 Syslog（含告警关键字）/ Trap / TFTP → 真机真实日志实时入面板并被标记 `s-hit` 告警、真机 snmptrap 入 Trap 区、真实 TFTP 传输进文件区 |
 | G12 | 诊断工具箱：界面发起真机 TCP 端口探测（开放/关闭如实标注）与 SNMP Walk（含真机 sysName） |
+| G13 | Web Shell · Telnet：真机弹出 Password 提示 → 输入口令进入 FRR CLI（设备名提示符），`show version` 返回带主机名/内核的 CLI 输出、`show ip route` 返回真实路由表 |
+| G14 | Web Shell · SFTP 文件面板：真机目录浏览（列出真机 /tmp 下新建的文件）、选中反馈（大小/已选中） |
+| G15 | 批量巡检：界面按 Linux 只读命令集对真机执行巡检并汇总（成功/耗时明细），结果可导出 CSV |
+| G16 | MAC/ARP 终端定位：界面经真机邻居表查出目标 IP 的 MAC（设备/接口/来源下一跳） |
+| G17 | 配置合规检查：对真机最新配置备份执行内置模板扫描，按地址给出违规/通过统计 |
+| G18 | 真机输出命中告警关键字：侧栏设备标记转告警态，监控中心事件时间线记录该告警 |
 
 需要本机能启动 Electron（`node_modules/electron`）；实验环境、变量、入站放行要求与 `live.js` 完全相同
 （两者都调用 `test/live-lab.sh` 自建自拆，可共用 `--keep`/`--skip-setup`）。未设置 `NETTOPO_LAB_HOST` 同样以 0 退出。
