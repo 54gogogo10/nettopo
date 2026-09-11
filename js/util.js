@@ -15,7 +15,7 @@ U.spreadMinMax = (arr) => {
 };
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260912b';
+U.APP_VERSION = 'v20260912c';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -3091,6 +3091,10 @@ U.buildRollback = (lines, prevText, vendorKey) => {
     return '';
   };
   const negRe = /^([ ]*)(undo|no)\s+(.+)$/i;   // 保留前导缩进：逆操作必须与原子命令同缩进（否则会落进错误的视图）
+  // 外壳包装行（`sudo vtysh -c "..."` / `nt-cli -c "configure terminal" -c "..."` 等，见真机 FRR 验证）：
+  // 其「配置行」在引号内，直接加取反前缀会产出 `no nt-cli -c "..."` 这种非法外壳命令——
+  // 这种行不自动求逆，列为人工项（宁可让人处理，也不下发一条必然报错、看着像回滚的命令）
+  const shellWrapRe = /^[^"']{0,60}\s-c\s+["'][^"']*["']/;
   for (let i = arr.length - 1; i >= 0; i--) {
     const raw = arr[i].raw;
     const text = arr[i].text;
@@ -3101,6 +3105,9 @@ U.buildRollback = (lines, prevText, vendorKey) => {
     let inv = '', kind = '', why = '';
     if (neg) {
       inv = neg[1] + neg[3].trim(); kind = 'restore'; why = '重新启用（本次为删除/关闭）';
+    } else if (shellWrapRe.test(text)) {
+      manual.push({ line: text, why: '外壳包装行（如 vtysh/nt-cli -c "…"）：配置在引号内，无法自动求逆——请按其内部配置行手工生成回滚' });
+      continue;
     } else if (indent === 0) {
       if (topSet.has(text)) continue;                       // 变更前已有该块 → 无需撤销
       if (/^interface\b/i.test(text) && v.negate === 'no') {
@@ -3573,11 +3580,11 @@ U.parseProtoNeighbors = (text, protocol) => {
       const toks = m[2].split(/\s+/).filter(Boolean);
       if (!toks.length) continue;
       let state = '', as = '', uptime = '', pfx = '';
-      let stateIdx = -1;
+      let stateIdx = -1, upIdx = -1;
       for (let i = 0; i < toks.length; i++) {
         const tk = toks[i];
         if (!state && PROTO_BGP_STATE.test(tk)) { state = tk; stateIdx = i; continue; }
-        if (!uptime && (/^\d{1,2}:\d{2}:\d{2}$/.test(tk) || /^\d{1,3}[dhm](\d{1,2}[dhm]){0,2}$/i.test(tk))) { uptime = tk; continue; }
+        if (upIdx < 0 && (/^\d{1,2}:\d{2}:\d{2}$/.test(tk) || /^\d{1,3}[dhm](\d{1,2}[dhm]){0,2}$/i.test(tk))) { uptime = tk; upIdx = i; continue; }
       }
       // AS 与 PrefRcv/PfxRcd：华为/H3C 首列是版本（4 / 4+），思科/锐捷无版本列。
       // 前缀数取「AS 列之后的最后一个纯数字」——不能取第一个数字（那是版本列）
@@ -3588,9 +3595,14 @@ U.parseProtoNeighbors = (text, protocol) => {
       const afterAs = nums.filter(x => x[1] > (nums[asIdx] ? nums[asIdx][1] : -1));
       pfx = afterAs.length ? afterAs[afterAs.length - 1][0] : '';
       if (!state) {
-        // 思科 show ip bgp summary：State/PfxRcd 列为数字即已建立（Idle 等状态会是文字）
-        if (toks.length >= 4 && /^\d+$/.test(toks[toks.length - 1])) state = 'Established';
-        else continue;                                  // 认不出状态的噪声行（如统计表尾）跳过
+        // 无状态关键字时的「已建立」判定：State/PfxRcd 列紧跟 Up/Down 列，取 Up/Down 之后的
+        // **首个**数字。真机 FRR 的该列之后还有 PfxSnt 与 Desc 描述列（末列是字符串），
+        // 因此「末列为数字」的启发式在真机上必然失效；思科 IOS 该列即行尾，两种口径都命中。
+        if (upIdx >= 0) {
+          const afterUp = nums.filter(x => x[1] > upIdx);
+          if (afterUp.length) { state = 'Established'; pfx = afterUp[0][0]; }
+        }
+        if (!state) continue;                            // 认不出状态的噪声行（统计表尾/无 Up-Down 列）跳过
       }
       if (stateIdx >= 0) {
         const afterState = nums.filter(x => x[1] > stateIdx);

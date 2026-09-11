@@ -582,6 +582,9 @@ class ShellManager extends EventEmitter {
       const readyTimeoutMs = clamp(opts.readyTimeoutMs, 3000, 60000, 15000);
       const showCmd = cleanLog(opts.showCmd).trim().slice(0, 256);
       const screenCmd = cleanLog(opts.screenCmd).trim().slice(0, 256);
+      // 前置命令（如 FRR/vtysh 设备需先 `enable` 进特权模式才能读配置与进配置模式）：
+      // 在关分页与前置备份之前发送，失败即中止——后面每一步都依赖它
+      const preCmd = cleanLog(opts.preCmd).trim().slice(0, 256);
       const enterCmd = cleanLog(opts.enterCmd).trim().slice(0, 256);
       const exitCmd = cleanLog(opts.exitCmd).trim().slice(0, 256);
       const saveCmd = cleanLog(opts.saveCmd).trim().slice(0, 256);
@@ -609,11 +612,13 @@ class ShellManager extends EventEmitter {
       const eol = protocol === 'telnet' ? '\r\n' : '\n';
       const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/;
       const MORE_RE = /--+\s*more\s*--+\s*$/i;
-      // 设备报错模式（逐行判定，避免多行噪声误伤）：只在被判定行的输出里找
+      // 设备报错模式（逐行判定，避免多行噪声误伤）：只在被判定行的输出里找。
+      // 注意 FRR 会在 `%` 后带**守护进程标签**（真机实测：`% [ZEBRA] Unknown command: ip route ...`），
+      // 不接受该标签会漏判——配置下发就成了「以为下发成功、其实一条没生效」。
       const ERR_RES = [
-        /^%\s*(invalid|incomplete|ambiguous|unrecognized|unknown|error|wrong|too many)/i,
+        /^%\s*(?:\[[A-Za-z0-9_-]{1,16}\]\s*)?(invalid|incomplete|ambiguous|unrecognized|unknown|error|wrong|too many)/i,
         /^(error|wrong parameter|invalid input|incomplete command|ambiguous command|unrecognized command|unknown command|too many parameters|failure)[:：]?/i,
-        /\b(invalid input|incomplete command|ambiguous command|unrecognized command|unknown command|wrong parameter|too many parameters)\b/i,
+        /(^|\s)(invalid input|incomplete command|ambiguous command|unrecognized command|unknown command|wrong parameter|too many parameters)(\s|$)/i,
         /^failed to\b/i
       ];
       const CONFIRM_RE = /(\[Y\/N\]|\[y\/n\]|\(y\/n\)|\[yes\/no\]|are you sure|continue\?)/i;
@@ -757,6 +762,13 @@ class ShellManager extends EventEmitter {
         const ready = await waitReady();
         if (!ready) errors.push('未识别到命令提示符（会话可能未就绪），已按超时继续');
         lineBuf = '';
+        // 0) 前置命令（best-effort 不成立：失败即中止，见上）
+        if (preCmd) {
+          const rp = await sendOne(preCmd);
+          const pe = errOf(rp.text);
+          if (rp.err || pe) { finish(false, '前置命令失败（' + preCmd + '）：' + (rp.err || pe)); return; }
+          if (settled) return;
+        }
         // 1) 关分页（best-effort：部分平台无此命令，报错忽略）
         if (screenCmd) await sendOne(screenCmd);
         // 2) 前置备份：抓当前运行配置（这是回滚的唯一依据，拿不到就不该继续）

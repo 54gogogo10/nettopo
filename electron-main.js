@@ -1158,6 +1158,8 @@ ipcMain.handle('deploy:run', async (e, p) => {
     jump: p && p.jump, encoding: p && p.encoding, expectFp: p && p.expectFp,
     lines,
     screenCmd: v.screen, showCmd: v.showCfg, enterCmd: v.enter, exitCmd: v.exit, saveCmd: v.save,
+    // 前置命令由渲染层显式给出（如思科用户模式需先 enable）：空则不发
+    preCmd: String((p && p.preCmd) || '').trim().slice(0, 256),
     doSave, verify,
     waitMs: p && p.waitMs, cmdTimeoutMs: p && p.cmdTimeoutMs, readyTimeoutMs: p && p.readyTimeoutMs
   });

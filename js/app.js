@@ -836,6 +836,7 @@ function openConfigDeploy(presetNodeId) {
           <select id="cdDev">${cands.map((c, i) => `<option value="${i}"${i === selIdx ? ' selected' : ''}>${U.escHtml(c.node.name)}（${U.escHtml(c.host || '无地址')}）</option>`).join('')}</select>
         </div>
         <div class="frow" style="margin:0"><label>厂家口径</label><select id="cdVendor">${vOpts}</select></div>
+        <div class="frow" style="margin:0"><label>前置命令</label><input id="cdPre" type="text" style="width:110px" spellcheck="false" autocomplete="off" placeholder="如 enable（可空）" title="连接后、读配置前先执行的一条命令：部分设备（如思科用户模式、直连 vty 的 FRR）需要先 enable 才能读配置与进配置模式。留空则不发。"/></div>
         <div class="frow" style="margin:0"><label>账号</label><input id="cdUser" type="text" style="width:90px" spellcheck="false" autocomplete="off"/></div>
         <div class="frow" style="margin:0"><label>密码</label><input id="cdPass" type="password" style="width:100px" autocomplete="new-password"/></div>
         <label style="display:flex;align-items:center;gap:4px;margin:0" title="把当前运行配置写入启动配置（华为 save / 思科 write memory）。多数平台会二次确认，工具会自动应答"><input id="cdSave" type="checkbox"/>下发后保存配置</label>
@@ -1059,6 +1060,7 @@ function openConfigDeploy(presetNodeId) {
         keyPassphrase: c.cred ? c.cred.keyPass : '',
         encoding: c.cred ? c.cred.encoding : '',
         vendor: vEl.value,
+        preCmd: ov.querySelector('#cdPre').value.trim(),
         lines: parsed.lines.map(l => l.text),
         plan: planEl.value,
         kind: 'change',
@@ -6209,7 +6211,7 @@ function openHelp() {
       <li><b>诊断工具箱…</b>（监控 ▾）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（v2c 团体字或 v3 USM 用户遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀）</li>
       <li><b>MAC/ARP 终端定位…</b>（监控 ▾）：输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置，可填备用账号），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮；接口名跨厂家规范化匹配（GE / Gi / GigabitEthernet 视为同一接口），下游未查询设备可一键续查</li>
       <li><b>批量巡检…</b>（监控 ▾）：勾选设备并发执行<b>只读白名单命令</b>（自动尝试 / 华为 / H3C / 思科 / 锐捷 / Linux 命令集：版本 / 时钟 / CPU / 内存 / 接口概览等），凭据取自各设备监控配置、可填备用账号；结果汇总可按设备查看输出、一键复制、<b>导出 CSV</b>——白名单拦截配置类命令，不会修改设备</li>
-      <li><b>配置变更下发…</b>（监控 ▾）：把「生成设备配置」的产物或手写配置片段<b>安全地下发到设备</b>——整条链路「先看后做」：① 变更集解析 + 安全闸门（<b>重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝且不可覆盖</b>；删除与关闭类命令、可能中断管理连接的变更需分别勾选确认）② dry-run 预判（与最近一次配置备份逐行比对：新增 / 覆盖 / 删除 / 幂等，并提示「管理地址被改写」「关闭管理通道」等自断风险）③ 主进程在<b>一条会话内</b>完成：强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停）→ 退出配置模式 → 可选保存配置 → 可选回采校验 ④ 失败时依前置备份<b>生成回滚变更单</b>（逐行求逆、逆序下发，回滚同样走 ①②③）⑤ 每次下发落审计记录（<code>password</code>/<code>community</code> 等口令类内容<b>打码</b>后落盘），可回看 / 载入 / 导出 CSV</li>
+      <li><b>配置变更下发…</b>（监控 ▾）：把「生成设备配置」的产物或手写配置片段<b>安全地下发到设备</b>——整条链路「先看后做」：① 变更集解析 + 安全闸门（<b>重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝且不可覆盖</b>；删除与关闭类命令、可能中断管理连接的变更需分别勾选确认）② dry-run 预判（与最近一次配置备份逐行比对：新增 / 覆盖 / 删除 / 幂等，并提示「管理地址被改写」「关闭管理通道」等自断风险）③ 主进程在<b>一条会话内</b>完成：（可选）<b>前置命令</b>（部分设备如思科用户模式需先 <code>enable</code>）→ 强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停，兼容 FRR 的 <code>% [ZEBRA] Unknown command</code> 形式）→ 退出配置模式 → 可选保存配置 → 可选回采校验 ④ 失败时依前置备份<b>生成回滚变更单</b>（逐行求逆、逆序下发，回滚同样走 ①②③；<code>vtysh -c "…"</code> 这类外壳包装行列人工项）⑤ 每次下发落审计记录（<code>password</code>/<code>community</code> 等口令类内容<b>打码</b>后落盘），可回看 / 载入 / 导出 CSV</li>
     </ul>
     <h4>⑭ 网络服务：TFTP / FTP / Syslog / Trap（桌面版）</h4>
     <p>「监控 ▾ 网络服务…」把本机变成一台内网运维服务器：</p>

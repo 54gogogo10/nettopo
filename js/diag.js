@@ -145,6 +145,24 @@ function runCommand(cmd, args, timeoutMs, maxChars) {
   });
 }
 
+/** 存活判定：**必须有目标自身的成功回复证据**。
+ *  只凭退出码 0 会被两类假象骗过（真机验证实测）：
+ *   ① 输出为空/被截断（高并发扫描时出现）；
+ *   ② Windows 会把路由器的「Destination host unreachable / 无法访问目标主机」回包也算成
+ *      Received=1 且不打印 RTT——于是半个网段被报成「存活」，既无延迟也无 MAC。
+ *  判据：出现失败标记即否；出现**目标 IP 的带字节数回复行**即真；其余情况仅在有 received>0 时接受。 */
+function pingEvidenceAlive(output, stats, target) {
+  const t = String(output == null ? '' : output);
+  if (/(?:Destination\s+(?:host\s+|net(?:work)?\s+)?unreachable|无法访问目标主机|目标主机不可达|请求超时|Request\s+timed\s+out|100%\s*(?:packet\s+)?loss|100%\s*丢失)/i.test(t)) return false;
+  const fromBytes = /(?:Reply\s+from\s+\S+:\s*bytes=)|(?:\d+\s+bytes\s+from\s+\S+)/i.test(t);
+  if (fromBytes) {
+    if (!target) return true;
+    const esc = String(target).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(?:Reply\\s+from\\s+' + esc + ':\\s*bytes=)|(?:\\d+\\s+bytes\\s+from\\s+' + esc + ')', 'i').test(t);
+  }
+  return !!(stats && stats.received != null && stats.received > 0);
+}
+
 /** Ping：count 钳制 1~10；返回 {ok, output, stats}（stats 为 parsePingStats 结果，可能为 null） */
 async function ping(host, count) {
   const h = String(host == null ? '' : host).trim();
@@ -152,7 +170,8 @@ async function ping(host, count) {
   const n = Math.max(1, Math.min(10, parseInt(count, 10) || 4));
   const args = process.platform === 'win32' ? ['-n', String(n), '-w', '2000', h] : ['-c', String(n), '-W', '2', h];
   const r = await runCommand('ping', args, 30000);
-  return { ok: !!r.ok, output: r.output, stats: parsePingStats(r.output), error: r.error };
+  const stats = parsePingStats(r.output);
+  return { ok: !!r.ok && pingEvidenceAlive(r.output, stats, h), output: r.output, stats, error: r.error };
 }
 
 /* ---------------- 网段存活扫描（CIDR 展开 + ICMP 并发 sweep + 本机 ARP 解析） ---------------- */
@@ -310,4 +329,4 @@ async function trace(host) {
   return { ok: !!r.ok, output: r.output, error: r.error };
 }
 
-module.exports = { isValidDiagHost, parsePortList, parsePingStats, scanPorts, tcpProbe, dnsLookup, ping, trace, expandScanTargets, parseLocalArp, scanSubnet, localArpTable };
+module.exports = { isValidDiagHost, parsePortList, parsePingStats, pingEvidenceAlive, scanPorts, tcpProbe, dnsLookup, ping, trace, expandScanTargets, parseLocalArp, scanSubnet, localArpTable };

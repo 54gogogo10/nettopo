@@ -3508,14 +3508,20 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const rbCisco = U.buildRollback(U.parseChangeSet('interface GigabitEthernet0/0/9\n description X').lines, prev, 'cisco');
       ok(rbCisco.manual.length === 1 && /no interface/.test(rbCisco.manual[0].why), '回滚：思科无法删除接口 → 列入人工项');
       ok(/#   \[需人工\]/.test(rbCisco.text), '回滚：人工项以注释形式出现在文本里（不会被下发）');
+      // 外壳包装行（真机 FRR 验证：配置要经 vtysh/nt-cli -c 推送）不得产出 `no nt-cli -c "…"` 这种非法命令
+      const wrapLine = 'nt-cli -c "configure terminal" -c "neighbor 10.99.12.2 description X"';
+      const rbWrap = U.buildRollback(U.parseChangeSet(wrapLine).lines, prev, 'cisco');
+      ok(rbWrap.manual.length === 1 && /外壳包装行/.test(rbWrap.manual[0].why), '回滚：外壳包装行列为人工项（不产出非法取反）');
+      ok(rbWrap.lines.every(l => l.text.indexOf('no nt-cli') < 0), '回滚：可下发部分不含 `no nt-cli …` 这类非法命令');
+      ok(/需人工确认 1 行/.test(rbWrap.text), '回滚：表头如实标注人工项数量');
     }
 
     console.log('== 回归：配置变更下发——会话状态机 runDeploy（mock Telnet 设备） ==');
     {
-      /** mock 华为设备：可注入失败行 / 确认行 / 备份报错 */
+      /** mock 华为设备：可注入失败行 / 确认行 / 备份报错 / 需先 enable（FRR 口径） */
       const makeDeployMock = (cfg) => {
         cfg = cfg || {};
-        const st = { cmds: [], mode: 'user' };
+        const st = { cmds: [], mode: 'user', enabled: false };
         const socks = new Set();
         const server = net.createServer((sock) => {
           socks.add(sock);
@@ -3526,6 +3532,12 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
             if (/[\xff\xfe]/.test(s)) return;                 // Telnet 协商帧
             const cmd = s.replace(/\r\n$/, '').replace(/\r$/, '');
             st.cmds.push(cmd);
+            // FRR 口径：非特权模式下连 show running-config 都是未知命令，先 enable 才放行
+            if (cfg.needEnable) {
+              const prompt0 = st.enabled ? (st.mode === 'config' ? '[R1]' : '<R1>') : 'R1>';
+              if (cmd === 'enable') { st.enabled = true; sock.write(cmd + '\r\nR1#'); return; }
+              if (!st.enabled) { sock.write(cmd + '\r\n% [ZEBRA] Unknown command: ' + cmd + '\r\nR1>'); return; }
+            }
             const prompt = st.mode === 'config' ? '[SW1]' : '<SW1>';
             if (cmd === 'screen-length 0 temporary') { sock.write(cmd + '\r\n' + prompt); return; }
             if (cmd === 'display current-configuration') {
@@ -3627,6 +3639,68 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(r.ok === false && /前置备份失败/.test(r.error || '') && r.backup.ok === false, 'runDeploy：拿不到基线即中止');
       ok(m.st.cmds.indexOf('system-view') < 0, 'runDeploy：备份失败时未进入配置模式、未下发配置行');
       await m.close();
+
+      // 前置命令（preCmd）：FRR/vtysh 真机实测必须先进特权模式，否则连读配置都是「Unknown command」
+      m = makeDeployMock({ needEnable: true });
+      await listen(m);
+      port = m.server.address().port;
+      let rr = await mgr.runDeploy(Object.assign({}, baseO, {
+        port, lines: ['interface Vlanif30'], showCmd: 'display current-configuration',
+        screenCmd: 'screen-length 0 temporary', enterCmd: 'system-view', exitCmd: 'return'
+      }));
+      ok(rr.ok === false && /前置备份失败/.test(rr.error || ''), '未发前置命令时（非特权模式）备份失败并中止');
+      m.st.cmds.length = 0;
+      rr = await mgr.runDeploy(Object.assign({}, baseO, {
+        port, lines: ['interface Vlanif30'], preCmd: 'enable', showCmd: 'display current-configuration',
+        screenCmd: 'screen-length 0 temporary', enterCmd: 'system-view', exitCmd: 'return'
+      }));
+      ok(rr.ok === true, '带前置命令（enable）后同一条链路成功：' + (rr.ok ? rr.appliedCount + ' 行' : rr.error));
+      ok(m.st.cmds[0] === 'enable' && m.st.cmds.indexOf('display current-configuration') > 0, '前置命令先于关分页与前置备份下发');
+      await m.close();
+      m = makeDeployMock({ failLine: 'enable' });
+      await listen(m);
+      port = m.server.address().port;
+      rr = await mgr.runDeploy(Object.assign({}, baseO, {
+        port, lines: ['x'], preCmd: 'enable', showCmd: 'display current-configuration', enterCmd: 'system-view'
+      }));
+      ok(rr.ok === false && /前置命令失败/.test(rr.error || ''), '前置命令本身失败时立即中止（不继续读配置/下发）');
+      ok(m.st.cmds.indexOf('display current-configuration') < 0, '前置命令失败后不再下发后续命令');
+      await m.close();
+
+      ok((function () { const { DEPLOY_VENDORS } = require('../js/config-deploy.js'); return Object.keys(DEPLOY_VENDORS).join(',') === 'huawei,h3c,cisco,ruijie'; })(),
+        '厂家口径表：主进程与渲染层同为 4 家网络设备口径（FRR 10 直连 daemon vty 已无配置模式，不建口径）');
+      // FRR 真机错误行格式：`% [ZEBRA] Unknown command: …`（% 后带守护进程标签）必须被识别为设备报错
+      {
+        const mE = makeDeployMock({ failLine: 'net topo not a command' });
+        mE.st.cmds = [];
+        const srv = mE.server;
+        // 让 mock 对该行回 FRR 风格错误（含 [ZEBRA] 标签）
+        srv.removeAllListeners('connection');
+        srv.on('connection', (sock) => {
+          sock.on('error', () => {});
+          sock.on('data', (d) => {
+            const s = d.toString('latin1');
+            if (/[\xff\xfe]/.test(s)) return;
+            const cmd = s.replace(/\r\n$/, '').replace(/\r$/, '');
+            mE.st.cmds.push(cmd);
+            if (cmd === 'net topo not a command') { sock.write(cmd + '\r\n% [ZEBRA] Unknown command: ' + cmd + '\r\n<SW1>'); return; }
+            if (cmd === 'display current-configuration') { sock.write(cmd + '\r\nhostname SW1\r\nreturn\r\n<SW1>'); return; }
+            if (cmd === 'system-view') { sock.write(cmd + '\r\n[SW1]'); return; }
+            if (cmd === 'return') { sock.write(cmd + '\r\n<SW1>'); return; }
+            sock.write(cmd + '\r\n<SW1>');
+          });
+          sock.write('\r\nWelcome\r\n<SW1>');
+        });
+        await listen(mE);
+        const pE = mE.server.address().port;
+        const rE = await mgr.runDeploy(Object.assign({}, baseO, {
+          port: pE, lines: ['display version', 'net topo not a command'], showCmd: 'display current-configuration',
+          screenCmd: 'screen-length 0 temporary', enterCmd: 'system-view', exitCmd: 'return'
+        }));
+        ok(rE.ok === false && rE.failedAt === 1 && /Unknown command/.test((rE.applied[1] || {}).error || ''),
+          'FRR 错误行（% [ZEBRA] Unknown command）被识别为设备报错并失败即停', (rE.applied[1] || {}).error);
+        await mE.close();
+      }
     }
 
     console.log('== 回归：配置变更下发——审计记录库 DeployStore（新功能） ==');
@@ -3854,6 +3928,19 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(r.ok === true && r.entries[0].state === 'Established' && r.entries[0].pfx === '12',
         '思科 show ip bgp summary：State/PfxRcd 为数字 → 已建立，前缀数取 AS 列之后的最后一个数字（不是版本列）');
       ok(r.entries[1].state === 'Active', '思科 BGP：Active 视为未建立');
+      // 真机 FRR（10.4.1）实测格式：Neighbor V AS MsgRcvd MsgSent TblVer InQ OutQ Up/Down State/PfxRcd PfxSnt Desc
+      // —— 该列之后还有 PfxSnt 与 Desc 描述列，末列是字符串，"末列数字即已建立" 的启发式在此必然失效
+      const frrBgq = ['BGP router identifier 1.1.1.1, local AS number 65001 VRF default vrf-id 0',
+        'BGP table version 3', 'RIB entries 5, using 640 bytes of memory', 'Peers 1, using 24 KiB of memory',
+        'Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc',
+        '10.99.12.2      4      65002        13        13        3    0    0 00:07:32            2        3 d12-to-r2',
+        'Total number of neighbors 1'].join('\n');
+      const rf = U.parseProtoNeighbors(frrBgq, 'bgp');
+      ok(rf.ok === true && rf.entries.length === 1, 'FRR 真机格式：解析出 1 个邻居（含 Desc 列也能识别）' + rf.entries.length);
+      ok(rf.entries[0].peer === '10.99.12.2' && rf.entries[0].as === '65002' && rf.entries[0].state === 'Established' && rf.entries[0].pfx === '2',
+        'FRR 真机格式：状态取 Up/Down 之后首个数字（2 = PfxRcd），不被 PfxSnt/Desc 顶掉 ' + JSON.stringify(rf.entries[0]));
+      ok(U.parseProtoNeighbors('10.99.12.2      4      65002         0         0        0    0    0    never Idle', 'bgp').entries[0].state === 'Idle',
+        'FRR 真机格式：never/Idle 行判为未建立');
       ok(U.protoStateOk('bgp', 'Established') === true && U.protoStateOk('bgp', 'Active') === false, 'BGP 状态判定：仅 Established 正常');
       ok(U.parseProtoNeighbors('Total number of peers : 3', 'bgp').ok === false, '无邻居行 → 明确失败');
 
@@ -4211,6 +4298,24 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const stLu = parsePingStats('4 packets transmitted, 4 received, 0% packet loss, time 3005ms\nrtt min/avg/max/mdev = 0.045/0.050/0.058/0.005 ms');
       ok(stLu && stLu.sent === 4 && stLu.received === 4 && stLu.lostPct === 0 && stLu.min === 0.045 && stLu.avg === 0.05, 'Ping 统计：Linux iputils 格式');
       ok(parsePingStats('garbage') === null, 'Ping 统计：无法解析返回 null');
+      // 存活必须有证据：真机高并发扫描中出现过「退出码 0 但输出为空」的条目，
+      // 只看退出码会把它们当成存活（同网段两次扫描 250 vs 17 台，前者大量条目无 RTT 无 MAC）
+      const { pingEvidenceAlive } = require('../js/diag.js');
+      ok(pingEvidenceAlive('', null) === false && pingEvidenceAlive('', { sent: 1, received: null }) === false,
+        '存活判定：输出为空/无统计时不判存活（真机误判回归）');
+      ok(pingEvidenceAlive('', { sent: 1, received: 0 }) === false, '存活判定：received=0 不判存活');
+      ok(pingEvidenceAlive('Reply from 10.0.0.1: bytes=32 time=4ms TTL=64', { sent: 1, received: 1 }, '10.0.0.1') === true
+        && pingEvidenceAlive('64 bytes from 10.0.0.1: icmp_seq=1 ttl=64 time=0.05 ms', null, '10.0.0.1') === true,
+        '存活判定：目标自身的带字节数回复行判为存活');
+      // 真机实测的假象：Windows 把路由器的「目标主机不可达」也算 Received=1 且不打印 RTT
+      const zhUnreach = '正在 Ping 10.0.0.9 具有 32 字节的数据:\n来自 10.0.0.1 的回复: 无法访问目标主机。\n\n10.0.0.9 的 Ping 统计信息:\n    数据包: 已发送 = 1，已接收 = 1，丢失 = 0 (0% 丢失)，';
+      ok(pingEvidenceAlive(zhUnreach, { sent: 1, received: 1, lostPct: 0 }, '10.0.0.9') === false,
+        '存活判定：Windows「无法访问目标主机」（Received=1 无 RTT）不判存活（真机误判回归）');
+      ok(pingEvidenceAlive('Reply from 10.0.0.1: Destination host unreachable.', { sent: 1, received: 1 }, '10.0.0.9') === false,
+        '存活判定：英文 Destination host unreachable 不判存活');
+      ok(pingEvidenceAlive('Reply from 10.0.0.3: bytes=32 time=2ms TTL=64', { sent: 1, received: 1 }, '10.0.0.9') === false,
+        '存活判定：回复行来自别的地址（网关代答）不判为目标存活');
+      ok(pingEvidenceAlive('Request timed out.', { sent: 1, received: 0, lostPct: 100 }, '10.0.0.9') === false, '存活判定：请求超时/100% 丢失不判存活');
       const psrv = http.createServer((req, res) => { res.writeHead(200); res.end('ok'); });
       await new Promise((res) => psrv.listen(0, '127.0.0.1', res));
       const pport = psrv.address().port;
