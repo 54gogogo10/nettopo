@@ -6323,7 +6323,7 @@ function openMonitorConfig(id) {
             <option value="">命令预设（选后自动填充）…</option>
             <option value="linux">Linux 服务器（df / free / loadavg）</option>
           </select>
-          <textarea class="mh-mt-ta" rows="3" placeholder="指标采集命令（每行一条）：&#10;df -P&#10;free -m&#10;cat /proc/loadavg">${U.escHtml(Array.isArray(r.metricsCommands) ? r.metricsCommands.join('\n') : '')}</textarea>
+          <textarea class="mh-mt-ta" rows="3" placeholder="指标采集命令（每行一条）：&#10;LC_ALL=C df -P&#10;LC_ALL=C free -m&#10;cat /proc/loadavg">${U.escHtml(Array.isArray(r.metricsCommands) ? r.metricsCommands.join('\n') : '')}</textarea>
           <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:4px">
             <span class="mh-unit">磁盘</span><input class="mh-mt-dw" type="number" min="1" max="100" style="width:52px" title="磁盘告警阈值（%）" value="${U.escHtml(r.metricsDiskWarn != null ? r.metricsDiskWarn : 80)}"/><span class="mh-unit">% / 严重</span><input class="mh-mt-dc" type="number" min="1" max="100" style="width:52px" title="磁盘严重阈值（%）" value="${U.escHtml(r.metricsDiskCrit != null ? r.metricsDiskCrit : 90)}"/><span class="mh-unit">%</span>
             <span class="mh-unit">内存</span><input class="mh-mt-mw" type="number" min="1" max="100" style="width:52px" title="内存告警阈值（%）" value="${U.escHtml(r.metricsMemWarn != null ? r.metricsMemWarn : 80)}"/><span class="mh-unit">% / 严重</span><input class="mh-mt-mc" type="number" min="1" max="100" style="width:52px" title="内存严重阈值（%）" value="${U.escHtml(r.metricsMemCrit != null ? r.metricsMemCrit : 90)}"/><span class="mh-unit">%</span>
@@ -6468,7 +6468,7 @@ function openMonitorConfig(id) {
     mtCb.addEventListener('change', applyMtUi);
     applyMtUi();
     rowEl.querySelector('.mh-mt-preset').addEventListener('change', (e) => {
-      if (e.target.value === 'linux') rowEl.querySelector('.mh-mt-ta').value = 'df -P\nfree -m\ncat /proc/loadavg';
+      if (e.target.value === 'linux') rowEl.querySelector('.mh-mt-ta').value = 'LC_ALL=C df -P\nLC_ALL=C free -m\ncat /proc/loadavg'; // 固定 locale：设备本地化表头会让解析恒为空值
     });
     // HTTP 探测折叠区：勾选展开
     const hpCb = rowEl.querySelector('.mh-hp-cb');

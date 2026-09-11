@@ -224,14 +224,20 @@ function recordsToGraph(records) {
       aMask: parseInt(r.amask, 10) > 0 && parseInt(r.amask, 10) <= 32 ? parseInt(r.amask, 10) : 24,
       bMask: parseInt(r.bmask, 10) > 0 && parseInt(r.bmask, 10) <= 32 ? parseInt(r.bmask, 10) : 24
     };
-    // 旧单列回退：源优先、目标其次（两端均已有值时忽略）
-    if (r.mgmt) {
-      if (!U.nodeMgmts(a).length) applyMgmt(a, r.mgmt);
-      else applyMgmt(b, r.mgmt);
-    }
-    if (r.vlans) {
-      if (!(a.vlans && a.vlans.length)) applyVlans(a, r.vlans);
-      else applyVlans(b, r.vlans);
+    // 旧单列回退：**仅当本行完全没有按端列时**才启用。
+    // 按端列存在即说明是新格式导出，旧单列（= 源端值优先、无源端时取目标端值）只是给旧版本软件读的
+    // 兼容副本；再拿它回填一次，会把源端的值写到目标端——单端配了管理地址/VLAN 接口时表现为
+    // 「导出再导入后对端凭空多出同样的地址」（数据串台，见 test/e2e.js 的 CSV 往返回归）。
+    const hasPerSide = !!(String(r.sam || '').trim() || String(r.sbm || '').trim() || String(r.sav || '').trim() || String(r.sbv || '').trim());
+    if (!hasPerSide) {
+      if (r.mgmt) {
+        if (!U.nodeMgmts(a).length) applyMgmt(a, r.mgmt);
+        else applyMgmt(b, r.mgmt);
+      }
+      if (r.vlans) {
+        if (!(a.vlans && a.vlans.length)) applyVlans(a, r.vlans);
+        else applyVlans(b, r.vlans);
+      }
     }
     links.push(link);
   }

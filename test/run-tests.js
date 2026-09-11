@@ -51,6 +51,40 @@ const ok = (cond, name) => {
   else { fail++; console.log('  ✗ ' + name); }
 };
 const eq = (a, b, name) => ok(a === b, `${name}（期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}）`);
+// 延时助手必须定义在模块作用域：套件正文是「一个大 IIFE + 若干平级块」，把助手写进某个块内
+// 后，同文件更靠后的块引用它会 ReferenceError——而这类引用常写在重试分支里（如端口撞车后的
+// 第二次尝试），平时不执行、只在偶发路径上炸，是最难复现的一类「假绿/假红」来源。
+const waitMsR7 = (ms) => new Promise(r => setTimeout(r, ms));
+/** 取一个「对 TCP 也可用」的临时端口：先让内核按 TCP 分配一个再释放。
+ *  为什么不直接用 start(0, true)：随机端口场景 TCP 必须跟随 UDP 实际端口（同端口语义），而内核
+ *  分配 UDP 临时端口时并不避开 **TCP** 的保留区间——Windows 上 Hyper-V/WSL 常驻大片 TCP 排除段
+ *  （本机实测 51520-52289 等上千个），UDP 挑中的号落到其中就 EACCES，重试十次可能全在同一段里。
+ *  先按 TCP 取号可以把这种跨协议撞车从「靠运气」变成「基本不发生」。 */
+const freeTcpPort = () => new Promise((resolve, reject) => {
+  const net = require('net'); // 惰性 require：与 startSyslogWithRetry 同口径，不依赖套件内部的局部变量
+  const srv = net.createServer();
+  srv.once('error', reject);
+  srv.listen(0, '0.0.0.0', () => {
+    const p = srv.address().port;
+    srv.close(() => resolve(p));
+  });
+});
+/** 取随机端口起 Syslog（UDP+TCP 同端口）并重试。
+ *  历史教训：start 失败时 port 停在 0，调用方若据此 net.connect 会抛未捕获 'error' 终结整个测试
+ *  进程（曾表现为随机挂掉）；只校验不重试则会让 promise 悬空、事件循环变空、整套以 0 退出码静默截断。
+ *  返回 { srv, st, errs }：errs 为逐次失败原因（起不来时能看出是同一原因还是多种）。 */
+const startSyslogWithRetry = async (baseDir, opts) => {
+  const { SyslogServer } = require('../js/svc-syslog.js'); // 惰性 require：不改动模块加载时机
+  let srv = null, st = null;
+  const errs = [];
+  for (let i = 0; i < 10 && !(st && st.ok); i++) {
+    if (i) await waitMsR7(60 * i);
+    srv = new SyslogServer(Object.assign({ baseDir }, opts || {}));
+    st = await srv.start(await freeTcpPort(), true);
+    if (!st.ok) errs.push(String((srv && srv.lastError) || '?'));
+  }
+  return { srv, st, errs };
+};
 
 /** python 模块可用性探测（缓存结果）：缺依赖时二进制校验降级为跳过而非失败——
  *  这些是导出产物的补充校验（本机开发环境已装齐，CI 由 workflow 安装），纯 JS 断言不受影响 */
@@ -438,6 +472,35 @@ console.log('== 多管理地址 ==');
     const iso2 = gI2.nodes.find(n => n.name === '备用设备');
     ok(gI2.nodes.length === 3 && gI2.links.length === 1, '孤立节点导出：不产生多余链路（3 节点 1 链路）');
     ok(iso2 && U.nodeMgmts(iso2).join(',') === '192.168.50.9' && iso2.note === '孤立设备备注' && iso2.vlans && iso2.vlans.length === 1 && iso2.vlans[0].id === '30', '孤立节点行导出→导入：管理地址/备注/VLAN 接口完整保留');
+  }
+  {
+    // 单端配置的导出→导入回环：**只有一端**有管理地址/VLAN 接口时，另一端不得被写入同样的值。
+    // 旧实现里「管理地址/VLAN接口」旧单列 = 源端值（无源端时取目标端），导入时又拿旧单列回填了
+    // 对端——两端都有值时看不出问题，单端配置时对端会凭空多出源端的地址（真实数据串台）。
+    const gOne = M.textToGraph('源设备,目标设备\nSW1,R1');
+    const sw = gOne.nodes.find(n => n.name === 'SW1'), rt = gOne.nodes.find(n => n.name === 'R1');
+    U.setNodeMgmts(sw, ['10.9.9.1']);
+    sw.vlans = [{ id: '10', ip: '10.9.10.1', mask: 24 }];
+    sw.note = '只有源端有配置';
+    const csvOne = U.buildCSV(M.graphToTableRows(gOne.nodes, gOne.links));
+    const gOne2 = M.textToGraph(csvOne);
+    const sw2 = gOne2.nodes.find(n => n.name === 'SW1'), rt2 = gOne2.nodes.find(n => n.name === 'R1');
+    ok(sw2 && U.nodeMgmts(sw2).join(',') === '10.9.9.1' && sw2.vlans && sw2.vlans.length === 1 && sw2.vlans[0].id === '10', '单端配置回环：源端管理地址/VLAN 接口保留');
+    ok(rt2 && U.nodeMgmts(rt2).length === 0 && !(rt2.vlans && rt2.vlans.length), '单端配置回环：目标端保持为空（旧单列不得回填对端）');
+    // 反向：只有目标端有配置
+    const gOneR = M.textToGraph('源设备,目标设备\nSW1,R1');
+    const rtR = gOneR.nodes.find(n => n.name === 'R1');
+    U.setNodeMgmts(rtR, ['10.9.9.2']);
+    rtR.vlans = [{ id: '20', ip: '10.9.20.1', mask: 24 }];
+    const csvR = U.buildCSV(M.graphToTableRows(gOneR.nodes, gOneR.links));
+    const gOneR2 = M.textToGraph(csvR);
+    const swR2 = gOneR2.nodes.find(n => n.name === 'SW1'), rtR2 = gOneR2.nodes.find(n => n.name === 'R1');
+    ok(rtR2 && U.nodeMgmts(rtR2).join(',') === '10.9.9.2' && rtR2.vlans && rtR2.vlans.length === 1, '单端配置回环（反向）：目标端配置保留');
+    ok(swR2 && U.nodeMgmts(swR2).length === 0 && !(swR2.vlans && swR2.vlans.length), '单端配置回环（反向）：源端保持为空');
+    // 旧格式（只有旧单列、无按端列）仍按旧语义回退：源端为空则给源端
+    const gLegacy = M.textToGraph('源设备,目标设备,管理地址\nSW1,R1,10.7.7.7');
+    const swL = gLegacy.nodes.find(n => n.name === 'SW1');
+    ok(swL && U.nodeMgmts(swL).join(',') === '10.7.7.7', '旧格式（仅旧单列）回退语义保留：管理地址落到源端');
   }
   // M1：非法/重复 id 与 type 清洗
   const bad = U.sanitizeGraph(
@@ -3517,7 +3580,11 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(vOk.cfg.metrics.intervalSec === 60, '指标配置：间隔下限钳制 60s（' + vOk.cfg.metrics.intervalSec + '）');
       ok(vOk.cfg.metrics.diskCrit === 70 && vOk.cfg.metrics.diskWarn === 70, '指标配置：crit 不低于 warn');
       const vDef = mm._validate({ key: 'd1@10.0.0.9', host: '10.0.0.9', commands: ['x'], metrics: { enabled: true } });
-      ok(vDef.cfg.metrics.commands.length === 3 && vDef.cfg.metrics.commands[0] === 'df -P', '指标配置：未填命令回落 Linux 默认三项');
+      ok(vDef.cfg.metrics.commands.length === 3 && vDef.cfg.metrics.commands[0] === 'LC_ALL=C df -P', '指标配置：未填命令回落 Linux 默认三项');
+      // 真机实测回归：中文 locale 设备 `free -m` 表头为「内存：/交换：」，解析器只认 Mem:/Swap:，
+      // 不固定 locale 时内存指标恒为空值。默认命令必须自带 LC_ALL=C（用户自定义命令不受影响）
+      ok(vDef.cfg.metrics.commands.join('|').includes('LC_ALL=C free -m') && vDef.cfg.metrics.commands.join('|').includes('LC_ALL=C df -P'),
+        '指标默认命令固定 C locale（设备本地化输出不再把内存/磁盘指标解析成空值）');
       const vRo = mm._validate({ key: 'd1@10.0.0.9', host: '10.0.0.9', readOnly: true, probe: { enabled: true }, metrics: { enabled: true } });
       ok(vRo.ok && vRo.cfg.metrics.enabled === false, '指标配置：仅读取模式下禁用');
       const vH = mm._validate({ key: 'd1@h', host: 'h', commands: ['x'], httpProbe: { enabled: true, url: 'https://1.2.3.4/status', intervalSec: 5, alertDays: 7, keyword: ' ok ' } });
@@ -4587,22 +4654,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     /* ---------- Syslog 服务器（UDP / TCP） ---------- */
     console.log('== 网络服务：Syslog 服务器 ==');
     const syslogBase = path.join(tmpSvc, 'syslog');
-    // 随机端口的「UDP+TCP 同端口」偶发与另一协议的临时端口撞车（EADDRINUSE）：整个 start 重试（间隔递增）
-    // 随机端口的「UDP+TCP 同端口」在 Windows 上会因 TCP/UDP 临时端口区间重叠而偶发 EADDRINUSE
-    // （实测约 1/400 次）：start 会如实返回 ok:false 且 port 保持 0，调用方必须检查返回值并重试——
-    // 旧用例直接拿 port=0 去 net.connect，抛出的未捕获 'error' 会终结整个测试进程（随机 1/3 概率）
-    const startSyslogWithRetry = async (baseDir, opts) => {
-      let srv = null, st = null;
-      for (let i = 0; i < 10 && !(st && st.ok); i++) {
-        if (i) await waitMs(60 * i);
-        srv = new SyslogServer(Object.assign({ baseDir }, opts || {}));
-        st = await srv.start(0, true);
-      }
-      return { srv, st };
-    };
     const sA = await startSyslogWithRetry(syslogBase, { maxPerSec: 10000 }); // 限速在专用用例中单独测
     const ssrv = sA.srv, sstart = sA.st;
-    ok(sstart.ok && sstart.port > 0, 'Syslog 启动（UDP+TCP 同端口）' + (sstart && sstart.ok ? '' : '：' + (ssrv && ssrv.lastError)));
+    ok(sstart.ok && sstart.port > 0, 'Syslog 启动（UDP+TCP 同端口）' + (sstart && sstart.ok ? '' : '：' + JSON.stringify(sA.errs.slice(0, 3))));
     const us = dgram.createSocket('udp4');
     const sendUdp = (msg, port) => new Promise((res) => us.send(Buffer.from(msg), 0, Buffer.byteLength(msg), port || ssrv.port, '127.0.0.1', res));
     await sendUdp('<134>Oct 12 22:14:15 r1 sshd[123]: Accepted password for admin');
@@ -6165,11 +6219,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       // 'error'（EADDRNOTAVAIL）终结整个测试进程（历史上表现为「随机 1/3 概率整套挂掉」）
       let srv6 = null, st6 = null;
       const startErrs = [];
-      for (let i = 0; i < 10 && !(st6 && st6.ok); i++) {
-        if (i) await waitMsR7(60 * i);
-        srv6 = new SyslogServer({ baseDir: tmpR7d('sl6') });
-        st6 = await srv6.start(0, true);
-        if (!st6.ok) startErrs.push(String((srv6 && srv6.lastError) || '?')); // 逐次留痕：复发时能看出是同一原因还是多种
+      {
+        const r6 = await startSyslogWithRetry(tmpR7d('sl6'));
+        srv6 = r6.srv; st6 = r6.st; startErrs.push(...r6.errs);
       }
       ok(st6.ok && srv6.port > 0, 'Syslog UDP+TCP 启动成功（含重试；失败时不得拿 port=0 去连接）'
         + (st6 && st6.ok ? '' : '：10 次失败原因 ' + JSON.stringify(startErrs.slice(0, 3))));
@@ -6479,13 +6531,11 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(rBusy.ok === false && sBusy.port === 0 && !!sBusy.lastError, 'M9：端口被占用时 start 如实返回 ok:false 且 port 保持 0（不再静默）');
       occupy.close();
       // 重试后必然成功（测试装置与产品调用方都应如此）
-      let sRetry = null, rRetry = null;
-      for (let i = 0; i < 10 && !(rRetry && rRetry.ok); i++) {
-        if (i) await waitMsR7(60 * i);
-        sRetry = new SyslogServer({ baseDir: path.join(capBase, 'retry' + i) });
-        rRetry = await sRetry.start(0, true);
-      }
-      ok(rRetry.ok && sRetry.port > 0, 'M9：偶发端口撞车经重试后可正常启动（同端口 TCP 语义保留）');
+      const retryRes = await startSyslogWithRetry(path.join(capBase, 'retry0'));
+      const sRetry = retryRes.srv, rRetry = retryRes.st;
+      ok(rRetry && rRetry.ok && sRetry.port > 0, 'M9：偶发端口撞车经重试后可正常启动（同端口 TCP 语义保留）'
+        + (rRetry && rRetry.ok ? '' : '：10 次失败原因 ' + JSON.stringify(retryRes.errs.slice(0, 3))));
+      if (!(rRetry && rRetry.ok && sRetry.port > 0)) throw new Error('Syslog（M9 重试）10 次仍未启动：' + JSON.stringify(retryRes.errs.slice(0, 3)));
       await sRetry.stop();
       // Trap 同口径
       const tCap = new TrapServer({ baseDir: path.join(capBase, 't'), maxPerSec: 100000 });

@@ -978,7 +978,10 @@ class MonitorManager extends EventEmitter {
         if (metrics.commands.length >= 8) break;
         metrics.commands.push(s.length > 256 ? s.slice(0, 256) : s);
       }
-      if (metrics.enabled && !metrics.commands.length) metrics.commands = ['df -P', 'free -m', 'cat /proc/loadavg'];
+      // 默认命令固定 C locale：真机实测（Ubuntu 中文 locale）下 `free -m` 表头是「内存：/交换：」，
+      // 解析器只认 Mem:/Swap:，内存指标恒为空值——同一个命令在不同 locale 设备上结果不一致。
+      // LC_ALL=C 是 POSIX 通用写法，设备侧输出因此稳定（用户自定义命令不干预）
+      if (metrics.enabled && !metrics.commands.length) metrics.commands = ['LC_ALL=C df -P', 'LC_ALL=C free -m', 'cat /proc/loadavg'];
     }
     let mtInt = parseFloat(mtOpt.intervalSec);
     if (!Number.isFinite(mtInt)) mtInt = 300;
