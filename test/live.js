@@ -40,7 +40,6 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const dgram = require('dgram');
-const { Client } = require('ssh2');
 const { ShellManager } = require('../js/shell.js');
 const { MonitorManager, snmpGetValue, snmpWalk } = require('../js/monitor.js');
 const { ConfigBackupStore } = require('../js/config-backup.js');
@@ -103,53 +102,26 @@ async function waitUntil(fn, ms, step) {
 const joined = (r) => ((r && r.outputs) || []).map(o => o.text || '').join('\n');
 
 // ---------------------------------------------------------------- SSH 控制通道（部署/拆除/宿主侧操作）
-function connectSsh(opts) {
-  return new Promise((resolve, reject) => {
-    const c = new Client();
-    c.on('ready', () => resolve(c)).on('error', (e) => reject(e))
-      .connect({ host: opts.host, port: opts.port || 22, username: opts.user, password: opts.pass, readyTimeout: 20000 });
-  });
-}
-/** 在控制通道上执行命令；opts.sudo 时以 root 执行（口令走 stdin，不进 argv） */
+// 实现集中在 test/lab-lib.js（与 test/gui-live.js 共用）：这里只做薄封装，保持本文件调用点不变
+const lab = require('./lab-lib.js');
+const connectSsh = (opts) => lab.connectSsh(opts);
 function exec(conn, cmd, opts) {
-  const o = opts || {};
-  return new Promise((resolve) => {
-    conn.exec((o.sudo ? "sudo -S -p '' bash -c " + JSON.stringify(cmd) : cmd), { pty: false }, (err, stream) => {
-      if (err) { resolve({ code: -1, out: '', err: err.message }); return; }
-      let out = '', errOut = '', code = 0;
-      if (o.sudo) stream.write(CFG.rootPass + '\n');
-      stream.on('close', (c) => { code = c == null ? 0 : c; resolve({ code, out, err: errOut }); });
-      stream.on('data', (d) => { out += d.toString('utf8'); if (o.echo) process.stdout.write(d); });
-      stream.stderr.on('data', (d) => { errOut += d.toString('utf8'); if (o.echo) process.stderr.write(d); });
-    });
-  });
+  return lab.exec(conn, cmd, Object.assign({ rootPass: CFG.rootPass }, opts || {}));
 }
-function upload(conn, local, remote) {
-  return new Promise((resolve, reject) => {
-    conn.sftp((e, sftp) => {
-      if (e) { reject(e); return; }
-      sftp.fastPut(local, remote, (e2) => (e2 ? reject(e2) : resolve(remote)));
-    });
-  });
-}
+const upload = (conn, local, remote) => lab.upload(conn, local, remote);
 
 // ---------------------------------------------------------------- 环境部署
 let inventory = null;
 async function provision(conn) {
-  const tmpScript = path.join(os.tmpdir(), 'nettopo-live-lab-' + process.pid + '.sh');
-  fs.copyFileSync(path.join(__dirname, 'live-lab.sh'), tmpScript);
-  await upload(conn, tmpScript, '/tmp/nettopo-live-lab.sh');
   line('[lab] 部署实验环境（多台 FRR 设备 + sshd + snmpd + telnet vty）…');
-  const r = await exec(conn, `LAB_PUBLIC_IP=${CFG.host} bash /tmp/nettopo-live-lab.sh up`, { sudo: true });
-  for (const l of r.out.split('\n')) if (/^\[live-lab\]/.test(l)) line('      ' + l);
-  const m = r.out.match(/^NETTOPO_LAB_INVENTORY=(.+)$/m);
-  if (!m) throw new Error('未拿到设备清单（部署失败）：\n' + r.out.slice(-1500) + r.err.slice(-500));
-  return JSON.parse(m[1]);
+  return lab.provision(conn, {
+    host: CFG.host, rootPass: CFG.rootPass, script: path.join(__dirname, 'live-lab.sh'),
+    onLine: (l) => line('      ' + l)
+  });
 }
 async function teardown(conn) {
   line('[lab] 拆除实验环境…');
-  const r = await exec(conn, 'bash /tmp/nettopo-live-lab.sh down', { sudo: true });
-  for (const l of r.out.split('\n')) if (/^\[live-lab\]/.test(l)) line('      ' + l);
+  await lab.teardown(conn, { rootPass: CFG.rootPass, onLine: (l) => line('      ' + l) });
 }
 
 // ---------------------------------------------------------------- 环境自检：测试机入站可达性
@@ -178,32 +150,14 @@ async function probeInbound(conn, ourIp) {
   });
   return { udpOk, tcpOk };
 }
-function ourAddress(conn, hosts) {
-  return exec(conn, 'echo "$SSH_CLIENT"').then((r) => {
-    const ip = String(r.out || '').trim().split(/\s+/)[0];
-    if (net.isIPv4(ip)) return ip;
-    // 退路：本机与实验机同网段的地址
-    const lab = hosts.split('.').slice(0, 3).join('.') + '.';
-    for (const list of Object.values(os.networkInterfaces())) {
-      for (const a of list || []) if (a.family === 'IPv4' && !a.internal && a.address.startsWith(lab)) return a.address;
-    }
-    return '';
-  });
-}
+const ourAddress = (conn, hosts) => lab.ourAddress(conn, hosts);
 
 // ---------------------------------------------------------------- 设备侧动作（经设备自己的 SSH 管理口）
+// 同样是 lab-lib 的薄封装：shell 在 main 里创建后再注入
 let shell = null;
-function devRun(dev, cmd, waitMs) {
-  return shell.runOneShot({
-    protocol: 'ssh', host: dev.host, port: dev.sshPort, username: dev.sshUser, password: CFG.pass,
-    commands: Array.isArray(cmd) ? cmd : [cmd], waitMs: waitMs || 900
-  });
-}
-/** 设备 CLI（nt-cli = vtysh 集成命令行，等价于登录设备敲命令） */
-async function devCli(dev, cmd, waitMs) {
-  const r = await devRun(dev, 'nt-cli -c ' + JSON.stringify(cmd), waitMs);
-  return { ok: r.ok, text: joined(r), raw: r };
-}
+let devH = null;
+const devRun = (dev, cmd, waitMs) => devH.devRun(dev, cmd, waitMs);
+const devCli = (dev, cmd, waitMs) => devH.devCli(dev, cmd, waitMs);
 /** 在实验宿主机上执行命令（控制通道；返回形态与 runOneShot 一致，便于复用 joined） */
 async function hostRun(cmd) {
   const r = await exec(connGlobal, cmd, {});
@@ -260,6 +214,7 @@ async function hostRun(cmd) {
     connGlobal = conn; ourIpGlobal = ourIp;
 
     shell = new ShellManager({ logDir: path.join(tmp, 'shell-logs') });
+    devH = lab.makeDevHelpers(shell, { pass: CFG.pass });
     const backupStore = new ConfigBackupStore(path.join(tmp, 'config-backups'));
     const monitor = new MonitorManager(shell, path.join(tmp, 'monitor-logs'), path.join(tmp, 'trust.json'), { backupStore });
     const netSvc = new NetServices({ baseDir: path.join(tmp, 'net-services') });
