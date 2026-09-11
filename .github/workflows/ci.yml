@@ -1,7 +1,8 @@
 # NetTopo CI：每次 push/PR 自动回归
-# - unit：纯 Node 单元测试（991+ 项，含 SSH/TFTP/FTP/Syslog mock server），双平台
-# - e2e：无头 Chrome 跑 34 段界面回归（ubuntu runner 预装 google-chrome-stable）
-# 冒烟测试（smoke-*.js，需 Electron 桌面环境）不进 CI。
+# - unit：纯 Node 单元测试（1600+ 项，含 SSH/TFTP/FTP/Syslog mock server），双平台
+# - e2e：无头 Chrome 跑界面与跨模块集成回归（ubuntu runner 预装 google-chrome-stable）
+# - live：真机集成测试的「CI 安全」自检（未指定 NETTOPO_LAB_HOST 时只打印说明并以 0 退出）
+# 冒烟测试（smoke-*.js，需 Electron 桌面环境）与真机集成测试（live.js，需实验室设备）不在 CI 跑。
 name: CI
 
 on:
@@ -49,3 +50,7 @@ jobs:
         working-directory: test
       - name: e2e 集成测试
         run: node test/e2e.js
+      # 真机集成测试需要实验室设备，CI 里只做「无实验机时不误报」的自检：未设 NETTOPO_LAB_HOST
+      # 应打印说明并以 0 退出（若哪天它误判为失败，CI 会立刻红，不会悄悄跳过）
+      - name: 真机集成测试自检（无实验机应安全跳过）
+        run: node test/live.js

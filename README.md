@@ -198,9 +198,10 @@ nettopo/
 ## 开发测试
 
 ```bash
-node test/run-tests.js        # 1451 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、多管理口、数据清洗、布局、路径、单点故障、网段分析、链路聚合、邻居表解析、接口总表、备份库、子网计算、快速搜索、区域容器、SNMP ifTable/性能采集与响应校验、合规模板、加载防重合、性能、回归、内置网络服务 TFTP/FTP/Syslog 协议级客户端与导入备份、AI LLM 地址/提示词/SSE/历史库/模型列表拉取/OpenAI 与 Claude 双协议本地假服务全链路/Shell AI 命令生成与提取/设备类型注入/IP 地址管理/会话录像解析/SFTP 文件管理/SSH 指标采集解析与阈值/HTTP 探测与证书到期/GBK 编码解码/连接书签/告警静默与维护窗口/诊断工具箱/巡检数据导出/终端搜索本地化 addon/日报每日调度/标签恢复与命令面板/MAC·ARP 表解析与终端定位/接口名跨厂家规范化/一次性命令执行 runOneShot/网段存活扫描/SNMP Trap v1·v2c 解析与接收器/管理器 Trap 集成/SNMP v3 USM 密钥本地化·三档安全·mock 代理全链路·v3 Trap 接收/Syslog 日志告警规则/链路流量叠加/批量巡检只读白名单）
-cd test && npm i && node e2e.js   # 无头 Chrome 端到端集成测试（需本机 Chrome）：画布编辑/拖拽撤销、删除级联与多步撤销重做、CSV/Excel 导入、保存工程与 CSV 导出内容断言、邻居表导入、接口总表（编辑应用/二层清 IP）、网段分析、单点故障/故障影响、聚合组校验豁免、快速搜索、多图纸、主题切换、浏览器降级等
+node test/run-tests.js        # 1641 项单元测试（VSDX/VDX/PDF 结构、Web Shell 会话、多管理口、数据清洗、布局、路径、单点故障、网段分析、链路聚合、邻居表解析、接口总表、备份库、子网计算、快速搜索、区域容器、SNMP ifTable/性能采集与响应校验、合规模板、加载防重合、性能、回归、内置网络服务 TFTP/FTP/Syslog 协议级客户端与导入备份、AI LLM 地址/提示词/SSE/历史库/模型列表拉取/OpenAI 与 Claude 双协议本地假服务全链路/Shell AI 命令生成与提取/设备类型注入/IP 地址管理/会话录像解析/SFTP 文件管理/SSH 指标采集解析与阈值/HTTP 探测与证书到期/GBK 编码解码/连接书签/告警静默与维护窗口/诊断工具箱/巡检数据导出/终端搜索本地化 addon/日报每日调度/标签恢复与命令面板/MAC·ARP 表解析与终端定位/接口名跨厂家规范化/一次性命令执行 runOneShot/网段存活扫描/SNMP Trap v1·v2c 解析与接收器/管理器 Trap 集成/SNMP v3 USM 密钥本地化·三档安全·mock 代理全链路·v3 Trap 接收/Syslog 日志告警规则/链路流量叠加/批量巡检只读白名单）
+cd test && npm i && node e2e.js   # 无头 Chrome 端到端集成测试（需本机 Chrome）：画布编辑/拖拽撤销、删除级联与多步撤销重做、CSV/Excel 导入、保存工程与 CSV 导出内容断言、邻居表导入、接口总表（编辑应用/二层清 IP）、网段分析、单点故障/故障影响、聚合组校验豁免、快速搜索、多图纸、主题切换、浏览器降级，以及跨模块集成回合（CSV 导出→导入往返、保存→打开全量往返、连线弹窗↔接口总表双向一致、校验↔修复联动、布局切换后连线端点跟随、多图纸×撤销不串页、网段分析↔定位高亮、搜索↔详情字段一致、类型配色↔导出 SVG 一致）
 node test/gen-e2e.js              # index.html 结构变化后再生 e2e 挂具 test/e2e.html（避免手工同步漂移）
+NETTOPO_LAB_HOST=<实验机IP> node test/live.js   # 真机集成测试：自动在实验机上部署多台 FRR 设备（netns + sshd + snmpd + telnet vty）后跑全链路（详见下节）
 node test/smoke-shell.js          # Electron 端到端冒烟（Web Shell 独立窗口/多标签，需本机桌面环境）
 node test/smoke-backup.js         # Electron 冒烟（备份管理：IPC 备份库 + 弹窗浏览/删除，需本机桌面环境）
 node test/smoke-monitor.js        # Electron 冒烟（设备监控采集/日志归档）
@@ -208,6 +209,39 @@ node test/smoke-center.js         # Electron 冒烟（监控中心 / 配置变�
 node test/smoke-services.js       # Electron 冒烟（内置网络服务：TFTP/FTP/Syslog 真实协议流量 + 面板 UI + 导入备份 + 截图走查）
 python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备用格式）
 ```
+
+### 真机集成测试（test/live.js）
+
+单元测试（mock）与无头浏览器 e2e 覆盖不到的**真实互操作**由 `test/live.js` 兜底：它先在一台可 SSH 登录的
+Linux 实验机上自动部署「多台真实网络设备」，再连上去跑全链路。
+
+```bash
+NETTOPO_LAB_HOST=192.168.50.148 node test/live.js                  # 部署 → 跑全部 → 拆除
+NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --keep           # 保留环境便于排障
+NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --skip-setup     # 用已部署好的环境
+NETTOPO_LAB_HOST=192.168.50.148 node test/live.js --only conn,diag # 只跑指定分组
+sudo bash test/live-lab.sh up|down|status                          # 在实验机上单独部署/拆除/查看
+```
+
+- **实验环境**（`test/live-lab.sh`）：每台设备 = 一个 network namespace，内部真实运行 zebra + bgpd（设备间 eBGP 互联、
+  真路由与接口计数器）、sshd（Linux 层管理口，复用实验机账号认证）、snmpd（SNMP v2c + v3 auth/authPriv、真 net-snmp）、
+  FRR vty telnet（真设备 CLI）与 `/usr/local/bin/nt-cli`（vtysh 集成 CLI 包装）。设备管理面以高位端口发布在实验机 IP 上
+  （SSH 2201+ / Telnet 2611+ / SNMP 1611+）；实验室自己加的 iptables 规则、veth、netns 在拆除时精确回收。
+- **覆盖分组**：A 连接层（真实 SSH/PTY/SFTP/批量巡检/主机指纹 TOFU/真 Telnet CLI）· B 设备监控（在线探测、SSH 指标、
+  SNMP v2c/v3 识别、ifTable、CPU/内存、真实重启检测、链路利用率）· C 配置备份（真实运行配置取回入库、变更 diff、失败如实上报、
+  独立连接模式）· D 内置服务与设备真实互操作（Syslog UDP/TCP、SNMP Trap、TFTP/FTP 双向、服务热更新）· E 诊断工具箱。
+- **环境要求**：测试机能 SSH 登录实验机（`NETTOPO_LAB_USER`/`NETTOPO_LAB_PASS`，默认 a/a，需 sudo 口令）；
+  设备 → 测试机方向的 Syslog/Trap/TFTP/FTP 需放行入站。Windows 默认拦截入站 UDP，按来源地址收窄放行（管理员 PowerShell）：
+
+  ```powershell
+  New-NetFirewallRule -DisplayName "NetTopo 真机集成测试" -Direction Inbound -Action Allow `
+    -Protocol UDP -RemoteAddress <实验机IP>
+  New-NetFirewallRule -DisplayName "NetTopo 真机集成测试 TCP" -Direction Inbound -Action Allow `
+    -Protocol TCP -RemoteAddress <实验机IP>
+  ```
+
+  放行不通时相关用例会**跳过并说明原因**，不会误判为失败。未设置 `NETTOPO_LAB_HOST` 时脚本打印说明并以 0 退出（CI 安全）。
+
 
 ## 说明
 
