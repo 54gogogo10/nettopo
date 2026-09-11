@@ -5,15 +5,21 @@
  *   G1 应用启动 / 示例拓扑
  *   G2-G4 Web Shell：真机 SSH 连接（首次指纹确认）、真机命令输出、多设备多标签
  *   G5-G9 设备监控：界面配置真机（SSH + SNMP）→ 监控中心概览/接口流量/性能呈现真实数据、日志落盘
- *   G10 配置备份：界面开启备份 → 真实运行配置落库 → 备份管理列出
+ *   G10 配置备份：界面开启备份 → 真实运行配置落库 → 「配置备份」弹窗列出
  *   G11 网络服务：界面启用 Syslog/Trap/TFTP → 真机发日志/Trap、实验机传文件 → 面板实时呈现
  *   G12 诊断工具箱：界面发起真机端口探测与 SNMP Walk
+ *   G13 Web Shell · Telnet：真机 FRR CLI 会话（show version / show ip route）
+ *   G14 Web Shell · SFTP 文件面板：真机目录浏览与选中
+ *   G15 批量巡检：界面下发只读命令集到真机并汇总结果
+ *   G16 MAC/ARP 终端定位：界面经真机查邻居表定位终端
+ *   G17 配置合规检查：对真机配置备份执行规则扫描
+ *   G18 真机输出命中告警：侧栏告警标记 + 事件时间线
  *
  * 用法（与 test/live.js 同一套环境变量与实验机）：
  *   NETTOPO_LAB_HOST=192.168.50.148 node test/gui-live.js              # 部署 → 跑全部 → 拆除
  *   node test/gui-live.js --host 192.168.50.148 --keep                 # 保留实验环境便于排障
  *   node test/gui-live.js --host 192.168.50.148 --skip-setup           # 用已部署好的实验环境
- *   node test/gui-live.js --host 192.168.50.148 --only g2,g3           # 只跑指定用例（g1..g12）
+ *   node test/gui-live.js --host 192.168.50.148 --only g13,g14         # 只跑指定用例（g1..g18）
  * 依赖：本机 Chrome 不需要，但需要能启动 Electron（node_modules/electron）；实验机侧同上；
  *      设备 → 测试机方向的 Syslog/Trap/TFTP 需放行入站（见 README 真机集成测试一节）。
  * ---------------------------------------------------------------------------
@@ -118,6 +124,20 @@ async function connectCDP(target) {
   return cdp;
 }
 
+// 终端读写（Web Shell 窗口内活动标签）
+const ACTIVE_ROWS = `document.querySelector('.sh-term-wrap.active .xterm-rows') || document.querySelector('.xterm-rows')`;
+const termTextOf = (cdp) => cdp.evaluate(`(${ACTIVE_ROWS} || {}).textContent || ''`).then((v) => String(v || ''));
+const typeInTerminal = (cdp, text) => cdp.evaluate(`(() => {
+  const ta = document.querySelector('.sh-term-wrap.active .xterm-helper-textarea') || document.querySelector('.xterm-helper-textarea');
+  if (!ta) return false;
+  ta.focus();
+  const d = ${JSON.stringify(text)};
+  ta.value = d;
+  ta.dispatchEvent(new InputEvent('input', { bubbles: true, data: d, inputType: 'insertText' }));
+  return true;
+})()`);
+const switchTab = (cdp, idx) => cdp.evaluate(`(() => { const t = document.querySelectorAll('.sh-tab')[${idx}]; if (!t) return false; t.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); return true; })()`);
+
 // ---------------------------------------------------------------- 主流程
 (async () => {
   if (!CFG.host) {
@@ -196,6 +216,11 @@ async function connectCDP(target) {
     if (want('g5') || want('g6') || want('g7') || want('g8') || want('g9') || want('g10')) {
       await caseMonitor(CFG, mainEval, d1, userData);
     }
+    if (want('g13') || want('g14')) await caseTelnetSftp(CFG, mainEval, devRun, d1);
+    if (want('g15')) await caseInspect(CFG, mainEval, d1);
+    if (want('g16')) await caseMacTrace(CFG, mainEval, devRun, d1);
+    if (want('g17')) await caseCompliance(CFG, mainEval, d1);
+    if (want('g18')) await caseAlert(CFG, mainEval, d1);
     if (want('g11')) await caseServices(CFG, mainEval, conn, devRun, ourIp, d1);
     if (want('g12')) await caseDiag(CFG, mainEval, d1);
 
@@ -256,18 +281,10 @@ async function caseShell(CFG, mainEval, d1, d2) {
   ok(fpShown && /SHA256:/.test(fpTxt) && fpTxt.includes(d1.host), '真机首次连接弹出指纹确认（SHA256 + 主机地址）', fpTxt.replace(/\s+/g, ' ').slice(0, 70));
   if (fpShown) await shEval(`document.querySelector('#fpModal [data-act=trust]').click()`);
 
-  const rowsSel = `document.querySelector('.sh-term-wrap.active .xterm-rows') || document.querySelector('.xterm-rows')`;
-  const termText = async () => String(await shEval(`(${rowsSel} || {}).textContent || ''`));
+  const rowsSel = `.sh-term-wrap.active .xterm-rows`;
+  const termText = () => termTextOf(shell);
   const waitTerm = (needle, ms) => waitUntil(async () => (await termText()).includes(needle), ms || 12000, 300);
-  const typeIn = async (text) => shEval(`(() => {
-    const ta = document.querySelector('.sh-term-wrap.active .xterm-helper-textarea') || document.querySelector('.xterm-helper-textarea');
-    if (!ta) return false;
-    ta.focus();
-    const d = ${JSON.stringify(text)};
-    ta.value = d;
-    ta.dispatchEvent(new InputEvent('input', { bubbles: true, data: d, inputType: 'insertText' }));
-    return true;
-  })()`);
+  const typeIn = (text) => typeInTerminal(shell, text);
 
   ok(await waitTerm('$', 20000), '真机 SSH 会话建立（终端出现 shell 提示符）');
   await typeIn('uname -s\r');
@@ -474,6 +491,234 @@ async function caseMonitor(CFG, mainEval, d1, userData) {
   await mainEval(`(() => { const h = document.querySelector('#bkHosts > *'); if (h) h.click(); return !!h; })()`);
   const fileSeen = await waitUntil(async () => /cfg_\d{8}_\d{6}\.cfg/.test(await filesTxt()), 10000, 400);
   ok(fileSeen, '备份文件列表列出真实配置备份文件', (await filesTxt()).replace(/\s+/g, ' ').slice(0, 70));
+  await mainEval(`(() => { const b = document.querySelector('#modalRoot [data-act=close]'); if (b) b.click(); return true; })()`);
+  await sleep(300);
+}
+
+// ================= G13–G14 Telnet 会话 与 SFTP 文件面板 =================
+/** 从主窗口发起一次 Web Shell 连接（proto 决定 ssh/telnet），供各用例独立使用。
+ *  注意：Telnet 目标若只认口令（FRR vty、多数网络设备），用户名必须留空——填了会被当成口令提交，
+ *  表现为一直停在 `Password:`（登录横幅里也有 "FRRouting" 字样，正好会让「命令有输出」的断言假阳性）。 */
+async function openWsFromMain(CFG, mainEval, dev, proto, port, pass) {
+  await mainEval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 120 })); return true; })()`);
+  await sleep(300);
+  await mainEval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('Web Shell')); b && b.click(); return !!b; })()`);
+  await sleep(300);
+  return mainEval(`(() => {
+    const setV = (el, v) => { if (!el) return false; el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); return true; };
+    const setS = (el, v) => { if (!el) return false; el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
+    if (!document.getElementById('wsProto')) return false;
+    setS(document.getElementById('wsProto'), ${JSON.stringify(proto)});
+    setV(document.getElementById('wsHost'), ${JSON.stringify(dev.host)});
+    setV(document.getElementById('wsPort'), ${JSON.stringify(String(port))});
+    setV(document.getElementById('wsUser'), ${JSON.stringify(proto === 'telnet' ? '' : dev.sshUser)});
+    setV(document.getElementById('wsPass'), ${JSON.stringify(pass)});
+    document.querySelector('[data-act=connect]').click();
+    return true;
+  })()`);
+}
+
+async function caseTelnetSftp(CFG, mainEval, devRun, d1) {
+  if (want('g13')) await caseTelnet(CFG, mainEval, d1);
+  if (want('g14')) await caseSftp(CFG, mainEval, devRun, d1);
+}
+
+/** 确保 Web Shell 窗口里有一个 SSH 会话标签，返回 {shell, idx}（找不到就新连一个真机） */
+async function ensureSshTab(CFG, mainEval, d1, existing) {
+  const sshIdxOf = (cdp) => cdp.evaluate(`(() => { const ts = [...document.querySelectorAll('.sh-tab .tt')]; return ts.findIndex(t => /SSH/i.test(t.textContent || '')); })()`);
+  let shell = existing || null;
+  if (!shell) {
+    let target = null;
+    try { target = await waitTarget(CFG.cdpPort, 'shell.html', 2500); } catch (e) { target = null; }
+    if (target) shell = await connectCDP(target);
+  }
+  if (shell && (await sshIdxOf(shell)) >= 0) { await switchTab(shell, await sshIdxOf(shell)); await sleep(400); return shell; }
+  // 没有 SSH 会话：现开一个（含首次指纹确认）
+  if (shell) shell.ws.close();
+  await openWsFromMain(CFG, mainEval, d1, 'ssh', d1.sshPort, CFG.pass);
+  shell = await connectCDP(await waitTarget(CFG.cdpPort, 'shell.html', 20000));
+  await waitUntil(() => shell.evaluate(`!!document.getElementById('fpModal')`), 15000, 300);
+  await shell.evaluate(`(() => { const b = document.querySelector('#fpModal [data-act=trust]'); if (b) b.click(); return !!b; })()`);
+  await waitUntil(async () => (await sshIdxOf(shell)) >= 0, 20000, 400);
+  await switchTab(shell, Math.max(0, await sshIdxOf(shell)));
+  await sleep(500);
+  return shell;
+}
+
+// ================= G13 Web Shell · Telnet 真机 CLI =================
+async function caseTelnet(CFG, mainEval, d1) {
+  section('G13 Web Shell · Telnet 真机 CLI');
+  ok(await openWsFromMain(CFG, mainEval, d1, 'telnet', d1.telnetPort, d1.telnetPassword), '主窗口以 Telnet 发起真机连接');
+  const shell = await connectCDP(await waitTarget(CFG.cdpPort, 'shell.html', 20000));
+  const telnetIdxOf = () => shell.evaluate(`(() => { const ts = [...document.querySelectorAll('.sh-tab .tt')]; return ts.findIndex(t => /TELNET/i.test(t.textContent || '')); })()`);
+  const appeared = await waitUntil(async () => (await telnetIdxOf()) >= 0, 20000, 400);
+  const titles = await shell.evaluate(`[...document.querySelectorAll('.sh-tab .tt')].map(x => x.textContent)`);
+  ok(appeared, 'Telnet 会话标签出现', titles.join(' | '));
+  if (appeared) {
+    await switchTab(shell, await telnetIdxOf());
+    await sleep(500);
+    // 界面上的 Telnet 不自动应答（autoLogin 只在后台采集启用），口令由用户在终端里输入
+    const asked = await waitUntil(async () => /Password:/.test(await termTextOf(shell)), 20000, 400);
+    ok(asked, '真机 Telnet 弹出登录口令提示（Password:）', '终端尾部：' + String(await termTextOf(shell)).replace(/\s+/g, ' ').slice(-80));
+    await typeInTerminal(shell, d1.telnetPassword + '\r');
+    // 登录成功判据：出现设备名提示符（R1-Core-01> / R1-Core-01#）
+    const ttyOk = await waitUntil(async () => /R1-Core-01[>#]/.test(await termTextOf(shell)), 20000, 400);
+    ok(ttyOk, '输入真机口令后进入 FRR CLI（设备名提示符）', '终端尾部：' + String(await termTextOf(shell)).replace(/\s+/g, ' ').slice(-110));
+    await typeInTerminal(shell, 'show version\r');
+    // 登录横幅也含 "FRRouting"，用 CLI 专有输出（带主机名与内核行）判定，避免假阳性
+    const cliOk = await waitUntil(async () => /FRRouting 10\.\d[\d.]* \(R1-Core-01\) on Linux/.test(await termTextOf(shell)), 15000, 400);
+    ok(cliOk, 'Telnet 会话中真机 CLI 返回版本（show version，带主机名与内核信息）',
+      ((await termTextOf(shell)).match(/FRRouting \d[\d.]* \(R1-Core-01\)[^\n]{0,20}/) || [''])[0]);
+    await typeInTerminal(shell, 'show ip route\r');
+    const rtOk = await waitUntil(async () => /Codes: K - kernel route/.test(await termTextOf(shell)), 15000, 400);
+    ok(rtOk, 'Telnet 会话中真机路由表返回（show ip route → Codes: 图例 + 10.99 网段）',
+      '终端尾部：' + String(await termTextOf(shell)).replace(/\s+/g, ' ').slice(-110));
+  }
+  shell.ws.close();
+}
+
+// ================= G14 Web Shell · SFTP 文件面板 =================
+async function caseSftp(CFG, mainEval, devRun, d1) {
+  section('G14 Web Shell · SFTP 文件面板（真机目录浏览）');
+  const shell = await ensureSshTab(CFG, mainEval, d1);
+  // 在真机上造一个可预测的文件，供面板列出
+  const fname = 'gui-sftp-' + Date.now() + '.txt';
+  await devRun(d1, `printf NETTOPO-GUI-SFTP > /tmp/${fname}`, 900);
+  await shell.evaluate(`(() => { const b = document.getElementById('shSftpBtn'); if (b) b.click(); return !!b; })()`);
+  await sleep(400);
+  await shell.evaluate(`(() => {
+    const p = document.getElementById('shSftpPath');
+    if (p) { p.value = '/tmp'; p.dispatchEvent(new Event('input', { bubbles: true })); }
+    const g = document.getElementById('shSftpGo'); if (g) g.click();
+    return true;
+  })()`);
+  const sfList = async () => String(await shell.evaluate(`(document.getElementById('shSftpList') || {}).textContent || ''`));
+  const listed = await waitUntil(async () => (await sfList()).includes(fname), 15000, 500);
+  ok(listed, 'SFTP 面板列出真机目录内容（真机 /tmp 下新建的文件）', (await sfList()).replace(/\s+/g, ' ').slice(0, 70));
+  const picked = await shell.evaluate(`(() => {
+    const rows = [...document.querySelectorAll('#shSftpList .sf-row')];
+    const r = rows.find(x => (x.textContent || '').includes(${JSON.stringify(fname)}));
+    if (!r) return null;
+    r.click();
+    return { sel: !!r.classList.contains('sel'), status: (document.getElementById('shSftpStatus') || {}).textContent || '' };
+  })()`);
+  ok(picked && picked.sel && String(picked.status).includes(fname), '选中文件后面板反馈（已选中 + 大小）',
+    picked ? String(picked.status).slice(0, 60) : '未找到该行');
+  await shell.evaluate(`(() => { const b = document.getElementById('shSftpClose'); if (b) b.click(); return true; })()`);
+  shell.ws.close();
+}
+// ================= G15 批量巡检（真机只读命令） =================
+async function caseInspect(CFG, mainEval, d1) {
+  section('G15 批量巡检（界面 + 真机只读命令集）');
+  await mainEval(`document.getElementById('btnDropMonitor').click(); true`);
+  await sleep(300);
+  await mainEval(`(() => { const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('批量巡检')); b && b.click(); return !!b; })()`);
+  await sleep(600);
+  if (!ok(await mainEval(`!!document.getElementById('biRun')`), '批量巡检弹窗可打开')) return;
+  const setup = await mainEval(`(() => {
+    const sel = [...document.querySelectorAll('#modalRoot select')].find(s => [...s.options].some(o => o.value === 'linux'));
+    if (sel) { sel.value = 'linux'; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    const devs = [...document.querySelectorAll('#biDevs input[type=checkbox]')];
+    if (devs[0]) { devs[0].checked = true; devs[0].dispatchEvent(new Event('change', { bubbles: true })); }
+    return { hasLinux: !!sel, devCount: devs.length, checked: devs.filter(d => d.checked).length };
+  })()`);
+  ok(setup.hasLinux && setup.devCount > 0, '巡检范围含已保存凭据设备，且可选 Linux 只读命令集', JSON.stringify(setup));
+  await mainEval(`document.getElementById('biRun').click(); true`);
+  const res = async () => String(await mainEval(`(document.getElementById('biResult') || {}).textContent || ''`));
+  const done = await waitUntil(async () => /成功|失败/.test(await res()), 90000, 1200);
+  ok(done, '真机巡检执行完成并给出结果', (await res()).replace(/\s+/g, ' ').slice(0, 80));
+  ok(/成功/.test(await res()), '巡检结果为成功（真机只读命令集真实执行）');
+  ok(!(await mainEval(`(document.getElementById('biCsv') || {}).disabled`)), '巡检结果可导出 CSV（按钮已启用）');
+  await mainEval(`(() => { const b = document.querySelector('#modalRoot [data-act=close]'); if (b) b.click(); return true; })()`);
+  await sleep(300);
+}
+
+// ================= G16 MAC/ARP 终端定位（真机查询） =================
+async function caseMacTrace(CFG, mainEval, devRun, d1) {
+  section('G16 MAC/ARP 终端定位（界面 + 真机 ARP 查询）');
+  const gw = '10.99.1.1'; // 设备管理网关（实验机侧），先通信保证邻居表有条目
+  await devRun(d1, `ping -c1 -W1 ${gw} >/dev/null 2>&1; ip neigh | grep -c ${gw}`, 1500);
+  await mainEval(`document.getElementById('btnDropMonitor').click(); true`);
+  await sleep(300);
+  await mainEval(`(() => { const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('MAC/ARP')); b && b.click(); return !!b; })()`);
+  await sleep(600);
+  if (!ok(await mainEval(`!!document.getElementById('mtRun')`), 'MAC/ARP 终端定位弹窗可打开')) return;
+  const setup = await mainEval(`(() => {
+    const setV = (el, v) => { if (!el) return false; el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); return true; };
+    setV(document.getElementById('mtTarget'), ${JSON.stringify(gw)});
+    const v = document.getElementById('mtVendor');
+    if (v) { v.value = 'linux'; v.dispatchEvent(new Event('change', { bubbles: true })); }
+    const devs = [...document.querySelectorAll('#mtDevs input[type=checkbox]')];
+    if (devs[0]) { devs[0].checked = true; devs[0].dispatchEvent(new Event('change', { bubbles: true })); }
+    document.getElementById('mtRun').click();
+    return { devCount: devs.length, hasVendor: !!v };
+  })()`);
+  ok(setup.hasVendor && setup.devCount > 0, '定位范围含已保存凭据设备（Linux 命令集）', JSON.stringify(setup));
+  const res = async () => String(await mainEval(`(document.getElementById('mtResult') || {}).textContent || ''`));
+  const gwRe = new RegExp(gw.replace(/\./g, '\\.'));
+  const found = await waitUntil(async () => {
+    const t = await res();
+    return gwRe.test(t) && /([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}/.test(t);
+  }, 60000, 1200);
+  ok(found, '真机 ARP/邻居表查询命中目标（IP + MAC）', (await res()).replace(/\s+/g, ' ').slice(0, 90));
+  await mainEval(`(() => { const b = document.querySelector('#modalRoot [data-act=close]'); if (b) b.click(); return true; })()`);
+  await sleep(300);
+}
+
+// ================= G17 配置合规检查（基于真机配置备份） =================
+async function caseCompliance(CFG, mainEval, d1) {
+  section('G17 配置合规检查（界面 + 真机配置备份）');
+  await mainEval(`document.getElementById('btnDropMonitor').click(); true`);
+  await sleep(300);
+  await mainEval(`(() => { const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('合规检查')); b && b.click(); return !!b; })()`);
+  await sleep(800);
+  if (!ok(await mainEval(`!!document.getElementById('compResults')`), '配置合规检查弹窗可打开')) return;
+  const tplCount = await mainEval(`(() => { const s = document.getElementById('compTpl'); return s ? s.options.length : 0; })()`);
+  ok(tplCount > 0, '内置合规模板可用（' + tplCount + ' 套）');
+  await mainEval(`(() => { const b = document.querySelector('#modalRoot [data-act=run]'); if (b) b.click(); return !!b; })()`);
+  const res = async () => String(await mainEval(`(document.getElementById('compResults') || {}).textContent || ''`));
+  const scanned = await waitUntil(async () => (await res()).includes(d1.host), 30000, 800);
+  ok(scanned, '对真机最新配置备份执行扫描并按地址列出结果', (await res()).replace(/\s+/g, ' ').slice(0, 90));
+  ok(/违规|通过|规则/.test(await res()), '扫描结果给出规则命中统计（违规/通过）');
+  await mainEval(`(() => { const b = document.querySelector('#modalRoot [data-act=close]'); if (b) b.click(); return true; })()`);
+  await sleep(300);
+}
+
+// ================= G18 真机输出告警 → 界面提示与事件时间线 =================
+async function caseAlert(CFG, mainEval, d1) {
+  section('G18 真机输出命中告警 → 侧栏告警标记与事件时间线');
+  const nodeId = await mainEval('__topo.state.nodes[0].id');
+  // 把监控命令改成会输出告警关键字的命令，并配置告警正则
+  await mainEval(`(() => { const el = document.querySelector('.node[data-id]'); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 120 })); return true; })()`);
+  await sleep(300);
+  await mainEval(`(() => { const b = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('设备监控')); b && b.click(); return !!b; })()`);
+  await sleep(400);
+  const cfgd = await mainEval(`(() => {
+    const setV = (el, v) => { if (!el) return false; el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); return true; };
+    const r = document.querySelector('.mon-host-row');
+    if (!r) return { ok: false, why: 'no-row' };
+    const ab = r.querySelector('.mh-alert-btn'); if (ab) ab.click();
+    const ta = r.querySelector('.mh-alerts');
+    const hasAlerts = !!ta;
+    if (ta) setV(ta, 'NETTOPO-GUI-ALERT');
+    const cb = r.querySelector('.mh-cmd-btn'); if (cb) cb.click();
+    setV(r.querySelector('.mh-cmds'), 'echo NETTOPO-GUI-ALERT');
+    setV(document.getElementById('monInterval'), '5');
+    document.querySelector('[data-act=save]').click();
+    return { ok: hasAlerts, hasAlerts };
+  })()`);
+  ok(cfgd && cfgd.ok, '监控命令与告警正则写入（输出将命中关键字）', JSON.stringify(cfgd));
+  const badgeAlert = await waitUntil(async () => String(await mainEval(`(() => { const it = [...document.querySelectorAll('.pitem')].find(x => x.dataset.id === ${JSON.stringify(nodeId)}); return it ? ((it.querySelector('.mon-badge') || {}).className || '') : ''; })()`)).includes('alert'), 60000, 800);
+  ok(badgeAlert, '命中告警后侧栏设备标记转为告警态');
+  // 事件时间线
+  await mainEval(`document.getElementById('btnDropMonitor').click(); true`);
+  await sleep(300);
+  await mainEval(`(() => { const b = [...document.querySelectorAll('#drop .ci')].find(x => x.textContent.includes('监控中心')); b && b.click(); return !!b; })()`);
+  await sleep(1200);
+  await mainEval(`(() => { const t = [...document.querySelectorAll('.mc-tab')].find(x => x.dataset.pane === 'events'); if (t) t.click(); return !!t; })()`);
+  await sleep(1000);
+  const evTxt = String(await mainEval(`(document.getElementById('mcEvents') || {}).textContent || ''`));
+  ok(/NETTOPO-GUI-ALERT/.test(evTxt), '事件时间线记录该次真机输出告警', evTxt.replace(/\s+/g, ' ').slice(0, 90));
   await mainEval(`(() => { const b = document.querySelector('#modalRoot [data-act=close]'); if (b) b.click(); return true; })()`);
   await sleep(300);
 }
