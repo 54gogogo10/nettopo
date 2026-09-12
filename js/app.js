@@ -8650,9 +8650,13 @@ function openMonitorCenter() {
             btn.disabled = true;
             try {
               await bridge.trustRevoke(host);
+              // 主进程信任库与渲染层指纹记忆是两份存储：撤销时必须一并清掉渲染层那份，
+              // 否则旧指纹仍会作为 expectFp 把连接挡在客户端（用户会觉得「撤销没用」）
+              let purged = 0;
+              try { purged = U.purgeFingerprintKeys(host, localStorage).length; } catch (e) { purged = 0; }
               btn.closest('.lb-file').remove();
               if (!listEl.querySelector('.lb-file')) listEl.innerHTML = '<div class="lb-empty">暂无已信任的主机</div>';
-              toast('已撤销 ' + host + ' 的信任，下次连接将重新确认指纹');
+              toast('已撤销 ' + host + ' 的信任，下次连接将重新确认指纹' + (purged ? '（同时清理 ' + purged + ' 条本机指纹记忆）' : ''));
             } catch (e) { toast('撤销失败'); btn.disabled = false; }
           };
         });

@@ -4047,6 +4047,35 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(/位置重叠/.test(U.buildRackSvg(ov2.racks[0], {})), '冲突在 SVG 中标注');
     }
 
+    // 指纹记忆：键口径 + 撤销信任时的连带清理（避免「撤销后仍连不上」）
+    console.log('== 回归：指纹记忆键与撤销连带清理（真机排障发现） ==');
+    {
+      ok(U.fpKeyOf('10.0.0.1', 22) === 'topoShellFp:10.0.0.1' && U.fpKeyOf('10.0.0.1') === 'topoShellFp:10.0.0.1',
+        '指纹键：默认 22 端口不带后缀');
+      ok(U.fpKeyOf('10.0.0.1', 2201) === 'topoShellFp:10.0.0.1:2201', '指纹键：非默认端口带端口后缀（同 IP 不同端口互不覆盖）');
+      const mkLs = (init) => {
+        const m = new Map(Object.entries(init));
+        return {
+          get length() { return m.size; },
+          key: (i) => [...m.keys()][i] || null,
+          removeItem: (k) => { m.delete(k); },
+          dump: () => [...m.keys()].sort().join(',')
+        };
+      };
+      const ls = mkLs({
+        'topoShellFp:10.0.0.1': 'SHA256:aaa',
+        'topoShellFp:10.0.0.1:2201': 'SHA256:bbb',
+        'topoShellFp:10.0.0.10': 'SHA256:ccc',
+        'topoShellFp:10.0.0.1x': 'SHA256:ddd',
+        other: 'x'
+      });
+      const removed = U.purgeFingerprintKeys('10.0.0.1', ls);
+      ok(removed.length === 2 && removed.indexOf('topoShellFp:10.0.0.1') >= 0 && removed.indexOf('topoShellFp:10.0.0.1:2201') >= 0,
+        '撤销清理：清掉该主机的两条记忆（含端口变体）');
+      ok(ls.dump() === 'other,topoShellFp:10.0.0.10,topoShellFp:10.0.0.1x', '撤销清理：不误伤其它主机与前缀相近的键（10.0.0.10 / 10.0.0.1x）');
+      ok(U.purgeFingerprintKeys('', ls).length === 0 && U.purgeFingerprintKeys('10.0.0.1', null).length === 0, '撤销清理：空主机/无存储时安全返回');
+    }
+
     // SFTP：远程文件浏览/上传/下载（注入 mock SSH client，验证 ShellManager 侧逻辑与路径白名单）
     console.log('== 回归：SFTP 远程文件管理（新功能） ==');
     {

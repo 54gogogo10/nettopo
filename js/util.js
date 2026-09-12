@@ -15,7 +15,7 @@ U.spreadMinMax = (arr) => {
 };
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20260912c';
+U.APP_VERSION = 'v20260913a';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -3757,6 +3757,33 @@ U.buildProtoTopology = (nodes, links, obs) => {
     adj, anomalies, linkBadges, linkIds, nodeIds,
     stats: { sessions: adj.length, ok: okCount, bad: badCount, onLinks: linkIds.length, state: anomalies.filter(a => a.kind === 'state').length, unmatched: anomalies.filter(a => a.kind === 'unmatched').length, unplanned: anomalies.filter(a => a.kind === 'unplanned').length }
   };
+};
+
+/* ---------- 指纹记忆（TOFU）键与撤销连带清理 ---------- */
+/** 指纹记忆键：非默认端口带端口后缀（与 ssh known_hosts 口径一致，同 IP 不同端口互不挤掉） */
+U.fpKeyOf = (host, port) => 'topoShellFp:' + String(host == null ? '' : host)
+  + (port && Number(port) !== 22 ? ':' + Number(port) : '');
+
+/** 撤销某主机的信任时，**连带清掉渲染层的指纹记忆**（Web Shell / 一次性采集用的 expectFp）。
+ *  指纹存在两处：主进程信任库（monitor-trust.json，权威裁决）与渲染层 localStorage
+ *  （'topoShellFp:<host>[:<port>]'，连接时作为 expectFp 交客户端严格比对）。
+ *  只清主进程那份时，渲染层残留的旧指纹仍会把连接挡在客户端——界面提示「撤销后重新连接确认」
+ *  却依然连不上，用户只会以为撤销没生效。返回被清掉的键名（便于测试与提示）。 */
+U.purgeFingerprintKeys = (host, ls) => {
+  const removed = [];
+  const h = String(host == null ? '' : host).trim();
+  if (!h || !ls || typeof ls.removeItem !== 'function') return removed;
+  const keys = [];
+  try {
+    const n = parseInt(ls.length, 10) || 0;
+    for (let i = 0; i < n; i++) { const k = ls.key ? ls.key(i) : null; if (k) keys.push(k); }
+  } catch (e) { return removed; }
+  const exact = 'topoShellFp:' + h;
+  for (const k of keys) {
+    if (k !== exact && k.indexOf(exact + ':') !== 0) continue;
+    try { ls.removeItem(k); removed.push(k); } catch (e) { /* ignore */ }
+  }
+  return removed;
 };
 
 /* ---------- 设备批量重命名 ---------- */
