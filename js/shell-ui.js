@@ -1459,21 +1459,41 @@ function upsertRestoreEntry(list, entry, cap) {
       return fp.indexOf('SHA256:') === 0 ? fp : '';
     } catch (e) { return ''; }
   };
+  /** 清除本机记住的指纹（键口径与 js/util.js 的 U.fpKeyOf 一致；shell.html 不引入 util.js，此处为最小镜像） */
+  const fpForget = (host, port) => {
+    try {
+      localStorage.removeItem(fpKeyOf(host, port));
+      localStorage.removeItem('topoShellFp:' + host);
+      localStorage.removeItem('topoShellFp:' + host + ':' + (port || 22)); // 兼容带端口写法
+    } catch (e) { /* ignore */ }
+  };
+  /** 连接失败若源于**本机记住的旧指纹**（ssh2 在客户端就拒：Host denied (verification failed)），
+   *  就地清掉本机记忆并提示重试。否则「重新连接」会一直复用同一份旧指纹，成为走不到指纹确认弹窗的死循环
+   *  ——真机排障实例：设备换过主机钥匙后，Web Shell 永远连不上，撤销主进程信任也没用。
+   *  交互式连接的指纹裁决归**主进程信任门**（权威库 + 首连确认弹窗 + 变化即拒的中文原因），
+   *  故下面不再把本机记住的指纹当 expectFp 传给客户端。 */
+  const healFpFailure = (res, host, port) => {
+    const err = String((res && res.error) || '');
+    if (!/Host denied|host denied|verification failed|指纹/i.test(err)) return false;
+    fpForget(host, port);
+    toast('已清除本机记住的 ' + host + ' 旧指纹：请重新连接（将按首次连接重新核对主机指纹）');
+    return true;
+  };
   async function connectBookmark(b) {
     const cfg = { protocol: b.protocol, host: b.host, port: b.port, username: b.username, encoding: b.encoding, title: b.name || b.host };
-    cfg.expectFp = fpReadOf(b.host, b.port);
+    // 不传本机记住的 expectFp：交互式连接的指纹裁决交给主进程信任门（见 healFpFailure 注释）
     if (b.passwordEnc && window.topoSecure && window.topoSecure.decryptSecret) {
       try { const r = await window.topoSecure.decryptSecret(b.passwordEnc); if (r && r.ok && r.text) cfg.password = r.text; } catch (e) { /* 解密失败按无密码连接 */ }
     }
     if (b.jump) {
-      cfg.jump = { host: b.jump.host, port: b.jump.port, username: b.jump.username, expectFp: fpReadOf(b.jump.host, b.jump.port) };
+      cfg.jump = { host: b.jump.host, port: b.jump.port, username: b.jump.username };
       if (b.jump.passwordEnc && window.topoSecure && window.topoSecure.decryptSecret) {
         try { const r = await window.topoSecure.decryptSecret(b.jump.passwordEnc); if (r && r.ok && r.text) cfg.jump.password = r.text; } catch (e) { /* ignore */ }
       }
     }
     let res;
     try { res = await window.topoShell.connect(cfg); } catch (err) { res = { ok: false, error: String((err && err.message) || err) }; }
-    if (!res || !res.ok) { toast('连接失败：' + ((res && res.error) || '未知错误')); return false; }
+    if (!res || !res.ok) { if (!healFpFailure(res, cfg.host, cfg.port)) toast('连接失败：' + ((res && res.error) || '未知错误')); return false; }
     return true;
   }
   async function openBookmarks() {
@@ -1774,10 +1794,9 @@ function upsertRestoreEntry(list, entry, cap) {
           port: ov.querySelector('#wsJumpPort').value.trim(),
           username: ov.querySelector('#wsJumpUser').value.trim(),
           password: ov.querySelector('#wsJumpPass').value,
-          expectFp: fpReadOf(ov.querySelector('#wsJumpHost').value.trim(), ov.querySelector('#wsJumpPort').value.trim())
+          expectFp: undefined           // 同样不传本机记住的指纹（裁决交主进程信任门）
         };
       }
-      cfg.expectFp = fpReadOf(cfg.host, cfg.port);
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
       // 标签恢复登记用：密码加密为 DPAPI 密文随建连参数透传（明文不落盘）
       try {
@@ -1816,7 +1835,7 @@ function upsertRestoreEntry(list, entry, cap) {
       try { res = await window.topoShell.connect(cfg); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
       if (!res || !res.ok) {
         btn.disabled = false; btn.textContent = '连接';
-        toast((res && res.error) || '无法发起连接');
+        if (!healFpFailure(res, cfg.host, cfg.port)) toast((res && res.error) || '无法发起连接');
         return;
       }
       close();
