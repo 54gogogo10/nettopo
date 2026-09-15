@@ -30,7 +30,21 @@ function logCrash(kind, err) {
   try {
     const fs = require('fs');
     const line = '[' + new Date().toISOString() + '] ' + kind + ': ' + String((err && (err.stack || err.message)) || err) + '\n';
-    fs.appendFileSync(path.join(app.getPath('userData'), 'main-crash.log'), line.slice(0, 8000), 'utf8');
+    const file = path.join(app.getPath('userData'), 'main-crash.log');
+    // 异常风暴兜底：日志超 4MB 时保留后半重写（丢最旧一半），防反复 appendFileSync 写满磁盘
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 4 * 1024 * 1024) {
+        const fd = fs.openSync(file, 'r');
+        try {
+          const keep = Buffer.alloc(2 * 1024 * 1024);
+          fs.readSync(fd, keep, 0, keep.length, st.size - keep.length);
+          const nl = keep.indexOf(10);
+          fs.writeFileSync(file, keep.slice(nl >= 0 ? nl + 1 : 0));
+        } finally { try { fs.closeSync(fd); } catch (e2) { /* ignore */ } }
+      }
+    } catch (e2) { /* 大小检查失败照常追加 */ }
+    fs.appendFileSync(file, line.slice(0, 8000), 'utf8');
   } catch (e) { /* 日志失败忽略 */ }
   console.error('[main]', kind, err);
 }
@@ -299,16 +313,27 @@ function createShellWindow() {
   return shellWin;
 }
 
-/** 会话事件统一出口：窗口未就绪时先入队，就绪后按序发送 */
+/** 会话事件统一出口：窗口未就绪时先入队，就绪后按序发送。
+ *  入队封顶（FIFO 丢最旧）：渲染进程崩溃/加载失败时 did-finish-load 不触发、shellReady 恒 false，
+ *  高频终端输出（cat 大文件等）会无限累积撑爆内存——丢最旧保最新，窗口恢复后仍能看到近段输出 */
+const SHELL_QUEUE_MAX = 2000;
 function emitShell(type, id, payload) {
   if (!shellWin || shellWin.isDestroyed()) return;
-  if (!shellReady) { shellQueue.push([type, id, payload]); return; }
+  if (!shellReady) {
+    if (shellQueue.length >= SHELL_QUEUE_MAX) shellQueue.shift();
+    shellQueue.push([type, id, payload]);
+    return;
+  }
   shellWin.webContents.send(type, id, payload);
 }
 
 function openShellTab(info) {
   const win = createShellWindow();
-  if (win.webContents.isLoading()) pendingTabs.push(info);
+  // 标签消息封顶：群发全选数百设备时上限远超实际标签数，只挡窗口加载异常期的无界堆积
+  if (win.webContents.isLoading()) {
+    if (pendingTabs.length >= 1024) pendingTabs.shift();
+    pendingTabs.push(info);
+  }
   else win.webContents.send('shell:newtab', info);
 }
 
@@ -351,7 +376,9 @@ function notifyUser(title, body) {
     if (!Notification.isSupported()) return;
     const n = new Notification({ title: title, body: body, silent: false });
     n.on('click', () => { if (mainWin && !mainWin.isDestroyed()) { if (mainWin.isMinimized()) mainWin.restore(); mainWin.focus(); } });
-    // 通知对象须保活至事件触发：局部引用可能被 GC，导致通知不显示/点击失效（告警漏报）
+    // 通知对象须保活至事件触发：局部引用可能被 GC，导致通知不显示/点击失效（告警漏报）。
+    // 保活集封顶：部分平台 close 事件不可靠（条目永不回收），超限丢弃最旧引用防 Set 无界增长
+    if (liveNotifications.size >= 64) { const oldest = liveNotifications.values().next().value; liveNotifications.delete(oldest); }
     liveNotifications.add(n);
     n.on('close', () => liveNotifications.delete(n));
     n.show();
@@ -654,20 +681,35 @@ function createWebWindow() {
   return webWin;
 }
 
-/** 证书告警统一出口：窗口未就绪先入队；无窗口则直接拒绝该请求 */
+/** 证书告警统一出口：窗口未就绪先入队；无窗口则直接拒绝该请求。
+ *  队列封顶（FIFO 拒最旧）：设备页持坏证书自动重连且窗口长时间未就绪时，certQueue 与挂起的
+ *  Chromium 请求句柄会无限累积——与 pendingCert 的 32 上限同思路，超限先拒最旧的等待项 */
+const CERT_QUEUE_MAX = 64;
 function emitCertError(info) {
   if (!webWin || webWin.isDestroyed()) {
     const rec = pendingCert.get(info.id);
     if (rec) { pendingCert.delete(info.id); rec.callback(false); }
     return;
   }
-  if (!webReady) { certQueue.push(info); return; }
+  if (!webReady) {
+    if (certQueue.length >= CERT_QUEUE_MAX) {
+      const oldest = certQueue.shift();
+      const rec = oldest ? pendingCert.get(oldest.id) : null;
+      if (oldest) pendingCert.delete(oldest.id);
+      if (rec) { try { rec.callback(false); } catch (e) { /* ignore */ } }
+    }
+    certQueue.push(info);
+    return;
+  }
   webWin.webContents.send('web:cert-error', info);
 }
 
 function openWebTab(info) {
   const win = createWebWindow();
-  if (win.webContents.isLoading()) pendingWebTabs.push(info);
+  if (win.webContents.isLoading()) {
+    if (pendingWebTabs.length >= 256) pendingWebTabs.shift();
+    pendingWebTabs.push(info);
+  }
   else win.webContents.send('web:newtab', info);
 }
 

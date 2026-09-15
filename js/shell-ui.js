@@ -1451,14 +1451,8 @@ function upsertRestoreEntry(list, entry, cap) {
     saveBookmarks(list);
   };
   /* 指纹记忆键：非默认端口（≠22）含端口后缀（与 ssh known_hosts 口径一致——同 IP 不同端口
-   *  是 NAT 映射多设备的常见形态，只按 host 存储会互相挤掉）；读取兼容旧版 host-only 键 */
+   * 是 NAT 映射多设备的常见形态，只按 host 存储会互相挤掉）；读取兼容旧版 host-only 键 */
   const fpKeyOf = (host, port) => 'topoShellFp:' + host + (port && Number(port) !== 22 ? ':' + Number(port) : '');
-  const fpReadOf = (host, port) => {
-    try {
-      const fp = localStorage.getItem(fpKeyOf(host, port)) || localStorage.getItem('topoShellFp:' + host) || '';
-      return fp.indexOf('SHA256:') === 0 ? fp : '';
-    } catch (e) { return ''; }
-  };
   /** 清除本机记住的指纹（键口径与 js/util.js 的 U.fpKeyOf 一致；shell.html 不引入 util.js，此处为最小镜像） */
   const fpForget = (host, port) => {
     try {

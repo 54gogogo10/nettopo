@@ -2298,6 +2298,8 @@ class MonitorManager extends EventEmitter {
       })().catch(() => {
         this.shell.removeListener('output', onOut);
         this.shell.removeListener('end', onEnd);
+        // 兜底关会话：正常路径末尾已 close，异常 reject 路径若不关，连接会残留到设备侧超时
+        try { this.shell.close(sid); } catch (e) { /* ignore */ }
         resolveCmds();
       });
     });
