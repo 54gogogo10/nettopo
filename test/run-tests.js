@@ -8062,6 +8062,44 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(cleaned.links[0].evidence.length <= 200, '合并：证据文本限长（防工程膨胀）');
     }
 
+    // 机房平面图底图：清洗（体积/格式/几何钳制）与导出取景（新功能）
+    console.log('== 回归：机房平面图底图（新功能） ==');
+    {
+      const PNG1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+      const su = U.sanitizeUnderlay;
+      const a = su({ dataUrl: PNG1, name: '机房 A 平面图', x: 100, y: 50, w: 1200, h: 900, opacity: 0.5 });
+      ok(a && a.dataUrl === PNG1 && a.x === 100 && a.w === 1200, '清洗：合法 PNG 底图保留几何');
+      ok(a.visible === true && a.locked === false && a.adjust === false, '清洗：缺省可见、未锁定、非调整态');
+      eq(a.name, '机房 A 平面图', '清洗：名称保留');
+      eq(su({ dataUrl: PNG1 }).opacity, 0.85, '清洗：未给不透明度时默认 0.85（能看清底图也不盖住设备）');
+      ok(su({ dataUrl: PNG1, opacity: 5 }).opacity === 1 && su({ dataUrl: PNG1, opacity: -3 }).opacity === 0.05, '清洗：不透明度钳制到 0.05~1');
+      ok(su({ dataUrl: PNG1, w: 1, h: 1 }).w === 40 && su({ dataUrl: PNG1, w: 1, h: 1 }).h === 40, '清洗：尺寸下限 40（防缩成一个点找不回来）');
+      ok(su({ dataUrl: PNG1, w: 1 }).h === 800, '清洗：只给宽时高取默认 800（未给即默认，不做「按宽度推算」的臆测）');
+      ok(su({ dataUrl: PNG1, x: 1e9 }).x === 1e6 && su({ dataUrl: PNG1, y: -1e9 }).y === -1e6, '清洗：坐标钳制到 ±1e6');
+      ok(su({ dataUrl: PNG1, w: 'abc' }).w === 1200, '清洗：尺寸非数值回退默认宽');
+      ok(su(null) === null && su({}) === null && su({ dataUrl: '' }) === null, '清洗：空/无图一律返回 null');
+      ok(su({ dataUrl: 'data:text/html;base64,PHNjcmlwdD4=' }) === null, '清洗：非图片 dataURL 拒绝');
+      ok(su({ dataUrl: 'javascript:alert(1)' }) === null, '清洗：javascript: 伪协议拒绝');
+      ok(su({ dataUrl: PNG1.replace('base64,', 'base64,QUFB" onload="x') }) === null, '清洗：base64 载荷里塞引号（属性逃逸尝试）拒绝');
+      ok(su({ dataUrl: 'data:image/svg+xml;base64,' + 'A'.repeat(6 * 1024 * 1024 + 10) }) === null, '清洗：超过 6MB 上限拒绝（防工程文件被单张图撑爆）');
+      ok(su({ dataUrl: 'data:image/svg+xml;base64,PHN2Zy8+' }) !== null, '清洗：SVG 底图允许（与设备图标同一套 image/href 安全上下文）');
+
+      // 导出：底图参与取景并画在最底层
+      const graph = { nodes: [{ id: 'n1', name: 'SW1', type: 'switch', x: 300, y: 300, w: 160, h: 56 }], links: [], texts: [], regions: [] };
+      const svgNo = sandbox.TopoPdf.buildSvgImage(graph, {});
+      ok(svgNo.indexOf('<image') < 0, '导出：无底图时不产生 image 元素');
+      const svgYes = sandbox.TopoPdf.buildSvgImage(Object.assign({ underlay: su({ dataUrl: PNG1, x: 0, y: 0, w: 2000, h: 1000, opacity: 0.4 }) }, graph), {});
+      ok(svgYes.indexOf('<image') > 0, '导出：有底图时输出 image 元素');
+      ok(svgYes.indexOf('opacity="0.4"') > 0, '导出：底图不透明度沿用画布设置');
+      ok(svgYes.indexOf('href="data:image/png;base64,') > 0 && svgYes.indexOf('xlink:href="data:image/png;base64,') > 0, '导出：image 同时写 href 与 xlink:href（兼容老渲染器）');
+      const wNo = Number((svgNo.match(/width="(\d+)"/) || [])[1] || 0);
+      const wYes = Number((svgYes.match(/width="(\d+)"/) || [])[1] || 0);
+      ok(wYes > wNo, '导出：底图参与取景（画布宽度随底图扩大，' + wNo + ' → ' + wYes + '）');
+      ok(svgYes.indexOf('<image') < svgYes.indexOf('SW1'), '导出：image 画在设备之前（垫在最底层；白底 rect 仍在最前）');
+      const svgHidden = sandbox.TopoPdf.buildSvgImage(Object.assign({ underlay: su({ dataUrl: PNG1, visible: false }) }, graph), {});
+      ok(svgHidden.indexOf('<image') < 0, '导出：底图被隐藏时不输出（导出件与屏幕所见一致）');
+    }
+
 })().then(() => {
   suiteFinished = true;
   console.log('');

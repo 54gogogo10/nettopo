@@ -46,6 +46,9 @@ class Renderer {
     const grid = el('g', { id: 'gridLayer' }, this.world);
     el('rect', { x: -100000, y: -100000, width: 200000, height: 200000, fill: 'url(#gridP)' }, grid);
 
+    // 底图（机房平面图/楼层图）：垫在网格之上、区域与连线之下，作为设备摆放的参照
+    this.underlayLayer = el('g', { id: 'underlayLayer' }, this.world);
+    this.underlayLayer.style.pointerEvents = 'none';   // 默认不吃事件：底图不挡画布操作
     this.regionLayer = el('g', { id: 'regionLayer' }, this.world);
     this.groupLayer = el('g', { id: 'groupLayer' }, this.world);
     this.linkLayer = el('g', { id: 'linkLayer' }, this.world);
@@ -381,7 +384,54 @@ class Renderer {
   }
 
   /* ---------- 全量位置更新 ---------- */
+  /* ---------- 底图（机房平面图底图） ---------- */
+  /** 设置底图：{dataUrl, name, x, y, w, h, opacity, locked, visible, adjust}
+   *  「调整」模式下未锁定时可直接拖动移动、右下角手柄缩放（改动经 onUnderlayChange 回传渲染层落库） */
+  setUnderlay(u, onChange) {
+    this.underlay = u || null;
+    if (typeof onChange === 'function') this.onUnderlayChange = onChange;
+    this._underlaySig = '';   // 强制下一帧重建（内容比较用轻量签名，避免每帧比较数 MB 的 dataURL）
+  }
+  _renderUnderlay() {
+    const u = this.underlay;
+    const sig = u ? [u.visible ? 1 : 0, u.x, u.y, u.w, u.h, u.opacity, u.locked ? 1 : 0, u.adjust ? 1 : 0, String(u.dataUrl || '').length, u.name].join('|') : '';
+    if (sig === this._underlaySig) return;
+    this._underlaySig = sig;
+    const layer = this.underlayLayer;
+    layer.innerHTML = '';
+    if (!u || !u.visible || !u.dataUrl) { layer.style.pointerEvents = 'none'; return; }
+    // 只在「调整底图且未锁定」时接管指针事件——否则底图会挡住底下所有画布操作
+    layer.style.pointerEvents = (u.adjust && !u.locked) ? 'auto' : 'none';
+    const img = el('image', {
+      class: 'underlay' + (u.adjust && !u.locked ? ' adjust' : ''),
+      x: u.x, y: u.y, width: Math.max(1, u.w), height: Math.max(1, u.h),
+      opacity: Math.max(0.02, Math.min(1, u.opacity == null ? 1 : u.opacity)),
+      preserveAspectRatio: 'none', href: u.dataUrl, 'xlink:href': u.dataUrl  // 双写：老 WebKit 只认 xlink
+    }, layer);
+    if (!(u.adjust && !u.locked)) return;
+    // 缩放手柄（右下角）：屏幕等效尺寸随缩放折算，视觉大小稳定
+    const hs = 12 / this.zoom;
+    const handle = el('rect', { class: 'underlay-handle', x: u.x + u.w - hs / 2, y: u.y + u.h - hs / 2, width: hs, height: hs, rx: hs / 4 }, layer);
+    const emit = (patch) => { if (typeof this.onUnderlayChange === 'function') this.onUnderlayChange(patch); };
+    const startDrag = (e, mode) => {
+      e.preventDefault(); e.stopPropagation();
+      const start = this.toWorld(e.clientX, e.clientY);
+      const o = { x: u.x, y: u.y, w: u.w, h: u.h };
+      const move = (ev) => {
+        const p = this.toWorld(ev.clientX, ev.clientY);
+        if (mode === 'move') emit({ x: Math.round(o.x + (p.x - start.x)), y: Math.round(o.y + (p.y - start.y)) });
+        else emit({ w: Math.max(40, Math.round(o.w + (p.x - start.x))), h: Math.max(40, Math.round(o.h + (p.y - start.y))) });
+      };
+      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    };
+    img.addEventListener('pointerdown', (e) => startDrag(e, 'move'));
+    handle.addEventListener('pointerdown', (e) => startDrag(e, 'resize'));
+  }
+
   update() {
+    this._renderUnderlay();
     this._buildRegions();
     this._buildGroups();
     for (const n of this.nodes) {

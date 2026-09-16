@@ -31,6 +31,7 @@ const state = {
   autoBackup: { on: lsGet('nettopo.autoBackup', '0') === '1', minutes: Number(lsGet('nettopo.autoBackupMin', '10') || 10), keep: Math.min(200, Math.max(1, Number(lsGet('nettopo.autoBackupKeep', '30') || 30) || 30)) },
   texts: [],  // 画布文本框（自定义字体样式）
   regions: [], // 区域分组容器（几何包含，双击编辑/拖动整体移动；随图纸保存）
+  underlay: null, // 机房平面图底图（每张图纸一张；图片以 dataURL 存进工程文件，体积有硬上限）
   monitorCfg: {},   // 设备后台监控配置：nodeId -> {hosts:[{host,protocol,port,username,password,commands,onConnect,readOnly,...}],intervalSec,cmdDelayMs,enabled}
   monitorStatus: {}, // 设备后台监控运行状态：nodeId -> {state,text,since}（运行时态，不持久化）
   linkFlow: {},      // 链路流量叠加数据：nodeId -> {ts, ifs:[{n,oper,speed,in,out}]}（最新 ifTable 采样，运行时态）
@@ -200,12 +201,14 @@ function restore(s) {
   }
   state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
   state.regions = s.regions || [];
+  state.underlay = U.sanitizeUnderlay(s.underlay);
   state.sel = { kind: null, id: null };
-  if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; state.sheets[state.sheetIdx].regions = state.regions; }
+  if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; state.sheets[state.sheetIdx].regions = state.regions; state.sheets[state.sheetIdx].underlay = state.underlay; }
   if (Array.isArray(s.downLinks)) { state.downLinks = new Set(s.downLinks); renderer.setDownLinks(state.downLinks); }
   if (s.subnetNames && typeof s.subnetNames === 'object') { state.subnetNames = s.subnetNames; renderer.subnetNames = s.subnetNames; }
   renderer.setSubnetView(state.showSubnets, state.subnetNames);
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
+  applyUnderlay();
   refreshAll();
   updateLegend();
   renderSelCard(); // 隐藏可能残留的选中卡
@@ -3702,6 +3705,7 @@ function switchSheet(idx, opts) {
   state.sheetIdx = idx;
   state.nodes = s.nodes || []; state.links = s.links || []; state.texts = s.texts || [];
   state.regions = s.regions || [];
+  state.underlay = U.sanitizeUnderlay(s.underlay);
   state.sel = { kind: null, id: null };
   if (!opts.keepUndo) { state.undoStack = []; state.redoStack = []; }
   renderer.orthoLinks = state.orthoLinks;
@@ -3725,7 +3729,7 @@ function addSheet() {
   } else {
     sheetStash();
   }
-  state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 ' + (state.sheets.length + 1), nodes: [], links: [], texts: [], regions: [], pan: null, zoom: null });
+  state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 ' + (state.sheets.length + 1), nodes: [], links: [], underlay: null, texts: [], regions: [], pan: null, zoom: null });
   switchSheet(state.sheets.length - 1);
   toast('已新建图纸页（' + (state.sheets.length) + ' 页）');
 }
@@ -3882,7 +3886,7 @@ function exportCanvasTooLarge(img, scale) {
 
 function exportPdf() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions, underlay: state.underlay }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -3915,7 +3919,7 @@ function exportPdf() {
 
 /* ================= 导出图片（PNG / SVG / 剪贴板） ================= */
 function renderTopologyPng(cb) {
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions, underlay: state.underlay }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -3939,7 +3943,7 @@ function renderTopologyPng(cb) {
 function exportImage(kind) {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   if (kind === 'svg') {
-    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions, underlay: state.underlay }, { showLabels: state.showLabels, ortho: state.orthoLinks });
     U.download(`网络拓扑图_${U.fmtDate()}.svg`, new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
     toast('已导出 SVG 矢量图');
     return;
@@ -4094,6 +4098,7 @@ async function buildProjectData() {
     links: state.links,
     texts: state.texts,
     regions: state.regions,
+    underlay: state.underlay ? Object.assign({}, state.underlay, { adjust: false }) : null,
     pan: renderer.pan,
     zoom: renderer.zoom,
     sheets: U.clone(state.sheets),
@@ -4207,6 +4212,7 @@ async function applyProjectData(data) {
   state.links = cleaned.links;
   state.texts = cleaned.texts;
   state.regions = U.sanitizeRegions(data.regions);
+  state.underlay = U.sanitizeUnderlay(data.underlay);
   state.sel = { kind: null, id: null };
   state.undoStack = [];
   state.redoStack = [];
@@ -4227,6 +4233,7 @@ async function applyProjectData(data) {
         name: typeof sp.name === 'string' ? sp.name.trim().slice(0, 64) : ('页面 ' + (state.sheets.length + 1)),
         nodes: c.nodes, links: c.links, texts: c.texts,
         regions: U.sanitizeRegions(sp.regions),
+          underlay: U.sanitizeUnderlay(sp.underlay),
         pan: (sp.pan && typeof sp.pan === 'object') ? { x: Number(sp.pan.x) || 0, y: Number(sp.pan.y) || 0 } : null,
         zoom: Number(sp.zoom) || null
       };
@@ -6158,6 +6165,7 @@ function restoreGraph() {
     state.links = cleaned.links;
     state.texts = cleaned.texts;
     state.regions = U.sanitizeRegions(d.regions);
+      state.underlay = U.sanitizeUnderlay(d.underlay);
     U.seedCounters(state.nodes, state.links, state.texts, state.regions); // 避免新 ID 与恢复节点/文本框冲突
     state.sel = { kind: null, id: null };
     state.undoStack = []; // 初始状态无需撤销
@@ -6179,6 +6187,7 @@ function restoreGraph() {
           name: typeof sp.name === 'string' ? sp.name.trim().slice(0, 64) : ('页面 ' + (state.sheets.length + 1)),
           nodes: c.nodes, links: c.links, texts: c.texts,
           regions: U.sanitizeRegions(sp.regions),
+          underlay: U.sanitizeUnderlay(sp.underlay),
           pan: (sp.pan && typeof sp.pan === 'object') ? { x: Number(sp.pan.x) || 0, y: Number(sp.pan.y) || 0 } : null,
           zoom: Number(sp.zoom) || null
         };
@@ -6869,6 +6878,7 @@ function wire() {
   $('#btnDropView').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'eye', label: '链路标注', active: state.showLabels, act: toggleLabels },
     { ic: 'layers', label: '子网分组', active: state.showSubnets, act: toggleSubnets },
+    { ic: 'image', label: state.underlay ? ('底图：' + (state.underlay.name || '已导入')) : '机房平面图底图…', act: () => openUnderlayPanel() },
     { sep: true },
     { ic: 'undo', label: state.downLinks.size ? '清除故障标记（' + state.downLinks.size + '）' : '清除故障标记', act: clearDownLinks },
     { ic: 'close', label: '清除路径高亮', active: !!renderer.pathHl, act: clearPathHl }
@@ -8420,6 +8430,160 @@ function openMonitorConfig(id) {
  * js/l2-topo.js 的纯函数里（单测覆盖）；采集走 diag:snmp-walk（v2c/v3 都支持）。
  * 推断链路合并进拓扑时带 inferred 标记：画布上虚线显示并与实测链路区分（不会冒充实测结果）。 */
 const L2 = globalThis.TopoL2;   // 二层推断纯逻辑（js/l2-topo.js，双形态导出）
+
+/* ================= 机房平面图底图 =================
+ * 把机房/楼层的平面图垫在画布最底层当参照，设备按真实位置摆放。每张图纸一张底图，
+ * 图片以 dataURL 存进工程文件（所以体积有 6MB 硬上限——否则一张扫描图会让每次自动备份都变成几十 MB）。
+ * 「调整底图」模式下可直接拖动移动、右下角手柄缩放；锁定后不再响应拖动（防误移动）。 */
+let underlaySaveTimer = null;
+/** 内容包围盒（设备 + 文字）：底图初始尺寸与「对齐内容」用 */
+function contentBox() {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of state.nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h); }
+  for (const t of state.texts) { minX = Math.min(minX, t.x); minY = Math.min(minY, t.y); maxX = Math.max(maxX, t.x + (t.w || 160)); maxY = Math.max(maxY, t.y + (t.h || 40)); }
+  if (!isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+/** 把当前底图交给渲染层（拖动/缩放改动回写 state；落盘 600ms 防抖——拖动中不断序列化几 MB 图片会卡） */
+function applyUnderlay() {
+  if (!renderer || typeof renderer.setUnderlay !== 'function') return;
+  renderer.setUnderlay(state.underlay, (patch) => {
+    if (!state.underlay) return;
+    for (const [k, v] of Object.entries(patch || {})) if (Number.isFinite(v)) state.underlay[k] = v;
+    if (state.sheets[state.sheetIdx]) state.sheets[state.sheetIdx].underlay = state.underlay;
+    renderer.setUnderlay(state.underlay);   // 立即重绘（拖动要跟手）
+    renderer.update();                      // 拖动路径必须显式重绘：setUnderlay 只清重建标记，不触发帧
+    if (underlaySaveTimer) clearTimeout(underlaySaveTimer);
+    underlaySaveTimer = setTimeout(() => { underlaySaveTimer = null; try { saveGraph(); } catch (e) { /* ignore */ } }, 600);
+  });
+}
+function openUnderlayPanel() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const u = state.underlay;
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:740px;max-height:84vh;display:flex;flex-direction:column">
+      <h3>机房平面图底图</h3>
+      <div class="m-sub">导入机房/楼层平面图作为画布底图（<b>每张图纸一张</b>，随工程保存）。勾选「调整底图」后可直接在画布上<b>拖动移动</b>、<b>右下角手柄缩放</b>；锁定后不再响应拖动。导出 PDF / 图片 / SVG <b>会带上底图</b>（与屏幕所见一致），Visio 导出不含底图。</div>
+      <div class="frow"><label>图片（PNG / JPG / GIF / WebP / SVG，建议 2MB 以内）</label>
+        <input id="ulFile" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"/></div>
+      <div id="ulInfo" class="m-sub" style="margin:2px 0 8px"></div>
+      <div class="frow" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input id="ulVisible" type="checkbox"/> 显示底图</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input id="ulAdjust" type="checkbox"/> 调整底图（拖动/缩放）</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input id="ulLocked" type="checkbox"/> 锁定位置</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0">不透明度 <input id="ulOpacity" type="range" min="5" max="100" step="5" style="width:110px"/><span id="ulOpacityVal" style="width:40px;text-align:right"></span></label>
+      </div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>X</label><input id="ulX" type="number" style="width:88px"/></div>
+        <div class="frow" style="margin:0"><label>Y</label><input id="ulY" type="number" style="width:88px"/></div>
+        <div class="frow" style="margin:0"><label>宽</label><input id="ulW" type="number" style="width:88px"/></div>
+        <div class="frow" style="margin:0"><label>高</label><input id="ulH" type="number" style="width:88px"/></div>
+        <button type="button" class="tb" id="ulFit">对齐内容（设备范围）</button>
+        <button type="button" class="tb" id="ulReset">按原始比例</button>
+      </div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="ulRemove"${u ? '' : ' disabled'}>移除底图</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const infoEl = ov.querySelector('#ulInfo');
+  const ids = ['#ulVisible', '#ulAdjust', '#ulLocked', '#ulOpacity', '#ulX', '#ulY', '#ulW', '#ulH', '#ulFit', '#ulReset'];
+  const sync = () => {
+    const c = state.underlay;
+    ov.querySelector('#ulVisible').checked = !!(c && c.visible !== false);
+    ov.querySelector('#ulAdjust').checked = !!(c && c.adjust);
+    ov.querySelector('#ulLocked').checked = !!(c && c.locked);
+    const op = c ? Math.round((c.opacity == null ? 0.85 : c.opacity) * 100) : 85;
+    ov.querySelector('#ulOpacity').value = String(op);
+    ov.querySelector('#ulOpacityVal').textContent = op + '%';
+    ov.querySelector('#ulX').value = c ? Math.round(c.x) : '';
+    ov.querySelector('#ulY').value = c ? Math.round(c.y) : '';
+    ov.querySelector('#ulW').value = c ? Math.round(c.w) : '';
+    ov.querySelector('#ulH').value = c ? Math.round(c.h) : '';
+    ov.querySelector('#ulRemove').disabled = !c;
+    for (const id of ids) ov.querySelector(id).disabled = !c;
+    infoEl.innerHTML = c
+      ? ('当前：<b>' + U.escHtml(c.name || '未命名') + '</b>　' + Math.round(c.w) + '×' + Math.round(c.h) + ' @ (' + Math.round(c.x) + ', ' + Math.round(c.y) + ')'
+        + '　图片约 <b>' + (c.dataUrl.length / 1024 / 1024).toFixed(2) + ' MB</b>（base64，随工程保存）'
+        + (c.dataUrl.length > 2 * 1024 * 1024 ? ' <span style="color:#f59e0b">偏大：会明显增加工程与自动备份体积</span>' : ''))
+      : '尚未导入底图。';
+    if (typeof renderer.syncUnderlayMode === 'function') renderer.syncUnderlayMode(!!(c && c.adjust && !c.locked));
+  };
+  const commit = (patch) => {
+    if (!state.underlay) return;
+    Object.assign(state.underlay, patch);
+    state.underlay = U.sanitizeUnderlay(state.underlay);
+    if (state.sheets[state.sheetIdx]) state.sheets[state.sheetIdx].underlay = state.underlay;
+    applyUnderlay(); renderer.update(); sync();
+    if (underlaySaveTimer) clearTimeout(underlaySaveTimer);
+    underlaySaveTimer = setTimeout(() => { underlaySaveTimer = null; try { saveGraph(); } catch (e) { /* ignore */ } }, 600);
+  };
+  ov.querySelector('#ulFile').onchange = async (e) => {
+    const f = (e.target.files || [])[0];
+    if (!f) return;
+    if (f.size > 4.5 * 1024 * 1024) { toast('图片过大（' + (f.size / 1024 / 1024).toFixed(1) + ' MB）：请压到 4MB 以内再导入（base64 后受 6MB 上限约束）'); e.target.value = ''; return; }
+    const dataUrl = await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result || '')); fr.onerror = () => res(''); fr.readAsDataURL(f); });
+    if (!U.sanitizeUnderlay({ dataUrl })) { toast('图片格式不受支持（PNG / JPG / GIF / WebP / SVG）或体积超限'); e.target.value = ''; return; }
+    const size = await new Promise((res) => {
+      const im = new Image();
+      im.onload = () => res({ w: im.naturalWidth || 1200, h: im.naturalHeight || 800 });
+      im.onerror = () => res({ w: 1200, h: 800 });
+      im.src = dataUrl;
+    });
+    const box = contentBox();
+    const targetW = Math.max(400, Math.min(4000, box.w || 1200));
+    const scale = targetW / (size.w || 1200);
+    state.underlay = U.sanitizeUnderlay({
+      dataUrl, name: f.name, x: Math.round(box.x || 0), y: Math.round(box.y || 0),
+      w: Math.round(size.w * scale), h: Math.round(size.h * scale), opacity: 0.85, visible: true, locked: false, adjust: true
+    });
+    if (state.sheets[state.sheetIdx]) state.sheets[state.sheetIdx].underlay = state.underlay;
+    applyUnderlay(); renderer.update(); sync(); saveGraph();
+    toast('已导入底图：' + f.name + '（' + Math.round(size.w * scale) + '×' + Math.round(size.h * scale) + '；勾选「调整底图」后可拖动摆放）');
+    e.target.value = '';
+  };
+  ov.querySelector('#ulVisible').onchange = (e) => commit({ visible: e.target.checked });
+  ov.querySelector('#ulAdjust').onchange = (e) => commit({ adjust: e.target.checked });
+  ov.querySelector('#ulLocked').onchange = (e) => commit({ locked: e.target.checked });
+  ov.querySelector('#ulOpacity').oninput = (e) => commit({ opacity: Number(e.target.value) / 100 });
+  for (const [id, key] of [['#ulX', 'x'], ['#ulY', 'y'], ['#ulW', 'w'], ['#ulH', 'h']]) {
+    ov.querySelector(id).onchange = (e) => { const v = Number(e.target.value); if (Number.isFinite(v)) commit({ [key]: v }); };
+  }
+  ov.querySelector('#ulFit').onclick = () => {
+    const box = contentBox();
+    if (!box.w || !box.h) { toast('画布暂无内容（设备/文字），无法对齐'); return; }
+    const ratio = (state.underlay && state.underlay.w) ? state.underlay.h / state.underlay.w : 0.75;
+    commit({ x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.w), h: Math.round(box.w * ratio) });
+    toast('底图已对齐到设备范围（' + Math.round(box.w) + '×' + Math.round(box.w * ratio) + '）');
+  };
+  ov.querySelector('#ulReset').onclick = () => {
+    if (!state.underlay) return;
+    const box = contentBox();
+    const targetW = Math.max(400, Math.min(4000, box.w || 1200));
+    const ratio = state.underlay.h / state.underlay.w;
+    commit({ w: Math.round(targetW), h: Math.round(targetW * ratio) });
+    toast('已按原始宽高比重新设定尺寸');
+  };
+  ov.querySelector('#ulRemove').onclick = async () => {
+    if (!state.underlay) return;
+    if (!(await confirmBox('移除当前图纸的底图？（设备位置不受影响）'))) return;
+    state.underlay = null;
+    if (state.sheets[state.sheetIdx]) state.sheets[state.sheetIdx].underlay = null;
+    applyUnderlay(); renderer.update(); sync(); saveGraph();
+    toast('已移除底图');
+  };
+  sync();
+}
+
 function openL2Infer() {
   if (!(window.topoDiag && window.topoDiag.snmpWalk)) { toast('二层拓扑推断需要桌面版（Electron）环境'); return; }
   const cands = state.nodes
@@ -11697,6 +11861,8 @@ if (typeof globalThis !== 'undefined') {
     openTeamPackImport,
     openSlaReport,
     openL2Infer,
+    openUnderlayPanel,
+    applyUnderlay,
     alertTopology: () => alertTopologySnapshot(),
     openMacTrace,
     openBatchInspect,

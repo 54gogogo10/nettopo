@@ -17,6 +17,12 @@ function buildSvgImage(graph, opts) {
   const M = 60; // 边距 px
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  // 底图（机房平面图）也参与取景：否则导出的图会把平面图裁掉一半
+  const underlay = (graph.underlay && graph.underlay.visible !== false && graph.underlay.dataUrl) ? graph.underlay : null;
+  if (underlay) {
+    minX = Math.min(minX, underlay.x); minY = Math.min(minY, underlay.y);
+    maxX = Math.max(maxX, underlay.x + underlay.w); maxY = Math.max(maxY, underlay.y + underlay.h);
+  }
   for (const r of regions) {
     minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
     maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h);
@@ -37,6 +43,11 @@ function buildSvgImage(graph, opts) {
   const parts = [];
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
   parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff"/>`);
+
+  // 底图先画（垫在所有元素之下）：透明度沿用画布设置，导出件与屏幕所见一致
+  if (underlay) {
+    parts.push(`<image x="${X(underlay.x)}" y="${Y(underlay.y)}" width="${underlay.w}" height="${underlay.h}" opacity="${Math.max(0.02, Math.min(1, underlay.opacity == null ? 1 : underlay.opacity))}" preserveAspectRatio="none" href="${underlay.dataUrl}" xlink:href="${underlay.dataUrl}"/>`);
+  }
 
   // 区域分组容器（设备底层背景框：浅色填充 + 虚线边 + 左上角标题）
   for (const r of regions) {

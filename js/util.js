@@ -437,6 +437,32 @@ U.isValidImg = (v, opts) => {
   const mime = (opts && opts.svg) ? '(?:png|jpe?g|gif|webp|svg\\+xml)' : '(?:png|jpe?g|gif|webp)';
   return new RegExp('^data:image\\/' + mime + ';base64,[A-Za-z0-9+/=\\s]*$', 'i').test(v);
 };
+
+/* ---------- 机房平面图底图 ----------
+ * 与设备图标同一套校验口径（data:image + 纯 base64 载荷），但上限放宽到 6MB：平面图普遍比图标大。
+ * 图片以 base64 存进工程文件，所以体积必须有硬上限——否则一张几 MB 的扫描图能让每个自动备份
+ * 都变成几十 MB。超限时导入直接拒绝并给出明确提示（不静默压缩、不静默截断）。 */
+U.MAX_UNDERLAY_CHARS = 6 * 1024 * 1024;
+U.sanitizeUnderlay = (u) => {
+  if (!u || typeof u !== 'object') return null;
+  const url = typeof u.dataUrl === 'string' ? u.dataUrl : '';
+  if (!url || url.length > U.MAX_UNDERLAY_CHARS) return null;
+  if (!/^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=\s]*$/i.test(url)) return null;
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  return {
+    dataUrl: url,
+    name: String(u.name == null ? '' : u.name).slice(0, 60),
+    x: clamp(num(u.x, 0), -1e6, 1e6),
+    y: clamp(num(u.y, 0), -1e6, 1e6),
+    w: clamp(num(u.w, 1200), 40, 1e6),
+    h: clamp(num(u.h, 800), 40, 1e6),
+    opacity: clamp(num(u.opacity, 0.85), 0.05, 1),
+    locked: !!u.locked,
+    visible: u.visible !== false,
+    adjust: !!u.adjust
+  };
+};
 /* 清洗 typeOverrides / customTypes：剔除非法颜色与图片，避免拼入 innerHTML/SVG 时注入 */
 U.sanitizeTypeData = (overrides, customTypes) => {
   const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
