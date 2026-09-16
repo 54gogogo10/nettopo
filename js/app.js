@@ -9462,7 +9462,7 @@ function openMonitorCenter() {
         </div>
         <div class="mc-col">
           <div class="mc-tabs">
-            <button type="button" class="mc-tab on" data-pane="events">事件时间线</button>
+            <button type="button" class="mc-tab on" data-pane="events">事件时间线<span id="mcUnack" class="mc-badge" hidden></span></button>
             <button type="button" class="mc-tab" data-pane="baks">配置备份</button>
             <button type="button" class="mc-tab" data-pane="ifaces">接口流量</button>
             <button type="button" class="mc-tab" data-pane="perf">性能</button>
@@ -10021,13 +10021,52 @@ function openMonitorCenter() {
         }
         const devTag = '<span class="mc-tag dev" data-dev="' + U.escHtml(e.deviceId || '') + '" data-name="' + U.escHtml(e.name || e.deviceId || '') + '"' + (e.host ? ' data-host="' + U.escHtml(e.host) + '"' : '') + ' title="点击筛选该设备的事件">' + U.escHtml(e.name || e.deviceId || '?') + '</span>';
         const typeTag = '<span class="mc-tag ' + U.escHtml(e.type || '') + '">' + U.escHtml(evTypeLabel[e.type] || e.type || '事件') + '</span>';
-        evRows.push('<div class="mc-ev"><span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span>' + devTag + typeTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + '</span></div>');
+        // 确认状态：未确认的条目左侧加竖条提示，已确认显示确认时刻 + 备注（值班交接一眼看出谁看过）
+        const acked = !!e.ackAt;
+        const ackHtml = acked
+          ? '<span class="mc-ack" title="已在 ' + U.escHtml(U.fmtDateTime(new Date(e.ackAt))) + ' 确认">✔ ' + U.escHtml(U.fmtDateTime(new Date(e.ackAt)).slice(5, 16)) + (e.ackNote ? '　' + U.escHtml(e.ackNote) : '') + '</span>'
+          : '';
+        evRows.push('<div class="mc-ev' + (acked ? ' acked' : ' unacked') + '" data-ev="' + Number(e.ts) + '">'
+          + '<span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span>'
+          + devTag + typeTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + ackHtml + '</span>'
+          + '<button type="button" class="tb mc-ackbtn" data-ack="' + Number(e.ts) + '" title="' + (acked ? '撤销确认' : '确认该事件（可留备注，便于交接）') + '">' + (acked ? '撤销' : '确认') + '</button>'
+          + '</div>');
       }
       evsEl.innerHTML = evs.length
         ? evRows.join('')
         : '<div class="mc-empty">' + (curDev ? '该设备暂无事件' : '暂无事件') + '</div>';
       evsEl.querySelectorAll('.mc-tag.dev').forEach(el => {
         el.onclick = () => setFilter(el.dataset.dev, el.dataset.host || null, el.dataset.name || '');
+      });
+      // 确认 / 撤销确认：确认时可选填备注（写进事件的 ackNote，随事件一起滚动淘汰）
+      evsEl.querySelectorAll('.mc-ackbtn').forEach(btn => {
+        btn.onclick = () => {
+          const ts = Number(btn.dataset.ack);
+          const ev = evs.find(x => Number(x.ts) === ts);
+          if (!ev) { toast('事件已滚动淘汰'); return; }
+          if (ev.ackAt) {
+            confirmBox('撤销该事件的确认？（' + (ev.detail || '').slice(0, 60) + '）').then(async (yes) => {
+              if (!yes) return;
+              const r = await window.topoMonitor.eventUnack({ ts });
+              if (!r || !r.ok) { toast('撤销失败：' + ((r && r.error) || '未知错误')); return; }
+              toast('已撤销确认（未确认 ' + r.unacked + ' 条）');
+              load();
+            });
+            return;
+          }
+          openModal({
+            title: '确认事件',
+            sub: (ev.name || ev.deviceId || '') + '　' + (ev.detail || '').slice(0, 120),
+            fields: [{ name: 'note', label: '备注（可留空，便于值班交接）', value: '', ph: '如：已联系机房现场确认，等待备件' }],
+            submit: '确认',
+            onSubmit: async (v) => {
+              const r = await window.topoMonitor.eventAck({ ts, note: v.note || '' });
+              if (!r || !r.ok) { toast('确认失败：' + ((r && r.error) || '未知错误')); return; }
+              toast('已确认' + (v.note ? '（备注：' + v.note + '）' : '') + '　剩余未确认 ' + r.unacked + ' 条');
+              load();
+            }
+          });
+        };
       });
       // 备份
       const baks = r.backups || [];
@@ -10038,6 +10077,8 @@ function openMonitorCenter() {
       const statOk = jobs.filter(j => !j.alert && j.probeOk !== false && j.state === 'monitoring').length;
       const statOff = jobs.filter(j => j.probeOk === false).length;
       const statAlert = jobs.filter(j => !!j.alert).length;
+      const unackEl = ov.querySelector('#mcUnack');
+      if (unackEl) { const n = Number(r.unacked || 0); unackEl.hidden = !n; unackEl.textContent = n ? String(n) : ''; unackEl.title = n ? (n + ' 条事件未确认（值班交接用：点事件右侧「确认」留痕）') : ''; }
       ov.querySelector('#mcSTotal').textContent = jobs.length;
       ov.querySelector('#mcSOk').textContent = statOk;
       ov.querySelector('#mcSOff').textContent = statOff;

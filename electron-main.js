@@ -10,6 +10,7 @@ const { ConfigBackupStore } = require('./js/config-backup.js');
 const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-backup.js');
 const { CredentialStore } = require('./js/credential-store.js');
 const { AlertDeps } = require('./js/alert-deps.js');
+const { applyAck, clearAck, unackedCount } = require('./js/event-ack.js');
 const { buildReport: buildSlaReport, rangeOf: slaRangeOf, fmtPct: slaFmtPct } = require('./js/sla-report.js');
 const { DeployStore, deployVendor } = require('./js/config-deploy.js');
 const { NetServices } = require('./js/net-services.js');
@@ -1130,6 +1131,9 @@ ipcMain.handle('cred:pick', (e, p) => monitorGuard(e)
 /* 告警依赖抑制的拓扑邻接表（渲染层推送；键与监控任务一致 deviceId@host）：
  * 只用于「上游同时失联时归并下游离线通知」的判定，不落盘、不出网 */
 ipcMain.handle('monitor:topology', (e, p) => monitorGuard(e) ? alertDeps.setTopology(p || {}) : { ok: false, error: 'forbidden' });
+/* 事件时间线确认（值班交接用）：确认只落在事件对象上，随容量滚动一起淘汰，不额外占空间 */
+ipcMain.handle('monitor:event-ack', (e, p) => monitorGuard(e) ? applyAck(monitorEvents, p || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:event-unack', (e, p) => monitorGuard(e) ? clearAck(monitorEvents, p || {}) : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:alert-deps', (e) => monitorGuard(e)
   ? { ok: true, pending: alertDeps.pending(), stats: alertDeps.stats(), debug: alertDeps.debugView() }
   : { ok: false, error: 'forbidden', pending: [], stats: null, debug: [] });
@@ -1148,6 +1152,7 @@ ipcMain.handle('monitor:overview', (e) => {
     ok: true,
     jobs: monitor.status(),
     events: monitorEvents.slice(-200).reverse(),
+    unacked: unackedCount(monitorEvents),
     backups: (configBackup.hosts().items || []).slice(0, 100)
   };
 });

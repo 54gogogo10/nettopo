@@ -8127,6 +8127,36 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(empty.indexOf('<!DOCTYPE html>') === 0 && empty.indexOf('设备 0 台') > 0, '边界：空拓扑也能导出（不抛异常）');
       ok(U.buildInteractiveHtml({ nodes, title: 'x'.repeat(200) }).indexOf('x'.repeat(81)) < 0, '边界：标题限长（防超长标题）');
     }
+    // 事件时间线确认（event-ack）：确认留痕 / 备注清洗 / 未确认计数 / 撤销（新功能）
+    console.log('== 回归：事件时间线确认与备注（新功能） ==');
+    {
+      const A = require('../js/event-ack.js');
+      const evs = [
+        { ts: 1000, type: 'offline', detail: '探测失败' },
+        { ts: 2000, type: 'recovery', detail: '探测恢复在线' },
+        { ts: 3000, type: 'backup-change', detail: '配置有变化' }
+      ];
+      eq(A.unackedCount(evs), 3, '计数：初始 3 条未确认');
+      const r1 = A.applyAck(evs, { ts: 2000, note: '已联系机房' }, 5000);
+      ok(r1.ok === true && r1.first === true && r1.ackAt === 5000, '确认：写入确认时刻并标记首次确认');
+      eq(evs[1].ackNote, '已联系机房', '确认：备注落在事件上');
+      eq(A.unackedCount(evs), 2, '计数：确认后未确认数减一');
+      const r2 = A.applyAck(evs, { ts: 2000, note: '改备注' }, 9000);
+      ok(r2.ok === true && r2.first === false && evs[1].ackAt === 5000, '重复确认：保留首次确认时刻（不改写「谁先看过」）');
+      eq(evs[1].ackNote, '改备注', '重复确认：备注可更新');
+      const r3 = A.applyAck(evs, { ts: 2000, note: 'x'.repeat(500) }, 9000);
+      eq(evs[1].ackNote.length, 200, '备注：限长 200（界面与导出件都会被渲染）');
+      A.applyAck(evs, { ts: 1000, note: 'bad\u0000note\n换行' }, 9000);
+      ok(evs[0].ackNote.indexOf('\u0000') < 0 && evs[0].ackNote.indexOf('\n') < 0, '备注：控制字符被清洗成空格（' + JSON.stringify(evs[0].ackNote) + '）');
+      ok(A.applyAck(evs, { ts: 9999 }, 9000).ok === false, '容错：不存在的时间戳如实报错（事件可能已被滚动淘汰）');
+      ok(A.applyAck(evs, {}, 9000).ok === false && A.applyAck(evs, null, 9000).ok === false, '容错：缺时间戳/空载荷拒绝');
+      const r4 = A.clearAck(evs, { ts: 2000 });
+      ok(r4.ok === true && evs[1].ackAt === undefined && evs[1].ackNote === undefined, '撤销：确认时刻与备注一并清除');
+      eq(A.unackedCount(evs), 2, '撤销后计数回到 2（' + A.unackedCount(evs) + '）');
+      ok(A.clearAck(evs, { ts: 1 }).ok === false, '撤销：不存在的事件如实报错');
+      eq(A.unackedCount(null), 0, '容错：空列表计数为 0');
+      eq(A.normalizeNote(null), '', '备注清洗：null → 空串');
+    }
 })().then(() => {
   suiteFinished = true;
   console.log('');

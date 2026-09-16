@@ -109,7 +109,10 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   maintenanceSet: (p) => ipcRenderer.invoke('monitor:maintenance-set', p),
   /* 告警依赖抑制：推送拓扑邻接表（上游失联时归并下游离线通知），另可查看当前归并状态 */
   setTopology: (p) => ipcRenderer.invoke('monitor:topology', p),
-  alertDeps: () => ipcRenderer.invoke('monitor:alert-deps')
+  alertDeps: () => ipcRenderer.invoke('monitor:alert-deps'),
+  /* 事件时间线确认/取消确认（确认时刻与备注留痕，随事件滚动淘汰） */
+  eventAck: (p) => ipcRenderer.invoke('monitor:event-ack', p),
+  eventUnack: (p) => ipcRenderer.invoke('monitor:event-unack', p)
 });
 
 /* 本机诊断工具箱（Ping / 路由跟踪 / TCP 端口 / DNS / 网段存活扫描 / SNMP Walk）：
