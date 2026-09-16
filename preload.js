@@ -80,6 +80,8 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   testClose: () => ipcRenderer.invoke('monitor:test-close'),
   overview: () => ipcRenderer.invoke('monitor:overview'),
   uptime: () => ipcRenderer.invoke('monitor:uptime'),
+  /* 可用性（SLA）报表：按区间统计在线率 / 中断明细（可导出 CSV / Excel / 打印用 HTML） */
+  sla: (p) => ipcRenderer.invoke('monitor:sla', p),
   onStatus: sub('monitor:status'),
   onProbe: sub('monitor:probe'),
   onAlert: sub('monitor:alert'),

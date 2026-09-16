@@ -634,27 +634,51 @@ function runCompliance(text, rules) {
  *  桶内同刻多次探测以后到为准；供监控中心渲染可用率趋势。 */
 class UptimeStore {
   /** @param {string} filePath 落盘 JSON 路径（空串则不落盘，仅内存）
-   *  @param {object} [opts] {bucketMs=600000, keepMs=7天, maxKeys=200} */
+   *  @param {object} [opts] {bucketMs=600000, keepMs=7天, maxKeys=200, keepDays=400}
+   *  两级保留：10 分钟明细桶（keepMs，默认 7 天，供中断次数/MTTR 这类需要逐桶切分的指标）
+   *  + 按天汇总（keepDays，默认 400 天，供月度可用率这类长期 SLA 口径，体积可忽略）。 */
   constructor(filePath, opts) {
     opts = opts || {};
     this.file = typeof filePath === 'string' ? filePath : '';
     this.bucketMs = opts.bucketMs || 10 * 60 * 1000;
     this.keepMs = opts.keepMs || 7 * 24 * 60 * 60 * 1000;
+    this.keepDays = opts.keepDays || 400;
     this.maxKeys = opts.maxKeys || 200;
     this.map = new Map();   // key -> [[bucketTs, 0|1], ...]（按时间升序）
+    this.daily = new Map(); // key -> { 'YYYYMMDD': {up, down} }（按天汇总，长期保留）
+    this._last = new Map(); // key -> {bucket, ok}：同桶覆盖时同步修正当天汇总（否则日汇总会重复计数）
     this._dirty = false;
     this._load();
+  }
+  static dayKeyOf(ts) {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
   }
   _load() {
     if (!this.file) return;
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-        for (const [k, arr] of Object.entries(raw)) {
+      const series = (raw && typeof raw === 'object' && raw.v === 2 && raw.series && typeof raw.series === 'object') ? raw.series : raw;
+      const daily = (raw && typeof raw === 'object' && raw.v === 2 && raw.daily && typeof raw.daily === 'object') ? raw.daily : null;
+      if (series && typeof series === 'object' && !Array.isArray(series)) {
+        for (const [k, arr] of Object.entries(series)) {
           if (!Array.isArray(arr)) continue;
           const clean = arr.filter(e => Array.isArray(e) && e.length === 2 && Number.isFinite(e[0]))
             .map(e => [e[0], e[1] ? 1 : 0]).slice(-1024);
           if (clean.length) this.map.set(String(k).slice(0, 128), clean);
+        }
+      }
+      if (daily && !Array.isArray(daily)) {
+        for (const [k, days] of Object.entries(daily)) {
+          if (!days || typeof days !== 'object') continue;
+          const clean = {};
+          for (const [dk, v] of Object.entries(days)) {
+            if (!/^\d{8}$/.test(dk) || !v || typeof v !== 'object') continue;
+            const up = Math.max(0, parseInt(v.up, 10) || 0), down = Math.max(0, parseInt(v.down, 10) || 0);
+            if (up || down) clean[dk] = { up, down };
+          }
+          if (Object.keys(clean).length) this.daily.set(String(k).slice(0, 128), clean);
         }
       }
     } catch (e) { /* 无记录/损坏则从空开始 */ }
@@ -665,28 +689,54 @@ class UptimeStore {
     const ts = Number.isFinite(t) ? t : Date.now();
     const bucket = Math.floor(ts / this.bucketMs) * this.bucketMs;
     const arr = this.map.get(key) || [];
+    const val = ok ? 1 : 0;
     const last = arr[arr.length - 1];
-    if (last && last[0] === bucket) last[1] = ok ? 1 : 0; // 同桶覆盖：保留该时段最后一次探测结果
+    if (last && last[0] === bucket) last[1] = val; // 同桶覆盖：保留该时段最后一次探测结果
     else {
-      arr.push([bucket, ok ? 1 : 0]);
+      arr.push([bucket, val]);
       if (arr.length > 1100) arr.splice(0, arr.length - 1024); // 单键上限兜底（7 天 ≈ 1008 桶）
     }
     this.map.set(key, arr);
+    // 按天汇总：与明细桶同一套「同桶覆盖」语义，覆盖时先减旧值再加新值（否则日汇总重复计数）
+    const day = UptimeStore.dayKeyOf(bucket);
+    const days = this.daily.get(key) || {};
+    const cell = days[day] || { up: 0, down: 0 };
+    const prev = this._last.get(key);
+    if (prev && prev.bucket === bucket) {
+      if (prev.ok !== val) {
+        if (prev.ok) cell.up = Math.max(0, cell.up - 1); else cell.down = Math.max(0, cell.down - 1);
+        if (val) cell.up++; else cell.down++;
+      }
+    } else if (val) cell.up++;
+    else cell.down++;
+    days[day] = cell;
+    this.daily.set(key, days);
+    this._last.set(key, { bucket, ok: val });
     this._dirty = true;
     this._prune();
   }
   series(key) { return (this.map.get(String(key)) || []).slice(); }
+  /** 某键的按天汇总（key 省略则返回全部） */
+  dailyOf(key) {
+    if (key == null) {
+      const out = {};
+      for (const [k, days] of this.daily) out[k] = Object.assign({}, days);
+      return out;
+    }
+    return Object.assign({}, this.daily.get(String(key)) || {});
+  }
   snapshot() {
     const out = {};
     for (const [k, arr] of this.map) out[k] = arr;
     return out;
   }
-  /** 落盘（tmp+rename 原子写）。有变更才写；返回是否实际写入 */
+  /** 落盘（tmp+rename 原子写）。有变更才写；返回是否实际写入。
+   *  文件格式 v2：{v:2, series:{}, daily:{}}；读取兼容旧版扁平格式（旧文件无日汇总，累积后自然补齐）。 */
   flush() {
     if (!this.file || !this._dirty) return false;
     const tmp = this.file + '.tmp-' + process.pid;
     try {
-      fs.writeFileSync(tmp, JSON.stringify(this.snapshot()), 'utf8');
+      fs.writeFileSync(tmp, JSON.stringify({ v: 2, series: this.snapshot(), daily: this.dailyOf() }), 'utf8');
       fs.renameSync(tmp, this.file);
       this._dirty = false;
       return true;
@@ -698,6 +748,12 @@ class UptimeStore {
       while (arr.length && arr[0][0] < cutoff) arr.shift();
       if (!arr.length) this.map.delete(k);
     }
+    // 日汇总按天保留（长期 SLA 口径）：超期整日丢弃
+    const minDay = UptimeStore.dayKeyOf(Date.now() - this.keepDays * 24 * 60 * 60 * 1000);
+    for (const [k, days] of this.daily) {
+      for (const dk of Object.keys(days)) if (dk < minDay) delete days[dk];
+      if (!Object.keys(days).length) { this.daily.delete(k); this._last.delete(k); }
+    }
     // 键数超限：淘汰最近活动最旧的键
     while (this.map.size > this.maxKeys) {
       let oldestKey = null, oldestTs = Infinity;
@@ -707,6 +763,8 @@ class UptimeStore {
       }
       if (oldestKey === null) break;
       this.map.delete(oldestKey);
+      this.daily.delete(oldestKey);
+      this._last.delete(oldestKey);
     }
   }
 }

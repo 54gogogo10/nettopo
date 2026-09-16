@@ -6839,6 +6839,7 @@ function wire() {
     } },
     { ic: 'server', label: '网络服务（TFTP / FTP / Syslog / Trap）…', act: openNetServices },
     { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / 网段 / SNMP）…', act: () => openDiagTools() },
+    { ic: 'pulse', label: '可用性报表（SLA）…', act: () => openSlaReport() },
     { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
     { ic: 'grid', label: '批量巡检（只读命令）…', act: () => openBatchInspect() },
     { ic: 'terminal', label: '配置变更下发…', act: () => openConfigDeploy() },
@@ -8406,6 +8407,198 @@ function openMonitorConfig(id) {
     ov.querySelector(sel).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } });
   }
   setTimeout(() => { if (document.body.contains(ov)) { const f = listEl.querySelector('.mh-host'); if (f) f.focus(); } }, 250);
+}
+
+/* ================= 可用性报表（SLA） =================
+ * 把监控在线探测的采样按区间汇总成可交付的可用率报表：可用率 / 中断次数 / 累计中断 / MTTR /
+ * 最长单次中断。10 分钟明细桶保留 7 天（中断明细靠它切分），按天汇总保留 400 天（长期可用率口径），
+ * 区间超出明细覆盖时如实降级并在界面上标注——验收材料里最忌讳看起来精确的假数字。 */
+function slaFmtPct(v) { return (v == null || !isFinite(v)) ? '—' : ((v >= 99.995 ? '100' : v.toFixed(v >= 99 ? 2 : 1)) + '%'); }
+function slaFmtDur(ms) {
+  if (ms == null || !isFinite(ms)) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' 秒';
+  const m = Math.floor(s / 60), rs = s % 60;
+  if (m < 60) return m + ' 分' + (rs ? ' ' + rs + ' 秒' : '');
+  const h = Math.floor(m / 60), rm = m % 60;
+  if (h < 24) return h + ' 时' + (rm ? ' ' + rm + ' 分' : '');
+  return Math.floor(h / 24) + ' 天' + (h % 24 ? ' ' + (h % 24) + ' 时' : '');
+}
+function slaRowsForExport(rep) {
+  const head = ['设备', '管理地址', '可用率(%)', '在线采样', '离线采样', '中断次数', '累计中断', '平均恢复(MTTR)', '最长单次中断', '采样覆盖(%)', '数据来源'];
+  const src = { detail: '10 分钟明细', 'detail-partial': '明细分段（未覆盖全区间）', daily: '按天汇总', none: '无采样' };
+  const rows = [head];
+  for (const r of rep.rows) {
+    rows.push([
+      r.name, r.host,
+      r.uptimePct == null ? '' : Number(r.uptimePct.toFixed(3)),
+      r.up, r.down,
+      r.outages == null ? '（无明细）' : (r.outagePartial ? r.outages + '（仅部分区间）' : r.outages),
+      r.downtimeMs == null ? '（无明细）' : slaFmtDur(r.downtimeMs),
+      r.mttrMs == null ? '—' : slaFmtDur(r.mttrMs),
+      r.longestMs == null ? '—' : slaFmtDur(r.longestMs),
+      Number((r.coveragePct || 0).toFixed(1)),
+      (src[r.source] || r.source) + (r.outagePartial && r.source === 'daily' ? ' + 中断明细分段' : '')
+    ]);
+  }
+  rows.push(['合计', rep.summary.devices + ' 台', rep.summary.uptimePct == null ? '' : Number(rep.summary.uptimePct.toFixed(3)),
+    rep.summary.up, rep.summary.down, rep.summary.outages, slaFmtDur(rep.summary.downtimeMs), '', '', '', '']);
+  return rows;
+}
+/** 自包含、可直接打印为 PDF 的 HTML 报表（不引外网资源，符合项目 CSP 口径） */
+function buildSlaHtml(rep, meta) {
+  const esc = U.escHtml;
+  const body = rep.rows.map(r => `<tr${r.meetsSla === false ? ' class="bad"' : ''}>
+    <td>${esc(r.name)}</td><td>${esc(r.host)}</td>
+    <td class="num"><b>${slaFmtPct(r.uptimePct)}</b></td>
+    <td class="num">${r.up}</td><td class="num">${r.down}</td>
+    <td class="num">${r.outages == null ? '（无明细）' : (r.outagePartial ? r.outages + ' *' : r.outages)}</td>
+    <td class="num">${r.downtimeMs == null ? '（无明细）' : slaFmtDur(r.downtimeMs)}</td>
+    <td class="num">${r.mttrMs == null ? '—' : slaFmtDur(r.mttrMs)}</td>
+    <td class="num">${r.longestMs == null ? '—' : slaFmtDur(r.longestMs)}</td>
+    <td class="num">${(r.coveragePct || 0).toFixed(1)}%</td></tr>`).join('');
+  return `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"/><title>可用性（SLA）报表 ${esc(meta.rangeText)}</title>
+<style>
+ body{font:13px/1.6 "Microsoft YaHei",system-ui,sans-serif;color:#111;margin:28px}
+ h1{font-size:19px;margin:0 0 4px} .meta{color:#555;font-size:12px;margin-bottom:14px}
+ table{border-collapse:collapse;width:100%;font-size:12px}
+ th,td{border:1px solid #bbb;padding:5px 7px;text-align:left} th{background:#f2f4f7}
+ td.num{text-align:right;font-variant-numeric:tabular-nums}
+ tr.bad td{background:#fff3f3} tr.bad td:nth-child(3){color:#c00;font-weight:600}
+ tfoot td{background:#fafafa;font-weight:600}
+ .note{color:#666;font-size:11.5px;margin-top:12px;line-height:1.7}
+</style></head><body>
+<h1>网络可用性（SLA）报表</h1>
+<div class="meta">统计区间：${esc(meta.rangeText)}（${esc(meta.fromText)} ~ ${esc(meta.toText)}）　目标线：${meta.minUptime}%　生成时间：${esc(meta.genText)}　工具：${esc(meta.appVersion)}</div>
+<table><thead><tr><th>设备</th><th>管理地址</th><th>可用率</th><th>在线采样</th><th>离线采样</th><th>中断次数</th><th>累计中断</th><th>平均恢复</th><th>最长中断</th><th>采样覆盖</th></tr></thead>
+<tbody>${body || '<tr><td colspan="10">区间内没有采样数据</td></tr>'}</tbody>
+<tfoot><tr><td>合计</td><td>${rep.summary.devices} 台（有采样 ${rep.summary.sampled} 台）</td><td class="num">${slaFmtPct(rep.summary.uptimePct)}</td><td class="num">${rep.summary.up}</td><td class="num">${rep.summary.down}</td><td class="num">${rep.summary.outages}</td><td class="num">${slaFmtDur(rep.summary.downtimeMs)}</td><td colspan="3"></td></tr></tfoot></table>
+<div class="note">口径说明：可用率 = 在线采样桶 ÷ 有效采样桶（按 10 分钟桶计数，非秒级探针统计）；中断时长 = 连续离线桶数 × 桶宽，最后一次中断按「至今」截断；同一桶内先失败后恢复只记该桶最后一次结果（桶内闪断不可见，这是探针采样粒度的固有限制）。${rep.summary.detailLimited ? '<br><b>注意：</b>本区间超出 10 分钟明细保留范围，可用率来自按天汇总。' : ''}${rep.summary.outageLimited ? '<br><b>注意：</b>标 * 的中断明细仅覆盖 10 分钟明细保留期内的部分（约近 ' + rep.detailKeepDays + ' 天），不等同于整段区间。' : ''}</div>
+</body></html>`;
+}
+async function openSlaReport() {
+  if (!(window.topoMonitor && window.topoMonitor.sla)) { toast('可用性报表需要桌面版（Electron）环境'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1080px;height:84vh;display:flex;flex-direction:column">
+      <h3>可用性报表（SLA）</h3>
+      <div class="m-sub">监控在线探测每次结果都按 10 分钟落桶（明细保留 7 天，按天汇总保留 400 天）。这里按区间汇总成可交付的可用率报表：可用率 / 中断次数 / 累计中断 / 平均恢复（MTTR）/ 最长单次中断。</div>
+      <div class="frow" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>统计区间</label>
+          <select id="slaRange">
+            <option value="last7" selected>近 7 天</option>
+            <option value="last30">近 30 天</option>
+            <option value="thisMonth">本月（至今）</option>
+            <option value="lastMonth">上月</option>
+            <option value="custom">自定义…</option>
+          </select>
+        </div>
+        <div class="frow" style="margin:0" id="slaFromWrap" hidden><label>起（含）</label><input id="slaFrom" type="date"/></div>
+        <div class="frow" style="margin:0" id="slaToWrap" hidden><label>止（含）</label><input id="slaTo" type="date"/></div>
+        <div class="frow" style="margin:0"><label>目标线 %</label><input id="slaMin" type="number" step="0.01" min="0" max="100" value="99.9" style="width:90px"/></div>
+        <button type="button" class="tb primary" id="slaGo"><i class="ic" data-ic="pulse"></i>统计</button>
+        <span id="slaHint" class="m-sub" style="margin:0;flex:1"></span>
+      </div>
+      <div id="slaBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px"><div class="bk-empty">选好区间后点「统计」。</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="slaCsv" disabled>导出 CSV</button>
+        <button type="button" class="tb" id="slaXlsx" disabled>导出 Excel</button>
+        <button type="button" class="tb" id="slaHtml" disabled title="自包含、可直接打印为 PDF 的 HTML 报表（发给同事/附在验收材料里）">导出报表 HTML</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const bodyEl = ov.querySelector('#slaBody'), hintEl = ov.querySelector('#slaHint');
+  const rangeEl = ov.querySelector('#slaRange'), minEl = ov.querySelector('#slaMin');
+  const fromWrap = ov.querySelector('#slaFromWrap'), toWrap = ov.querySelector('#slaToWrap');
+  const csvBtn = ov.querySelector('#slaCsv'), xlsxBtn = ov.querySelector('#slaXlsx'), htmlBtn = ov.querySelector('#slaHtml');
+  let last = null;
+  const setDisabled = (v) => { csvBtn.disabled = v; xlsxBtn.disabled = v; htmlBtn.disabled = v; };
+  rangeEl.onchange = () => {
+    const custom = rangeEl.value === 'custom';
+    fromWrap.hidden = !custom; toWrap.hidden = !custom;
+    if (custom) {
+      const t = new Date();
+      const iso = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      if (!ov.querySelector('#slaTo').value) ov.querySelector('#slaTo').value = iso(t);
+      if (!ov.querySelector('#slaFrom').value) ov.querySelector('#slaFrom').value = iso(new Date(t.getTime() - 6 * 86400000));
+    }
+  };
+  const dayStart = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '')); return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() : NaN; };
+  const load = async () => {
+    const p = { range: rangeEl.value, minUptime: Number(minEl.value) || 99.9 };
+    if (rangeEl.value === 'custom') {
+      const f = dayStart(ov.querySelector('#slaFrom').value), t = dayStart(ov.querySelector('#slaTo').value);
+      if (!isFinite(f) || !isFinite(t)) { toast('请填写自定义区间的起止日期'); return; }
+      p.from = f; p.to = t + 86400000;   // 「止」当天含在内
+    }
+    setDisabled(true);
+    bodyEl.innerHTML = '<div class="bk-empty">统计中…</div>';
+    let rep = null;
+    try { rep = await window.topoMonitor.sla(p); } catch (e) { rep = null; }
+    if (!rep || !rep.ok) { bodyEl.innerHTML = '<div class="ipam-conflict">统计失败：' + U.escHtml((rep && rep.error) || '未知错误') + '</div>'; return; }
+    last = rep;
+    if (!rep.rows.length || !rep.summary.total) {
+      bodyEl.innerHTML = '<div class="bk-empty">该区间没有在线探测采样：设备需开启「在线探测」并运行一段时间后才有数据。</div>';
+      hintEl.textContent = rep.label + '：无采样';
+      return;
+    }
+    const fdate = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+    const rows = rep.rows.map(r => `<tr${r.meetsSla === false ? ' style="background:rgba(220,38,38,.08)"' : ''}>
+      <td>${U.escHtml(r.name)}</td><td>${U.escHtml(r.host || '—')}</td>
+      <td><b${r.meetsSla === false ? ' style="color:var(--danger)"' : ''}>${slaFmtPct(r.uptimePct)}</b></td>
+      <td style="text-align:right">${r.up}</td><td style="text-align:right">${r.down}</td>
+      <td style="text-align:right">${r.outages == null ? '<span style="opacity:.6">无明细</span>' : (r.outagePartial ? r.outages + ' <span style="opacity:.6" title="中断明细仅覆盖 10 分钟明细保留期内的部分">*</span>' : r.outages)}</td>
+      <td style="text-align:right">${r.downtimeMs == null ? '<span style="opacity:.6">无明细</span>' : slaFmtDur(r.downtimeMs)}</td>
+      <td style="text-align:right">${r.mttrMs == null ? '—' : slaFmtDur(r.mttrMs)}</td>
+      <td style="text-align:right">${r.longestMs == null ? '—' : slaFmtDur(r.longestMs)}</td>
+      <td style="text-align:right">${(r.coveragePct || 0).toFixed(1)}%</td></tr>`).join('');
+    bodyEl.innerHTML = `<table class="nb-table"><tr><th>设备</th><th>管理地址</th><th>可用率</th><th>在线采样</th><th>离线采样</th><th>中断次数</th><th>累计中断</th><th>平均恢复</th><th>最长中断</th><th>采样覆盖</th></tr>${rows}
+      <tr style="font-weight:600"><td>合计</td><td>${rep.summary.devices} 台（有采样 ${rep.summary.sampled} 台）</td><td>${slaFmtPct(rep.summary.uptimePct)}</td>
+      <td style="text-align:right">${rep.summary.up}</td><td style="text-align:right">${rep.summary.down}</td><td style="text-align:right">${rep.summary.outages}</td>
+      <td style="text-align:right">${slaFmtDur(rep.summary.downtimeMs)}</td><td colspan="3"></td></tr></table>
+      <div class="m-sub" style="margin-top:8px">区间 ${U.escHtml(fdate(rep.range.from))} ~ ${U.escHtml(fdate(rep.range.to))}；低于目标线 ${rep.summary.minUptime}% 的共 <b>${rep.summary.below}</b> 台。
+      ${rep.summary.detailLimited ? '<br><b style="color:#f59e0b">本区间超出 10 分钟明细保留范围（' + rep.detailKeepDays + ' 天）：可用率取自按天汇总（保留 ' + rep.dailyKeepDays + ' 天）。</b>' : ''}
+      ${rep.summary.outageLimited && !rep.summary.detailLimited ? '<br>标 <b>*</b> 的中断明细仅覆盖 10 分钟明细保留期（近 ' + rep.detailKeepDays + ' 天）内的部分，不等同于整段区间。' : ''}
+      ${rep.summary.detailLimited && rep.summary.outageLimited ? '<br>中断次数 / MTTR / 最长中断只覆盖 10 分钟明细保留期（近 ' + rep.detailKeepDays + ' 天）内的部分，标 <b>*</b> 者尤其注意。' : ''}
+      <br>口径：按 ' + Math.round(rep.bucketMs / 60000) + ' 分钟采样桶计（非秒级探针统计）；中断时长 = 连续离线桶数 × 桶宽，最后一次按「至今」截断；桶内闪断不可见。</div>`;
+    hintEl.textContent = rep.label + '：' + rep.summaryText + '（' + rep.summary.sampled + ' 台有采样）';
+    setDisabled(false);
+  };
+  ov.querySelector('#slaGo').onclick = load;
+  const metaOf = () => {
+    const d = new Date(last.range.from), t2 = new Date(last.range.to - 1);
+    const f = (x) => x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0');
+    return { rangeText: last.label, fromText: f(d), toText: f(t2), genText: U.fmtDateTime(new Date()), appVersion: U.APP_VERSION, minUptime: last.summary.minUptime };
+  };
+  csvBtn.onclick = () => { if (!last) return; U.download('可用性报表_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(slaRowsForExport(last))], { type: 'text/csv;charset=utf-8' })); toast('已导出可用性报表 CSV'); };
+  xlsxBtn.onclick = () => {
+    if (!last) return;
+    const rows = slaRowsForExport(last);
+    if (!window.XLSX) { U.download('可用性报表_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' })); toast('本机无 Excel 库，已回退导出 CSV'); return; }
+    const ws = window.XLSX.utils.aoa_to_sheet(rows.map(r => r.map(U.sanitizeCell)));
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, '可用性报表');
+    const buf = window.XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    U.download('可用性报表_' + U.fmtDate() + '.xlsx', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    toast('已导出可用性报表 Excel');
+  };
+  htmlBtn.onclick = () => {
+    if (!last) return;
+    U.download('可用性报表_' + U.fmtDate() + '.html', new Blob([buildSlaHtml(last, metaOf())], { type: 'text/html;charset=utf-8' }));
+    toast('已导出报表 HTML（浏览器打开后可直接打印为 PDF）');
+  };
+  rangeEl.dispatchEvent(new Event('change'));
+  load();
 }
 
 /* ================= 团队基线包（合规规则集 + 自定义模板 的导入导出） =================
@@ -11309,6 +11502,7 @@ if (typeof globalThis !== 'undefined') {
     openDeployHistory,
     openCredManager,
     openTeamPackImport,
+    openSlaReport,
     alertTopology: () => alertTopologySnapshot(),
     openMacTrace,
     openBatchInspect,

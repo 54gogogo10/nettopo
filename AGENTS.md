@@ -7,12 +7,12 @@ UI 文案、代码注释、commit 信息均为中文，请保持一致。
 ## 常用命令
 ```bash
 npm start                          # 开发运行（Electron）
-node test/run-tests.js             # 单元测试（纯 Node，当前 1977 项；改动后必跑且须全绿）
+node test/run-tests.js             # 单元测试（纯 Node，当前 2025 项；改动后必跑且须全绿）
 cd test && npm i && node e2e.js    # 无头 Chrome e2e 集成测试（需本机 Chrome）
 node test/gen-e2e.js               # 从 index.html 再生 e2e 挂具（index.html 结构变化后重跑，再跑 e2e.js 验证）
 NETTOPO_LAB_HOST=<实验机IP> node test/live.js   # 真机集成测试：自动在实验机部署多台 FRR 设备后跑全链路（未设变量则打印说明并跳过）
 NETTOPO_LAB_HOST=<实验机IP> node test/gui-live.js  # 真机 GUI 集成测试：同一实验环境上驱动 Electron 界面（未设变量则跳过）
-node test/smoke-shell.js           # Electron 冒烟（需桌面环境）：另有 smoke-backup / smoke-center / smoke-monitor / smoke-cred（统一凭据库）/ smoke-alertdeps（告警依赖抑制）/ smoke-backupignore（配置变更忽略规则）/ smoke-teampack（团队基线包）
+node test/smoke-shell.js           # Electron 冒烟（需桌面环境）：另有 smoke-backup / smoke-center / smoke-monitor / smoke-cred（统一凭据库）/ smoke-alertdeps（告警依赖抑制）/ smoke-backupignore（配置变更忽略规则）/ smoke-teampack（团队基线包）/ smoke-sla（可用性报表）
 npm run build                      # bump-version.js 自动升版本 + electron-builder 便携版打包（dist/portable）
 node bump-version.js --dry-run     # 预览版本变更不写入
 ```
@@ -20,7 +20,7 @@ Linux 包由 `build/electron-builder-linux.yml` 交叉打包（产物不入库�
 
 ## 架构边界
 - **渲染层**（浏览器兼容）：`index.html` 按 util→model→layout→visio→vsdx→pdf→render→app 顺序以普通 `<script>` 加载；**无 ES modules、无打包器**，模块间靠全局对象（`js/util.js` 的 `U`）。画布/交互在 `render.js`，业务在 `app.js`，数据转换/校验在 `model.js`。
-- **主进程纯 Node 模块**（头部注明「不依赖 Electron」，可在 Node 测试中直接调用）：`js/shell.js`（SSH/Telnet ShellManager）、`js/monitor.js`（定时采集/日志归档）、`js/backup-store.js`（工程备份库）、`js/config-backup.js`（设备配置备份库）、`js/credential-store.js`（统一凭据库：口令经宿主注入的 safeStorage 适配器密文落盘，明文不回渲染层）、`js/alert-deps.js`（告警依赖抑制：按拓扑邻接与探测状态裁决根因，归并下游离线通知）、`js/svc-tftp.js` / `js/svc-ftp.js` / `js/svc-syslog.js`（内置 TFTP/FTP/Syslog 服务器）、`js/net-services.js`（网络服务管理器）。这些模块不得 `require('electron')`，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
+- **主进程纯 Node 模块**（头部注明「不依赖 Electron」，可在 Node 测试中直接调用）：`js/shell.js`（SSH/Telnet ShellManager）、`js/monitor.js`（定时采集/日志归档）、`js/backup-store.js`（工程备份库）、`js/config-backup.js`（设备配置备份库）、`js/credential-store.js`（统一凭据库：口令经宿主注入的 safeStorage 适配器密文落盘，明文不回渲染层）、`js/alert-deps.js`（告警依赖抑制：按拓扑邻接与探测状态裁决根因，归并下游离线通知）、`js/sla-report.js`（可用性 SLA 报表：区间统计、中断切分、日汇总降级口径）、`js/svc-tftp.js` / `js/svc-ftp.js` / `js/svc-syslog.js`（内置 TFTP/FTP/Syslog 服务器）、`js/net-services.js`（网络服务管理器）。这些模块不得 `require('electron')`，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
 - `preload.js` 是渲染层↔主进程的唯一 contextBridge 安全桥。
 - `shell.html`+`shell-ui.js` = Web Shell 独立窗口；`webview.html`+`webview-ui.js` = 设备管理页窗口（三页面各有 CSP）。
 - `lib/` 为内置离线第三方库（xlsx/xterm），勿修改。

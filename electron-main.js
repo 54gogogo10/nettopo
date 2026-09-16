@@ -10,6 +10,7 @@ const { ConfigBackupStore } = require('./js/config-backup.js');
 const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-backup.js');
 const { CredentialStore } = require('./js/credential-store.js');
 const { AlertDeps } = require('./js/alert-deps.js');
+const { buildReport: buildSlaReport, rangeOf: slaRangeOf, fmtPct: slaFmtPct } = require('./js/sla-report.js');
 const { DeployStore, deployVendor } = require('./js/config-deploy.js');
 const { NetServices } = require('./js/net-services.js');
 const { SEV_NAMES: SYSLOG_SEV_NAMES } = require('./js/svc-syslog.js');
@@ -1154,6 +1155,41 @@ ipcMain.handle('monitor:overview', (e) => {
 ipcMain.handle('monitor:uptime', (e) => monitorGuard(e)
   ? { ok: true, series: uptimeStore.snapshot() }
   : { ok: false, error: 'forbidden' });
+/* 可用性（SLA）报表：在线探测采样的区间统计。明细桶（10 分钟，7 天）算中断明细，
+ * 按天汇总（400 天）兜长期可用率；区间超出明细覆盖时如实降级并标注（不拿部分数据冒充全区间）。 */
+ipcMain.handle('monitor:sla', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const rg = slaRangeOf(String((p && p.range) || 'last7'), Date.now(), p && p.from, p && p.to);
+  const series = uptimeStore.snapshot();
+  const daily = uptimeStore.dailyOf();
+  const targets = [];
+  const seen = new Set();
+  const push = (key, name, host) => {
+    const k = String(key || '');
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    const i = k.indexOf('@');
+    targets.push({ key: k, name: name || (i > 0 ? k.slice(0, i) : k), host: host || (i > 0 ? k.slice(i + 1) : '') });
+  };
+  for (const j of monitor.status()) push(j.key, j.name || j.deviceId, j.host);
+  // 只有历史采样、当前已停监控的键也要纳入，否则「停掉监控」会让设备的 SLA 凭空消失
+  for (const k of Object.keys(series)) push(k);
+  for (const k of Object.keys(daily)) push(k);
+  const rep = buildSlaReport({
+    targets, series, daily, from: rg.from, to: rg.to,
+    bucketMs: uptimeStore.bucketMs, now: Date.now(),
+    minUptime: Number.isFinite(Number(p && p.minUptime)) ? Number(p.minUptime) : 99.9
+  });
+  const days = Object.keys(daily).reduce((m, k) => Math.max(m, Object.keys(daily[k] || {}).length), 0);
+  return Object.assign({}, rep, {
+    label: rg.label,
+    rangeKind: String((p && p.range) || 'last7'),
+    detailKeepDays: Math.round(uptimeStore.keepMs / (24 * 60 * 60 * 1000)),
+    dailyKeepDays: uptimeStore.keepDays,
+    historyDays: days,
+    summaryText: rep.summary.uptimePct == null ? '（区间内无采样）' : slaFmtPct(rep.summary.uptimePct)
+  });
+});
 // 接口流量历史（监控中心「接口流量」页按需拉取采样序列）
 ipcMain.handle('monitor:ifhistory', (e, key) => monitorGuard(e)
   ? monitor.ifHistory(String((key && key.key) || key || ''))

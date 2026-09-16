@@ -7838,6 +7838,131 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       }
     }
 
+    // 可用性（SLA）报表：区间统计 / 中断切分 / 明细不足时如实降级（新功能）
+    console.log('== 回归：可用性（SLA）报表（新功能） ==');
+    {
+      const S = require('../js/sla-report.js');
+      const B = 10 * 60 * 1000;
+      const now = new Date(2026, 8, 17, 15, 30, 0).getTime();
+      const from = S.startOfDay(now - 6 * 24 * 60 * 60 * 1000);
+      const to = now + 1;
+      const N = Math.floor((now - from) / B);
+      const mk = (down) => { const out = []; for (let i = 0; i < N; i++) out.push([from + i * B, down(i) ? 0 : 1]); return out; };
+      ok(N > 900 && N < 1010, '构造：近 7 天约 ' + N + ' 个 10 分钟桶（' + Math.round(N / 144) + ' 天）');
+
+      const rep = S.buildReport({
+        targets: [{ key: 'a@10.0.0.1', name: 'A 核心', host: '10.0.0.1' }, { key: 'b@10.0.0.2', name: 'B 接入', host: '10.0.0.2' }, { key: 'c@10.0.0.3', name: 'C 汇聚', host: '10.0.0.3' }, { key: 'd@10.0.0.4', name: 'D 无采样', host: '10.0.0.4' }],
+        series: { 'a@10.0.0.1': mk(() => false), 'b@10.0.0.2': mk(i => i >= 100 && i < 103), 'c@10.0.0.3': mk(i => i >= N - 2) },
+        daily: {}, from, to, bucketMs: B, now
+      });
+      const A = rep.rows.find(r => r.key === 'a@10.0.0.1'), Bb = rep.rows.find(r => r.key === 'b@10.0.0.2'), C = rep.rows.find(r => r.key === 'c@10.0.0.3'), D = rep.rows.find(r => r.key === 'd@10.0.0.4');
+      ok(A.uptimePct === 100 && A.outages === 0 && A.longestMs === null, '全程在线：可用率 100%、零中断、最长中断为空（不给「0 秒」噪声）');
+      ok(A.source === 'detail' && A.partial === false, '数据来源标注：覆盖全区间时为 10 分钟明细');
+      ok(Math.abs(Bb.uptimePct - 99.66) < 0.05, '中断已恢复：可用率按桶计（' + Bb.uptimePct.toFixed(2) + '%）');
+      ok(Bb.outages === 1 && Bb.downtimeMs === 3 * B && Bb.mttrMs === 3 * B, '中断切分：连续 3 桶记 1 次中断、时长 30 分、MTTR 30 分');
+      ok(C.outages === 1 && C.downtimeMs === 2 * B, '末尾未恢复的中断：按「至今」截断（2 桶 = 20 分，不把未来算进去）');
+      ok(D.total === 0 && D.uptimePct === null && D.meetsSla === null, '无采样设备：可用率为空而不是 0%（不误判为全掉线）');
+      ok(rep.summary.devices === 4 && rep.summary.sampled === 3, '合计：纳入 4 台、其中有采样 3 台');
+      ok(rep.summary.below === 2, '目标线判定：低于 99.9% 的共 ' + rep.summary.below + ' 台（B 99.69% 与 C 99.79%）');
+      ok(Math.abs(rep.summary.uptimePct - (A.up + Bb.up + C.up) / (A.total + Bb.total + C.total) * 100) < 1e-6, '合计可用率 = 桶数加权（非各设备简单平均）');
+      ok(rep.summary.detailLimited === false, '全部有明细时不给「明细受限」提示');
+
+      // 区间超出明细覆盖：可用率退回按天汇总，中断明细如实留空
+      const oldFrom = new Date(2026, 0, 1).getTime(), oldTo = new Date(2026, 0, 8).getTime();
+      const rep2 = S.buildReport({
+        targets: [{ key: 'a@10.0.0.1', name: 'A 核心' }], series: {}, from: oldFrom, to: oldTo, now,
+        daily: { 'a@10.0.0.1': { '20260101': { up: 144, down: 0 }, '20260102': { up: 140, down: 4 }, '20260109': { up: 144, down: 144 } } }
+      });
+      const r2 = rep2.rows[0];
+      ok(Math.abs(r2.uptimePct - (284 / 288) * 100) < 1e-6, '长区间：可用率取自按天汇总且只计区间内的天（' + r2.uptimePct.toFixed(2) + '%）');
+      ok(r2.outages === null && r2.downtimeMs === null && r2.longestMs === null, '长区间：中断明细如实留空（日汇总切不出中断起止）');
+      ok(r2.source === 'daily' && r2.partial === true, '长区间：数据来源标注为按天汇总且标注为部分口径');
+      ok(rep2.summary.detailLimited === true, '长区间：合计里给出「明细受限」标记');
+
+      // 混合口径：可用率来自按天汇总（覆盖整段区间），中断明细来自手上那部分明细桶并标注只覆盖一部分
+      const mixFrom = new Date(2026, 0, 1).getTime(), mixTo = new Date(2026, 0, 8).getTime();
+      const mixDetailFrom = new Date(2026, 0, 6).getTime();
+      const mixBuckets = [];
+      for (let i = 0; i < 288; i++) mixBuckets.push([mixDetailFrom + i * B, (i >= 100 && i < 103) ? 0 : 1]);
+      const mix = S.buildReport({
+        targets: [{ key: 'm@1', name: 'M' }], from: mixFrom, to: mixTo, now, bucketMs: B,
+        series: { 'm@1': mixBuckets },
+        daily: { 'm@1': { '20260101': { up: 144, down: 0 }, '20260106': { up: 141, down: 3 }, '20260107': { up: 144, down: 0 } } }
+      });
+      const mr = mix.rows[0];
+      ok(mr.source === 'daily' && mr.partial === true, '混合口径：可用率取自覆盖整段区间的按天汇总');
+      ok(mr.up === 429 && mr.down === 3, '混合口径：在线/离线采样用日汇总数（' + mr.up + '/' + mr.down + '）');
+      ok(mr.outages === 1 && mr.downtimeMs === 3 * B && mr.outagePartial === true, '混合口径：中断明细仍照实给出并标注只覆盖一部分（不因降级而丢弃）');
+      ok(mix.summary.outageLimited === true && mix.summary.detailLimited === true, '混合口径：合计同时给出「可用率降级」与「中断明细分段」两个标记');
+
+      // 明细分段（区间两端超出明细）：标 detail-partial，仍给中断明细但明确标注
+      const seg = S.buildReport({
+        targets: [{ key: 'a@10.0.0.1', name: 'A' }], daily: {}, now,
+        series: { 'a@10.0.0.1': mk(i => i >= 5 && i < 8) },
+        from: from - 3 * 24 * 60 * 60 * 1000, to
+      });
+      ok(seg.rows[0].source === 'detail-partial' && seg.rows[0].outages === 1, '明细分段：仍算中断但标注「未覆盖全区间」（' + seg.rows[0].source + '）');
+      ok(seg.rows[0].coveragePct < 100, '明细分段：采样覆盖率如实体现在 100% 以下（' + seg.rows[0].coveragePct.toFixed(1) + '%）');
+
+      // 输入容错与格式化
+      ok(S.buildReport({}).ok === true && S.buildReport({}).rows.length === 0, '空输入：返回空报表而不是抛异常');
+      ok(S.buildReport({ targets: [{ key: '' }, null], series: {} }).rows.length === 0, '空键/空对象：跳过不产生行');
+      const badSeries = S.buildReport({ targets: [{ key: 'x@1', name: 'X' }], series: { 'x@1': [null, [1, 1], ['a', 0], [from + 100, 0], [from + 200, 1]] }, from, to, now, bucketMs: B });
+      ok(badSeries.rows[0].total === 2, '脏采样：非数组/非数值项被忽略，只统计合法桶（' + badSeries.rows[0].total + '）');
+      eq(S.fmtPct(null), '—', '格式化：空可用率显示 —');
+      eq(S.fmtPct(100), '100%', '格式化：100% 不显示小数');
+      eq(S.fmtPct(99.876), '99.88%', '格式化：接近目标线保留两位');
+      eq(S.fmtPct(95.4321), '95.4%', '格式化：低可用率保留一位（不假装精确）');
+      eq(S.fmtDur(null), '—', '格式化：空时长显示 —');
+      eq(S.fmtDur(45 * 1000), '45 秒', '格式化：秒');
+      eq(S.fmtDur(90 * 60 * 1000), '1 时 30 分', '格式化：时分');
+      eq(S.fmtDur(50 * 60 * 60 * 1000), '2 天 2 时', '格式化：天时');
+      ok(S.rangeOf('last7', now).label === '近 7 天' && S.rangeOf('last30', now).label === '近 30 天', '区间：近 7 天 / 近 30 天标签');
+      const tm = S.rangeOf('thisMonth', now), lm = S.rangeOf('lastMonth', now);
+      ok(new Date(tm.from).getDate() === 1 && tm.to > tm.from, '区间：本月从 1 号起算（' + new Date(tm.from).toDateString() + '）');
+      ok(new Date(lm.from).getMonth() === 7 && new Date(lm.to).getMonth() === 8, '区间：上月是完整自然月（8/1 → 9/1）');
+      const cu = S.rangeOf('custom', now, from, to);
+      ok(cu.from === from && cu.to === to, '区间：自定义区间原样采用');
+      ok(S.rangeOf('custom', now, 500, 100).label === '近 7 天', '区间：自定义参数非法时回退近 7 天（不给出空区间）');
+      // outagesOf 直接口径
+      const od = S.outagesOf([[0, 1], [B, 0], [2 * B, 0], [3 * B, 1], [4 * B, 0]], B, 4 * B + 5 * 60 * 1000);
+      ok(od.outages === 2 && od.downtimeMs === 2 * B + 5 * 60 * 1000 && od.longestMs === 2 * B, '中断切分：两次中断分别计数，末次按 now 截断（' + od.downtimeMs + '）');
+
+      // UptimeStore 日汇总：与明细同口径（同桶覆盖要修正当天计数）
+      const { UptimeStore } = require('../js/monitor.js');
+      const tmpUp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-sla-'));
+      const upFile = path.join(tmpUp, 'uptime.json');
+      const st = new UptimeStore(upFile);
+      // 桶内固定偏移取样：直接取「30 分钟前」会在桶边界附近跨桶（本用例曾因此偶发失败）。
+      // 取当天中午所在桶 + 1 分钟处，既稳在桶内，也不会跨天（否则日汇总断言会分裂到两天）。
+      const noon = new Date(); noon.setHours(12, 0, 0, 0);
+      const bucketBase = Math.floor(noon.getTime() / (10 * 60 * 1000)) * (10 * 60 * 1000);
+      const t0 = bucketBase + 60 * 1000;
+      const bucketOf = (ts) => Math.floor(ts / (10 * 60 * 1000));
+      ok(bucketOf(t0) === bucketOf(t0 + 90 * 1000) && bucketOf(t0) !== bucketOf(t0 + 11 * 60 * 1000), '构造：前两次取样同桶、第三次进新桶（用例前提成立）');
+      eq(UptimeStore.dayKeyOf(t0), UptimeStore.dayKeyOf(t0 + 11 * 60 * 1000), '构造：三次取样同属一天（日汇总断言不会分裂到两天）');
+      st.record('k@1', true, t0);
+      st.record('k@1', true, t0 + 60 * 1000);              // 同桶重复：不重复计数
+      eq(st.dailyOf('k@1')[UptimeStore.dayKeyOf(t0)].up, 1, '日汇总：同桶重复探测只计一次');
+      st.record('k@1', false, t0 + 90 * 1000);            // 同桶改判：当天 up-1 / down+1
+      const d1 = st.dailyOf('k@1')[UptimeStore.dayKeyOf(t0)];
+      ok(d1.up === 0 && d1.down === 1, '日汇总：同桶内改判为离线时修正当天计数（' + JSON.stringify(d1) + '）');
+      st.record('k@1', false, t0 + 11 * 60 * 1000);       // 新桶
+      ok(st.dailyOf('k@1')[UptimeStore.dayKeyOf(t0)].down === 2, '日汇总：新桶累加');
+      ok(st.flush() === true && fs.existsSync(upFile), '日汇总：落盘成功');
+      const rawUp = JSON.parse(fs.readFileSync(upFile, 'utf8'));
+      ok(rawUp.v === 2 && rawUp.series && rawUp.daily, '日汇总：落盘为 v2 结构（series + daily）');
+      const st2 = new UptimeStore(upFile);                 // 重新载入：明细与日汇总都要恢复
+      ok(st2.series('k@1').length === st.series('k@1').length, '日汇总：重载后明细一致（' + st2.series('k@1').length + ' 桶）');
+      ok(st2.dailyOf('k@1')[UptimeStore.dayKeyOf(t0)].down === 2, '日汇总：重载后按天汇总一致');
+      // 兼容旧版扁平格式（v1：只有 key→数组）
+      const legacy = path.join(tmpUp, 'legacy.json');
+      fs.writeFileSync(legacy, JSON.stringify({ 'old@1': [[t0, 1], [t0 + 11 * 60 * 1000, 0]] }), 'utf8');
+      const st3 = new UptimeStore(legacy);
+      ok(st3.series('old@1').length === 2 && Object.keys(st3.dailyOf('old@1')).length === 0, '兼容：旧版扁平格式可读（日汇总从空开始累积）');
+      rmTmp(tmpUp);
+    }
+
 })().then(() => {
   suiteFinished = true;
   console.log('');
