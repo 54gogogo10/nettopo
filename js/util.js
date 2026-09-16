@@ -613,7 +613,12 @@ U.sanitizeGraph = (nodes, links, texts) => {
       aVlan: str(l.aVlan).trim().slice(0, 16), bVlan: str(l.bVlan).trim().slice(0, 16),
       aVlanMode: vlanModeOf(l.aVlanMode), bVlanMode: vlanModeOf(l.bVlanMode),
       // 掩码位与 vlans.mask 同口径钳制 0-32：越界值导出回读会被对端钳成 24，掩码静默漂移
-      aMask: maskBitsOf(l.aMask), bMask: maskBitsOf(l.bMask)
+      aMask: maskBitsOf(l.aMask), bMask: maskBitsOf(l.bMask),
+      // SNMP 二层推断出来的链路：inferred 标记随工程保存，画布以虚线与实测（LLDP/CDP）链路区分。
+      // 不做进白名单的话，清洗（合并/导入/打开工程都会走）会把标记静默抹掉——推断结果就冒充实测结果了
+      inferred: !!l.inferred,
+      inferredBy: str(l.inferredBy).slice(0, 32),
+      evidence: str(l.evidence).slice(0, 200)
     };
   }).filter(Boolean);
   const cleanTexts = (Array.isArray(texts) ? texts : []).map(t => {

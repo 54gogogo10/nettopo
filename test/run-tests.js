@@ -7963,6 +7963,105 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       rmTmp(tmpUp);
     }
 
+    // 二层拓扑推断（SNMP 转发表）：varbind 解析、独占交集判据、共享网段拒绝、桥地址证据（新功能）
+    console.log('== 回归：二层拓扑推断（BRIDGE-MIB）（新功能） ==');
+    {
+      const L = require('../js/l2-topo.js');
+      const mk = (id, name, pairs, extra) => Object.assign({
+        id, name, host: id + '.1',
+        bridgeAddr: (extra && extra.addr) || '',
+        portIfIndex: Object.fromEntries(pairs.map(([p, ifx]) => [String(p), ifx])),
+        ifNames: Object.fromEntries(pairs.map(([p, ifx]) => [String(ifx), 'GE0/0/' + ifx])),
+        fdb: (extra && extra.fdb) || [],
+        truncated: !!(extra && extra.truncated)
+      }, extra && extra.raw ? extra.raw : {});
+
+      // MAC 归一与噪声过滤
+      eq(L.normMac('AA:BB:CC:00:11:22'), 'aabbcc001122', 'MAC 归一：冒号/大小写统一为 12 位小写');
+      eq(L.normMac('aabb.cc00.1122'), 'aabbcc001122', 'MAC 归一：点分格式');
+      eq(L.normMac('nope'), '', 'MAC 归一：非法输入返回空串');
+      ok(L.isNoiseMac('ffffffffffff') === true && L.isNoiseMac('01005e000001') === true, '噪声过滤：广播与组播 MAC 不参与推断');
+      ok(L.isNoiseMac('000000000000') === true && L.isNoiseMac('aabbcc001122') === false, '噪声过滤：全零排除、单播保留');
+      eq(L.macFromOidSuffix('1.3.6.1.2.1.17.4.3.1.2.170.187.204.0.17.34'), 'aabbcc001122', 'OID 索引 → MAC（末 6 段十六进制）');
+      eq(L.macFromOidSuffix('1.2.3'), '', 'OID 索引段数不足返回空串');
+
+      // varbind 解析
+      eq(L.parseBridgeAddr([{ oid: '1.3.6.1.2.1.17.1.1.0', value: 'AA BB CC 00 11 22' }]), 'aabbcc001122', '解析：桥地址（hex-string）');
+      eq(L.parseBridgeAddr([{ oid: 'x', value: '170.187.204.0.17.34' }]), 'aabbcc001122', '解析：桥地址（6 段点分十进制回退）');
+      eq(L.parseBridgeAddr([]), '', '解析：无绑定时桥地址为空');
+      eq(JSON.stringify(L.parsePortIfIndex([{ oid: '1.3.6.1.2.1.17.1.4.1.2.5', value: '101' }])), '{"5":101}', '解析：桥端口 → ifIndex');
+      eq(JSON.stringify(L.parseIfNames([{ oid: '1.3.6.1.2.1.31.1.1.1.1.101', value: 'GE0/0/24' }])), '{"101":"GE0/0/24"}', '解析：ifName 表');
+      const fdb = L.parseFdb(
+        [{ oid: '1.3.6.1.2.1.17.4.3.1.1.170.187.204.0.17.34', value: 'aabbcc001122' }],
+        [{ oid: '1.3.6.1.2.1.17.4.3.1.2.170.187.204.0.17.34', value: '5' }],
+        [{ oid: '1.3.6.1.2.1.17.4.3.1.3.170.187.204.0.17.34', value: '3' }]
+      );
+      ok(fdb.length === 1 && fdb[0].mac === 'aabbcc001122' && fdb[0].port === 5 && fdb[0].status === 3, '解析：转发表三张表按 MAC 索引合并（' + JSON.stringify(fdb) + '）');
+      ok(L.parseFdb([], [{ oid: '1.3.6.1.2.1.17.4.3.1.2.170.187.204.0.17.34', value: '5' }], []).length === 1, '解析：缺 address 表时用 port 表索引回退');
+
+      // 推断：基本链路
+      const shared = ['aabbcc000001', 'aabbcc000002', 'aabbcc000003'];
+      const A = mk('a', 'SW-A', [[1, 24]], { addr: '00aa00000001', fdb: shared.map(m => ({ mac: m, port: 1, status: 3 })) });
+      const B = mk('b', 'SW-B', [[2, 24]], { addr: '00aa00000002', fdb: shared.map(m => ({ mac: m, port: 2, status: 3 })) });
+      const r1 = L.inferLinks([A, B]);
+      ok(r1.links.length === 1, '推断：两端独占交集 → 一条链路');
+      ok(r1.links[0].aIf === 'GE0/0/24' && r1.links[0].bIf === 'GE0/0/24', '推断：端口名走 dot1dBasePortIfIndex → ifName 映射（' + r1.links[0].aIf + '/' + r1.links[0].bIf + '）');
+      ok(r1.links[0].unique === 3 && r1.links[0].shared === 3, '推断：独占/共有 MAC 计数正确（' + r1.links[0].unique + '/' + r1.links[0].shared + '）');
+      ok(r1.links[0].confidence === 'medium' && r1.links[0].evidence.join('/').indexOf('独占交集') >= 0, '推断：置信度与证据（' + r1.links[0].confidence + '：' + r1.links[0].evidence.join('、') + '）');
+
+      // 共享网段：交集 MAC 在 A 的两个端口都出现 → 不判链路（这是二层推断最容易出错的地方）
+      const A2 = mk('a', 'SW-A', [[1, 24], [2, 24]], { fdb: shared.flatMap(m => [{ mac: m, port: 1, status: 3 }, { mac: m, port: 2, status: 3 }]) });
+      const r2 = L.inferLinks([A2, B]);
+      ok(r2.links.length === 0 && r2.stats.skippedNoUnique === 1, '推断：交集 MAC 在别处也出现 → 判为共享网段、不出链路（skippedNoUnique=' + r2.stats.skippedNoUnique + '）');
+
+      // 桥地址证据：不需要转发表交集也成立（交换机通常不把自己的桥 MAC 学进转发表）
+      const A3 = mk('a', 'SW-A', [[1, 24]], { addr: '00aa00000001', fdb: [{ mac: '00bb00000009', port: 1, status: 3 }] });
+      const B3 = mk('b', 'SW-B', [[9, 24]], { addr: '00bb00000009', fdb: [{ mac: '00aa00000001', port: 9, status: 3 }] });
+      const r3 = L.inferLinks([A3, B3]);
+      ok(r3.links.length === 1 && r3.links[0].confidence === 'high' && r3.links[0].evidence.join('').indexOf('桥地址命中') >= 0, '推断：双方各自看到对方桥 MAC → 强证据链路（' + (r3.links[0] && r3.links[0].confidence) + '）');
+      const r3b = L.inferLinks([A3, mk('b', 'SW-B', [[9, 24]], { addr: '00bb00000009', fdb: [] })]);
+      ok(r3b.links.length === 0, '推断：只有单向看到桥 MAC 不算链路（防泛洪误判）');
+
+      // 一对多：A 的两个端口分别连 B、C
+      const A5 = mk('a', 'SW-A', [[1, 24], [2, 24]], { fdb: [{ mac: 'aabbcc00000b', port: 1, status: 3 }, { mac: 'aabbcc00000c', port: 2, status: 3 }] });
+      const B5 = mk('b', 'SW-B', [[5, 24]], { fdb: [{ mac: 'aabbcc00000b', port: 5, status: 3 }] });
+      const C5 = mk('c', 'SW-C', [[7, 24]], { fdb: [{ mac: 'aabbcc00000c', port: 7, status: 3 }] });
+      const r5 = L.inferLinks([A5, B5, C5]);
+      ok(r5.links.length === 2, '推断：一台设备的多个端口分别连不同设备（' + r5.links.length + ' 条）');
+
+      // 歧义：同一对设备之间两个端口并列最优 → 只报疑似、不判链路
+      const A6 = mk('a', 'SW-A', [[1, 24], [2, 24]], { fdb: [{ mac: 'aabbcc00000d', port: 1, status: 3 }, { mac: 'aabbcc00000e', port: 2, status: 3 }] });
+      const B6 = mk('b', 'SW-B', [[5, 24], [6, 24]], { fdb: [{ mac: 'aabbcc00000d', port: 5, status: 3 }, { mac: 'aabbcc00000e', port: 6, status: 3 }] });
+      const r6 = L.inferLinks([A6, B6]);
+      ok(r6.links.length === 0 && r6.ambiguous.length >= 1, '推断：多端口并列最优 → 只报疑似不判链路（疑似 ' + r6.ambiguous.length + ' 条）');
+      ok(r6.ambiguous[0] && /并列最优|不一致/.test(r6.ambiguous[0].reason), '推断：疑似条目给出原因（' + (r6.ambiguous[0] && r6.ambiguous[0].reason) + '）');
+
+      // 截断降级：采集被上限截断时置信度下调并注明
+      const r7 = L.inferLinks([mk('a', 'SW-A', [[1, 24]], { addr: '00aa00000001', truncated: true, fdb: [{ mac: '00bb00000009', port: 1, status: 3 }] }),
+        mk('b', 'SW-B', [[9, 24]], { addr: '00bb00000009', fdb: [{ mac: '00aa00000001', port: 9, status: 3 }] })]);
+      ok(r7.links[0].confidence === 'medium' && r7.links[0].truncated === true && r7.links[0].note.indexOf('截断') >= 0, '推断：采集截断时置信度下调并注明（' + r7.links[0].confidence + '）');
+      ok(r7.stats.truncated === 1, '推断：统计里标出截断设备数');
+
+      // 输入容错与边界
+      ok(L.inferLinks([]).ok === true && L.inferLinks(null).links.length === 0, '容错：空输入返回空结果');
+      ok(L.inferLinks([A]).links.length === 0, '容错：单台设备不可能成链路');
+      ok(L.inferLinks([mk('a', 'A', [[1, 24]], { fdb: [{ mac: 'zzz', port: 1, status: 3 }] }), B]).links.length === 0, '容错：非法 MAC 被忽略');
+      ok(L.inferLinks([A, mk('b', 'B', [[2, 24]], { fdb: [{ mac: 'aabbcc000001', port: 2, status: 3 }, { mac: 'aabbcc000002', port: 2, status: 3 }] })]).links[0].unique === 2, '推断：部分交集也算（独占 2 个）');
+      const many = L.inferLinks([A, B], { maxLinks: 1 });
+      ok(many.links.length === 1, '边界：maxLinks 生效');
+      eq(L.portLabel({ portIfIndex: {}, ifNames: {} }, 7), '桥端口 7', '端口名缺失时回退为「桥端口 N」');
+
+      // 合并成图连线：带 inferred 标记，清洗（sanitizeGraph）后仍保留
+      const gl = L.toGraphLinks(r1.links, { uid: (() => { let n = 0; return () => 'lt' + (++n); })() });
+      ok(gl.length === 1 && gl[0].inferred === true && gl[0].inferredBy === 'snmp-l2' && gl[0].a === 'a' && gl[0].b === 'b', '合并：产出带 inferred 标记的连线');
+      ok(gl[0].note.indexOf('推断') >= 0, '合并：备注写明推断来源（' + gl[0].note + '）');
+      const nodes = [{ id: 'a', name: 'SW-A', type: 'switch', x: 0, y: 0, w: 160, h: 56 }, { id: 'b', name: 'SW-B', type: 'switch', x: 300, y: 0, w: 160, h: 56 }];
+      const cleaned = U.sanitizeGraph(nodes, gl, []);
+      ok(cleaned.links.length === 1 && cleaned.links[0].inferred === true && cleaned.links[0].inferredBy === 'snmp-l2',
+        '合并：推断标记能过 sanitizeGraph 字段白名单（否则合并/导入/打开工程时会被静默抹掉，推断结果就冒充实测）');
+      ok(cleaned.links[0].evidence.length <= 200, '合并：证据文本限长（防工程膨胀）');
+    }
+
 })().then(() => {
   suiteFinished = true;
   console.log('');

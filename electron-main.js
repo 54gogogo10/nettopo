@@ -1316,7 +1316,9 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
   let port = parseInt(p && p.port, 10);
   if (!(port > 0 && port <= 65535)) port = 161;
   const timeoutMs = Math.max(300, Math.min(10000, parseInt(p && p.timeoutMs, 10) || 1500));
-  const r = await snmpWalk(oid, host, target, timeoutMs, port, 512);
+  // 行数上限：默认 512（诊断随手查足够）；二层拓扑推断要拉整张转发表，允许调到 8192
+  const maxRows = Math.max(1, Math.min(8192, parseInt(p && p.max, 10) || 512));
+  const r = await snmpWalk(oid, host, target, timeoutMs, port, maxRows);
   // walk 为空时回退单值 GET（叶子 OID 无子树，GETNEXT 也不命中时给 GET 一次机会）；
   // 回退必须沿用同一 target——v3 模式下若误用 v2c 团体字，v3-only 设备永远白等一次超时
   if (r.ok && !r.varbinds.length) {

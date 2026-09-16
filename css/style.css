@@ -138,6 +138,8 @@ input, select, textarea { font: inherit; color: inherit; }
 .link:hover .ln { stroke: var(--muted); stroke-width: 2.6; }
 .link.selected .ln { stroke: var(--link-sel); stroke-width: 3; }
 .link.down .ln { stroke: #ef4444; stroke-width: 2.6; stroke-dasharray: 7 4; }
+.link.inferred .ln { stroke-dasharray: 5 5; opacity: .85; }
+.link.inferred .lab .lb { font-style: italic; }
 .link.down.selected .ln { stroke: #ef4444; stroke-width: 3; }
 .link .lb {
   font-size: 11px; fill: var(--text);

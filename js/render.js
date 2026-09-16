@@ -437,6 +437,8 @@ class Renderer {
       if (!q) continue;
       const ln = g.querySelector('.ln'), hit = g.querySelector('.hit');
       g.classList.toggle('down', this.downLinks.has(l.id));
+      // SNMP 转发表推断出来的链路：虚线显示，与实测（LLDP/CDP）链路一眼可分（绝不冒充实测结果）
+      g.classList.toggle('inferred', !!l.inferred);
       g.style.setProperty('--bw-c', U.bwColor(l.bw)); // 带宽颜色（图上不显示带宽文字）
       // 直角模式走 pts 折线，直线模式退化为两段式 path（元素统一为 path，命中/样式不变）
       const d = q.pts

@@ -6097,6 +6097,10 @@ function updateLegend() {
   // 故障图例
   const faultHtml = state.downLinks.size
     ? `<span class="lg fault" title="已标记故障的链路（模拟断链）"><i></i>故障 ${state.downLinks.size}</span>` : '';
+  // 推断链路图例：SNMP 转发表推断出来的链路（虚线），与实测 LLDP/CDP 链路区分
+  const infCount = state.links.filter(l => l && l.inferred).length;
+  const inferredHtml = infCount
+    ? `<span class="lg" title="由 SNMP 网桥转发表推断出来的链路（非实测 LLDP/CDP），画布上以虚线显示"><i style="border-top:2px dashed var(--link-c);height:0"></i>推断 ${infCount}</span>` : '';
   // 子网分组图例（显示子网分组时展示配色）
   let subnetHtml = '';
   if (state.showSubnets) {
@@ -6105,7 +6109,7 @@ function updateLegend() {
       `<span class="lg subnet" title="${U.escHtml(g.cidr)}"><i style="border-color:${g.color};color:${g.color}"></i>${U.escHtml(g.name)}</span>`
     ).join('');
   }
-  const parts = [typeHtml, bwHtml, faultHtml, subnetHtml].filter(Boolean);
+  const parts = [typeHtml, bwHtml, faultHtml, inferredHtml, subnetHtml].filter(Boolean);
   $('#legend').innerHTML = parts.map((p, i) => i ? '<span class="lg-sep"></span>' + p : p).join('');
 }
 
@@ -6839,6 +6843,7 @@ function wire() {
     } },
     { ic: 'server', label: '网络服务（TFTP / FTP / Syslog / Trap）…', act: openNetServices },
     { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / 网段 / SNMP）…', act: () => openDiagTools() },
+    { ic: 'grid', label: '二层拓扑推断（SNMP 转发表）…', act: () => openL2Infer() },
     { ic: 'pulse', label: '可用性报表（SLA）…', act: () => openSlaReport() },
     { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
     { ic: 'grid', label: '批量巡检（只读命令）…', act: () => openBatchInspect() },
@@ -8407,6 +8412,194 @@ function openMonitorConfig(id) {
     ov.querySelector(sel).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } });
   }
   setTimeout(() => { if (document.body.contains(ov)) { const f = listEl.querySelector('.mh-host'); if (f) f.focus(); } }, 250);
+}
+
+/* ================= 二层拓扑推断（SNMP BRIDGE-MIB） =================
+ * 覆盖不开 LLDP/CDP 的设备：读各交换机的网桥转发表（dot1dTpFdbTable + dot1dBasePortIfIndex），
+ * 按「同一批 MAC 只出在这一对端口上」反推链路；桥地址命中给最强证据。推断判据与解析都在
+ * js/l2-topo.js 的纯函数里（单测覆盖）；采集走 diag:snmp-walk（v2c/v3 都支持）。
+ * 推断链路合并进拓扑时带 inferred 标记：画布上虚线显示并与实测链路区分（不会冒充实测结果）。 */
+const L2 = globalThis.TopoL2;   // 二层推断纯逻辑（js/l2-topo.js，双形态导出）
+function openL2Infer() {
+  if (!(window.topoDiag && window.topoDiag.snmpWalk)) { toast('二层拓扑推断需要桌面版（Electron）环境'); return; }
+  const cands = state.nodes
+    .map(n => {
+      const mc = normalizeMonitorHosts(state.monitorCfg[n.id]) || [];
+      const row = mc.find(r => r && r.host && r.snmpEnabled) || mc.find(r => r && r.host) || null;
+      const host = row ? row.host : (U.nodeMgmts(n)[0] || '');
+      return { node: n, host, snmp: row && row.snmpEnabled ? row : null };
+    })
+    .filter(c => c.host);
+  if (!cands.length) { toast('当前没有带管理地址的设备：先为设备填写管理地址'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1080px;height:86vh;display:flex;flex-direction:column">
+      <h3>二层拓扑推断（SNMP 转发表）</h3>
+      <div class="m-sub">读各交换机的网桥转发表（<code>dot1dTpFdbTable</code> + <code>dot1dBasePortIfIndex</code>），按「<b>同一批 MAC 只出现在这一对端口上</b>」反推交换机之间的链路——适用于<b>不开 LLDP/CDP 的老设备</b>。判据从强到弱：① 双方各自在唯一端口上看到<b>对方的桥 MAC</b>（最强）；② 转发表在两端都独占的交集。交集里的 MAC 在任一方<b>其他端口</b>也出现时不判链路（那多半是共享网段/环路）；双方认定的端口不一致时只报「疑似」。<b>推断结果与实测（LLDP/CDP）是两回事</b>，合并进拓扑后画布用虚线与图例区分。凭据取各设备「设备监控」里的 SNMP 配置（v2c 团体字 / v3 用户）。</div>
+      <div class="frow" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>团体字（未配 SNMP 的设备用这个）</label><input id="l2Comm" type="text" value="public" style="width:110px" spellcheck="false"/></div>
+        <div class="frow" style="margin:0"><label>单表行数上限</label><select id="l2Max"><option value="512">512</option><option value="2048" selected>2048</option><option value="8192">8192（大表）</option></select></div>
+        <div class="frow" style="margin:0"><label>并发</label><select id="l2Conc"><option value="1">1 台</option><option value="2" selected>2 台</option><option value="4">4 台</option></select></div>
+        <label style="display:flex;align-items:center;gap:4px;margin:0 0 4px"><input id="l2All" type="checkbox" checked/>全选设备</label>
+        <span id="l2Hint" class="m-sub" style="margin:0;flex:1"></span>
+      </div>
+      <div id="l2Devs" style="max-height:120px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
+      <div id="l2Res" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:140px;margin-top:8px"><div class="bk-empty">点「采集并推断」后结果汇总在这里。</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="l2Csv" disabled>导出推断结果 CSV</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" id="l2Stop" disabled>停止</button>
+        <button type="button" class="tb primary" id="l2Go"><i class="ic" data-ic="search"></i>采集并推断</button>
+        <button type="button" class="tb" id="l2Merge" disabled>合并进拓扑（标注推断）</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const devsEl = ov.querySelector('#l2Devs'), resEl = ov.querySelector('#l2Res'), hintEl = ov.querySelector('#l2Hint');
+  const goBtn = ov.querySelector('#l2Go'), stopBtn = ov.querySelector('#l2Stop'), csvBtn = ov.querySelector('#l2Csv'), mergeBtn = ov.querySelector('#l2Merge');
+  devsEl.innerHTML = cands.map((c, i) => `<label style="display:flex;align-items:center;gap:4px" title="${c.snmp ? '使用设备监控里的 SNMP 配置' : '用上方团体字'}"><input type="checkbox" data-idx="${i}" checked/> ${c.snmp ? '<span style="color:var(--ok,#22c55e)">●</span>' : '<span style="color:#f59e0b">●</span>'} ${U.escHtml(c.node.name)}<span style="opacity:.6">（${U.escHtml(c.host)}）</span></label>`).join('');
+  ov.querySelector('#l2All').addEventListener('change', (e) => {
+    devsEl.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = e.target.checked; });
+  });
+  let result = null, stopFlag = false;
+
+  /** 采集一台交换机：桥地址 / 端口→ifIndex / 转发表三张 + 接口名 */
+  const collectOne = async (c) => {
+    const base = { host: c.host, port: 161, timeoutMs: 2500, max: parseInt(ov.querySelector('#l2Max').value, 10) || 2048 };
+    if (c.snmp) {
+      const v3 = String(c.snmp.snmpVersion || 'v2c') === 'v3';
+      Object.assign(base, {
+        version: v3 ? 'v3' : 'v2c',
+        community: c.snmp.snmpCommunity || 'public',
+        v3User: c.snmp.snmpV3User || '', v3AuthProto: c.snmp.snmpV3AuthProto || 'sha', v3AuthPass: c.snmp.snmpV3AuthPass || '',
+        v3PrivProto: c.snmp.snmpV3PrivProto || 'aes', v3PrivPass: c.snmp.snmpV3PrivPass || ''
+      });
+      if (c.snmp.snmpPort) base.port = parseInt(c.snmp.snmpPort, 10) || 161;
+    } else {
+      base.community = ov.querySelector('#l2Comm').value.trim() || 'public';
+    }
+    const walk = (oid) => window.topoDiag.snmpWalk(Object.assign({}, base, { oid }));
+    const addr = await walk(L2.OIDS.bridgeAddr);
+    const p2i = await walk(L2.OIDS.portIfIndex);
+    const fdbAddr = await walk(L2.OIDS.fdbAddress);
+    const fdbPort = await walk(L2.OIDS.fdbPort);
+    const fdbStat = await walk(L2.OIDS.fdbStatus);
+    const ifName = await walk(L2.OIDS.ifName);
+    let ifDesc = { varbinds: [] };
+    if (!(ifName.varbinds || []).length) ifDesc = await walk(L2.OIDS.ifDescr);
+    const maxRows = base.max;
+    const truncated = [fdbAddr, fdbPort, fdbStat].some(r => (r.varbinds || []).length >= maxRows);
+    const err = [addr, p2i, fdbAddr, fdbPort].map(r => r && r.error).filter(Boolean)[0] || '';
+    const fdb = L2.parseFdb(fdbAddr.varbinds, fdbPort.varbinds, fdbStat.varbinds);
+    return {
+      id: c.node.id, name: c.node.name, host: c.host,
+      bridgeAddr: L2.parseBridgeAddr(addr.varbinds),
+      portIfIndex: L2.parsePortIfIndex(p2i.varbinds),
+      ifNames: Object.assign({}, L2.parseIfNames(ifDesc.varbinds), L2.parseIfNames(ifName.varbinds)),
+      fdb, truncated, error: fdb.length ? '' : (err || '未读到转发表（设备可能不是交换机 / 未启用 BRIDGE-MIB / 团体字无权限）')
+    };
+  };
+
+  const run = async () => {
+    const chosen = [...devsEl.querySelectorAll('input[type=checkbox]')].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
+    if (chosen.length < 2) { toast('至少勾选两台交换机（链路是两台之间的事）'); return; }
+    result = null; mergeBtn.disabled = true; csvBtn.disabled = true;
+    goBtn.disabled = true; stopBtn.disabled = false; stopFlag = false;
+    const tables = [], fails = [];
+    const CONC = parseInt(ov.querySelector('#l2Conc').value, 10) || 2;
+    const t0 = Date.now();
+    for (let i = 0; i < chosen.length; i += CONC) {
+      if (stopFlag) break;
+      await Promise.all(chosen.slice(i, i + CONC).map(async (c) => {
+        hintEl.textContent = '采集中：' + c.node.name + '（' + c.host + '）…';
+        try {
+          const t = await collectOne(c);
+          tables.push(t);
+          if (!t.fdb.length) fails.push(c.node.name + '（' + (t.error || '无转发表') + '）');
+        } catch (e) { fails.push(c.node.name + '（' + String((e && e.message) || e) + '）'); }
+      }));
+    }
+    hintEl.textContent = '';
+    goBtn.disabled = false; stopBtn.disabled = true;
+    if (!tables.filter(t => t.fdb.length).length) {
+      resEl.innerHTML = '<div class="ipam-conflict">没有采到任何转发表：' + U.escHtml(fails.join('、') || '请核对 SNMP 配置') + '</div>';
+      return;
+    }
+    result = L2.inferLinks(tables);
+    result.tables = tables;
+    result.fails = fails;
+    result.ms = Date.now() - t0;
+    renderResult();
+  };
+
+  const renderResult = () => {
+    if (!result) return;
+    const st = result.stats;
+    const conf = { high: '<b style="color:#22c55e">强</b>（桥地址命中）', medium: '<b style="color:#0ea5e9">中</b>（独占交集）', low: '<span style="color:#f59e0b">弱</span>（仅 1 个独占 MAC）' };
+    const rows = result.links.map(l => `<tr>
+      <td>${U.escHtml(l.aName)}</td><td><code style="font-size:12px">${U.escHtml(l.aIf)}</code></td>
+      <td>${U.escHtml(l.bName)}</td><td><code style="font-size:12px">${U.escHtml(l.bIf)}</code></td>
+      <td style="text-align:right">${l.unique}</td><td style="text-align:right">${l.shared}</td>
+      <td>${conf[l.confidence] || l.confidence}${l.truncated ? ' <span style="color:#f59e0b" title="采集被上限截断，置信度已下调">截断</span>' : ''}</td>
+      <td style="font-size:12px;opacity:.8">${U.escHtml((l.evidence || []).join('、'))}</td></tr>`).join('');
+    const amb = (result.ambiguous || []).map(a => `<tr><td>${U.escHtml(a.aName)}</td><td><code style="font-size:12px">${U.escHtml(a.aIf)}</code></td>
+      <td>${U.escHtml(a.bName)}</td><td><code style="font-size:12px">${U.escHtml(a.bIf)}</code></td><td colspan="4" style="color:#f59e0b">${U.escHtml(a.reason)}（共有 MAC ${a.shared}，不判链路）</td></tr>`).join('');
+    const tbl = result.tables.map(t => `<tr><td>${U.escHtml(t.name)}</td><td>${U.escHtml(t.host)}</td>
+      <td style="text-align:right">${t.fdb.length}</td><td style="font-size:12px">${t.bridgeAddr ? U.escHtml(t.bridgeAddr.replace(/(..)(?=.)/g, '$1:')) : '—'}</td>
+      <td style="text-align:right">${Object.keys(t.portIfIndex).length}</td>
+      <td style="font-size:12px">${t.fdb.length ? (t.error ? '' : '正常') : '<span style="color:var(--danger)">' + U.escHtml(t.error || '无数据') + '</span>'}${t.truncated ? ' <span style="color:#f59e0b">（表已截断）</span>' : ''}</td></tr>`).join('');
+    resEl.innerHTML = `
+      <div class="comp-total">采集 ${result.tables.filter(t => t.fdb.length).length} 台（转发表合计 <b>${st.macs}</b> 条 MAC）· 比较 <b>${st.pairs}</b> 对设备 · 推断出 <b>${result.links.length}</b> 条链路 · 疑似（不判）<b>${result.ambiguous.length}</b> 条 · 耗时 ${result.ms} ms${failsText(result)}</div>
+      ${result.links.length ? `<table class="nb-table"><tr><th>设备 A</th><th>端口 A</th><th>设备 B</th><th>端口 B</th><th>独占 MAC</th><th>共有 MAC</th><th>置信度</th><th>证据</th></tr>${rows}</table>` : '<div class="bk-empty">没有推断出链路：两台设备之间没有转发表交集，或交集 MAC 在双方的其他端口上也出现（共享网段不判链路）。</div>'}
+      ${result.ambiguous.length ? `<div class="m-sub" style="margin:8px 0 2px">疑似但<b>不判</b>（歧义：多个端口并列最优或双方认定不一致，通常是共享网段/环路）</div>
+        <table class="nb-table"><tr><th>设备 A</th><th>端口 A</th><th>设备 B</th><th>端口 B</th><th colspan="4">原因</th></tr>${amb}</table>` : ''}
+      <div class="m-sub" style="margin-top:8px">采集明细</div>
+      <table class="nb-table"><tr><th>设备</th><th>管理地址</th><th>转发表条数</th><th>桥 MAC</th><th>端口映射</th><th>状态</th></tr>${tbl}</table>
+      <div class="m-sub" style="margin-top:8px">判据：独占交集 = 该批 MAC 在这两台设备上都只挂这一对端口；桥地址命中 = 双方各自在唯一端口上看到对方的桥 MAC（最强证据）。转发表是<b>学到的</b>，会随流量变化；合并进拓扑后以虚线与实测链路区分，建议核对后再据此施工。</div>`;
+    csvBtn.disabled = !result.links.length;
+    mergeBtn.disabled = !result.links.length;
+  };
+  const failsText = (r) => (r.fails && r.fails.length) ? ` · <span style="color:#f59e0b">失败 ${r.fails.length} 台：${U.escHtml(r.fails.join('、'))}</span>` : '';
+
+  csvBtn.onclick = () => {
+    if (!result) return;
+    const rows = [['设备A', '端口A', '设备B', '端口B', '独占MAC', '共有MAC', '置信度', '证据', '备注']];
+    for (const l of result.links) rows.push([l.aName, l.aIf, l.bName, l.bIf, String(l.unique), String(l.shared), l.confidence, (l.evidence || []).join('、'), l.note || '']);
+    for (const a of (result.ambiguous || [])) rows.push([a.aName, a.aIf, a.bName, a.bIf, '', String(a.shared), '疑似（不判）', a.reason, '']);
+    U.download('二层拓扑推断_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出推断结果 CSV（' + result.links.length + ' 条链路，' + (result.ambiguous || []).length + ' 条疑似）');
+  };
+  mergeBtn.onclick = () => {
+    if (!result || !result.links.length) return;
+    const exist = new Set(state.links.map(l => [l.a, l.b].sort().join('|')));
+    const add = [];
+    for (const l of result.links) {
+      const k = [l.aId, l.bId].sort().join('|');
+      if (exist.has(k)) continue;      // 已有这条链路（无论实测还是先前推断）：不重复添加
+      exist.add(k);
+      add.push(l);
+    }
+    if (!add.length) { toast('推断出的链路在拓扑里都已存在，无需合并'); return; }
+    pushUndo();
+    for (const l of L2.toGraphLinks(add, { uid: () => U.uid('l') })) state.links.push(l);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    refreshAll();
+    saveGraph();
+    toast('已合并 ' + add.length + ' 条链路（标注为 SNMP 推断，画布上以虚线显示）' + (add.some(l => l.confidence === 'low') ? '；其中含低置信项，建议核对' : ''));
+  };
+  stopBtn.onclick = () => { stopFlag = true; toast('已请求停止：正在进行的采集完成后结束'); };
+  goBtn.onclick = run;
+  // 测试挂具：注入采集结果，直接验证推断与界面渲染（不依赖真实 SNMP 设备）
+  ov.__l2inject = (tables) => { result = L2.inferLinks(tables); result.tables = tables; result.fails = []; result.ms = 0; renderResult(); return result; };
+  globalThis.__l2Panel = ov;
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#l2Go').focus(); }, 250);
 }
 
 /* ================= 可用性报表（SLA） =================
@@ -11503,6 +11696,7 @@ if (typeof globalThis !== 'undefined') {
     openCredManager,
     openTeamPackImport,
     openSlaReport,
+    openL2Infer,
     alertTopology: () => alertTopologySnapshot(),
     openMacTrace,
     openBatchInspect,
