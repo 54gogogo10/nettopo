@@ -7661,6 +7661,80 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(d12.failAt.has('core@10.0.0.1') === false, '恢复后清除本轮失败时刻（下一轮故障重新计时）');
     }
 
+    // 配置变更漂移：易变行忽略规则（配置备份判定与摘要）（新功能）
+    console.log('== 回归：配置变更忽略规则与漂移摘要（新功能） ==');
+    {
+      const cb = require('../js/config-backup.js');
+      const { normalizeIgnoreRules, applyIgnoreRules, sameAfterIgnore, ConfigBackupStore, DEFAULT_IGNORE_RULES } = cb;
+      const bad = DEFAULT_IGNORE_RULES.filter(r => { try { new RegExp(r, 'i'); return false; } catch (e) { return true; } });
+      ok(bad.length === 0, '内置默认规则全部可编译（' + DEFAULT_IGNORE_RULES.length + ' 条' + (bad.length ? '，坏：' + bad.join('|') : '') + '）');
+      const n1 = normalizeIgnoreRules(['^!\\s*Last configuration change', '', '  ', 'uptime\\s+is']);
+      ok(n1.ok === true && n1.rules.length === 2, '规则校验：空行跳过、有效规则保留（' + n1.rules.length + ' 条）');
+      const n2 = normalizeIgnoreRules(['^!\\s*Last', '^!\\s*Last']);
+      ok(n2.ok === true && n2.rules.length === 1, '规则校验：重复规则静默去重');
+      const n3 = normalizeIgnoreRules(['[unclosed']);
+      ok(n3.ok === false && /第 1 条/.test(n3.error), '规则校验：非法正则如实指出是第几条（' + n3.error + '）');
+      const n4 = normalizeIgnoreRules(['a', 'b', '[x']);
+      ok(n4.ok === false && /第 3 条/.test(n4.error), '规则校验：定位到出错的那一条（第 3 条）');
+      ok(normalizeIgnoreRules(new Array(31).fill('x')).ok === false, '规则校验：超过 30 条拒绝');
+      ok(normalizeIgnoreRules(['x'.repeat(201)]).ok === false, '规则校验：单条超长拒绝');
+      ok(normalizeIgnoreRules(['bad\u0000rule']).ok === false, '规则校验：控制字符拒绝');
+      ok(normalizeIgnoreRules('not-array').ok === true && normalizeIgnoreRules('not-array').rules.length === 0, '规则校验：非数组输入按空处理');
+
+      const volatileA = 'sysname SW1\n! Last configuration change at 10:00:00\ntime-range x\nuptime is 3 days, 2 hours\ninterface GE0/0/1\n ip address 10.0.0.1 255.255.255.0';
+      const volatileB = 'sysname SW1\n! Last configuration change at 22:41:07\ntime-range x\nuptime is 9 days, 11 hours\ninterface GE0/0/1\n ip address 10.0.0.1 255.255.255.0';
+      ok(applyIgnoreRules(volatileA, DEFAULT_IGNORE_RULES).indexOf('Last configuration change') < 0, '过滤：命中规则的整行被丢弃');
+      ok(applyIgnoreRules(volatileA, DEFAULT_IGNORE_RULES).indexOf('sysname SW1') >= 0, '过滤：未命中的行原样保留');
+      eq(applyIgnoreRules('a\r\nb', []), 'a\nb', '过滤：空规则集只做换行归一');
+      ok(sameAfterIgnore(volatileA, volatileB, DEFAULT_IGNORE_RULES) === true, '噪声行差异不算变更（时钟/运行时长）');
+      ok(sameAfterIgnore(volatileA, volatileB, []) === false, '不过滤时噪声行差异当然算变更（对照）');
+      const realB = volatileB.replace('10.0.0.1', '10.0.0.9');
+      ok(sameAfterIgnore(volatileA, realB, DEFAULT_IGNORE_RULES) === false, '真实配置改动仍然判定为变更（不误吞）');
+
+      const d1 = ConfigBackupStore.diffConfigText(volatileA, volatileB, DEFAULT_IGNORE_RULES);
+      ok(d1.ok === true && d1.changed === false && d1.added === 0 && d1.removed === 0, '带规则的 diff：纯噪声差异 → 无变更');
+      ok(d1.ignoredRules === DEFAULT_IGNORE_RULES.length, '带规则的 diff：回报生效的规则条数（' + d1.ignoredRules + '）');
+      const d2 = ConfigBackupStore.diffConfigText(volatileA, realB, DEFAULT_IGNORE_RULES);
+      ok(d2.ok === true && d2.changed === true && d2.added === 1 && d2.removed === 1, '带规则的 diff：真实改动计数正确（+' + d2.added + '/-' + d2.removed + '）');
+      ok(d2.summary.indexOf('+ ip address 10.0.0.9') >= 0 && d2.summary.indexOf('- ip address 10.0.0.1') >= 0,
+        '漂移摘要：列出具体变更行（新增在前、删除在后）（' + d2.summary + '）');
+      eq(ConfigBackupStore.summarizeDiff({ changed: false, hunks: [] }), '', '漂移摘要：无变更返回空串');
+      const many = [];
+      for (let i = 0; i < 12; i++) many.push({ type: 'change', lines: [{ type: 'add', text: 'line-' + i }] });
+      const s3 = ConfigBackupStore.summarizeDiff({ changed: true, added: 12, removed: 0, hunks: many }, 80);
+      ok(s3.length <= 80 && /另有 8 行变化/.test(s3), '漂移摘要：超量折叠并截断（' + s3 + '）');
+
+      // 监控侧集成：忽略规则生效时不新增备份、真实变更时事件带摘要
+      const { MonitorManager } = require('../js/monitor.js');
+      const tmpIG = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-ign-'));
+      const storeIG = new ConfigBackupStore(path.join(tmpIG, 'cfg'));
+      const stubIG = { on() {}, removeListener() {}, write() {}, close() {}, connect() { return { ok: true, id: 's1' }; }, trustFingerprint() { return true; } };
+      const mgrIG = new MonitorManager(stubIG, tmpIG, null, { backupStore: storeIG, ignoreRules: () => DEFAULT_IGNORE_RULES });
+      const eventsIG = [];
+      mgrIG.on('backup', (info) => eventsIG.push(info));
+      const jobIG = { key: 'n1@10.0.0.1', deviceId: 'n1', name: '核心SW', host: '10.0.0.1', backup: { skipIfSame: true, command: '', mode: 'shared' }, backupLast: null, logDay: null };
+      mgrIG._saveBackup(jobIG, 1, volatileA);
+      eq(storeIG.list('核心SW', '10.0.0.1').items.length, 1, '忽略规则集成：首份正常入库');
+      eq(eventsIG[0].first, true, '忽略规则集成：首份事件标记 first');
+      mgrIG._saveBackup(jobIG, 1, volatileB);
+      eq(storeIG.list('核心SW', '10.0.0.1').items.length, 1, '忽略规则集成：仅噪声行变化 → 不新增备份文件（skipIfSame 生效）');
+      eq(eventsIG[1].skipped, true, '忽略规则集成：噪声变化事件标记 skipped');
+      ok(eventsIG[1].ignoredRules === DEFAULT_IGNORE_RULES.length, '忽略规则集成：事件回报生效规则条数');
+      mgrIG._saveBackup(jobIG, 1, realB);
+      eq(storeIG.list('核心SW', '10.0.0.1').items.length, 2, '忽略规则集成：真实变更正常新增备份');
+      ok(eventsIG[2].changed === true && String(eventsIG[2].summary).indexOf('10.0.0.9') >= 0,
+        '忽略规则集成：变更事件携带漂移摘要（' + eventsIG[2].summary + '）');
+      // 无规则提供者时行为与旧版一致（原始字节比较）
+      const mgrNo = new MonitorManager(stubIG, tmpIG, null, { backupStore: storeIG });
+      const evNo = [];
+      mgrNo.on('backup', (i) => evNo.push(i));
+      const jobNo = { key: 'n2@10.0.0.2', deviceId: 'n2', name: '接入SW', host: '10.0.0.2', backup: { skipIfSame: true, command: '', mode: 'shared' }, backupLast: null, logDay: null };
+      mgrNo._saveBackup(jobNo, 1, volatileA);
+      mgrNo._saveBackup(jobNo, 1, volatileB);
+      eq(storeIG.list('接入SW', '10.0.0.2').items.length, 2, '未注入规则时：噪声行差异照旧新增备份（行为与旧版一致）');
+      rmTmp(tmpIG);
+    }
+
 })().then(() => {
   suiteFinished = true;
   console.log('');

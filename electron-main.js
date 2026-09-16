@@ -7,6 +7,7 @@ const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
+const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-backup.js');
 const { CredentialStore } = require('./js/credential-store.js');
 const { AlertDeps } = require('./js/alert-deps.js');
 const { DeployStore, deployVendor } = require('./js/config-deploy.js');
@@ -98,10 +99,19 @@ const shell = new ShellManager({ logDir: path.join(app.getPath('userData'), 'mon
 const configBackup = new ConfigBackupStore(path.join(app.getPath('userData'), 'config-backups'));
 /* ---- 配置变更下发记录库（变更单/逐行结果/回滚留痕；口令打码后落盘） ---- */
 const deployStore = new DeployStore(path.join(app.getPath('userData'), 'deploy-records'));
-const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup });
+const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup, ignoreRules: () => configIgnoreRules() });
 // 指纹信任裁决统一收口到 monitor 的权威信任库：无人值守采集（runOneShot）也必须遵守
 // 「首连 TOFU、变化即拒」，否则已钉扎主机的指纹变化会被静默接受并反写渲染层长期钉扎
 shell.setTrustGate((host, port, fp) => monitor.verifyFingerprint(host, port, fp));
+
+/* ---- 配置变更判定的「易变行」忽略规则（全局设置）----
+ * 时钟/运行时长/时间戳这类天天变却不代表有人改配置的行，不过滤就会让「配置有变化」天天误报。
+ * 读取即校验：设置被外部改坏时回落到内置默认规则，绝不让备份变更判定失效。 */
+function configIgnoreRules() {
+  const raw = loadAppSettings().configIgnoreRules;
+  const norm = normalizeIgnoreRules(Array.isArray(raw) ? raw : DEFAULT_IGNORE_RULES);
+  return norm.ok ? norm.rules : DEFAULT_IGNORE_RULES;
+}
 /* ---- 告警依赖抑制（上游失联 → 归并下游离线通知）：邻接表由渲染层在拓扑/监控配置变化时推送 ---- */
 const alertDeps = new AlertDeps();
 
@@ -575,14 +585,15 @@ monitor.on('backup', (info) => {
   if (!notifyEnabled()) return;
   if (info.ok) {
     if (info.first) recordMonitorEvent(info, 'backup', '首次备份：' + (info.fileName || ''));
-    else if (info.changed) recordMonitorEvent(info, 'backup-change', '配置有变化（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）：' + (info.fileName || ''));
+    else if (info.changed) recordMonitorEvent(info, 'backup-change', '配置有变化（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）' + (info.summary ? '：' + info.summary : '') + '　' + (info.fileName || ''));
     else recordMonitorEvent(info, 'backup', '与上次一致：' + (info.fileName || ''));
     if (info.changed) {
       const now = Date.now();
       const last = lastBackupChangeAt.get(info.key) || 0;
       if (now - last > 30 * 60 * 1000) {
         lastBackupChangeAt.set(info.key, now);
-        notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置变更', info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
+        notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置变更',
+          info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）' + (info.summary ? '：' + info.summary : ''));
       }
     }
   } else {
@@ -1575,12 +1586,38 @@ ipcMain.handle('backupcfg:diff', (e, p) => {
   const a = String((p && p.a) || ''), b = String((p && p.b) || '');
   if (!a || !b) return { ok: false, error: '请选择两份备份' };
   if (a === b) return { ok: false, error: '请选择两份不同的备份' };
-  return configBackup.diff(dh.device, dh.host, a, b);
+  // 与自动备份的变更判定同口径：先按「易变行忽略规则」过滤，界面看到的差异就是会触发告警的那些差异
+  const ra = configBackup.read(dh.device, dh.host, a), rb = configBackup.read(dh.device, dh.host, b);
+  if (!ra.ok || !rb.ok) return { ok: false, error: '读取备份失败：' + ((ra.error || rb.error) || '') };
+  return ConfigBackupStore.diffConfigText(ra.content, rb.content, configIgnoreRules());
 });
 ipcMain.handle('backupcfg:open', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   try { require('fs').mkdirSync(configBackup.baseDir, { recursive: true }); } catch (err) { /* ignore */ }
   return require('electron').shell.openPath(configBackup.baseDir).then(() => ({ ok: true }), (err) => ({ ok: false, error: String(err && err.message || err) }));
+});
+
+/* ---- 配置变更判定的易变行忽略规则（全局设置，仅主窗口可改）---- */
+ipcMain.handle('backupcfg:ignore-get', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden', rules: [], defaults: [] };
+  return { ok: true, rules: configIgnoreRules(), defaults: DEFAULT_IGNORE_RULES.slice(), isDefault: !Array.isArray(loadAppSettings().configIgnoreRules) };
+});
+ipcMain.handle('backupcfg:ignore-set', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const list = (p && Array.isArray(p.rules)) ? p.rules.slice(0, 200) : [];
+  const norm = normalizeIgnoreRules(list);
+  if (!norm.ok) return { ok: false, error: norm.error };
+  loadAppSettings().configIgnoreRules = norm.rules;
+  saveAppSettings();
+  monitor.setIgnoreRules(() => configIgnoreRules());   // 立即生效，不必重启监控任务
+  return { ok: true, rules: norm.rules };
+});
+ipcMain.handle('backupcfg:ignore-reset', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  delete loadAppSettings().configIgnoreRules;
+  saveAppSettings();
+  monitor.setIgnoreRules(() => configIgnoreRules());
+  return { ok: true, rules: DEFAULT_IGNORE_RULES.slice() };
 });
 
 /* ---- 内置网络服务 IPC（TFTP / FTP / Syslog，仅主窗口可调用） ---- */

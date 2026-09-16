@@ -667,6 +667,60 @@ async function openCredManager() {
   renderList();
 }
 
+/* ================= 配置变更的「易变行」忽略规则 =================
+ * 设备配置里天天变却不代表有人改配置的行（时钟、运行时长、构建时间戳、会话计数器……）——
+ * 不忽略它们，「配置有变化」告警每天必然误报。规则为正则（大小写不敏感、逐行匹配），
+ * 命中即视为噪声行：既不参与变更判定，也不产生新备份文件。规则存本机设置、全局生效。 */
+async function openConfigIgnoreRules() {
+  if (!(window.topoConfigBackup && window.topoConfigBackup.ignoreGet)) { toast('该功能需要桌面版（Electron）环境'); return; }
+  const cur = await window.topoConfigBackup.ignoreGet();
+  if (!cur || !cur.ok) { toast('读取规则失败：' + ((cur && cur.error) || '未知错误')); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:760px;height:74vh;display:flex;flex-direction:column">
+      <h3>配置变更忽略规则（易变行）</h3>
+      <div class="m-sub">每行一条<b>正则</b>（大小写不敏感、逐行匹配）：命中的行视为噪声，<b>不参与「配置有变化」判定</b>，也不会因此新增备份文件。用于时钟、运行时长、构建时间戳、会话/计数器这类天天变但不代表有人改配置的行。最多 30 条。</div>
+      <div class="frow" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <label>规则列表（一行一条，留空行忽略）</label>
+        <textarea id="igText" spellcheck="false" style="flex:1;min-height:120px;font-family:ui-monospace,Consolas,monospace;font-size:12px"></textarea>
+      </div>
+      <div id="igHint" class="m-sub" style="margin:2px 0"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="igDefaults">恢复默认规则</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="close">关闭</button>
+        <button type="button" class="tb primary" id="igSave">保存</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const ta = ov.querySelector('#igText'), hintEl = ov.querySelector('#igHint');
+  ta.value = (cur.rules || []).join('\n');
+  hintEl.textContent = '当前 ' + (cur.rules || []).length + ' 条' + (cur.isDefault ? '（内置默认）' : '（自定义）');
+  ov.querySelector('#igDefaults').onclick = () => {
+    ta.value = (cur.defaults || []).join('\n');
+    hintEl.textContent = '已填入内置默认规则（' + (cur.defaults || []).length + ' 条），点「保存」生效';
+  };
+  ov.querySelector('#igSave').onclick = async () => {
+    const rules = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+    // 先本地编译一遍，把「第几条写坏了」直接指出来（主进程也会再校验一次）
+    for (let i = 0; i < rules.length; i++) {
+      try { new RegExp(rules[i], 'i'); } catch (e) { toast('第 ' + (i + 1) + ' 条正则无法编译：' + ((e && e.message) || e)); return; }
+    }
+    const r = await window.topoConfigBackup.ignoreSet(rules);
+    if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '未知错误')); return; }
+    toast('已保存 ' + (r.rules || []).length + ' 条忽略规则（对后续备份变更判定立即生效）');
+    close();
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ta.focus(); }, 200);
+}
+
 /* ================= MAC/ARP 终端定位 =================
  * 输入 IP 或 MAC，并发 SSH/Telnet 采集范围内设备的 ARP / MAC 地址表（凭据取自各设备监控配置，
  * 无则用弹窗内的备用账号），U.traceMacHops 沿拓扑逐跳追踪到接入端口并高亮。 */
@@ -9647,6 +9701,7 @@ function openConfigBackups(devicePreset) {
             <button type="button" class="tb" id="bkDelete" disabled>删除选中</button>
             <button type="button" class="tb" id="bkComp">合规检查…</button>
             <button type="button" class="tb" id="bkAi">AI 解析…</button>
+            <button type="button" class="tb" id="bkIgnores" title="配置里时钟/运行时长/时间戳这类天天变却不代表有人改配置的行，在此按正则忽略，避免「配置有变化」天天误报">变更忽略规则…</button>
             <button type="button" class="tb" id="bkNow">立即备份当前地址</button>
             <button type="button" class="tb" data-act="openfolder">打开目录</button>
             <button type="button" class="tb primary" data-act="close">关闭</button>
@@ -9768,11 +9823,15 @@ function openConfigBackups(devicePreset) {
     try {
       const d = await window.topoConfigBackup.diff(cur.device, cur.host, oldN, newN);
       if (!d || !d.ok) { diffInfoEl.textContent = ''; contentEl.textContent = '（对比失败：' + ((d && d.error) || '') + '）'; return; }
-      diffInfoEl.textContent = '对比 ' + oldN + ' → ' + newN + '（+' + (d.added || 0) + '/-' + (d.removed || 0) + ' 行）';
-      contentEl.innerHTML = fmtDiff(d); // 行内容已逐行 escHtml；失败分支已改走 textContent
+      diffInfoEl.textContent = '对比 ' + oldN + ' → ' + newN + '（+' + (d.added || 0) + '/-' + (d.removed || 0) + ' 行'
+        + (d.ignoredRules ? '，已按 ' + d.ignoredRules + ' 条规则忽略易变行' : '') + '）';
+      contentEl.innerHTML = d.changed
+        ? fmtDiff(d)
+        : '<div class="bk-empty">两份备份在忽略易变行后完全一致（时钟 / 运行时长这类噪声行不算变更）。</div>';
     } catch (e) { contentEl.textContent = '（对比失败）'; }
   };
   ov.querySelector('#bkComp').onclick = () => { close(); openComplianceCheck(); };
+  ov.querySelector('#bkIgnores').onclick = () => openConfigIgnoreRules();
   ov.querySelector('#bkAi').onclick = () => {
     if (sel.size !== 1) { toast('请先勾选一份备份再进行 AI 解析'); return; }
     const name = [...sel][0];

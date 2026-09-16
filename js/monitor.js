@@ -15,6 +15,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { RegexLab } = require('./regex-lab.js');
+const { ConfigBackupStore, sameAfterIgnore } = require('./config-backup.js');
 
 /** 文件名/目录名安全化：去掉 Windows 与常见控制字符，去空白、限长。
  *  注意：正则必须独立匹配字符类（不得写成 "/字符类"——那要求字面 / 前缀，永不匹配），
@@ -746,6 +747,8 @@ class MonitorManager extends EventEmitter {
     this.logBaseDir = logBaseDir;
     this.trustFile = trustFile;
     this.backupStore = opts.backupStore || null;
+    // 配置变更判定的易变行忽略规则提供者（宿主注入：返回规则字符串数组）。缺省不过滤。
+    this._ignoreRules = typeof opts.ignoreRules === 'function' ? opts.ignoreRules : null;
     this.regexLab = new RegexLab({ timeoutMs: 5000 }); // 用户正则的工作线程超时执行器（防灾难性回溯挂死主进程）
     this.jobs = new Map();       // key -> job
     this._bySid = new Map();     // sid -> key
@@ -755,6 +758,11 @@ class MonitorManager extends EventEmitter {
     shell.on('output', (sid, data) => this._onOutput(sid, data));
     shell.on('status', (sid, info) => this._onStatus(sid, info));
     shell.on('end', (sid, reason) => this._onEnd(sid, reason));
+  }
+
+  /** 更新易变行忽略规则提供者（宿主在设置变更后调用；规则用于「无变化不新增」与变更 diff） */
+  setIgnoreRules(fn) {
+    this._ignoreRules = typeof fn === 'function' ? fn : null;
   }
 
   /* ---------------- 指纹记录 ---------------- */
@@ -2316,16 +2324,19 @@ class MonitorManager extends EventEmitter {
       return;
     }
     const deviceKey = job.name || job.deviceId;
+    // 易变行忽略规则（时钟/运行时长/时间戳等）：由宿主注入的提供者给出，缺省不过滤
+    const ignoreRules = (() => { try { return typeof this._ignoreRules === 'function' ? (this._ignoreRules() || []) : []; } catch (e) { return []; } })();
     if (job.backup.skipIfSame) {
       const prevName = this.backupStore.latest(deviceKey, job.host);
       if (prevName) {
         const prev = this.backupStore.read(deviceKey, job.host, prevName);
-        if (prev.ok && prev.content === content) {
-          // 与上一份完全一致：不新增备份文件，仅刷新状态与广播
+        // 过滤后等价即视为无变化：否则时钟/运行时长这类噪声行会让「无变化不新增」彻底失效
+        if (prev.ok && sameAfterIgnore(prev.content, content, ignoreRules)) {
+          // 与上一份（忽略噪声行后）一致：不新增备份文件，仅刷新状态与广播
           job._bkResult = { saved: false, skipped: true, name: prevName };
           job.backupLast = { name: prevName, at: Date.now(), changed: false, same: true };
-          this._logLine(job, '配置备份：与上次一致，未新增备份文件（' + prevName + '）');
-          this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, skipped: true, changed: false, fileName: prevName, first: false });
+          this._logLine(job, '配置备份：与上次一致（已忽略 ' + ignoreRules.length + ' 条易变行规则），未新增备份文件（' + prevName + '）');
+          this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, skipped: true, changed: false, fileName: prevName, first: false, ignoredRules: ignoreRules.length });
           this._emit(job);
           return;
         }
@@ -2341,14 +2352,18 @@ class MonitorManager extends EventEmitter {
     }
     let diffInfo = null;
     if (r.prev) {
-      const d = this.backupStore.diff(job.name || job.deviceId, job.host, r.prev, r.name);
-      if (d.ok) diffInfo = { added: d.added, removed: d.removed, changed: d.changed };
+      // 变更判定走「过滤噪声行后」的 diff，并顺带产出摘要（事件与通知里能直接看到变了什么）
+      const prevRead = this.backupStore.read(deviceKey, job.host, r.prev);
+      const d = prevRead.ok
+        ? ConfigBackupStore.diffConfigText(prevRead.content, content, ignoreRules)
+        : this.backupStore.diff(deviceKey, job.host, r.prev, r.name);
+      if (d.ok) diffInfo = { added: d.added, removed: d.removed, changed: d.changed, summary: d.summary || '' };
     }
     const changed = diffInfo ? diffInfo.changed : true;
     job._bkResult = { saved: true, skipped: false, name: r.name, first: !!r.first, changed };
     job.backupLast = { name: r.name, at: Date.now(), changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null, first: !!r.first };
-    this._logLine(job, '配置备份已保存：' + r.name + '（' + content.split('\n').length + ' 行）' + (r.first ? '（首份）' : (diffInfo ? (changed ? '，与上次差异 +' + diffInfo.added + '/-' + diffInfo.removed + ' 行' : '，与上次一致') : '')));
-    this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, fileName: r.name, first: !!r.first, prev: r.prev, changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null });
+    this._logLine(job, '配置备份已保存：' + r.name + '（' + content.split('\n').length + ' 行）' + (r.first ? '（首份）' : (diffInfo ? (changed ? '，与上次差异 +' + diffInfo.added + '/-' + diffInfo.removed + ' 行' + (diffInfo.summary ? '：' + diffInfo.summary : '') : '，与上次一致') : '')));
+    this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, fileName: r.name, first: !!r.first, prev: r.prev, changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null, summary: (diffInfo && diffInfo.summary) || '', ignoredRules: ignoreRules.length });
     this._runCompliance(job, gen, content).catch(() => { /* 合规巡检失败不中断备份 */ });
   }
   /** 备份内容自动合规巡检（job.backup.compliance.enabled 时）：违规写入事件时间线并广播。
