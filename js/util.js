@@ -463,6 +463,107 @@ U.sanitizeUnderlay = (u) => {
     adjust: !!u.adjust
   };
 };
+/* ---------- 交互式拓扑 HTML 导出 ----------
+ * 把当前拓扑导成一个**自包含单文件 HTML**：内嵌 SVG + 点击设备/连线看详情（类型/管理地址/型号/版本/
+ * 接口/备注/监控状态）。发给同事不用装软件、离线可看，是唯一能扩大用户面的导出形式。
+ * 全部内容本地内联（无外链、无 CDN、无 eval），所有文本转义后再拼——导出件同样要防注入。 */
+U.buildInteractiveHtml = (opt) => {
+  const o = opt || {};
+  const nodes = Array.isArray(o.nodes) ? o.nodes : [];
+  const links = Array.isArray(o.links) ? o.links : [];
+  const regions = Array.isArray(o.regions) ? o.regions : [];
+  const status = o.monitorStatus || {};
+  const esc = U.escHtml;
+  const M = 40;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of regions) { minX = Math.min(minX, r.x); minY = Math.min(minY, r.y); maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); }
+  for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h); }
+  if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 800; maxY = 600; }
+  const W = Math.ceil(maxX - minX + M * 2), H = Math.ceil(maxY - minY + M * 2);
+  const X = (v) => Math.round(v - minX + M), Y = (v) => Math.round(v - minY + M);
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const T = U.TYPES || {};
+  const statusOf = (id) => {
+    const s = status[id];
+    if (!s) return null;
+    const st = s.state || '';
+    const color = st === 'monitoring' ? '#22c55e' : ((st === 'offline' || st === 'error' || st === 'alert') ? '#ef4444' : '#f59e0b');
+    return { text: String(s.text || st).slice(0, 200), color };
+  };
+  const regionSvg = regions.map(r => `<g><rect x="${X(r.x)}" y="${Y(r.y)}" width="${Math.round(r.w)}" height="${Math.round(r.h)}" rx="14" fill="${esc(r.color || '#6366f1')}" fill-opacity="0.06" stroke="${esc(r.color || '#6366f1')}" stroke-opacity="0.5" stroke-dasharray="6 5"/><text x="${X(r.x) + 10}" y="${Y(r.y) + 18}" font-size="13" fill="${esc(r.color || '#6366f1')}">${esc(r.name || '区域')}</text></g>`).join('');
+  const linkSvg = links.map(l => {
+    const a = byId.get(l.a), b = byId.get(l.b);
+    if (!a || !b) return '';
+    const x1 = X(a.x + a.w / 2), y1 = Y(a.y + a.h / 2), x2 = X(b.x + b.w / 2), y2 = Y(b.y + b.h / 2);
+    const bw = U.normalizeBw(l.bw);
+    const color = bw ? U.bwColor(bw) : '#94a3b8';
+    const label = [l.aIf, l.bIf].filter(Boolean).join(' ⇄ ');
+    return `<g class="lk" data-a="${esc(a.name)}" data-b="${esc(b.name)}" data-if="${esc(label)}" data-bw="${bw ? esc(U.formatBw(bw)) : ''}" data-note="${esc(l.note || '')}">`
+      + `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"${l.inferred ? ' stroke-dasharray="5 5"' : ''}/>`
+      + `<text x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 4}" font-size="11" fill="#64748b" text-anchor="middle">${esc(label)}</text></g>`;
+  }).join('');
+  const nodeSvg = nodes.map(n => {
+    const tp = T[n.type] || T.other || { c1: '#4b5563', stroke: '#374151', label: '其他' };
+    const st = statusOf(n.id);
+    const ifs = links.filter(l => l.a === n.id || l.b === n.id).map(l => {
+      const other = byId.get(l.a === n.id ? l.b : l.a);
+      const mine = l.a === n.id ? l.aIf : l.bIf;
+      const ip = l.a === n.id ? l.aIp : l.bIp;
+      return (mine || '') + (ip ? ' ' + ip : '') + ' → ' + ((other && other.name) || '?');
+    });
+    return `<g class="nd" data-name="${esc(n.name)}" data-type="${esc(tp.label || n.type || '其他')}"`
+      + ` data-mgmt="${esc(U.nodeMgmts(n).join('、') || n.mgmt || '')}" data-model="${esc(n.model || '')}" data-os="${esc(n.osver || '')}"`
+      + ` data-note="${esc(n.note || '')}" data-status="${esc(st ? st.text : '')}" data-status-color="${esc(st ? st.color : '')}"`
+      + ` data-ifs="${esc(ifs.join('；'))}">`
+      + `<rect x="${X(n.x)}" y="${Y(n.y)}" width="${Math.round(n.w)}" height="${Math.round(n.h)}" rx="12" fill="${esc(tp.c1)}" stroke="${esc(tp.stroke || tp.c1)}" stroke-width="1.5"/>`
+      + `<text x="${X(n.x + n.w / 2)}" y="${Y(n.y + n.h / 2) + 5}" font-size="13" fill="#fff" text-anchor="middle">${esc(n.name)}</text>`
+      + (st ? `<circle cx="${X(n.x + n.w) - 9}" cy="${Y(n.y) + 9}" r="5" fill="${esc(st.color)}"/>` : '')
+      + `</g>`;
+  }).join('');
+  const title = String(o.title || '网络拓扑图').slice(0, 80);
+  const ver = String(o.appVersion || '').slice(0, 24);
+  return `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${esc(title)}</title>
+<style>
+ body{margin:0;font:14px/1.6 "Microsoft YaHei",system-ui,sans-serif;color:#0f172a;background:#f8fafc}
+ header{padding:12px 18px;border-bottom:1px solid #e2e8f0;background:#fff}
+ h1{font-size:17px;margin:0 0 2px} .meta{color:#64748b;font-size:12px}
+ main{display:flex;height:calc(100vh - 62px)} #cv{flex:1;overflow:auto;background:#fff}
+ #side{width:320px;border-left:1px solid #e2e8f0;padding:14px 16px;overflow:auto;background:#fff}
+ .nd{cursor:pointer} .nd:hover rect{filter:brightness(1.12)}
+ .lk{cursor:pointer} .lk:hover line{stroke-width:4}
+ #side h2{font-size:14px;margin:0 0 8px} #side dl{margin:0;font-size:12.5px} #side dt{color:#64748b;margin-top:8px} #side dd{margin:2px 0 0;word-break:break-all}
+ .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+ .hint{color:#94a3b8;font-size:12.5px}
+</style></head><body>
+<header><h1>${esc(title)}</h1><div class="meta">生成时间 ${esc(new Date().toLocaleString('zh-CN'))}　设备 ${nodes.length} 台 · 链路 ${links.length} 条${ver ? '　由 NetTopo ' + esc(ver) + ' 导出' : ''}　（自包含单文件，离线可看；点击设备或连线查看详情）</div></header>
+<main><div id="cv"><svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" fill="#ffffff"/>${regionSvg}${linkSvg}${nodeSvg}</svg></div>
+<aside id="side"><h2>详情</h2><div id="info" class="hint">点击画布上的设备或连线查看详情。</div></aside></main>
+<script>
+(function(){
+  var info = document.getElementById('info');
+  function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
+  function row(k, v){ return v ? '<dt>' + k + '</dt><dd>' + v + '</dd>' : ''; }
+  function show(el){
+    var d = el.dataset, html = '';
+    if (el.classList.contains('nd')) {
+      html = '<h2>' + esc(d.name) + '</h2><dl>'
+        + row('类型', esc(d.type)) + row('管理地址', esc(d.mgmt)) + row('型号', esc(d.model)) + row('软件版本', esc(d.os))
+        + (d.status ? '<dt>监控状态</dt><dd><span class="dot" style="background:' + esc(d.statusColor) + '"></span>' + esc(d.status) + '</dd>' : '')
+        + row('接口', esc(d.ifs)) + row('备注', esc(d.note)) + '</dl>';
+    } else {
+      html = '<h2>' + esc(d.a) + ' ⇄ ' + esc(d.b) + '</h2><dl>' + row('接口', esc(d.if)) + row('带宽', esc(d.bw)) + row('备注', esc(d.note)) + '</dl>';
+    }
+    info.innerHTML = html;
+  }
+  var all = document.querySelectorAll('.nd,.lk');
+  for (var i = 0; i < all.length; i++) all[i].addEventListener('click', function(){ show(this); });
+})();
+</script>
+</body></html>`;
+};
+
 /* 清洗 typeOverrides / customTypes：剔除非法颜色与图片，避免拼入 innerHTML/SVG 时注入 */
 U.sanitizeTypeData = (overrides, customTypes) => {
   const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;

@@ -3830,6 +3830,18 @@ async function exportInventory() {
   }
 }
 
+/** 交互式拓扑 HTML：自包含单文件（内嵌 SVG + 点击看详情 + 监控状态点），发给同事离线可看 */
+function exportInteractiveHtml() {
+  if (!state.nodes.length) { toast('画布为空，请先添加设备'); return; }
+  const html = U.buildInteractiveHtml({
+    nodes: state.nodes, links: state.links, regions: state.regions,
+    monitorStatus: state.monitorStatus || {},
+    title: (state.projectName ? state.projectName + ' · ' : '') + '网络拓扑图',
+    appVersion: U.APP_VERSION
+  });
+  U.download('网络拓扑图_' + U.fmtDate() + '.html', new Blob([html], { type: 'text/html;charset=utf-8' }));
+  toast('已导出交互式拓扑 HTML（' + state.nodes.length + ' 台设备、' + state.links.length + ' 条链路；浏览器打开即可点击查看详情，无需安装软件）');
+}
 async function exportVisio() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   // 图标光栅化：VSDX 的 Foreign 图片形状仅接受位图
@@ -6886,6 +6898,7 @@ function wire() {
   $('#btnDropExport').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'csv', label: '导出 CSV 表格', act: exportCSV },
     { ic: 'xlsx', label: '导出 Excel 表格', act: exportXlsx },
+    { ic: 'cloud', label: '导出交互式拓扑 HTML（可点击看详情）', act: exportInteractiveHtml },
     { ic: 'archive', label: '导出资产清单（Excel）', act: exportInventory },
     { ic: 'pdf', label: '导出 PDF', act: exportPdf },
     { ic: 'image', label: '导出图片（PNG / SVG）', act: openImageExport },
@@ -11850,6 +11863,7 @@ if (typeof globalThis !== 'undefined') {
     openComplianceCheck,
     exportXlsx,
     exportVisio,
+    exportInteractiveHtml,
     exportPdf,
     openMonitorConfig,
     openMonitorCenter,

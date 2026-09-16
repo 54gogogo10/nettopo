@@ -8100,6 +8100,33 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(svgHidden.indexOf('<image') < 0, '导出：底图被隐藏时不输出（导出件与屏幕所见一致）');
     }
 
+    // 交互式拓扑 HTML 导出：自包含、可点击详情、防注入、带监控状态（新功能）
+    console.log('== 回归：交互式拓扑 HTML 导出（新功能） ==');
+    {
+      const nodes = [
+        { id: 'n1', name: '核心SW', type: 'switch', x: 100, y: 100, w: 160, h: 56, mgmt: '10.0.0.1', model: 'S5720', osver: 'V200R019', note: '机房A' },
+        { id: 'n2', name: '<img src=x onerror=alert(1)>', type: 'router', x: 400, y: 100, w: 160, h: 56, mgmt: '10.0.0.2', note: '"><script>alert(2)</script>' }
+      ];
+      const links = [{ id: 'l1', a: 'n1', b: 'n2', aIf: 'GE0/0/1', bIf: 'GE0/0/24', bw: 1000, note: '主干' }];
+      const html = U.buildInteractiveHtml({ nodes, links, regions: [{ id: 'r1', name: '核心区', color: '#6366f1', x: 60, y: 60, w: 600, h: 200 }], monitorStatus: { n1: { state: 'monitoring', text: '监控中' }, n2: { state: 'offline', text: '探测失败' } }, title: '测试拓扑', appVersion: 'vTEST' });
+      ok(html.indexOf('<!DOCTYPE html>') === 0 && html.indexOf('</html>') > 0, '结构：产出完整 HTML 文档');
+      ok(html.indexOf('核心SW') > 0 && html.indexOf('GE0/0/1') > 0 && html.indexOf('核心区') > 0, '内容：含设备名、接口与区域');
+      ok(html.indexOf('data-mgmt="10.0.0.1"') > 0 && html.indexOf('data-model="S5720"') > 0, '内容：设备详情字段（管理地址/型号）进了数据集');
+      ok(html.indexOf('监控中') > 0 && html.indexOf('#22c55e') > 0 && html.indexOf('#ef4444') > 0, '内容：监控状态文案与状态点颜色（在线绿/离线红）');
+      ok(html.indexOf('addEventListener') > 0 && html.indexOf('class="nd"') > 0, '交互：内置点击设备看详情的脚本（无需外部依赖）');
+      ok(html.indexOf('<img src=x onerror') < 0 && html.indexOf('<script>alert(2)') < 0, '安全：设备名/备注里的标签被转义，不产生可执行元素');
+      ok(html.indexOf('&lt;img src=x onerror=alert(1)&gt;') > 0, '安全：恶意内容以转义文本形式呈现');
+      // xmlns 是 XML 命名空间（不是网络请求），只查真正会发起请求的引用形式
+      ok(!/(?:src|href)=\"https?:/i.test(html) && html.indexOf('<link') < 0 && html.indexOf('@import') < 0 && html.indexOf('//cdn') < 0, '自包含：不引用任何外网资源（离线可看；xmlns 命名空间不算）');
+      ok(html.indexOf('new Function') < 0 && html.indexOf('eval(') < 0, '自包含：不使用 eval / new Function');
+      const html2 = U.buildInteractiveHtml({ nodes, links: [{ id: 'l1', a: 'n1', b: 'n2', inferred: true }] });
+      ok(html2.indexOf('stroke-dasharray="5 5"') > 0, '渲染：推断链路在导出件里同样是虚线（与画布口径一致）');
+      const html3 = U.buildInteractiveHtml({ nodes, links });
+      ok(html3.indexOf('stroke-dasharray="5 5"') < 0, '渲染：普通链路实线');
+      const empty = U.buildInteractiveHtml({});
+      ok(empty.indexOf('<!DOCTYPE html>') === 0 && empty.indexOf('设备 0 台') > 0, '边界：空拓扑也能导出（不抛异常）');
+      ok(U.buildInteractiveHtml({ nodes, title: 'x'.repeat(200) }).indexOf('x'.repeat(81)) < 0, '边界：标题限长（防超长标题）');
+    }
 })().then(() => {
   suiteFinished = true;
   console.log('');
