@@ -7,6 +7,7 @@ const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
+const { CredentialStore } = require('./js/credential-store.js');
 const { DeployStore, deployVendor } = require('./js/config-deploy.js');
 const { NetServices } = require('./js/net-services.js');
 const { SEV_NAMES: SYSLOG_SEV_NAMES } = require('./js/svc-syslog.js');
@@ -738,6 +739,38 @@ function decryptSecretValue(value) {
   } catch (e) { return ''; }
 }
 
+/* ---- 统一凭据库（监控 ▾ 凭据库…）：设备访问凭据集中管理，口令经 safeStorage 密文落盘 ----
+ * 与 settings.json 的「加密不可用则原样落盘」不同，凭据库**不允许退化成明文**：
+ * 适配器在加密不可用时返回空串，由 CredentialStore 拒存口令并回报「口令未保存」告警。
+ * 渲染层只拿得到元数据（hasPassword 布尔）与 id，明文只在主进程内解密后交给会话/下发管道。 */
+const credStore = new CredentialStore(path.join(app.getPath('userData'), 'credentials'), {
+  encrypt: (text) => {
+    try {
+      const { safeStorage } = require('electron');
+      if (!safeStorage || !safeStorage.isEncryptionAvailable()) return '';
+      return ENC_PREFIX + safeStorage.encryptString(String(text)).toString('base64');
+    } catch (e) { return ''; }
+  },
+  decrypt: (cipher) => decryptSecretValue(cipher)
+});
+
+/** 把渲染层给出的「凭据标识」解析成可连接参数（明文只在主进程内存在，不跨 IPC 回渲染层）。
+ *  显式 credId 优先；解析失败即如实报错——不静默回退成默认/匿名账号，否则排障方向会被带偏。
+ *  协议与端口：调用方显式给了就以调用方为准（面板上用户看得见也改得动），否则取凭据档案里的值。 */
+function credPatchOf(p) {
+  const id = p && p.credId;
+  if (!id) return { ok: true, patch: {} };
+  const r = credStore.resolve(String(id));
+  if (!r.ok) return { ok: false, error: '凭据不可用：' + (r.error || '') };
+  const c = r.cred;
+  const patch = { username: c.username, password: c.password, privateKey: c.privateKey, keyPassphrase: c.keyPassphrase };
+  // 前置命令：调用方显式给了就以调用方为准（配置下发面板上那条前置命令是变更计划的一部分，不该被档案悄悄换掉）
+  if (c.preCmd && !(p && p.preCmd)) patch.preCmd = c.preCmd;
+  if (!(p && p.protocol)) patch.protocol = c.protocol;
+  if (!(p && p.port)) patch.port = c.port;
+  return { ok: true, patch };
+}
+
 /* ---- Web Shell IPC ---- */
 /** Shell 相关 IPC 仅允许主窗口与 Shell 窗口调用（两窗口都加载同一 preload） */
 function shellSender(e) {
@@ -1003,6 +1036,16 @@ ipcMain.handle('secure:decrypt', (e, cipher) => {
     return { ok: true, text };
   } catch (err) { return { ok: false, error: '解密失败' }; }
 });
+/* ---- 统一凭据库 IPC（监控 ▾ 凭据库…，仅主窗口可调用）----
+ * 清单不含机密：口令/私钥只回 hasPassword / hasKey 布尔，明文永不跨 IPC 回渲染层。
+ * 连接类流程（采集/下发）只提交 credId，由主进程解析后补齐参数（见 credPatchOf）。 */
+ipcMain.handle('cred:list', (e) => monitorGuard(e) ? credStore.list() : { ok: false, error: 'forbidden', items: [] });
+ipcMain.handle('cred:save', (e, p) => monitorGuard(e) ? credStore.save(p || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('cred:remove', (e, p) => monitorGuard(e) ? credStore.remove(String((p && p.id) || '')) : { ok: false, error: 'forbidden' });
+/** 按厂家 / 显式 id 选取凭据 id 顺序（面板「自动匹配」用；选取规则见 CredentialStore.pick） */
+ipcMain.handle('cred:pick', (e, p) => monitorGuard(e)
+  ? credStore.pickFor({ ids: p && p.ids, vendor: p && p.vendor })
+  : { ok: false, error: 'forbidden', ids: [] });
 ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? { ok: true, notify: loadAppSettings().monitorNotify !== false, tray: trayEnabled() } : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:set-settings', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1160,10 +1203,15 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
   }
   return { ok: !!r.ok, varbinds: r.varbinds || [], error: r.error || null };
 });
-/* 一次性命令执行（采集邻居表 / MAC·ARP 定位）：独立会话在 shell.js 内完成，凭据不落盘不进日志明文 */
+/* 一次性命令执行（采集邻居表 / MAC·ARP 定位）：独立会话在 shell.js 内完成，凭据不落盘不进日志明文。
+ * 面板可只给 credId（统一凭据库），账号/口令/前置命令由主进程补齐，明文不经过渲染层 */
 ipcMain.handle('shell:oneshot', (e, p) => {
   if (!monitorGuard(e)) return Promise.resolve({ ok: false, outputs: [], fingerprint: null, error: 'forbidden', errors: [] });
-  return shell.runOneShot(p || {});
+  const cp = credPatchOf(p);
+  if (!cp.ok) return Promise.resolve({ ok: false, outputs: [], fingerprint: null, error: cp.error, errors: [] });
+  const opts = Object.assign({}, p || {}, cp.patch);
+  delete opts.credId;
+  return shell.runOneShot(opts);
 });
 
 /* ---- 配置变更下发（监控 ▾ 配置变更下发）----
@@ -1182,6 +1230,10 @@ function deployTargetOf(p) {
 }
 ipcMain.handle('deploy:run', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  // 凭据可以是「统一凭据库」里的一条（credId）：账号/口令/私钥/前置命令在主进程内补齐后统一走同一条管道
+  const cpD = credPatchOf(p);
+  if (!cpD.ok) return { ok: false, error: cpD.error };
+  p = Object.assign({}, p || {}, cpD.patch);
   const dh = deployTargetOf(p);
   if (!dh) return { ok: false, error: '缺少管理地址' };
   const v = deployVendor(p && p.vendor);

@@ -150,6 +150,15 @@ contextBridge.exposeInMainWorld('topoSecure', {
   decryptSecret: (cipher) => ipcRenderer.invoke('secure:decrypt', cipher)
 });
 
+/* 统一凭据库（监控 ▾ 凭据库…）：设备访问凭据集中管理。清单不含机密（只回 hasPassword / hasKey 布尔），
+ * 连接类流程改传 credId，账号/口令/前置命令由主进程解析——明文永不跨 IPC 回渲染层（仅主窗口可用） */
+contextBridge.exposeInMainWorld('topoCred', {
+  list: () => ipcRenderer.invoke('cred:list'),
+  save: (p) => ipcRenderer.invoke('cred:save', p),
+  remove: (id) => ipcRenderer.invoke('cred:remove', { id }),
+  pick: (p) => ipcRenderer.invoke('cred:pick', p)
+});
+
 /* 在线升级（仅主窗口可用）：检查 / 下载校验 / 取消下载 / 应用重启；进度与发现新版本经事件推送 */
 contextBridge.exposeInMainWorld('topoUpdate', {
   check: () => ipcRenderer.invoke('update:check'),

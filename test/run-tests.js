@@ -7371,6 +7371,156 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(U.fmtBps(1500000000), '1.5 Gbps', '速率：1.5e9 → 1.5 Gbps');
       eq(U.fmtBps(4294967295), '4.29 Gbps', '速率：计数器差值不适用哨兵语义（按实际速率显示）');
     }
+    // 前置命令（runOneShot 的 preCmd，凭据档案携带）：先于采集命令下发一次，输出不进任何命令窗口
+    console.log('== 回归：一次性采集的前置命令（凭据库 preCmd）（新功能） ==');
+    {
+      const seen = [];
+      const socks = new Set();
+      const server = net.createServer((sock) => {
+        socks.add(sock);
+        sock.on('close', () => socks.delete(sock));
+        sock.on('data', (d) => {
+          const s = d.toString('latin1');
+          if (s === ' ') return;                            // More 翻页应答（本用例不触发）
+          const cmd = s.replace(/\r\n$/, '');
+          seen.push(cmd);
+          if (cmd === 'enable') sock.write(cmd + '\r\n<SW1>#');
+          else sock.write(cmd + '\r\noutput-' + cmd + '\r\n<SW1>#');
+        });
+        sock.write('\r\nWelcome to mock device\r\n<SW1>');
+      });
+      await new Promise((res) => server.listen(0, '127.0.0.1', res));
+      const port = server.address().port;
+      const mgr = new ShellManager();
+      try {
+        const bad = await mgr.runOneShot({ protocol: 'telnet', host: '127.0.0.1', port, preCmd: 'a\nb', commands: ['show version'] });
+        ok(bad.ok === false, 'runOneShot：前置命令含控制字符拒绝（防换行注入）');
+        const bad2 = await mgr.runOneShot({ protocol: 'telnet', host: '127.0.0.1', port, preCmd: 'x'.repeat(257), commands: ['show version'] });
+        ok(bad2.ok === false, 'runOneShot：前置命令超长拒绝');
+        const r = await mgr.runOneShot({
+          protocol: 'telnet', host: '127.0.0.1', port, username: 'admin', preCmd: 'enable',
+          commands: ['show version'], waitMs: 300, cmdTimeoutMs: 3000, readyTimeoutMs: 3000
+        });
+        ok(seen.indexOf('enable') >= 0, 'runOneShot：前置命令确实已下发');
+        ok(seen.indexOf('enable') < seen.indexOf('show version'), 'runOneShot：前置命令先于采集命令下发');
+        ok(r.ok === true && r.outputs.length === 1, 'runOneShot：前置命令不占用命令窗口（输出条数 ' + (r.outputs || []).length + '）');
+        ok(r.outputs[0].text.includes('output-show version') && !r.outputs[0].text.includes('enable'), 'runOneShot：前置命令输出不计入采集结果（' + JSON.stringify(r.outputs[0].text) + '）');
+      } finally {
+        for (const s of socks) s.destroy();
+        await new Promise((res) => { server.close(res); setTimeout(res, 500); });
+      }
+    }
+
+    // 统一凭据库（CredentialStore）：CRUD / 机密落盘语义 / 名称与上限 / 损坏只读 / pick 选取规则
+    console.log('== 回归：统一凭据库（CredentialStore）（新功能） ==');
+    {
+      const { CredentialStore } = require('../js/credential-store.js');
+      const tmpCS = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-cred-'));
+      const credFile = path.join(tmpCS, 'credentials.json');
+      // 假适配器：加密结果带可识别前缀，用于断言「落盘的是密文、不是明文」
+      const fakeCrypto = (tag) => ({
+        encrypt: (t) => 'ENC:' + tag + ':' + Buffer.from(String(t), 'utf8').toString('base64'),
+        decrypt: (c) => (String(c).indexOf('ENC:' + tag + ':') === 0)
+          ? Buffer.from(String(c).slice(('ENC:' + tag + ':').length), 'base64').toString('utf8') : ''
+      });
+      const store = new CredentialStore(tmpCS, fakeCrypto('k1'));
+      ok(store.list().ok === true && store.list().items.length === 0, '凭据库：初始为空且可读');
+
+      const s1 = store.save({ name: '核心交换机 · netops', username: 'netops', password: 'P@ssw0rd-明文', protocol: 'ssh', port: 22, vendor: 'huawei', preCmd: 'enable', note: '机房A', isDefault: true });
+      ok(s1.ok === true && s1.item.id && s1.item.hasPassword === true, '凭据库：新增条目成功（含口令）');
+      ok(s1.item.name === '核心交换机 · netops' && s1.item.preCmd === 'enable' && s1.item.vendor === 'huawei', '凭据库：名称/前置命令/厂家原样保存');
+      const raw1 = fs.readFileSync(credFile, 'utf8');
+      ok(raw1.indexOf('P@ssw0rd-明文') < 0, '凭据库：口令明文不落盘');
+      ok(raw1.indexOf('ENC:k1:') >= 0, '凭据库：口令以宿主适配器密文落盘');
+      ok(fs.readdirSync(tmpCS).every((f) => f.indexOf('.tmp-') < 0), '凭据库：原子写入不残留临时文件');
+      if (process.platform !== 'win32') eq(fs.statSync(credFile).mode & 0o777, 0o600, '凭据库：文件权限收紧到 0600');
+
+      const l1 = store.list();
+      const publicJson = JSON.stringify(l1.items);
+      ok(publicJson.indexOf('ENC:') < 0 && publicJson.indexOf('P@ssw0rd') < 0, '凭据库：list 只回元数据（无密文、无明文）');
+      ok(l1.items[0].hasPassword === true && l1.items[0].username === 'netops', '凭据库：list 携带 hasPassword 布尔与账号');
+      const idA = l1.items[0].id;
+      const r1 = store.resolve(idA);
+      ok(r1.ok === true && r1.cred.password === 'P@ssw0rd-明文', '凭据库：resolve 解出明文（仅主进程内部使用）');
+      ok(r1.cred.preCmd === 'enable' && r1.cred.vendor === 'huawei', '凭据库：resolve 一并给出前置命令与厂家');
+
+      const s2 = store.save({ id: idA, name: '核心交换机 · netops', username: 'netops2' });
+      ok(s2.ok === true && s2.item.hasPassword === true && s2.item.username === 'netops2', '凭据库：编辑未提交口令字段 → 原密文保持不变');
+      ok(store.resolve(idA).cred.password === 'P@ssw0rd-明文', '凭据库：未提交口令时解密结果不变');
+      const s3 = store.save({ id: idA, name: '核心交换机 · netops', password: '' });
+      ok(s3.ok === true && s3.item.hasPassword === false, '凭据库：口令提交空串 → 清空');
+      const s3b = store.save({ id: idA, name: '核心交换机 · netops', password: 'N3w@pass' });
+      ok(s3b.ok === true && store.resolve(idA).cred.password === 'N3w@pass', '凭据库：重新设置口令生效');
+
+      const s4 = store.save({ name: 'CORE-SW', username: 'a', isDefault: true });
+      ok(s4.ok === true, '凭据库：第二条新增成功');
+      const s5 = store.save({ name: ' core-sw ', username: 'b' });
+      ok(s5.ok === false && /已存在/.test(String(s5.error)), '凭据库：重名拒绝（大小写与首尾空白不敏感）');
+      ok(store.save({ name: '   ', username: 'a' }).ok === false, '凭据库：名称为空拒绝');
+      ok(store.save({ name: 'X', username: 'a', id: 'nope1' }).ok === false, '凭据库：非法凭据标识拒绝');
+      ok(store.resolve('nope1').ok === false && store.remove('nope1').ok === false, '凭据库：非法标识的解析/删除一律拒绝');
+      ok(store.resolve('c999999').ok === false, '凭据库：不存在的标识如实报错');
+      const l2 = store.list();
+      ok(l2.items[0].isDefault === true && l2.items.filter(e => e.isDefault).length === 1, '凭据库：默认项唯一且排在清单首位（新默认生效后旧默认被清）');
+      ok(l2.items[0].id === s4.item.id, '凭据库：后设的默认项成为唯一默认');
+
+      const rm = store.remove(s4.item.id);
+      ok(rm.ok === true && store.list().items.length === 1, '凭据库：删除生效');
+      ok(store.remove(s4.item.id).ok === false, '凭据库：重复删除如实报「不存在」');
+
+      // pick 纯函数：显式 id 优先 → 厂家匹配 → 默认兜底；不隐式遍历全部凭据（防账号锁定）
+      const entries = [
+        { id: 'c0001', name: 'A', username: 'a', vendor: 'huawei', isDefault: false },
+        { id: 'c0002', name: 'B', username: 'b', vendor: 'cisco', isDefault: true },
+        { id: 'c0003', name: 'C', username: 'c', vendor: '', isDefault: false }
+      ];
+      eq(JSON.stringify(CredentialStore.pick(entries, { ids: ['c0003', 'c0001'], vendor: 'huawei' })), JSON.stringify(['c0003', 'c0001', 'c0002']), '选取规则：显式 id 优先 → 厂家匹配 → 默认兜底');
+      eq(JSON.stringify(CredentialStore.pick(entries, { vendor: 'ruijie' })), JSON.stringify(['c0002']), '选取规则：厂家不匹配时不隐式遍历全部凭据（只回默认项）');
+      eq(JSON.stringify(CredentialStore.pick(entries, {})), JSON.stringify(['c0002']), '选取规则：无任何线索时只回默认项');
+      eq(JSON.stringify(CredentialStore.pick(entries, { ids: ['c9999', 'c0001'] })), JSON.stringify(['c0001', 'c0002']), '选取规则：不存在的 id 被忽略、不产生空洞');
+      eq(JSON.stringify(CredentialStore.pick([], { ids: ['c0001'] })), '[]', '选取规则：空库返回空（调用方回落手填）');
+
+      // 加密适配器缺失：口令拒存（绝不退化为明文），其余字段照常保存并回报告警
+      const tmpNE = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-cred-ne-'));
+      const storeNE = new CredentialStore(tmpNE);
+      const s6 = storeNE.save({ name: '无加密', username: 'u', password: 'topsecret' });
+      ok(s6.ok === true && s6.item.hasPassword === false && !!s6.warn, '凭据库：系统加密不可用时拒存口令并回报告警');
+      ok(fs.readFileSync(path.join(tmpNE, 'credentials.json'), 'utf8').indexOf('topsecret') < 0, '凭据库：加密不可用时绝不把口令退化成明文落盘');
+      ok(storeNE.resolve(s6.item.id).cred.password === '', '凭据库：无适配器时解密返回空串（不冒充有口令）');
+      rmTmp(tmpNE);
+
+      // 上限：超限报错（不静默丢弃已有条目）
+      const tmpMax = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-cred-max-'));
+      const storeMax = new CredentialStore(tmpMax, fakeCrypto('kx'));
+      let lastOk = true;
+      for (let i = 0; i < 51; i++) lastOk = storeMax.save({ name: 'cred-' + i, username: 'u' + i }).ok;
+      ok(lastOk === false, '凭据库：超过 50 条上限时报错拒绝');
+      eq(storeMax.list().items.length, 50, '凭据库：达上限后已有条目数量不变（不静默丢弃）');
+      rmTmp(tmpMax);
+
+      // 损坏文件：进入只读保护、如实报错、不覆盖原文件（凭据不可再生，留人工挽救余地）
+      fs.writeFileSync(credFile, '{ 这不是 JSON', 'utf8');
+      const l3 = store.list();
+      ok(l3.ok === false && l3.items.length === 0 && /损坏/.test(String(l3.error)), '凭据库：文件损坏时如实报错且不返回半截数据');
+      const s7 = store.save({ name: '新条目', username: 'x' });
+      ok(s7.ok === false, '凭据库：损坏态拒绝写入（只读保护）');
+      ok(store.remove(idA).ok === false, '凭据库：损坏态拒绝删除');
+      eq(fs.readFileSync(credFile, 'utf8'), '{ 这不是 JSON', '凭据库：损坏态不覆盖原文件内容');
+      fs.unlinkSync(credFile);
+      ok(store.list().ok === true && store.list().items.length === 0, '凭据库：文件被移除后恢复可用（空库）');
+
+      // 符号链接拒写（创建失败的环境跳过，不误判）
+      if (process.platform !== 'win32') {
+        try {
+          fs.symlinkSync('/tmp/nettopo-cred-evil.json', credFile);
+          const s8 = store.save({ name: '链路攻击', username: 'x' });
+          ok(s8.ok === false && store.list().ok === false, '凭据库：文件被替换为符号链接时拒绝写入并如实报错');
+          fs.unlinkSync(credFile);
+        } catch (e) { /* 无权限创建链接的环境跳过 */ }
+      }
+      rmTmp(tmpCS);
+    }
+
 })().then(() => {
   suiteFinished = true;
   console.log('');

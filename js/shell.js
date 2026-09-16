@@ -360,11 +360,17 @@ class ShellManager extends EventEmitter {
       }
       if (cmdInvalid) { resolve({ ok: false, outputs: [], fingerprint: null, error: '命令包含控制字符或超过 256 字符，已拒绝执行', errors: [] }); return; }
       if (!commands.length) { resolve({ ok: false, outputs: [], fingerprint: null, error: '未提供要执行的命令', errors: [] }); return; }
+      // 前置命令（凭据档案携带，如思科用户模式需先 enable、FRR 直连 vty 需先 enable 才能读配置）：
+      // 单条、同样禁控制字符（防换行注入拆分/伪造命令）
+      const preCmd = String(opts.preCmd == null ? '' : opts.preCmd).trim();
+      if (preCmd && (/[\u0000-\u001f\u007f]/.test(preCmd) || preCmd.length > 256)) {
+        resolve({ ok: false, outputs: [], fingerprint: null, error: '前置命令包含控制字符或超过 256 字符，已拒绝执行', errors: [] }); return;
+      }
       const clamp = (v, lo, hi, d) => { const n = parseInt(v, 10); return (n >= lo && n <= hi) ? n : d; };
       const waitMs = clamp(opts.waitMs, 200, 20000, 1200);
       const cmdTimeoutMs = clamp(opts.cmdTimeoutMs, 1000, 60000, 10000);
       const readyTimeoutMs = clamp(opts.readyTimeoutMs, 3000, 60000, 15000);
-      const overallMs = readyTimeoutMs + commands.length * (cmdTimeoutMs + waitMs) + 15000;
+      const overallMs = readyTimeoutMs + commands.length * (cmdTimeoutMs + waitMs) + (preCmd ? cmdTimeoutMs + waitMs : 0) + 15000;
 
       const r = this.connect({
         protocol, host, port,
@@ -507,6 +513,16 @@ class ShellManager extends EventEmitter {
         if (!ready) errors.push('未识别到命令提示符（会话可能未就绪），已按超时继续');
         // 首条命令前的输出（登录横幅/提示符回显）不属于命令输出：丢弃
         lineBuf = '';
+        // 前置命令：先于采集命令下发一次并等提示符，其输出不进任何命令窗口（与配置下发的 preCmd 语义一致）
+        if (preCmd) {
+          curCap = { lines: [], chars: 0 };
+          try { this.write(sid, preCmd + eol); } catch (e) { errors.push('前置命令写入失败：' + preCmd); }
+          await sleep(Math.min(waitMs, 800));
+          await waitCmdDone();
+          await sleep(150);
+          curCap = null;
+          lineBuf = '';
+        }
         for (const cmd of commands) {
           if (settled) break;
           curCap = { lines: [], chars: 0 };

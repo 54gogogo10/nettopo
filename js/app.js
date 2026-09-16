@@ -105,6 +105,7 @@ renderer.showLabels = state.showLabels;
 renderer.showSubnets = state.showSubnets;
 renderer.subnetNames = state.subnetNames;
 setupAutoBackup(); // 自动备份（若有配置）
+loadCreds();       // 预热统一凭据库清单（各采集/下发面板首帧即可列出档案；失败静默，面板回落手工输入）
 
 /* ================= 选中 ================= */
 function select(kind, id, opts) {
@@ -354,8 +355,7 @@ function openNeighborImport(prefillText, presetLocalId) {
         <div class="frow" style="margin:0"><label>协议</label><select id="nbProto"><option value="ssh">SSH</option><option value="telnet">Telnet</option></select></div>
         <div class="frow" style="margin:0"><label>地址</label><input id="nbHost" type="text" style="width:120px" spellcheck="false" autocomplete="off"/></div>
         <div class="frow" style="margin:0"><label>端口</label><input id="nbPort" type="number" style="width:60px" value="22"/></div>
-        <div class="frow" style="margin:0"><label>账号</label><input id="nbUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
-        <div class="frow" style="margin:0"><label>密码</label><input id="nbPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        ${credPickerHtml('nb', credCache || [])}
         <div class="frow" style="margin:0"><label>厂家</label>
           <select id="nbVendor"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="ruijie">锐捷</option></select>
         </div>
@@ -373,6 +373,8 @@ function openNeighborImport(prefillText, presetLocalId) {
   const close = () => ov.remove();
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const nbCred = bindCredPicker(ov, 'nb');
+  hydrateCredPickers(ov);
   let parsed = null;
   const prevEl = ov.querySelector('#nbPrev');
   const goBtn = ov.querySelector('#nbGo');
@@ -420,15 +422,17 @@ function openNeighborImport(prefillText, presetLocalId) {
     prevEl.innerHTML = '<div class="bk-empty">连接中…（首次连接自动信任主机指纹；命令执行约数秒）</div>';
     const vendor = ov.querySelector('#nbVendor').value;
     try {
-      const r = await window.topoShell.runOneShot({
-        protocol: ov.querySelector('#nbProto').value,
-        host, port: ov.querySelector('#nbPort').value,
-        username: ov.querySelector('#nbUser').value.trim() || 'admin',
-        password: ov.querySelector('#nbPass').value,
+      const cpNb = nbCred.patch();
+      const params = {
+        host,
         encoding: ov.querySelector('#nbGbk').checked ? 'gbk' : 'utf8',
-        commands: NB_COLLECT_CMDS[vendor] || NB_COLLECT_CMDS.auto,
-        expectFp: trustedFpOf(host, ov.querySelector('#nbPort').value)
-      });
+        commands: NB_COLLECT_CMDS[vendor] || NB_COLLECT_CMDS.auto
+      };
+      // 选了凭据库档案：协议/端口以档案为准（主进程解析后补齐）；手填路径仍用面板上的协议与端口
+      if (!cpNb.credId) { params.protocol = ov.querySelector('#nbProto').value; params.port = ov.querySelector('#nbPort').value; }
+      Object.assign(params, cpNb);
+      params.expectFp = trustedFpOf(host, params.port || ov.querySelector('#nbPort').value);
+      const r = await window.topoShell.runOneShot(params);
       if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || ov.querySelector('#nbPort').value, r.fingerprint.fp);
       const text = (r.outputs || []).map(o => o.text).filter(t => t && t.trim()).join('\n');
       if (text) ov.querySelector('#nbText').value = text;
@@ -469,6 +473,200 @@ function openNeighborImport(prefillText, presetLocalId) {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#nbText').focus(); }, 250);
 }
 
+/* ================= 统一凭据库（监控 ▾ 凭据库…） =================
+ * 设备访问凭据集中在一处维护，各采集/下发面板改为「优先选档案、必要时手填」。
+ * 机密语义：选中档案时只把 id（credId）交给主进程解析，口令明文不回渲染层；手填账号仍是渲染层内存态。
+ * credCache 只缓存清单元数据（hasPassword / hasKey 布尔，不含任何机密），增删改后 loadCreds(true) 刷新。 */
+let credCache = null;
+async function loadCreds(force) {
+  if (!(window.topoCred && window.topoCred.list)) return [];
+  if (credCache && !force) return credCache;
+  try {
+    const r = await window.topoCred.list();
+    credCache = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+  } catch (e) { credCache = []; }
+  return credCache;
+}
+const CRED_VENDORS = [['', '不限（不参与自动匹配）'], ['huawei', '华为 VRP'], ['h3c', 'H3C Comware'], ['cisco', '思科 IOS'], ['ruijie', '锐捷'], ['linux', 'Linux']];
+function credVendorLabel(k) { const f = CRED_VENDORS.find(v => v[0] === String(k || '')); return f ? f[1] : String(k || ''); }
+/** 下拉里的档案摘要：账号 / 协议端口 / 有无口令 / 有无前置命令——选之前就能确认是哪一条 */
+function credOptionLabel(e) {
+  const bits = [e.username || '无账号'];
+  if (e.protocol === 'telnet') bits.push('Telnet' + (e.port && e.port !== 23 ? ':' + e.port : ''));
+  if (!e.hasPassword) bits.push('无口令');
+  if (e.preCmd) bits.push('前置命令');
+  return e.name + '（' + bits.join(' · ') + '）';
+}
+/** 下拉选项（含「手工输入」空项）：面板自定义紧凑布局时复用 */
+function credOptionsHtml(list, selected) {
+  const items = Array.isArray(list) ? list : [];
+  const sel = items.some(e => e.id === selected) ? String(selected) : '';
+  return ['<option value="">手工输入</option>'].concat(items.map(e =>
+    `<option value="${U.escHtml(e.id)}"${e.id === sel ? ' selected' : ''}>${U.escHtml(credOptionLabel(e))}</option>`)).join('');
+}
+/** 凭据选择器 HTML：档案下拉 + 手填账号/口令（选中档案时手填行自动隐藏）。
+ *  pfx 为元素 id 前缀（如 mt → #mtCred/#mtUser/#mtPass），data-cred-manual 按前缀精确归属 */
+function credPickerHtml(pfx, list, opts) {
+  const o = opts || {};
+  const defU = o.userDefault == null ? 'admin' : o.userDefault;
+  return `<div class="frow" style="margin:0"><label>凭据库</label><select id="${pfx}Cred" style="max-width:210px" title="凭据库档案（监控 ▾ 凭据库… 维护）：只把档案标识交给主进程解析，口令不回界面">${credOptionsHtml(list, o.selected)}</select></div>`
+    + `<div class="frow" style="margin:0" data-cred-manual="${pfx}"><label>${U.escHtml(o.userLabel || '账号')}</label><input id="${pfx}User" type="text" style="width:${o.userWidth || 90}px" value="${U.escHtml(defU)}" spellcheck="false" autocomplete="off"/></div>`
+    + `<div class="frow" style="margin:0" data-cred-manual="${pfx}"><label>${U.escHtml(o.passLabel || '密码')}</label><input id="${pfx}Pass" type="password" style="width:${o.passWidth || 100}px" autocomplete="new-password"/></div>`;
+}
+/** 接线凭据选择器：返回 {patch(), any()}。
+ *  patch() 可直接展开进 runOneShot / deploy 参数：选了档案给 {credId}，否则给手填账号口令。 */
+function bindCredPicker(ov, pfx) {
+  const selEl = ov.querySelector('#' + pfx + 'Cred');
+  const userEl = ov.querySelector('#' + pfx + 'User');
+  const passEl = ov.querySelector('#' + pfx + 'Pass');
+  const manual = Array.prototype.slice.call(ov.querySelectorAll('[data-cred-manual="' + pfx + '"]'));
+  const sync = () => { const has = !!(selEl && selEl.value); for (const el of manual) el.style.display = has ? 'none' : ''; };
+  if (selEl) selEl.addEventListener('change', sync);
+  sync();
+  return {
+    patch() {
+      if (selEl && selEl.value) return { credId: selEl.value };
+      return { username: userEl ? userEl.value.trim() : '', password: passEl ? passEl.value : '' };
+    },
+    /** 是否配置了任何回退凭据（沿用既有「两项都空则跳过该设备」的语义） */
+    any() { return !!((selEl && selEl.value) || (userEl && userEl.value.trim()) || (passEl && passEl.value)); }
+  };
+}
+/** 凭据池选择器（拓扑自动发现要多组凭据按顺序试）：多选档案 + 手填行。
+ *  返回 {ids(), lines()}：ids 供逐条解析，lines 为手填的「账号 密码」行 */
+function credPoolHtml(pfx, list, opts) {
+  const o = opts || {};
+  const items = Array.isArray(list) ? list : [];
+  const selHtml = items.map(e => `<option value="${U.escHtml(e.id)}">${U.escHtml(credOptionLabel(e))}</option>`).join('');
+  return `<div class="m-sub" style="margin:0 0 2px">备用凭据池（<b>凭据库档案</b>可多选，按列表顺序尝试；下方手填行排在档案之后）</div>`
+    + `<select id="${pfx}Creds" multiple size="4" style="width:100%;font-size:12px" title="Ctrl / Shift 多选；顺序即尝试顺序（档案内部顺序）">${selHtml}</select>`
+    + `<textarea id="${pfx}Lines" spellcheck="false" style="width:100%;height:${o.linesHeight || 46}px;margin-top:4px;font-family:ui-monospace,Consolas,monospace;font-size:12px" placeholder="手工补一组：admin Admin@123"></textarea>`;
+}
+function bindCredPool(ov, pfx) {
+  const selEl = ov.querySelector('#' + pfx + 'Creds');
+  const linesEl = ov.querySelector('#' + pfx + 'Lines');
+  return {
+    ids() { return selEl ? Array.prototype.slice.call(selEl.selectedOptions).map(o => o.value).filter(Boolean) : []; },
+    lines() { return linesEl ? linesEl.value : ''; }
+  };
+}
+/** 面板打开后异步补全凭据下拉：首帧用缓存渲染，缓存冷（刚启动）时这里再填一次。
+ *  选择值由 bindCredPicker 在提交时刻读取，补全不会丢用户已选内容 */
+async function hydrateCredPickers(ov) {
+  const list = await loadCreds();
+  if (!list.length || !document.body.contains(ov)) return;
+  const optHtml = (e) => `<option value="${U.escHtml(e.id)}">${U.escHtml(credOptionLabel(e))}</option>`;
+  ov.querySelectorAll('select[id$="Creds"]').forEach(sel => {
+    if (sel.options.length) return;
+    const keep = Array.prototype.slice.call(sel.selectedOptions).map(o => o.value);
+    sel.innerHTML = list.map(optHtml).join('');
+    Array.prototype.slice.call(sel.options).forEach(o => { if (keep.indexOf(o.value) >= 0) o.selected = true; });
+  });
+  ov.querySelectorAll('select[id$="Cred"]').forEach(sel => {
+    if (sel.options.length > 1) return;
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">手工输入</option>' + list.map(optHtml).join('');
+    sel.value = keep;
+  });
+}
+/** 凭据库管理面板：清单 + 新增/编辑表单（口令只填不回显，留空即保持不变） */
+async function openCredManager() {
+  if (!(window.topoCred && window.topoCred.list)) { toast('凭据库需要桌面版（Electron）环境'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:900px;height:82vh;display:flex;flex-direction:column">
+      <h3>凭据库</h3>
+      <div class="m-sub">设备访问凭据集中维护：各面板（邻居表采集 / MAC·ARP 定位 / 批量巡检 / 三层邻居 / IPAM 实网核对 / 拓扑发现 / 配置变更下发）可直接选用这里的档案。口令经系统加密（Windows DPAPI）仅存本机、<b>不回显也不回传界面</b>；凭据库文件损坏时进入只读保护并如实报错，不会静默重建。</div>
+      <div id="cmBody" style="flex:1;overflow:auto;min-height:160px"></div>
+      <div class="m-actions">
+        <span id="cmHint" class="m-sub" style="margin:0;flex:1"></span>
+        <button type="button" class="tb" id="cmNew"><i class="ic" data-ic="shield"></i>新增凭据</button>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const bodyEl = ov.querySelector('#cmBody'), hintEl = ov.querySelector('#cmHint');
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+
+  const esc = (s) => U.escHtml(String(s == null ? '' : s));
+  const renderList = async () => {
+    const items = await loadCreds(true);
+    hintEl.textContent = window.topoCred ? ('共 ' + items.length + ' 条（上限 50）') : '';
+    if (!items.length) { bodyEl.innerHTML = '<div class="bk-empty">凭据库为空：点右下角「新增凭据」录入第一条（如「核心交换机 · netops」）。</div>'; return; }
+    const rows = items.map(e => `<tr>
+      <td>${e.isDefault ? '<b style="color:var(--accent)">默认</b> ' : ''}${esc(e.name)}</td>
+      <td>${esc(e.username || '—')}</td>
+      <td>${e.protocol === 'telnet' ? 'Telnet' : 'SSH'}:${e.port}</td>
+      <td>${e.vendor ? esc(credVendorLabel(e.vendor)) : '—'}</td>
+      <td>${e.preCmd ? esc(e.preCmd) : '—'}</td>
+      <td>${e.hasPassword ? '已存' : (e.hasKey ? '密钥' : '<span style="color:#f59e0b">未存</span>')}</td>
+      <td style="white-space:nowrap"><button type="button" class="tb" data-edit="${esc(e.id)}">编辑</button> <button type="button" class="tb" data-del="${esc(e.id)}">删除</button></td>
+    </tr>`).join('');
+    bodyEl.innerHTML = `<table class="nb-table"><tr><th>名称</th><th>账号</th><th>协议</th><th>厂家匹配</th><th>前置命令</th><th>口令</th><th>操作</th></tr>${rows}</table>
+      <div class="m-sub" style="margin-top:8px">厂家匹配：拓扑自动发现等「按厂家自动挑凭据」的流程会优先用与目标厂家一致的档案（同厂家多条时按清单顺序）；标为<b>默认</b>的档案兜底。不会把整库口令挨个去试——乱试会锁设备账号。</div>`;
+    bodyEl.querySelectorAll('[data-edit]').forEach(b => { b.onclick = () => renderForm(items.find(x => x.id === b.getAttribute('data-edit'))); });
+    bodyEl.querySelectorAll('[data-del]').forEach(b => { b.onclick = async () => {
+      const id = b.getAttribute('data-del');
+      const it = items.find(x => x.id === id);
+      if (!confirm('删除凭据「' + ((it && it.name) || id) + '」？使用该档案的面板会回落到手填账号。')) return;
+      const r = await window.topoCred.remove(id);
+      if (!r || !r.ok) { toast('删除失败：' + ((r && r.error) || '未知错误')); return; }
+      await loadCreds(true); renderList();
+    } });
+  };
+  const renderForm = (entry) => {
+    const e = entry || null;
+    const vOpts = CRED_VENDORS.map(v => `<option value="${v[0]}"${e && String(e.vendor || '') === v[0] ? ' selected' : ''}>${U.escHtml(v[1])}</option>`).join('');
+    bodyEl.innerHTML = `
+      <div class="frow"><label>名称 <span class="req">*</span></label><input id="cfName" type="text" maxlength="40" value="${esc(e && e.name)}" placeholder="如：核心交换机 · netops" spellcheck="false"/></div>
+      <div class="frow"><label>账号</label><input id="cfUser" type="text" maxlength="128" value="${esc(e && e.username)}" spellcheck="false" autocomplete="off"/></div>
+      <div class="frow"><label>口令${e ? '（留空 = 保持不变）' : ''}</label><input id="cfPass" type="password" autocomplete="new-password" placeholder="${e && e.hasPassword ? '已保存（不回显）：留空即不改动' : '输入口令'}"/></div>
+      <div class="frow" style="display:flex;gap:8px">
+        <div style="flex:1"><label>协议</label><select id="cfProto"><option value="ssh"${!e || e.protocol === 'ssh' ? ' selected' : ''}>SSH</option><option value="telnet"${e && e.protocol === 'telnet' ? ' selected' : ''}>Telnet</option></select></div>
+        <div style="flex:1"><label>端口（留空按协议默认 22 / 23）</label><input id="cfPort" type="number" min="1" max="65535" value="${e ? e.port : ''}"/></div>
+      </div>
+      <div class="frow"><label>厂家（供「按厂家自动匹配」使用）</label><select id="cfVendor">${vOpts}</select></div>
+      <div class="frow"><label>前置命令（可选，如思科用户模式需先 <code>enable</code>）</label><input id="cfPre" type="text" maxlength="256" value="${esc(e && e.preCmd)}" spellcheck="false" autocomplete="off"/></div>
+      <div class="frow"><label>私钥（可选，公钥认证用；留空${e ? ' = 保持不变' : ''}）</label><textarea id="cfKey" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></div>
+      <div class="frow"><label>私钥口令（可选${e ? '，留空 = 保持不变' : ''}）</label><input id="cfKeyPass" type="password" autocomplete="new-password"/></div>
+      <div class="frow"><label>备注</label><input id="cfNote" type="text" maxlength="200" value="${esc(e && e.note)}" spellcheck="false"/></div>
+      <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="cfDefault" type="checkbox"${e && e.isDefault ? ' checked' : ''}/> 设为默认凭据（厂家未匹配时的兜底）</label></div>`;
+    hintEl.innerHTML = '<button type="button" class="tb" id="cfCancel">返回清单</button> <button type="button" class="tb primary" id="cfSave">保存</button>';
+    ov.querySelector('#cfCancel').onclick = () => { renderList(); };
+    ov.querySelector('#cfSave').onclick = async () => {
+      const payload = {
+        name: ov.querySelector('#cfName').value,
+        username: ov.querySelector('#cfUser').value,
+        protocol: ov.querySelector('#cfProto').value,
+        port: ov.querySelector('#cfPort').value,
+        vendor: ov.querySelector('#cfVendor').value,
+        preCmd: ov.querySelector('#cfPre').value,
+        note: ov.querySelector('#cfNote').value,
+        isDefault: ov.querySelector('#cfDefault').checked
+      };
+      if (e) payload.id = e.id;
+      // 机密字段只在填了内容时提交：字段缺席 = 保持不变（口令不回显，空串提交会被当成「清空」）
+      const pv = ov.querySelector('#cfPass').value; if (pv) payload.password = pv;
+      const kv = ov.querySelector('#cfKey').value.trim(); if (kv) payload.privateKey = kv;
+      const kp = ov.querySelector('#cfKeyPass').value; if (kp) payload.keyPassphrase = kp;
+      const r = await window.topoCred.save(payload);
+      if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '未知错误')); return; }
+      await loadCreds(true);
+      toast(r.warn ? ('已保存，但' + r.warn) : ('已保存凭据「' + payload.name + '」'));
+      renderList();
+    };
+    const f = ov.querySelector('#cfName'); if (f) f.focus();
+  };
+  ov.querySelector('#cmNew').onclick = () => renderForm(null);
+  renderList();
+}
+
 /* ================= MAC/ARP 终端定位 =================
  * 输入 IP 或 MAC，并发 SSH/Telnet 采集范围内设备的 ARP / MAC 地址表（凭据取自各设备监控配置，
  * 无则用弹窗内的备用账号），U.traceMacHops 沿拓扑逐跳追踪到接入端口并高亮。 */
@@ -499,8 +697,7 @@ function openMacTrace(prefill) {
         <div class="frow" style="margin:0"><label>厂家</label>
           <select id="mtVendor"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="linux">Linux</option></select>
         </div>
-        <div class="frow" style="margin:0"><label>备用账号</label><input id="mtUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
-        <div class="frow" style="margin:0"><label>备用密码</label><input id="mtPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        ${credPickerHtml('mt', credCache || [])}
         <button type="button" class="tb primary" id="mtRun"><i class="ic" data-ic="search"></i>开始定位</button>
       </div>
       <div class="frow" style="display:flex;gap:8px;align-items:center">
@@ -532,29 +729,36 @@ function openMacTrace(prefill) {
   const resultEl = ov.querySelector('#mtResult');
   const hintEl = ov.querySelector('#mtHint');
   const runBtn = ov.querySelector('#mtRun');
+  const mtCred = bindCredPicker(ov, 'mt');
+  hydrateCredPickers(ov);
   const queryResults = {};   // nodeId → parseArpMacTables 结果（跨「继续查询」轮次累积）
   let lastUnqueried = [];    // 上一轮定位中「拓扑下游存在但未采集」的设备，供「继续查询下游」增量采集
   const nameOf = (id) => { const n = state.nodes.find(x => x.id === id); return n ? n.name : id; };
-  /** 采集一组设备（并发 2）：返回 {got, fails} */
-  const collectDevices = async (items, vendor, fbUser, fbPass) => {
+  /** 采集一组设备（并发 2）：返回 {got, fails}；fb 为凭据选择器（档案 → credId / 手填账号口令） */
+  const collectDevices = async (items, vendor, fb) => {
     const got = [], fails = [];
     const CONC = 2;
     for (let i = 0; i < items.length; i += CONC) {
       const batch = items.slice(i, i + CONC);
       await Promise.all(batch.map(async (c) => {
         const host = c.cred ? c.cred.host : (U.nodeMgmts(c.node)[0] || '');
-        if (!host || (!c.cred && !fbUser && !fbPass)) { fails.push(c.node.name + '（无凭据，跳过）'); return; }
+        if (!host || (!c.cred && !fb.any())) { fails.push(c.node.name + '（无凭据，跳过）'); return; }
         const proto = c.cred ? c.cred.protocol : 'ssh';
         try {
           hintEl.textContent = '采集中：' + c.node.name + '（' + host + '）…';
-          const r = await window.topoShell.runOneShot({
-            protocol: proto, host,
-            port: c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22),
-            username: c.cred ? c.cred.username : fbUser,
-            password: c.cred ? c.cred.password : fbPass,
-            commands: MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto,
-            expectFp: trustedFpOf(host, c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22))
-          });
+          const p = { host, commands: MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto };
+          if (c.cred) {
+            // 设备自身「设备监控」里的凭据优先（原有语义不变）
+            p.protocol = proto;
+            p.port = c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22);
+            p.username = c.cred.username;
+            p.password = c.cred.password;
+          } else {
+            // 回退到凭据选择器：选中档案时只给 credId，协议/端口由主进程按档案补齐
+            Object.assign(p, fb.patch());
+          }
+          p.expectFp = trustedFpOf(host, p.port || (proto === 'telnet' ? 23 : 22));
+          const r = await window.topoShell.runOneShot(p);
           if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port, r.fingerprint.fp);
           const text = (r.outputs || []).map(o => o.text).join('\n');
           const t = U.parseArpMacTables(text);
@@ -603,13 +807,11 @@ function openMacTrace(prefill) {
     const moreBtn = resultEl.querySelector('#mtMore');
     if (moreBtn) moreBtn.onclick = async () => {
       const vendor = ov.querySelector('#mtVendor').value;
-      const fbUser = ov.querySelector('#mtUser').value.trim();
-      const fbPass = ov.querySelector('#mtPass').value;
       const items = lastUnqueried.map(id => cands.find(c => c.node.id === id)).filter(Boolean);
       if (!items.length) { toast('没有可继续查询的下游设备'); return; }
       runBtn.disabled = true;
       resultEl.innerHTML = '<div class="bk-empty">继续采集下游设备…</div>';
-      await collectDevices(items, vendor, fbUser, fbPass);
+      await collectDevices(items, vendor, mtCred);
       runBtn.disabled = false;
       runTrace();
     };
@@ -618,14 +820,12 @@ function openMacTrace(prefill) {
   };
   runBtn.onclick = async () => {
     const vendor = ov.querySelector('#mtVendor').value;
-    const fbUser = ov.querySelector('#mtUser').value.trim();
-    const fbPass = ov.querySelector('#mtPass').value;
     const items = devsEl.querySelectorAll('input[type=checkbox]');
     const chosen = [...items].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
     if (!chosen.length) { toast('请勾选至少一台要查询的设备'); return; }
     runBtn.disabled = true;
     resultEl.innerHTML = '<div class="bk-empty">采集中…（并发 2 台，每台执行 ' + (MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto).length + ' 条只读命令）</div>';
-    const { got, fails } = await collectDevices(chosen, vendor, fbUser, fbPass);
+    const { got, fails } = await collectDevices(chosen, vendor, mtCred);
     hintEl.textContent = '采集完成：成功 ' + got.length + ' 台' + (fails.length ? '，失败 ' + fails.length + ' 台' : '');
     runTrace();
     runBtn.disabled = false;
@@ -654,8 +854,7 @@ function openBatchInspect() {
         <div class="frow" style="margin:0"><label>厂家命令集</label>
           <select id="biVendor">${biVendorOpts}</select>
         </div>
-        <div class="frow" style="margin:0"><label>备用账号</label><input id="biUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
-        <div class="frow" style="margin:0"><label>备用密码</label><input id="biPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        ${credPickerHtml('bi', credCache || [])}
         <button type="button" class="tb primary" id="biRun"><i class="ic" data-ic="search"></i>开始巡检</button>
         <span id="biHint" class="m-sub" style="margin:0;flex:1">巡检范围（默认勾选已保存凭据的设备）：</span>
         <label style="display:flex;align-items:center;gap:4px;margin:0"><input id="biAll" type="checkbox"/>全选</label>
@@ -688,6 +887,8 @@ function openBatchInspect() {
   const hintEl = ov.querySelector('#biHint');
   const runBtn = ov.querySelector('#biRun');
   const csvBtn = ov.querySelector('#biCsv');
+  const biCred = bindCredPicker(ov, 'bi');
+  hydrateCredPickers(ov);
   const results = [];   // {node, host, proto, ok, cmds:[{cmd, text}], error, ms}
   /** 查看单设备输出：按命令分节，可复制全文 */
   const viewOutput = (r) => {
@@ -740,8 +941,6 @@ function openBatchInspect() {
   };
   runBtn.onclick = async () => {
     const vendor = ov.querySelector('#biVendor').value;
-    const fbUser = ov.querySelector('#biUser').value.trim();
-    const fbPass = ov.querySelector('#biPass').value;
     const chosen = [...devsEl.querySelectorAll('input[type=checkbox]')].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
     if (!chosen.length) { toast('请勾选至少一台要巡检的设备'); return; }
     const cmds = U.INSPECT_PRESETS[vendor] || U.INSPECT_PRESETS.auto;
@@ -754,7 +953,7 @@ function openBatchInspect() {
     for (let i = 0; i < chosen.length; i += CONC) {
       await Promise.all(chosen.slice(i, i + CONC).map(async (c) => {
         const host = c.cred ? c.cred.host : (U.nodeMgmts(c.node)[0] || '');
-        if (!host || (!c.cred && !fbUser && !fbPass)) {
+        if (!host || (!c.cred && !biCred.any())) {
           results.push({ node: c.node, host, proto: c.cred ? c.cred.protocol : 'ssh', ok: false, cmds: [], error: '无凭据，已跳过', ms: 0 });
           renderResults();
           return;
@@ -763,14 +962,17 @@ function openBatchInspect() {
         const t0 = Date.now();
         hintEl.textContent = '巡检中：' + c.node.name + '（' + host + '）…';
         try {
-          const r = await window.topoShell.runOneShot({
-            protocol: proto, host,
-            port: c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22),
-            username: c.cred ? c.cred.username : fbUser,
-            password: c.cred ? c.cred.password : fbPass,
-            commands: cmds,
-            expectFp: trustedFpOf(host, c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22))
-          });
+          const p = { host, commands: cmds };
+          if (c.cred) {
+            p.protocol = proto;
+            p.port = c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22);
+            p.username = c.cred.username;
+            p.password = c.cred.password;
+          } else {
+            Object.assign(p, biCred.patch());
+          }
+          p.expectFp = trustedFpOf(host, p.port || (proto === 'telnet' ? 23 : 22));
+          const r = await window.topoShell.runOneShot(p);
           if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port, r.fingerprint.fp);
           const textOf = (o) => { const t = String((o && o.text) || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, ''); return t.trim(); };
           const got = (r.outputs || []).map(o => ({ cmd: o.cmd, text: textOf(o) })).filter(o => o.text);
@@ -837,8 +1039,7 @@ function openConfigDeploy(presetNodeId) {
         </div>
         <div class="frow" style="margin:0"><label>厂家口径</label><select id="cdVendor">${vOpts}</select></div>
         <div class="frow" style="margin:0"><label>前置命令</label><input id="cdPre" type="text" style="width:110px" spellcheck="false" autocomplete="off" placeholder="如 enable（可空）" title="连接后、读配置前先执行的一条命令：部分设备（如思科用户模式、直连 vty 的 FRR）需要先 enable 才能读配置与进配置模式。留空则不发。"/></div>
-        <div class="frow" style="margin:0"><label>账号</label><input id="cdUser" type="text" style="width:90px" spellcheck="false" autocomplete="off"/></div>
-        <div class="frow" style="margin:0"><label>密码</label><input id="cdPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        ${credPickerHtml('cd', credCache || [], { userDefault: '' })}
         <label style="display:flex;align-items:center;gap:4px;margin:0" title="把当前运行配置写入启动配置（华为 save / 思科 write memory）。多数平台会二次确认，工具会自动应答"><input id="cdSave" type="checkbox"/>下发后保存配置</label>
         <label style="display:flex;align-items:center;gap:4px;margin:0" title="下发完成后再次抓取运行配置作为结果记录（便于与变更前对比）"><input id="cdVerify" type="checkbox" checked/>回采校验</label>
       </div>
@@ -872,6 +1073,8 @@ function openConfigDeploy(presetNodeId) {
 
   const devEl = ov.querySelector('#cdDev'), vEl = ov.querySelector('#cdVendor');
   const userEl = ov.querySelector('#cdUser'), passEl = ov.querySelector('#cdPass');
+  const cdCred = bindCredPicker(ov, 'cd');
+  hydrateCredPickers(ov);
   const saveEl = ov.querySelector('#cdSave'), verifyEl = ov.querySelector('#cdVerify');
   const planEl = ov.querySelector('#cdPlan'), prevEl = ov.querySelector('#cdPrev');
   const baseEl = ov.querySelector('#cdBase'), skipEl = ov.querySelector('#cdSkip');
@@ -1045,15 +1248,17 @@ function openConfigDeploy(presetNodeId) {
     if (!gate.ok) { toast('已拦截：' + gate.error); return; }
     const port = c.port;
     const proto = c.protocol;
+    // 账号来源：手填 / 设备监控配置（预填在上方字段里）优先；字段为空时才回落到凭据库档案
+    const cdPatch = (!userEl.value.trim() && !passEl.value && cdCred.any()) ? cdCred.patch() : {};
     const user = userEl.value.trim() || (c.cred ? c.cred.username : '');
     const pass = passEl.value || (c.cred ? c.cred.password : '');
-    if (!user) { toast('请填写账号'); return; }
+    if (!user && !cdPatch.credId) { toast('请填写账号，或在「凭据库」里选一条档案'); return; }
     runBtn.disabled = true; csvBtn.disabled = true; rollBtn.disabled = true;
     lastResult = null;
     prevEl.innerHTML = '<div class="bk-empty">下发中：' + U.escHtml(c.node.name) + '（' + U.escHtml(c.host) + '）——先强制备份当前运行配置，再逐行下发 ' + parsed.lines.length + ' 行…</div>';
     let r;
     try {
-      r = await window.topoDeploy.run({
+      r = await window.topoDeploy.run(Object.assign({
         device: String(c.node.name || c.node.id), deviceId: c.node.id, host: c.host, port, protocol: proto,
         username: user, password: pass,
         privateKey: c.cred && c.cred.authMode === 'key' ? c.cred.privateKey : '',
@@ -1066,7 +1271,7 @@ function openConfigDeploy(presetNodeId) {
         kind: 'change',
         doSave: saveEl.checked, verify: verifyEl.checked,
         expectFp: trustedFpOf(c.host, port)
-      });
+      }, cdPatch));
     } catch (e) {
       r = { ok: false, error: String((e && e.message) || e), applied: [], appliedCount: 0, remaining: parsed.lines.length, backup: {}, saved: {}, post: {} };
     }
@@ -1318,8 +1523,7 @@ function openTopoDiscovery() {
           <textarea id="dcManual" spellcheck="false" style="width:100%;height:92px;font-family:ui-monospace,Consolas,monospace;font-size:12px" placeholder="10.0.0.1 CORE&#10;10.0.0.2"></textarea>
         </div>
         <div style="flex:1;min-width:0">
-          <div class="m-sub" style="margin:0 0 2px">备用凭据池（每行一组：<code>账号 密码</code>，按顺序尝试；监控配置里的凭据优先）</div>
-          <textarea id="dcCred" spellcheck="false" style="width:100%;height:92px;font-family:ui-monospace,Consolas,monospace;font-size:12px" placeholder="admin Admin@123&#10;netops Passw0rd"></textarea>
+          ${credPoolHtml('dc', credCache || [], { linesHeight: 44 })}
         </div>
       </div>
       <div id="dcProg" class="m-sub" style="margin:6px 0 2px;min-height:18px">待开始。</div>
@@ -1341,7 +1545,9 @@ function openTopoDiscovery() {
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
 
-  const seedsEl = ov.querySelector('#dcSeeds'), manualEl = ov.querySelector('#dcManual'), credEl = ov.querySelector('#dcCred');
+  const seedsEl = ov.querySelector('#dcSeeds'), manualEl = ov.querySelector('#dcManual');
+  const dcPool = bindCredPool(ov, 'dc');
+  hydrateCredPickers(ov);
   const vEl = ov.querySelector('#dcVendor'), depthEl = ov.querySelector('#dcDepth'), concEl = ov.querySelector('#dcConc');
   const verEl = ov.querySelector('#dcVer'), dryEl = ov.querySelector('#dcDry');
   const progEl = ov.querySelector('#dcProg'), resEl = ov.querySelector('#dcRes'), hintEl = ov.querySelector('#dcHint');
@@ -1350,14 +1556,17 @@ function openTopoDiscovery() {
     ? seedCands.map((c, i) => `<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" data-idx="${i}"${c.cred ? ' checked' : ''}/> ${U.escHtml(c.node.name)}<span style="opacity:.6">（${U.escHtml(c.host)}${c.cred ? ' · 有凭据' : ''}）</span></label>`).join('')
     : '<span class="bk-empty">拓扑中没有带管理地址的设备：可直接在右侧手工填写种子地址。</span>';
   let disco = null, running = false, stopFlag = false, merged = false;
+  // 本次发现使用的凭据库档案顺序（开始发现时定：指定档案 + 按厂家命令集自动匹配的档案）
+  let libCredIds = [];
 
-  /** 该设备的候选凭据：监控配置优先，其次备用凭据池（按顺序） */
+  /** 该设备的候选凭据：监控配置优先，其次凭据库档案（只传 credId，主进程解析），最后手填池（按顺序） */
   const credsFor = (host, name) => {
     const node = state.nodes.find(n => String(n.name) === String(name));
     const mc = node ? monitorCredOf(node.id) : null;
     const out = [];
     if (mc && mc.host === host && (mc.username || mc.password)) out.push({ username: mc.username, password: mc.password, protocol: mc.protocol, port: mc.port, privateKey: mc.authMode === 'key' ? mc.privateKey : '', keyPassphrase: mc.keyPass });
-    for (const c of parseCredPool(credEl.value)) out.push({ username: c.username, password: c.password });
+    for (const id of libCredIds) out.push({ credId: id });
+    for (const c of parseCredPool(dcPool.lines())) out.push({ username: c.username, password: c.password });
     if (!out.length) out.push({ username: 'admin', password: '' });
     return out;
   };
@@ -1411,6 +1620,15 @@ function openTopoDiscovery() {
     const vcmd = DISCO_VERSION_CMD[vendor] || DISCO_VERSION_CMD.auto;
     // 一次会话内：关分页 + 邻居命令若干 + （可选）版本命令；runOneShot 上限 16 条
     const allCmds = withVer ? cmds.concat([vcmd]).slice(0, 16) : cmds;
+    // 凭据顺序：显式勾选的档案优先；若厂家命令集不是「自动尝试」，再按该厂家自动匹配档案补齐（默认项兜底）
+    const selIds = dcPool.ids();
+    libCredIds = selIds.slice();
+    if (vendor && vendor !== 'auto' && window.topoCred && window.topoCred.pick) {
+      try {
+        const pr = await window.topoCred.pick({ ids: selIds, vendor: vendor });
+        if (pr && pr.ok && Array.isArray(pr.ids) && pr.ids.length) libCredIds = pr.ids;
+      } catch (e) { /* 自动匹配失败就用手工勾选的 */ }
+    }
     disco = U.createDiscovery({ maxDepth: parseInt(depthEl.value, 10), maxDevices: 60 });
     for (const s of seeds) disco.addSeed(s);
     running = true; stopFlag = false; merged = false;
@@ -1430,13 +1648,16 @@ function openTopoDiscovery() {
           const proto = c.protocol || 'ssh';
           const port = c.port ? String(c.port) : (proto === 'telnet' ? '23' : '22');
           try {
-            const r = await window.topoShell.runOneShot({
-              protocol: proto, host: t.host, port,
-              username: c.username || 'admin', password: c.password || '',
-              privateKey: c.privateKey || '', keyPassphrase: c.keyPassphrase || '',
-              commands: allCmds, waitMs: 800, cmdTimeoutMs: 8000,
-              expectFp: trustedFpOf(t.host, port)
-            });
+            const p = { host: t.host, commands: allCmds, waitMs: 800, cmdTimeoutMs: 8000 };
+            if (c.credId) {
+              p.credId = c.credId;   // 凭据库档案：账号/口令/协议/端口/前置命令由主进程补齐
+            } else {
+              p.protocol = proto; p.port = port;
+              p.username = c.username || 'admin'; p.password = c.password || '';
+              p.privateKey = c.privateKey || ''; p.keyPassphrase = c.keyPassphrase || '';
+            }
+            p.expectFp = trustedFpOf(t.host, p.port || port);
+            const r = await window.topoShell.runOneShot(p);
             if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || t.host, r.fingerprint.port || port, r.fingerprint.fp);
             // 逐条命令解析邻居表：取命中邻居最多的一条（auto 命令集会同时下发多家命令）
             let best = null;
@@ -1535,8 +1756,7 @@ function openProtoNeighbors() {
         <div class="frow" style="margin:0"><label>厂家命令集</label>
           <select id="pnVendor"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="ruijie">锐捷</option></select>
         </div>
-        <div class="frow" style="margin:0"><label>备用账号</label><input id="pnUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
-        <div class="frow" style="margin:0"><label>备用密码</label><input id="pnPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        ${credPickerHtml('pn', credCache || [])}
         <label style="display:flex;align-items:center;gap:4px;margin:0"><input id="pnAll" type="checkbox" checked/>全选设备</label>
         <span id="pnHint" class="m-sub" style="margin:0;flex:1">采集范围：</span>
       </div>
@@ -1563,7 +1783,9 @@ function openProtoNeighbors() {
   ov.querySelector('[data-act=close]').onclick = close;
 
   const devsEl = ov.querySelector('#pnDevs'), protoEl = ov.querySelector('#pnProto'), vEl = ov.querySelector('#pnVendor');
-  const userEl = ov.querySelector('#pnUser'), passEl = ov.querySelector('#pnPass'), allEl = ov.querySelector('#pnAll');
+  const allEl = ov.querySelector('#pnAll');
+  const pnCred = bindCredPicker(ov, 'pn');
+  hydrateCredPickers(ov);
   const progEl = ov.querySelector('#pnProg'), resEl = ov.querySelector('#pnRes'), filterEl = ov.querySelector('#pnFilter');
   const goBtn = ov.querySelector('#pnGo'), stopBtn = ov.querySelector('#pnStop'), csvBtn = ov.querySelector('#pnCsv');
   const viewBtn = ov.querySelector('#pnView'), clearViewBtn = ov.querySelector('#pnClearView'), recBtn = ov.querySelector('#pnRecord');
@@ -1619,7 +1841,7 @@ function openProtoNeighbors() {
     // 一条会话内跑完所选协议的命令（去重关分页命令；runOneShot 上限 16 条）
     const cmds = [];
     for (const p of protos) for (const c of (U.PROTO_PRESETS[p][vendor] || U.PROTO_PRESETS[p].auto)) if (cmds.indexOf(c) < 0) cmds.push(c);
-    const fbUser = userEl.value.trim(), fbPass = passEl.value;
+    const fbPatch = pnCred.any() ? pnCred.patch() : null;
     running = true; stopFlag = false;
     goBtn.disabled = true; stopBtn.disabled = false; csvBtn.disabled = true; viewBtn.disabled = true; clearViewBtn.disabled = true; recBtn.disabled = true;
     proto = null;
@@ -1635,16 +1857,20 @@ function openProtoNeighbors() {
         if (!host) return;
         const proto2 = c.cred ? c.cred.protocol : c.protocol;
         const port = c.cred && c.cred.port ? c.cred.port : (proto2 === 'telnet' ? 23 : 22);
-        const user = c.cred ? c.cred.username : fbUser;
-        const pass = c.cred ? c.cred.password : fbPass;
         try {
-          const r = await window.topoShell.runOneShot({
-            protocol: proto2, host, port, username: user, password: pass,
-            privateKey: c.cred && c.cred.authMode === 'key' ? c.cred.privateKey : '',
-            keyPassphrase: c.cred ? c.cred.keyPass : '',
-            commands: cmds.slice(0, 16), waitMs: 800, cmdTimeoutMs: 8000,
-            expectFp: trustedFpOf(host, port)
-          });
+          const p = {
+            host, commands: cmds.slice(0, 16), waitMs: 800, cmdTimeoutMs: 8000
+          };
+          if (c.cred) {
+            p.protocol = proto2; p.port = port;
+            p.username = c.cred.username; p.password = c.cred.password;
+            p.privateKey = c.cred.authMode === 'key' ? c.cred.privateKey : '';
+            p.keyPassphrase = c.cred.keyPass || '';
+          } else if (fbPatch) {
+            Object.assign(p, fbPatch);
+          } else return;
+          p.expectFp = trustedFpOf(host, p.port || port);
+          const r = await window.topoShell.runOneShot(p);
           if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || port, r.fingerprint.fp);
           for (const p of protos) {
             let best = null;
@@ -1820,13 +2046,14 @@ function openIpamAudit(data) {
           </div>
         </div>
         <div style="flex:0.9;min-width:0">
-          <div class="m-sub" style="margin:0 0 2px">设备采集凭据（优先取各设备监控配置）</div>
-          <div style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;height:104px;box-sizing:border-box;font-size:12.5px;display:flex;flex-direction:column;gap:4px;overflow:auto">
+          <div class="m-sub" style="margin:0 0 2px">设备采集凭据（优先取各设备监控配置，其次下方凭据库档案 / 手填账号）</div>
+          <div style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;height:128px;box-sizing:border-box;font-size:12.5px;display:flex;flex-direction:column;gap:4px;overflow:auto">
             <div style="display:flex;gap:6px;align-items:center"><label style="width:44px">厂家</label>
               <select id="iaVendor" style="flex:1"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="linux">Linux</option></select>
             </div>
-            <div style="display:flex;gap:6px;align-items:center"><label style="width:44px">账号</label><input id="iaUser" type="text" style="flex:1" value="admin" spellcheck="false" autocomplete="off"/></div>
-            <div style="display:flex;gap:6px;align-items:center"><label style="width:44px">密码</label><input id="iaPass" type="password" style="flex:1" autocomplete="new-password"/></div>
+            <div style="display:flex;gap:6px;align-items:center"><label style="width:44px">凭据库</label><select id="iaCred" style="flex:1">${credOptionsHtml(credCache || [])}</select></div>
+            <div style="display:flex;gap:6px;align-items:center" data-cred-manual="ia"><label style="width:44px">账号</label><input id="iaUser" type="text" style="flex:1" value="admin" spellcheck="false" autocomplete="off"/></div>
+            <div style="display:flex;gap:6px;align-items:center" data-cred-manual="ia"><label style="width:44px">密码</label><input id="iaPass" type="password" style="flex:1" autocomplete="new-password"/></div>
           </div>
         </div>
       </div>
@@ -1851,6 +2078,8 @@ function openIpamAudit(data) {
   const subsEl = ov.querySelector('#iaSubnets'), pickEl = ov.querySelector('#iaPick');
   const scanEl = ov.querySelector('#iaScan'), macEl = ov.querySelector('#iaMac'), ptrEl = ov.querySelector('#iaPtr'), devEl = ov.querySelector('#iaDev');
   const vEl = ov.querySelector('#iaVendor'), userEl = ov.querySelector('#iaUser'), passEl = ov.querySelector('#iaPass');
+  const iaCred = bindCredPicker(ov, 'ia');
+  hydrateCredPickers(ov);
   const progEl = ov.querySelector('#iaProg'), resEl = ov.querySelector('#iaRes'), filterEl = ov.querySelector('#iaFilter');
   const goBtn = ov.querySelector('#iaGo'), stopBtn = ov.querySelector('#iaStop'), csvBtn = ov.querySelector('#iaCsv');
   subsEl.innerHTML = subnets.map((s, i) => `<label style="display:block"><input type="checkbox" data-idx="${i}" checked/> <code>${U.escHtml(s.network)}/${s.bits}</code> · 已用 ${s.used}/${s.usable} · ${s.deviceCount} 台</label>`).join('');
@@ -1931,7 +2160,7 @@ function openIpamAudit(data) {
       // ② 设备侧 ARP / MAC 表采集（只读；ARP 给 IP→MAC，MAC 表给 MAC→端口）
       if (doDev && !stopFlag) {
         const cmds = MAC_TRACE_CMDS[vEl.value] || MAC_TRACE_CMDS.auto;
-        const fbUser = userEl.value.trim(), fbPass = passEl.value;
+        const fbPatch = iaCred.any() ? iaCred.patch() : null;
         let done = 0;
         const collected = [];
         const CONC = 2;
@@ -1942,17 +2171,19 @@ function openIpamAudit(data) {
             if (!host) return;
             const proto = c.cred ? c.cred.protocol : c.protocol;
             const port = c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22);
-            const user = c.cred ? c.cred.username : fbUser;
-            const pass = c.cred ? c.cred.password : fbPass;
-            if (!user && !pass) return;
+            if (!c.cred && !fbPatch) return;
             try {
-              const r = await window.topoShell.runOneShot({
-                protocol: proto, host, port, username: user, password: pass,
-                privateKey: c.cred && c.cred.authMode === 'key' ? c.cred.privateKey : '',
-                keyPassphrase: c.cred ? c.cred.keyPass : '',
-                commands: cmds, waitMs: 800, cmdTimeoutMs: 8000,
-                expectFp: trustedFpOf(host, port)
-              });
+              const p = { host, commands: cmds, waitMs: 800, cmdTimeoutMs: 8000 };
+              if (c.cred) {
+                p.protocol = proto; p.port = port;
+                p.username = c.cred.username; p.password = c.cred.password;
+                p.privateKey = c.cred.authMode === 'key' ? c.cred.privateKey : '';
+                p.keyPassphrase = c.cred.keyPass || '';
+              } else {
+                Object.assign(p, fbPatch);
+              }
+              p.expectFp = trustedFpOf(host, p.port || port);
+              const r = await window.topoShell.runOneShot(p);
               if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || port, r.fingerprint.fp);
               const arp = [], mac = [];
               for (const o of (r.outputs || [])) {
@@ -6541,6 +6772,7 @@ function wire() {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds && renderer.selIds.size ? [...renderer.selIds][0] : '');
       if (selId) openMonitorConfig(selId); else toast('请先选中一台设备，或右键设备进入');
     } },
+    { ic: 'shield', label: '凭据库（设备访问凭据集中维护）…', act: () => openCredManager() },
     { sep: true },
     { ic: 'doc', label: '监控日志…', act: () => {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
@@ -10883,6 +11115,10 @@ if (typeof globalThis !== 'undefined') {
     openConfigBackups,
     openConfigDeploy,
     openDeployHistory,
+    openCredManager,
+    openMacTrace,
+    openBatchInspect,
+    loadCreds,
     openTopoDiscovery,
     openIpam,
     openProtoNeighbors,
