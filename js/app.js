@@ -8408,6 +8408,73 @@ function openMonitorConfig(id) {
   setTimeout(() => { if (document.body.contains(ov)) { const f = listEl.querySelector('.mh-host'); if (f) f.focus(); } }, 250);
 }
 
+/* ================= 团队基线包（合规规则集 + 自定义模板 的导入导出） =================
+ * 规则集与模板此前只活在本机：三个人的网络组各配一套基线，改一条要挨个通知，最后没人维护。
+ * 基线包是一个 JSON 文件（含格式版本号），导出即发同事；导入前逐项白名单清洗：
+ * 正则逐条编译（写坏的那条丢弃并计数），配置模板键走原型污染白名单。 */
+function openTeamPackImport() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:760px;height:76vh;display:flex;flex-direction:column">
+      <h3>导入团队基线包</h3>
+      <div class="m-sub">粘贴同事发来的基线包 JSON（「配置合规检查 ▾ 导出基线包…」生成）。导入前会逐项清洗：<b>写坏的正则会被丢弃并如实计数</b>，配置模板键走安全白名单，不会污染本机数据。</div>
+      <div class="frow" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <label>基线包 JSON</label>
+        <textarea id="tpText" spellcheck="false" style="flex:1;min-height:140px;font-family:ui-monospace,Consolas,monospace;font-size:12px" placeholder='{"format":"nettopo-team-pack","formatVersion":1,…}'></textarea>
+      </div>
+      <div class="frow" style="display:flex;gap:14px;align-items:center;margin:6px 0">
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input type="radio" name="tpMode" value="merge" checked/> 合并（同名覆盖，其余保留）</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input type="radio" name="tpMode" value="replace"/> 整体替换本机规则集与模板</label>
+      </div>
+      <div id="tpPrev" class="m-sub" style="min-height:38px;margin:2px 0"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="tpCheck">解析预览</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="close">关闭</button>
+        <button type="button" class="tb primary" id="tpApply" disabled>导入</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const ta = ov.querySelector('#tpText'), prevEl = ov.querySelector('#tpPrev'), applyBtn = ov.querySelector('#tpApply');
+  let parsed = null;
+  const doParse = () => {
+    const r = U.parseTeamPack(ta.value);
+    parsed = r.ok ? r : null;
+    applyBtn.disabled = !r.ok;
+    if (!r.ok) { prevEl.innerHTML = '<span style="color:var(--danger)">' + U.escHtml(r.error) + '</span>'; return; }
+    const st = r.stats, pk = r.pack;
+    const drops = [];
+    if (st.rulesDropped) drops.push('规则丢弃 ' + st.rulesDropped);
+    if (st.templatesDropped) drops.push('模板丢弃 ' + st.templatesDropped);
+    if (st.cfgTemplatesDropped) drops.push('配置模板丢弃 ' + st.cfgTemplatesDropped);
+    prevEl.innerHTML = '格式版本 v' + pk.formatVersion + (pk.appVersion ? '（导出自 ' + U.escHtml(pk.appVersion) + '）' : '') + '：合规规则 <b>' + st.rules + '</b> 条'
+      + '、自定义合规模板 <b>' + st.templates + '</b> 套' + (pk.compliance.templates.length ? '（' + U.escHtml(pk.compliance.templates.map(t => t.name).join('、')) + '）' : '')
+      + '、自定义配置模板 <b>' + st.cfgTemplates + '</b> 个'
+      + (drops.length ? '<br><span style="color:#f59e0b">清洗丢弃：' + U.escHtml(drops.join('，')) + '（格式不合法或正则无法编译）</span>' : '');
+  };
+  ov.querySelector('#tpCheck').onclick = doParse;
+  ta.addEventListener('paste', () => setTimeout(doParse, 0));
+  applyBtn.onclick = () => {
+    if (!parsed) return;
+    const mode = (ov.querySelector('input[name=tpMode]:checked') || {}).value || 'merge';
+    if (mode === 'replace' && !confirm('整体替换会清空本机现有的合规规则与自定义模板（建议先「导出基线包」备份）。继续？')) return;
+    const r = U.applyTeamPack(parsed.pack, mode);
+    if (!r || !r.ok) { toast('导入失败：' + ((r && r.error) || '未知错误')); return; }
+    toast('已导入：规则 ' + r.applied.rules + ' 条、合规模板 ' + r.applied.templates + ' 套、配置模板 ' + r.applied.cfgTemplates + ' 个（'
+      + (r.mode === 'replace' ? '整体替换' : '合并') + '）');
+    close();
+    try { openComplianceCheck(); } catch (e) { /* 打开失败不影响导入结果 */ }
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ta.focus(); }, 200);
+}
+
 /* ================= 配置合规基线检查（本地规则扫描备份库） ================= */
 function openComplianceCheck() {
   if (!window.topoConfigBackup) { toast('配置合规检查需要桌面版（Electron）环境'); return; }
@@ -8425,6 +8492,9 @@ function openComplianceCheck() {
         <button type="button" class="tb" data-act="tplload" title="把选中模板加载到下方规则编辑器（并设为当前规则集）">加载</button>
         <button type="button" class="tb" data-act="tplsave" title="把下方当前规则保存为一套自定义模板（可保存多套，同名覆盖）">另存为模板…</button>
         <button type="button" class="tb" data-act="tpldel" title="删除选中的自定义模板（内置模板不可删）">删除模板</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="packexport" title="把当前规则集 + 自定义合规模板 + 自定义配置模板打包成 JSON 基线包，发给同事导入即可对齐">导出基线包…</button>
+        <button type="button" class="tb" data-act="packimport" title="导入同事发来的基线包 JSON（导入前逐项清洗：坏正则丢弃并计数）">导入基线包…</button>
       </div>
       <div class="comp-rules" id="compRules"></div>
       <div class="m-actions" style="justify-content:flex-start;margin:8px 0">
@@ -8516,6 +8586,13 @@ function openComplianceCheck() {
     renderRules();
     toast('已加载模板「' + label + '」（' + U.complianceRules.length + ' 条规则），点「保存规则并扫描备份库」开始检查');
   };
+  // 团队基线包：导出当前规则集 + 自定义模板；导入见 openTeamPackImport
+  ov.querySelector('[data-act=packexport]').onclick = () => {
+    const pack = U.buildTeamPack({ rules: collectRules() });   // 用编辑器里的当前规则（含未保存的改动）
+    U.download('NetTopo基线包_' + U.fmtDate() + '.json', new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' }));
+    toast('已导出基线包：规则 ' + pack.compliance.rules.length + ' 条、合规模板 ' + pack.compliance.templates.length + ' 套、配置模板 ' + Object.keys(pack.cfgTemplates).length + ' 个');
+  };
+  ov.querySelector('[data-act=packimport]').onclick = () => openTeamPackImport();
   ov.querySelector('[data-act=tplsave]').onclick = () => {
     const cur = collectRules();
     if (!cur.length) { toast('当前规则为空，无法保存为模板'); return; }
@@ -11231,6 +11308,7 @@ if (typeof globalThis !== 'undefined') {
     openConfigDeploy,
     openDeployHistory,
     openCredManager,
+    openTeamPackImport,
     alertTopology: () => alertTopologySnapshot(),
     openMacTrace,
     openBatchInspect,

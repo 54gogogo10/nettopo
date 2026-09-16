@@ -7,12 +7,12 @@ UI 文案、代码注释、commit 信息均为中文，请保持一致。
 ## 常用命令
 ```bash
 npm start                          # 开发运行（Electron）
-node test/run-tests.js             # 单元测试（纯 Node，当前 1941 项；改动后必跑且须全绿）
+node test/run-tests.js             # 单元测试（纯 Node，当前 1977 项；改动后必跑且须全绿）
 cd test && npm i && node e2e.js    # 无头 Chrome e2e 集成测试（需本机 Chrome）
 node test/gen-e2e.js               # 从 index.html 再生 e2e 挂具（index.html 结构变化后重跑，再跑 e2e.js 验证）
 NETTOPO_LAB_HOST=<实验机IP> node test/live.js   # 真机集成测试：自动在实验机部署多台 FRR 设备后跑全链路（未设变量则打印说明并跳过）
 NETTOPO_LAB_HOST=<实验机IP> node test/gui-live.js  # 真机 GUI 集成测试：同一实验环境上驱动 Electron 界面（未设变量则跳过）
-node test/smoke-shell.js           # Electron 冒烟（需桌面环境）：另有 smoke-backup / smoke-center / smoke-monitor / smoke-cred（统一凭据库）/ smoke-alertdeps（告警依赖抑制）/ smoke-backupignore（配置变更忽略规则）
+node test/smoke-shell.js           # Electron 冒烟（需桌面环境）：另有 smoke-backup / smoke-center / smoke-monitor / smoke-cred（统一凭据库）/ smoke-alertdeps（告警依赖抑制）/ smoke-backupignore（配置变更忽略规则）/ smoke-teampack（团队基线包）
 npm run build                      # bump-version.js 自动升版本 + electron-builder 便携版打包（dist/portable）
 node bump-version.js --dry-run     # 预览版本变更不写入
 ```

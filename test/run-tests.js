@@ -7735,6 +7735,109 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       rmTmp(tmpIG);
     }
 
+    // 团队基线包：合规规则集 / 自定义合规模板 / 自定义配置模板 的导出、清洗与导入（新功能）
+    console.log('== 回归：团队基线包导入导出（新功能） ==');
+    {
+      const store = {};   // 本用例专用 localStorage：验证导入导出的落盘与合并语义
+      const origGet = sandbox.localStorage.getItem, origSet = sandbox.localStorage.setItem;
+      sandbox.localStorage.getItem = (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null);
+      sandbox.localStorage.setItem = (k, v) => { store[k] = String(v); };
+      try {
+        U.loadComplianceRules();
+        U.loadComplianceTemplates();
+        U.loadCustomCfgTemplates();
+        const baseRules = U.complianceRules.length;
+        ok(baseRules >= 5, '前置：默认规则集已加载（' + baseRules + ' 条）');
+        U.customCfgTemplates = { mytpl: { label: '我的模板', comment: '#', body: 'hostname {name}' } };
+        U.saveCustomCfgTemplates();
+        U.saveComplianceTemplate('团队基线', U.complianceRules.slice(0, 3));
+        U.loadComplianceTemplates();
+
+        const pack = U.buildTeamPack();
+        ok(pack.format === U.TEAM_PACK_FORMAT && pack.formatVersion === 1, '打包：含 format 与 formatVersion（' + pack.format + ' v' + pack.formatVersion + '）');
+        ok(pack.compliance.rules.length === baseRules, '打包：携带当前规则集（' + pack.compliance.rules.length + ' 条）');
+        ok(pack.compliance.templates.length === 1 && pack.compliance.templates[0].name === '团队基线', '打包：携带自定义合规模板');
+        ok(Object.keys(pack.cfgTemplates).join(',') === 'mytpl', '打包：携带自定义配置模板（' + Object.keys(pack.cfgTemplates).join(',') + '）');
+        ok(typeof pack.exportedAt === 'string' && pack.exportedAt.indexOf('T') > 0, '打包：带导出时间戳');
+
+        const rt = U.parseTeamPack(JSON.stringify(pack));
+        ok(rt.ok === true, '往返：解析成功');
+        ok(rt.stats.rules === baseRules && rt.stats.rulesDropped === 0, '往返：规则数一致且无丢弃');
+        ok(rt.stats.templates === 1 && rt.stats.cfgTemplates === 1, '往返：模板与配置模板数一致');
+        ok(rt.pack.appVersion === (U.APP_VERSION || ''), '往返：保留导出来源版本号（' + rt.pack.appVersion + '）');
+
+        ok(U.parseTeamPack('').ok === false, '拒绝：空内容');
+        ok(U.parseTeamPack('   ').ok === false, '拒绝：纯空白');
+        ok(U.parseTeamPack('{bad json').ok === false && /JSON 解析失败/.test(U.parseTeamPack('{bad json').error), '拒绝：JSON 解析失败并说明原因');
+        ok(U.parseTeamPack('[1,2,3]').ok === false, '拒绝：顶层为数组');
+        ok(/不是 NetTopo 基线包/.test(U.parseTeamPack('{"format":"other","formatVersion":1}').error), '拒绝：非本软件的 JSON');
+        ok(/formatVersion/.test(U.parseTeamPack('{"format":"nettopo-team-pack"}').error), '拒绝：缺 formatVersion');
+        ok(/高于本软件支持/.test(U.parseTeamPack('{"format":"nettopo-team-pack","formatVersion":99}').error), '拒绝：包版本高于本机支持');
+        ok(/过大/.test(U.parseTeamPack('x'.repeat(600 * 1024)).error), '拒绝：超过 512KB');
+
+        // 清洗：坏正则 / 空名模板 / 全非法规则模板 / 原型污染键，全部丢弃并计数
+        const dirty = {
+          format: 'nettopo-team-pack', formatVersion: 1,
+          compliance: {
+            rules: [{ id: 'ok1', name: '正常', pattern: '^sysname' }, { id: 'bad1', name: '坏', pattern: '[unclosed' }],
+            templates: [
+              { name: '好的', rules: [{ id: 't1', name: 'ok', pattern: '^aaa' }] },
+              { name: '', rules: [{ id: 't2', name: 'ok', pattern: '^bbb' }] },
+              { name: '全坏', rules: [{ id: 't3', name: 'x', pattern: '[bad' }] },
+              { name: '好的', rules: [{ id: 't4', name: 'dup', pattern: '^ccc' }] }
+            ]
+          },
+          cfgTemplates: JSON.parse('{"__proto__":{"label":"攻击"},"constructor":{"label":"攻击"},"safe_key":{"label":"合法","body":"x"}}')
+        };
+        const dm = U.parseTeamPack(JSON.stringify(dirty));
+        ok(dm.ok === true, '清洗：脏包仍可解析（逐项清洗而非整包拒绝）');
+        ok(dm.stats.rules === 1 && dm.stats.rulesDropped === 1, '清洗：坏正则丢弃并计数（规则 ' + dm.stats.rules + '，丢弃 ' + dm.stats.rulesDropped + '）');
+        ok(dm.stats.templates === 1 && dm.stats.templatesDropped === 3, '清洗：空名/全非法/重名模板丢弃并计数（保留 ' + dm.stats.templates + '，丢弃 ' + dm.stats.templatesDropped + '）');
+        ok(Object.keys(dm.pack.cfgTemplates).join(',') === 'safe_key', '清洗：原型污染键（__proto__/constructor）被丢弃，合法键保留（' + Object.keys(dm.pack.cfgTemplates).join(',') + '）');
+        ok(dm.stats.cfgTemplatesDropped === 2, '清洗：配置模板丢弃数如实计数（' + dm.stats.cfgTemplatesDropped + '）');
+        ok(({}).label === undefined, '清洗：未发生原型污染（Object.prototype 干净）');
+
+        // 合并模式：同 id 规则覆盖、新 id 追加；同名模板覆盖；配置模板键合并
+        U.loadComplianceRules();
+        const before = U.complianceRules.length;
+        const incoming = {
+          format: 'nettopo-team-pack', formatVersion: 1,
+          compliance: {
+            rules: [{ id: U.complianceRules[0].id, name: '被覆盖的规则名', pattern: '^covered', negate: false, enabled: true, group: '', note: '' },
+              { id: 'brandnew', name: '新增规则', pattern: '^brandnew', negate: true, enabled: true, group: '认证与授权', note: '' }],
+            templates: [{ name: '团队基线', rules: [{ id: 'x1', name: '覆盖后', pattern: '^zzz' }] }, { name: '新模板', rules: [{ id: 'x2', name: 'n', pattern: '^yyy' }] }]
+          },
+          cfgTemplates: { another: { label: '另一个模板', body: 'y' } }
+        };
+        const ap = U.parseTeamPack(JSON.stringify(incoming));
+        const mg = U.applyTeamPack(ap.pack, 'merge');
+        ok(mg.ok === true && mg.mode === 'merge', '导入（合并）：返回应用结果');
+        eq(U.complianceRules.length, before + 1, '导入（合并）：同 id 覆盖、新 id 追加（' + before + ' → ' + U.complianceRules.length + '）');
+        ok(U.complianceRules.some(r => r.name === '被覆盖的规则名'), '导入（合并）：同 id 规则确实被覆盖');
+        U.loadComplianceTemplates();
+        ok(U.complianceTemplates.length === 2, '导入（合并）：同名模板覆盖、新模板追加（' + U.complianceTemplates.length + ' 套）');
+        ok(U.complianceTemplates.find(t => t.name === '团队基线').rules[0].name === '覆盖后', '导入（合并）：同名模板内容已更新');
+        U.loadCustomCfgTemplates();
+        ok(Object.keys(U.customCfgTemplates).sort().join(',') === 'another,mytpl', '导入（合并）：配置模板键合并保留原有（' + Object.keys(U.customCfgTemplates).sort().join(',') + '）');
+        // 落盘：合并结果确实写进了 localStorage（下次启动仍是这套）
+        ok(String(store['nettopo.complianceRules'] || '').indexOf('brandnew') >= 0, '导入（合并）：规则集已落盘');
+
+        // 替换模式：清掉本机其余规则与模板
+        const ap2 = U.parseTeamPack(JSON.stringify(incoming));
+        const rp = U.applyTeamPack(ap2.pack, 'replace');
+        ok(rp.ok === true && rp.mode === 'replace', '导入（替换）：返回替换模式');
+        eq(U.complianceRules.length, 2, '导入（替换）：规则集被整体替换（2 条）');
+        U.loadComplianceTemplates();
+        eq(U.complianceTemplates.length, 2, '导入（替换）：模板集被整体替换');
+        U.loadCustomCfgTemplates();
+        ok(Object.keys(U.customCfgTemplates).join(',') === 'another', '导入（替换）：配置模板被整体替换（' + Object.keys(U.customCfgTemplates).join(',') + '）');
+        ok(U.applyTeamPack(null, 'merge').ok === false, '导入：空包拒绝');
+      } finally {
+        sandbox.localStorage.getItem = origGet;
+        sandbox.localStorage.setItem = origSet;
+      }
+    }
+
 })().then(() => {
   suiteFinished = true;
   console.log('');

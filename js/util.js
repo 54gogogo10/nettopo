@@ -1343,6 +1343,117 @@ U.deleteComplianceTemplate = (name) => {
   return U.complianceTemplates;
 };
 
+/* ---------- 团队基线包：合规规则集 / 自定义合规模板 / 自定义配置模板 的导入导出 ----------
+ * 这些东西此前只活在本机 localStorage 里：三个人的网络组各配一套基线，改一条要挨个通知，
+ * 于是干脆没人维护。基线包是一个 JSON 文件（带 format 与 formatVersion），导出即可发同事，
+ * 导入前**逐项白名单清洗**——包里全是正则与模板文本，是不可信输入：
+ * 正则逐条编译（写坏的那条会被丢弃并计数，不会让整包失效），模板键沿用既有的原型污染白名单。 */
+U.TEAM_PACK_FORMAT = 'nettopo-team-pack';
+U.TEAM_PACK_VERSION = 1;
+const TEAM_PACK_MAX_BYTES = 512 * 1024;
+
+/** 打包当前本机的规则集与模板（不传参即取当前内存态） */
+U.buildTeamPack = (opts) => {
+  const o = opts || {};
+  if (!U.complianceRules) { try { U.loadComplianceRules(); } catch (e) { U.complianceRules = []; } }
+  if (!U.complianceTemplates) { try { U.loadComplianceTemplates(); } catch (e) { U.complianceTemplates = []; } }
+  if (!U.customCfgTemplates) { try { U.loadCustomCfgTemplates(); } catch (e) { U.customCfgTemplates = {}; } }
+  const rules = (o.rules || U.complianceRules || []).map(complianceStorableRule);
+  const templates = (U.complianceTemplates || []).map(t => ({ name: t.name, rules: (t.rules || []).map(complianceStorableRule) }));
+  const cfgTemplates = cleanCfgTemplates(U.customCfgTemplates || {});
+  return {
+    format: U.TEAM_PACK_FORMAT,
+    formatVersion: U.TEAM_PACK_VERSION,
+    app: 'NetTopo',
+    appVersion: U.APP_VERSION || '',
+    exportedAt: new Date().toISOString(),
+    compliance: { rules, templates },
+    cfgTemplates
+  };
+};
+
+/** 解析并清洗基线包文本。返回 {ok, pack, stats, error}；stats 里如实给出丢弃项（不静默） */
+U.parseTeamPack = (text) => {
+  const raw = String(text == null ? '' : text);
+  if (!raw.trim()) return { ok: false, error: '内容为空：请粘贴基线包 JSON 或选择文件' };
+  if (raw.length > TEAM_PACK_MAX_BYTES) return { ok: false, error: '基线包过大（超过 ' + Math.round(TEAM_PACK_MAX_BYTES / 1024) + 'KB）' };
+  let data;
+  try { data = JSON.parse(raw); } catch (e) { return { ok: false, error: 'JSON 解析失败：' + ((e && e.message) || e) }; }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return { ok: false, error: '基线包格式不对：顶层应为对象' };
+  if (data.format !== U.TEAM_PACK_FORMAT) return { ok: false, error: '不是 NetTopo 基线包（format 应为 ' + U.TEAM_PACK_FORMAT + '）' };
+  const ver = Number(data.formatVersion);
+  if (!Number.isFinite(ver) || ver < 1) return { ok: false, error: '基线包缺少有效的 formatVersion' };
+  if (ver > U.TEAM_PACK_VERSION) return { ok: false, error: '基线包版本（v' + ver + '）高于本软件支持的 v' + U.TEAM_PACK_VERSION + '，请升级软件后再导入' };
+  const stats = { rules: 0, rulesDropped: 0, templates: 0, templatesDropped: 0, cfgTemplates: 0, cfgTemplatesDropped: 0 };
+  const comp = (data.compliance && typeof data.compliance === 'object') ? data.compliance : {};
+  const rawRules = Array.isArray(comp.rules) ? comp.rules : [];
+  const rules = U.cleanComplianceRules(rawRules).map(complianceStorableRule);
+  stats.rules = rules.length;
+  stats.rulesDropped = Math.max(0, rawRules.length - rules.length);
+  const seenTpl = new Set();
+  const templates = [];
+  for (const t of (Array.isArray(comp.templates) ? comp.templates : [])) {
+    if (!t || typeof t !== 'object') { stats.templatesDropped++; continue; }
+    const name = typeof t.name === 'string' ? t.name.trim().slice(0, 32) : '';
+    if (!name || seenTpl.has(name)) { stats.templatesDropped++; continue; }
+    const rawT = Array.isArray(t.rules) ? t.rules : [];
+    const clean = U.cleanComplianceRules(rawT).map(complianceStorableRule);
+    if (!clean.length) { stats.templatesDropped++; continue; }   // 清洗后无有效规则的模板不导入（与另存为模板同口径）
+    seenTpl.add(name);
+    templates.push({ name, rules: clean });
+    if (clean.length < rawT.length) stats.rulesDropped += (rawT.length - clean.length);
+  }
+  stats.templates = templates.length;
+  const rawCfg = (data.cfgTemplates && typeof data.cfgTemplates === 'object' && !Array.isArray(data.cfgTemplates)) ? data.cfgTemplates : {};
+  const cfgTemplates = cleanCfgTemplates(rawCfg);
+  stats.cfgTemplates = Object.keys(cfgTemplates).length;
+  stats.cfgTemplatesDropped = Math.max(0, Object.keys(rawCfg).length - stats.cfgTemplates);
+  return {
+    ok: true,
+    pack: { format: U.TEAM_PACK_FORMAT, formatVersion: ver, appVersion: typeof data.appVersion === 'string' ? data.appVersion.slice(0, 32) : '', exportedAt: typeof data.exportedAt === 'string' ? data.exportedAt.slice(0, 40) : '', compliance: { rules, templates }, cfgTemplates },
+    stats
+  };
+};
+
+/** 应用基线包：mode='merge' 合并（同名模板/同名键覆盖）| 'replace' 整体替换。返回 {ok, applied, stats} */
+U.applyTeamPack = (pack, mode) => {
+  if (!pack || typeof pack !== 'object') return { ok: false, error: '基线包为空' };
+  const replace = String(mode || 'merge') === 'replace';
+  const applied = { rules: 0, templates: 0, cfgTemplates: 0 };
+  const comp = pack.compliance || {};
+  const rules = Array.isArray(comp.rules) ? comp.rules : [];
+  // 规则集：合并时按 id 覆盖、新 id 追加（顺序保持：先原有、后新增）
+  U.loadComplianceRules();
+  if (replace) {
+    U.complianceRules = rules.slice();
+  } else {
+    const byId = new Map((U.complianceRules || []).map(r => [r.id, r]));
+    for (const r of rules) byId.set(r.id, r);
+    U.complianceRules = [...byId.values()];
+  }
+  U.saveComplianceRules(U.complianceRules);
+  applied.rules = rules.length;
+  // 自定义合规模板：合并时同名覆盖
+  U.loadComplianceTemplates();
+  const tpls = Array.isArray(comp.templates) ? comp.templates : [];
+  if (replace) U.complianceTemplates = tpls.slice();
+  else {
+    for (const t of tpls) {
+      const i = U.complianceTemplates.findIndex(x => x.name === t.name);
+      if (i >= 0) U.complianceTemplates[i] = t; else U.complianceTemplates.push(t);
+    }
+  }
+  U.saveComplianceTemplates();
+  applied.templates = tpls.length;
+  // 自定义配置模板：合并时同名键覆盖
+  U.loadCustomCfgTemplates();
+  const cfgs = cleanCfgTemplates(pack.cfgTemplates || {});
+  U.customCfgTemplates = replace ? cfgs : Object.assign({}, U.customCfgTemplates || {}, cfgs);
+  U.saveCustomCfgTemplates();
+  applied.cfgTemplates = Object.keys(cfgs).length;
+  return { ok: true, applied, mode: replace ? 'replace' : 'merge' };
+};
+
 /** 规则白名单清洗：id/名称/可编译正则/长度与数量上限；返回带编译后 re 的规则数组 */
 U.cleanComplianceRules = (raw) => {
   const out = [];
