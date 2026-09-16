@@ -8,6 +8,7 @@ const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 const { CredentialStore } = require('./js/credential-store.js');
+const { AlertDeps } = require('./js/alert-deps.js');
 const { DeployStore, deployVendor } = require('./js/config-deploy.js');
 const { NetServices } = require('./js/net-services.js');
 const { SEV_NAMES: SYSLOG_SEV_NAMES } = require('./js/svc-syslog.js');
@@ -101,6 +102,8 @@ const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'mo
 // 指纹信任裁决统一收口到 monitor 的权威信任库：无人值守采集（runOneShot）也必须遵守
 // 「首连 TOFU、变化即拒」，否则已钉扎主机的指纹变化会被静默接受并反写渲染层长期钉扎
 shell.setTrustGate((host, port, fp) => monitor.verifyFingerprint(host, port, fp));
+/* ---- 告警依赖抑制（上游失联 → 归并下游离线通知）：邻接表由渲染层在拓扑/监控配置变化时推送 ---- */
+const alertDeps = new AlertDeps();
 
 /* ---- 在线率采样（监控中心 7 天趋势）：探测结果按 10 分钟桶落盘 ---- */
 const uptimeStore = new UptimeStore(path.join(app.getPath('userData'), 'monitor-uptime.json'));
@@ -386,17 +389,83 @@ function notifyUser(title, body) {
   } catch (e) { /* 通知失败不阻断 */ }
 }
 const liveNotifications = new Set();
+
+/* ---- 告警依赖抑制（上游失联时归并下游离线通知）----
+ * 拓扑邻接表由渲染层推送（拓扑或监控配置变化时，键与监控任务一致：deviceId@host）。
+ * 判定窗口：下游离线后先等一个窗口再决定是否通知——各设备探测定时器彼此独立，上游与下游的离线
+ * 事件到达顺序是随机的，不设窗口就只能在一半情况下归并成功；窗口也顺带抑制瞬时抖动（窗口内恢复
+ * 则两条通知都不发，在线率采样照常记录）。
+ * 窗口长度：有「在监控清单里的邻居」时用 ALERT_DEP_WINDOW_MS（值得等上游事件到达再裁决），
+ * 否则只用 ALERT_FLAP_WINDOW_MS 做抖动抑制（行为接近旧版）。
+ * 注意：不能等到「邻居已判为离线」才延迟——先失败的那台此刻还不知道邻居的情况，
+ * 那样会让它跳过窗口直接通知，归并随即失效（实测踩过）。 */
+const ALERT_DEP_WINDOW_MS = 8000;
+const ALERT_FLAP_WINDOW_MS = 2000;
+const pendingOffline = new Map();   // key -> timer（等待窗口内是否出现上游失联）
+function fireOffline(info) {
+  pendingOffline.delete(info.key);
+  const dep = alertDeps.judgeOffline(info.key);
+  if (dep.suppress) {
+    alertDeps.noteSuppressed(info.key, dep.rootKey);
+    // 只归并通知；事件时间线照常记录并写明归并原因（证据不丢）
+    recordMonitorEvent(info, 'offline', '探测失败，设备可能离线（上游 ' + dep.rootName + ' 同时失联，通知已归并）');
+    return;
+  }
+  recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
+  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
+}
 monitor.on('probe', (info) => {
   sendMonitor('monitor:probe', info);
+  // failSince 为该轮故障的起始时刻：根因判据「同故障分量里最早失败者」据此裁决（与事件到达顺序无关）
+  alertDeps.noteProbe(info.key, info.ok === true ? true : (info.ok === false ? false : undefined), info.failSince);
   const prev = lastProbeOk.get(info.key);
   if (info.ok === false && prev !== false) {
     lastProbeOk.set(info.key, false);
-    recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
-    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
+    const win = alertDeps.hasMonitoredNeighbor(info.key) ? ALERT_DEP_WINDOW_MS : ALERT_FLAP_WINDOW_MS;
+    const old = pendingOffline.get(info.key);
+    if (old) clearTimeout(old);
+    pendingOffline.set(info.key, setTimeout(() => { try { fireOffline(info); } catch (e) { logCrash('alertDeps', e); } }, win));
   } else if (info.ok === true && prev === false) {
     lastProbeOk.set(info.key, true);
-    recordMonitorEvent(info, 'recovery', '探测恢复在线');
-    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
+    const pend = pendingOffline.get(info.key);
+    if (pend) {
+      // 窗口内自行恢复：离线通知从未发出，恢复通知同样不必发（只留一条事件说明，避免抖动刷屏）
+      clearTimeout(pend);
+      pendingOffline.delete(info.key);
+      recordMonitorEvent(info, 'recovery', '探测一度失败，在通知归并窗口内自行恢复（未打扰）');
+    } else {
+      const rc = alertDeps.judgeRecover(info.key);
+      const agg = rc.aggregate && rc.aggregate.count ? rc.aggregate : null;
+      if (rc.suppress) {
+        recordMonitorEvent(info, 'recovery', '探测恢复在线（随上游 ' + rc.rootName + ' 恢复，通知已归并）');
+      } else {
+        // 根因设备恢复时，把随之恢复的下游一并播报（下游各自的恢复通知已被归并，信号不丢）；
+        // 仍未恢复的下游如实单列——它们的离线通知此前从未发出，下面按第一条补发
+        let tail = '';
+        if (agg) {
+          const parts = [];
+          if (agg.recoveredNames.length) parts.push('已随之恢复 ' + agg.recoveredNames.join('、'));
+          if (agg.stillDownNames.length) parts.push('仍不可达 ' + agg.stillDownNames.join('、'));
+          tail = '；此前因其失联的 ' + agg.count + ' 台设备' + (parts.length ? '：' + parts.join('；') : '');
+        }
+        recordMonitorEvent(info, 'recovery', '探测恢复在线' + tail);
+        if (notifyEnabled()) {
+          notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备恢复',
+            info.name + '（' + info.host + '）已恢复在线' + tail);
+          for (const k of ((agg && agg.stillDownKeys) || [])) {
+            const i = k.lastIndexOf('@');
+            const devId = i > 0 ? k.slice(0, i) : k;
+            const host = i > 0 ? k.slice(i + 1) : '';
+            const nm = alertDeps.nameOf(k);
+            // 该设备的离线通知此前被归并（从未发出），此处补发是第一条而非重复；同时记入时间线留痕
+            recordMonitorEvent({ key: k, deviceId: devId, host, name: nm }, 'offline',
+              '仍不可达（此前因 ' + (agg && agg.rootName) + ' 失联，离线通知已归并）');
+            notifyForDevice(devId, '网络拓扑管理软件 · 设备仍不可达',
+              nm + (host ? '（' + host + '）' : '') + '仍未恢复在线（此前因 ' + (agg && agg.rootName) + ' 失联未单独通知）');
+          }
+        }
+      }
+    }
   } else {
     lastProbeOk.set(info.key, info.ok);
   }
@@ -1046,6 +1115,12 @@ ipcMain.handle('cred:remove', (e, p) => monitorGuard(e) ? credStore.remove(Strin
 ipcMain.handle('cred:pick', (e, p) => monitorGuard(e)
   ? credStore.pickFor({ ids: p && p.ids, vendor: p && p.vendor })
   : { ok: false, error: 'forbidden', ids: [] });
+/* 告警依赖抑制的拓扑邻接表（渲染层推送；键与监控任务一致 deviceId@host）：
+ * 只用于「上游同时失联时归并下游离线通知」的判定，不落盘、不出网 */
+ipcMain.handle('monitor:topology', (e, p) => monitorGuard(e) ? alertDeps.setTopology(p || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:alert-deps', (e) => monitorGuard(e)
+  ? { ok: true, pending: alertDeps.pending(), stats: alertDeps.stats(), debug: alertDeps.debugView() }
+  : { ok: false, error: 'forbidden', pending: [], stats: null, debug: [] });
 ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? { ok: true, notify: loadAppSettings().monitorNotify !== false, tray: trayEnabled() } : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:set-settings', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };

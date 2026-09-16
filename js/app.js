@@ -5964,6 +5964,7 @@ function updateStats() {
 }
 
 function refreshPanel() {
+  scheduleAlertTopology();   // 拓扑/监控配置变化后重推邻接表（防抖 + 去重，供主进程归并上游失联告警）
   const wrap = $('#listWrap');
   const q = state.search.trim().toLowerCase();
   if (state.tab === 'nodes') {
@@ -7402,6 +7403,58 @@ function monitorBridge(silent) {
 /** 监控任务 key：nodeId@host（同一设备多个管理口各一个任务） */
 function monitorKey(nodeId, host) { return String(nodeId) + '@' + String(host); }
 
+/* ================= 告警依赖抑制：向主进程推送拓扑邻接表 =================
+ * 主进程按「设备间连线 + 哪些设备装了在线探测」判定上游失联，从而归并下游的离线通知。
+ * 邻接表键与监控任务一致（deviceId@host）；拓扑/监控配置变化时重推（800ms 防抖 + 内容去重）。
+ * ranks 为「上游度」（设备类型序）：只在同一轮齐掉、失败时刻分不出先后时用于裁决根因。 */
+const ALERT_RANK = { cloud: 4, firewall: 3, router: 3, switch: 2, other: 1, server: 1, pc: 0 };
+function alertRankOf(node) {
+  const k = String((node && node.type) || '');
+  return Object.prototype.hasOwnProperty.call(ALERT_RANK, k) ? ALERT_RANK[k] : 1;
+}
+let alertTopoPushed = '';
+let alertTopoTimer = null;
+function alertTopologySnapshot() {
+  const keysOf = new Map();   // nodeId -> [监控任务 key…]
+  for (const n of state.nodes) {
+    const cfg = state.monitorCfg[n.id];
+    if (!cfg || cfg.enabled === false) continue;
+    const hosts = normalizeMonitorHosts(cfg);
+    if (!hosts.length) continue;
+    keysOf.set(n.id, hosts.map(r => monitorKey(n.id, r.host)));
+  }
+  const names = {}, ranks = {};
+  for (const n of state.nodes) {
+    const ks = keysOf.get(n.id);
+    if (!ks) continue;
+    for (const k of ks) { names[k] = String(n.name || ''); ranks[k] = alertRankOf(n); }
+  }
+  const edges = [];
+  for (const l of (state.links || [])) {
+    const a = keysOf.get(l.a), b = keysOf.get(l.b);
+    if (!a || !b) continue;
+    for (const ka of a) for (const kb of b) edges.push([ka, kb]);
+  }
+  return { edges, names, ranks };
+}
+function pushAlertTopology() {
+  const bridge = window.topoMonitor;
+  if (!bridge || !bridge.setTopology) return;
+  try {
+    const snap = alertTopologySnapshot();
+    const json = JSON.stringify(snap);
+    if (json === alertTopoPushed) return;      // 内容没变不重复过桥（拓扑不变时不产生 IPC 流量）
+    alertTopoPushed = json;
+    const r = bridge.setTopology(snap);
+    if (r && typeof r.catch === 'function') r.catch(() => { alertTopoPushed = ''; });
+  } catch (e) { alertTopoPushed = ''; }
+}
+/** 防抖推送：画布刷新（refreshPanel）频繁调用，这里合并成一次 */
+function scheduleAlertTopology() {
+  if (alertTopoTimer) return;
+  alertTopoTimer = setTimeout(() => { alertTopoTimer = null; pushAlertTopology(); }, 800);
+}
+
 /** 从 hostKey 解析设备 id */
 function deviceIdFromMonitorKey(key) {
   const i = String(key || '').lastIndexOf('@');
@@ -7690,6 +7743,9 @@ async function applyMonitor(id, cfg, enabled) {
       };
       state.monitorCfg[id] = Object.assign({}, cleanCfg, { enabled: true });
       saveMonitorCfg().catch(() => {});
+      // 立即推送邻接表（不走 800ms 防抖）：探针首次失败可能就在几十毫秒后，
+      // 主进程要据此判定上游失联，晚一步就会把下游离线通知照常发出去（归并失效）
+      pushAlertTopology();
       const perHost = {};
       for (const r of hosts) perHost[r.host] = { state: 'connecting', text: '启动监控…', since: Date.now() };
       state.monitorStatus[id] = { state: 'connecting', text: aggregateMonitorText(perHost), perHost };
@@ -11116,6 +11172,7 @@ if (typeof globalThis !== 'undefined') {
     openConfigDeploy,
     openDeployHistory,
     openCredManager,
+    alertTopology: () => alertTopologySnapshot(),
     openMacTrace,
     openBatchInspect,
     loadCreds,

@@ -104,7 +104,10 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   /* 告警静默 / 维护窗口：静默期内通知不弹、事件时间线照常记录 */
   mute: (p) => ipcRenderer.invoke('monitor:mute', p),
   maintenanceGet: (p) => ipcRenderer.invoke('monitor:maintenance-get', p),
-  maintenanceSet: (p) => ipcRenderer.invoke('monitor:maintenance-set', p)
+  maintenanceSet: (p) => ipcRenderer.invoke('monitor:maintenance-set', p),
+  /* 告警依赖抑制：推送拓扑邻接表（上游失联时归并下游离线通知），另可查看当前归并状态 */
+  setTopology: (p) => ipcRenderer.invoke('monitor:topology', p),
+  alertDeps: () => ipcRenderer.invoke('monitor:alert-deps')
 });
 
 /* 本机诊断工具箱（Ping / 路由跟踪 / TCP 端口 / DNS / 网段存活扫描 / SNMP Walk）：

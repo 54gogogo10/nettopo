@@ -7521,6 +7521,146 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       rmTmp(tmpCS);
     }
 
+    // 告警依赖抑制（AlertDeps）：故障连通分量的根因裁决 / 归并与恢复 / 保守判据
+    console.log('== 回归：告警依赖抑制（AlertDeps）（新功能） ==');
+    {
+      const { AlertDeps } = require('../js/alert-deps.js');
+      let now = 1000000;
+      const mk = (opts) => new AlertDeps(Object.assign({ now: () => now, graceMs: 60000, failTieMs: 5000, maxChain: 32, maxKeys: 16 }, opts || {}));
+      // 拓扑：core(路由器) — dist(交换机) — access(交换机)；acc2 — dist2（dist2 未装探测）
+      const R = { 'core@10.0.0.1': 3, 'dist@10.0.0.2': 2, 'access@10.0.0.3': 2, 'acc2@10.0.0.9': 2, 'dist2@10.0.0.8': 2 };
+      const N = { 'core@10.0.0.1': '核心路由器', 'dist@10.0.0.2': '汇聚交换机', 'access@10.0.0.3': '接入交换机', 'acc2@10.0.0.9': '接入2', 'dist2@10.0.0.8': '汇聚2' };
+      const topo = () => ({
+        edges: [['core@10.0.0.1', 'dist@10.0.0.2'], ['dist@10.0.0.2', 'access@10.0.0.3'], ['acc2@10.0.0.9', 'dist2@10.0.0.8']],
+        names: N, ranks: R
+      });
+
+      const d0 = mk();
+      ok(d0.judgeOffline('core@10.0.0.1').suppress === false, '未推送拓扑时：不抑制任何离线通知（行为与旧版一致）');
+
+      const d1 = mk();
+      d1.setTopology({ edges: [['acc@10.0.0.9', 'unmon@10.0.0.8']], names: { 'acc@10.0.0.9': '接入' }, ranks: { 'acc@10.0.0.9': 2 } });
+      ok(d1.hasMonitoredNeighbor('acc@10.0.0.9') === false, '邻居不在监控清单（未推送其键）时 hasMonitoredNeighbor=false（不做延迟判定）');
+      ok(d1.isMonitored('acc@10.0.0.9') === true && d1.isMonitored('unmon@10.0.0.8') === false, 'isMonitored 判据：名单内为真、名单外为假');
+      const d1b = mk();
+      d1b.setTopology(topo());
+      d1b.noteProbe('core@10.0.0.1', false, now - 30000);
+      ok(d1b.hasMonitoredNeighbor('dist@10.0.0.2') === true, '邻居在监控清单里时 hasMonitoredNeighbor=true（先失败的那台也会延迟判定）');
+      d1b.noteProbe('dist@10.0.0.2', false, now);
+      const r1 = d1b.judgeOffline('dist@10.0.0.2');
+      ok(r1.suppress === true && r1.rootKey === 'core@10.0.0.1' && r1.rootName === '核心路由器', '上游先失联：下游被抑制并归因到根因设备（' + JSON.stringify(r1) + '）');
+      ok(d1b.judgeOffline('core@10.0.0.1').suppress === false, '根因自身（分量里最早失败）照常通知');
+
+      const d3 = mk();
+      d3.setTopology(topo());
+      ok(d3.judgeOffline('acc2@10.0.0.9').suppress === false, '邻居无探测记录（未知）时不抑制：未监控≠故障，不静默真告警');
+
+      // 同轮齐掉（时间戳毫秒级差异不足以定序）：退回上游度裁决 → 路由器当根
+      const d4 = mk();
+      d4.setTopology(topo());
+      d4.noteProbe('core@10.0.0.1', false, now - 800);
+      d4.noteProbe('dist@10.0.0.2', false, now - 400);
+      d4.noteProbe('access@10.0.0.3', false, now);
+      const r4 = d4.judgeOffline('access@10.0.0.3');
+      ok(r4.suppress === true && r4.rootKey === 'core@10.0.0.1' && r4.size === 3, '同轮齐掉：按上游度裁决出核心为根因、下游全部归并（' + JSON.stringify(r4) + '）');
+      ok(d4.judgeOffline('dist@10.0.0.2').rootKey === 'core@10.0.0.1', '同一分量内各设备的根因判定一致（汇聚也指向核心）');
+
+      // 非同时失败：更早失败的那台优先，不受上游度影响
+      const d4b = mk();
+      d4b.setTopology(topo());
+      d4b.noteProbe('core@10.0.0.1', false, now - 60000);
+      d4b.noteProbe('dist@10.0.0.2', false, now - 1000);
+      ok(d4b.judgeOffline('dist@10.0.0.2').rootKey === 'core@10.0.0.1', '失败时刻相差超过容差：按最早失败者定根因（不受上游度干扰）');
+
+      // 中间设备在线时分量断开：下游故障不归因到它上游
+      const d4c = mk();
+      d4c.setTopology(topo());
+      d4c.noteProbe('core@10.0.0.1', false, now - 60000);
+      d4c.noteProbe('dist@10.0.0.2', true);
+      d4c.noteProbe('access@10.0.0.3', false, now);
+      ok(d4c.judgeOffline('access@10.0.0.3').suppress === false, '中间设备在线 → 故障分量断开，下游故障不归因到更上游（路径是通的）');
+
+      // 两设备互连且同时离线：必须且只有一台通知（不会互相归并到谁都不报）
+      const dMut = mk();
+      dMut.setTopology({ edges: [['a@1', 'b@1']], names: { 'a@1': 'A', 'b@1': 'B' }, ranks: { 'a@1': 2, 'b@1': 2 } });
+      dMut.noteProbe('a@1', false, now - 1000);
+      dMut.noteProbe('b@1', false, now);
+      ok(dMut.judgeOffline('a@1').suppress === false, '互连双设备同时离线：更早失败的一台通知');
+      const rMut = dMut.judgeOffline('b@1');
+      ok(rMut.suppress === true && rMut.rootKey === 'a@1', '互连双设备同时离线：另一台被归并（不会两台互相归并导致静默）');
+
+      // 恢复归并：根因恢复后下游恢复不再单独通知，聚合名单在根因恢复时给出
+      const d5 = mk();
+      d5.setTopology(topo());
+      d5.noteProbe('core@10.0.0.1', false, now - 60000); d5.noteProbe('dist@10.0.0.2', false, now - 1000); d5.noteProbe('access@10.0.0.3', false, now);
+      d5.noteSuppressed('dist@10.0.0.2', 'core@10.0.0.1');
+      d5.noteSuppressed('access@10.0.0.3', 'core@10.0.0.1');
+      ok(d5.pending().length === 1 && d5.pending()[0].names.length === 2, '归并登记：两台下游设备挂在同一根因下');
+      d5.noteProbe('core@10.0.0.1', true);
+      const rcRoot = d5.judgeRecover('core@10.0.0.1');
+      ok(rcRoot.suppress === false, '根因自身恢复照常通知（不抑制根因）');
+      ok(rcRoot.aggregate && rcRoot.aggregate.count === 2 && rcRoot.aggregate.recoveredNames.length === 0 && rcRoot.aggregate.stillDownNames.length === 2,
+        '根因恢复时聚合：尚未恢复的下游如实列入「仍不可达」而非谎报已恢复（' + JSON.stringify(rcRoot.aggregate && rcRoot.aggregate.stillDownNames) + '）');
+      ok(d5.pending().length === 0, '「仍不可达」的下游解除归并：其离线通知此前未发出，补发是第一条而非重复');
+      d5.noteSuppressed('dist@10.0.0.2', 'core@10.0.0.1');
+      d5.noteProbe('dist@10.0.0.2', true);
+      const rcDown = d5.judgeRecover('dist@10.0.0.2');
+      ok(rcDown.suppress === true && rcDown.rootKey === 'core@10.0.0.1', '下游恢复被归并（根因已恢复且未超宽限期）');
+
+      // 根因仍离线时下游自行恢复：照常通知（不漏报）
+      const d6 = mk();
+      d6.setTopology(topo());
+      d6.noteProbe('core@10.0.0.1', false, now - 1000);
+      d6.noteSuppressed('dist@10.0.0.2', 'core@10.0.0.1');
+      d6.noteProbe('dist@10.0.0.2', true);   // 自己起来了，而核心还挂着
+      ok(d6.judgeRecover('dist@10.0.0.2').suppress === false, '根因仍离线时下游恢复照常通知（不因归并而漏报）');
+
+      // 宽限期外：不再归并下游恢复
+      const d7 = mk({ graceMs: 60000 });
+      d7.setTopology(topo());
+      d7.noteProbe('core@10.0.0.1', true);
+      d7.noteSuppressed('dist@10.0.0.2', 'core@10.0.0.1');
+      now += 61000;
+      d7.noteProbe('dist@10.0.0.2', true);
+      ok(d7.judgeRecover('dist@10.0.0.2').suppress === false, '超过宽限期的下游恢复各自通知（归并只覆盖同一次故障）');
+      now = 1000000;
+
+      // 环与病态拓扑：不无限扩散、不崩
+      const d8 = mk({ maxChain: 4 });
+      d8.setTopology({ edges: [['a@1', 'b@1'], ['b@1', 'c@1'], ['c@1', 'a@1']], names: {}, ranks: {} });
+      d8.noteProbe('a@1', false, now); d8.noteProbe('b@1', false, now); d8.noteProbe('c@1', false, now);
+      const r8 = d8.judgeOffline('b@1');
+      ok(typeof r8.suppress === 'boolean' && d8.component('a@1').length === 3, '环路拓扑：分量扩散不重复访问节点（成员 ' + d8.component('a@1').length + ' 个）');
+
+      // 邻接表校验：自环忽略、非法项忽略、超限整体拒绝、重推清空旧登记
+      const d9 = mk();
+      const st1 = d9.setTopology({ edges: [['a@1', 'a@1'], ['b@1', 'b@1'], ['a@1', 'b@1'], 'junk', null], names: { 'a@1': 'A', 'b@1': 'B' }, ranks: { 'a@1': 'x', 'b@1': 2 } });
+      ok(st1.ok === true && st1.edges === 1, '邻接表校验：自环与非法项被忽略（有效边 1 条）');
+      ok(d9.ranks['a@1'] === undefined && d9.ranks['b@1'] === 2, '上游度校验：非数值被丢弃、合法值保留');
+      d9.noteProbe('a@1', false, now); d9.noteSuppressed('b@1', 'a@1');
+      d9.setTopology({ edges: [['x@1', 'y@1']], names: {}, ranks: {} });
+      ok(d9.pending().length === 0, '重推拓扑后清空既有归并登记（避免引用已不存在的链路）');
+      const st2 = d9.setTopology({ edges: new Array(4001).fill(['a@1', 'b@1']), names: {} });
+      ok(st2.ok === false, '邻接表超过 4000 条：整体拒绝（不半途截断造成错图）');
+      ok(d9.judgeOffline('b@1').suppress === false, '拒绝后仍可继续调用（不抛异常）');
+
+      // 状态表上限：超限淘汰最旧（防无界增长）
+      const d10 = mk({ maxKeys: 16 });
+      for (let i = 0; i < 40; i++) d10.noteProbe('k' + i + '@1', i % 2 === 0);
+      ok(d10.states.size <= 16, '状态表有上限（当前 ' + d10.states.size + ' ≤ 16）');
+      ok(d10.states.has('k39@1') === true, '淘汰最旧、保留最新探测状态');
+      // 非布尔 ok 不污染状态（未知不等于离线）
+      const d11 = mk();
+      d11.noteProbe('z@1', undefined);
+      ok(d11.states.has('z@1') === false, 'ok 非布尔时保持未知（不写入状态）');
+      // 恢复清除失败时刻：新一轮故障不沿用上一轮的时间戳
+      const d12 = mk();
+      d12.setTopology(topo());
+      d12.noteProbe('core@10.0.0.1', false, now - 60000);
+      d12.noteProbe('core@10.0.0.1', true);
+      ok(d12.failAt.has('core@10.0.0.1') === false, '恢复后清除本轮失败时刻（下一轮故障重新计时）');
+    }
+
 })().then(() => {
   suiteFinished = true;
   console.log('');
