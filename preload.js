@@ -76,6 +76,10 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   runBackup: (key) => ipcRenderer.invoke('monitor:run-backup', { key }),
   getSettings: () => ipcRenderer.invoke('monitor:get-settings'),
   setSettings: (notify) => ipcRenderer.invoke('monitor:set-settings', { notify }),
+  /* 告警等级与分级提示音：等级覆盖表与声音开关存主进程 settings.json；发声由渲染层合成 WebAudio */
+  setSound: (sound) => ipcRenderer.invoke('monitor:set-settings', { sound }),
+  setAlertLevels: (levels) => ipcRenderer.invoke('monitor:set-settings', { levels }),
+  onAlertSound: sub('monitor:alert-sound'),
   setTray: (enabled) => ipcRenderer.invoke('monitor:tray', { enabled }),
   testClose: () => ipcRenderer.invoke('monitor:test-close'),
   overview: () => ipcRenderer.invoke('monitor:overview'),

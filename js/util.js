@@ -957,6 +957,8 @@ I.server = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-wi
 I.pc = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="11" rx="1.5"/><path d="M9 19.5h6M12 15.5v4"/><path d="M6.5 8h11"/></svg>';
 I.cloud = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7.2 17.5a4.3 4.3 0 0 1-.7-8.55 5.6 5.6 0 0 1 10.7-1.25 4.1 4.1 0 0 1-.5 8.16z"/><path d="M9 13.5l2.2 2.2L16 10.5"/></svg>';
 I.other = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9.8 9.3a2.4 2.4 0 0 1 4.5 1.1c0 1.6-2.3 2.1-2.3 3.6"/><path d="M12 17.2h.01"/></svg>';
+/* 告警铃铛（告警等级与提示音菜单项）：等级越高声音越急，图标只做入口标识 */
+I.bell = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 10a5.5 5.5 0 0 1 11 0c0 4 1.5 5.5 1.5 5.5H5S6.5 14 6.5 10z"/><path d="M10 18.2a2.2 2.2 0 0 0 4 0"/></svg>';
 U.ICONS = I;
 
 /* 节点可用图标 key（设备级自定义图标选择器） */

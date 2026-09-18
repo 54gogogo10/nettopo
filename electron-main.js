@@ -1,6 +1,6 @@
 /* NetTopo Electron 主进程 */
 'use strict';
-const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu } = require('electron');
+const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu, shell: electronShell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
@@ -10,6 +10,7 @@ const { ConfigBackupStore } = require('./js/config-backup.js');
 const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-backup.js');
 const { CredentialStore } = require('./js/credential-store.js');
 const { AlertDeps } = require('./js/alert-deps.js');
+const AL = require('./js/alert-level.js');
 const { applyAck, clearAck, unackedCount } = require('./js/event-ack.js');
 const { buildReport: buildSlaReport, rangeOf: slaRangeOf, fmtPct: slaFmtPct } = require('./js/sla-report.js');
 const { DeployStore, deployVendor } = require('./js/config-deploy.js');
@@ -132,7 +133,7 @@ netSvc.on('file', (info) => {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:file', info);
   if (notifyEnabled()) {
     notifyUser('网络拓扑管理软件 · 收到设备文件',
-      (info.svc === 'tftp' ? 'TFTP' : 'FTP') + ' 收到 ' + info.name + '（来自 ' + info.ip + '，' + info.size + ' 字节），可在「网络服务」面板导入配置备份库');
+      (info.svc === 'tftp' ? 'TFTP' : 'FTP') + ' 收到 ' + info.name + '（来自 ' + info.ip + '，' + info.size + ' 字节），可在「网络服务」面板导入配置备份库', levelOf('file'));
   }
 });
 netSvc.on('status', (st) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:status', st); });
@@ -152,11 +153,13 @@ netSvc.on('syslog-alert', (a) => {
     : '日志级别 ' + sevName + ' 达到告警阈值';
   const title = '网络拓扑管理软件 · Syslog 告警';
   const body = (name ? name + '（' + a.host + '）' : a.host) + ' ' + why + '：' + String(a.msg || '').slice(0, 120);
+  // 等级按日志自身的严重度取（设备自己标的级别比「命中即同级」更贴近现场）
+  const lv = AL.levelFromSyslogSeverity(a.severity);
   if (deviceId) {
-    recordMonitorEvent({ key: deviceId + '@' + a.host, deviceId, host: a.host, name }, 'syslog-alert', why + '：' + (a.msg || ''));
-    notifyForDevice(deviceId, title, body);
+    recordMonitorEvent({ key: deviceId + '@' + a.host, deviceId, host: a.host, name }, 'syslog-alert', why + '：' + (a.msg || ''), lv);
+    notifyForDevice(deviceId, title, body, lv);
   } else {
-    notifyUser(title, body);
+    notifyUser(title, body, lv);
   }
 });
 // SNMP Trap：实时推送面板；标准 Trap（接口 Down/Up、冷/热启动、认证失败等）弹系统通知——
@@ -173,11 +176,13 @@ netSvc.on('trap', (t) => {
   const body = (name ? name + '（' + t.host + '）' : t.host) + ' 上报 ' + t.trap
     + (t.uptime ? '，设备已运行 ' + t.uptime : '')
     + (t.msg ? '：' + t.msg.slice(0, 120) : '');
+  // 等级按 Trap 含义取：接口断开 / 认证失败为严重，接口恢复为提示，冷热启动等为警告
+  const lv = AL.levelFromTrap(t.trap);
   if (deviceId) {
-    recordMonitorEvent({ key: deviceId + '@' + t.host, deviceId, host: t.host, name }, 'trap', t.trap + (t.msg ? '：' + t.msg : ''));
-    notifyForDevice(deviceId, title, body);
+    recordMonitorEvent({ key: deviceId + '@' + t.host, deviceId, host: t.host, name }, 'trap', t.trap + (t.msg ? '：' + t.msg : ''), lv);
+    notifyForDevice(deviceId, title, body, lv);
   } else {
-    notifyUser(title, body);
+    notifyUser(title, body, lv);
   }
 });
 
@@ -249,10 +254,33 @@ const maintenance = new Maintenance({
     }
   }
 });
-/** 设备告警的系统通知统一出口：静默期内（手动静默 / 维护窗口）不弹通知，事件时间线照常记录 */
-function notifyForDevice(deviceId, title, body) {
+/** 告警等级设置（settings.json ：alertLevels / alertSound）——读写一律经 js/alert-level.js 归一化，
+ *  损坏或手改的设置只影响其自身字段，不改变默认等级 */
+function alertLevelOverrides() { return AL.normalizeOverrides(loadAppSettings().alertLevels); }
+function alertSoundSettings() { return AL.normalizeSoundSettings(loadAppSettings().alertSound); }
+/** 事件类型 → 当前生效等级（用户覆盖优先，其次默认表） */
+function levelOf(type) { return AL.levelFor(type, alertLevelOverrides()); }
+
+/** 设备告警的系统通知统一出口：静默期内（手动静默 / 维护窗口）不弹通知，事件时间线照常记录。
+ *  level 省略时按事件默认等级；告警等级与提示音见 js/alert-level.js */
+function notifyForDevice(deviceId, title, body, level) {
   try { if (maintenance.isMuted(deviceId).muted) return; } catch (e) { /* 判定失败照常通知 */ }
-  notifyUser(title, body);
+  notifyUser(title, body, level);
+}
+
+/** 分级提示音：渲染层用 WebAudio 现场合成（无音频文件、离线可用、CSP 无外链）；
+ *  主窗口不可用（已销毁/加载失败）时退回系统提示音，保证告警不至全静音。
+ *  多台设备同时告警的合并与节流在渲染层做（见 app.js playAlertSound：按最高等级合并）。 */
+function emitAlertSound(level) {
+  const st = alertSoundSettings();
+  if (!AL.shouldPlay(level, st)) return;
+  if (mainWin && !mainWin.isDestroyed()) {
+    try {
+      mainWin.webContents.send('monitor:alert-sound', { level: AL.normalizeLevel(level), volume: st.volume, ts: Date.now() });
+      return;
+    } catch (e) { /* 发送失败：走下面的系统提示音兜底 */ }
+  }
+  try { electronShell.beep(); } catch (e) { /* 提示音失败不阻断通知 */ }
 }
 
 /* ---- 系统托盘常驻 ---- */
@@ -366,7 +394,8 @@ monitor.on('status', (info) => {
 });
 // 监控事件历史（供监控中心时间线；主进程保存最近 500 条）
 const monitorEvents = [];
-function recordMonitorEvent(info, type, detail) {
+/** 事件时间线入账：level 省略时按事件类型取默认等级（告警等级见 js/alert-level.js） */
+function recordMonitorEvent(info, type, detail, level) {
   let name = info.name || '';
   // 兜底：事件未携带设备名时从任务状态表补齐（避免时间线显示 deviceId）
   if (!name && info && info.key) {
@@ -375,7 +404,7 @@ function recordMonitorEvent(info, type, detail) {
       if (it && it.name) name = it.name;
     } catch (e) { /* ignore */ }
   }
-  monitorEvents.push({ ts: Date.now(), type: type, key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' });
+  monitorEvents.push({ ts: Date.now(), type: type, level: AL.normalizeLevel(level || levelOf(type)), key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' });
   if (monitorEvents.length > 500) monitorEvents.splice(0, monitorEvents.length - 500);
 }
 // 在线探测状态 → 主窗口；离线/恢复转换时弹系统通知（受 settings.monitorNotify 开关控制）
@@ -387,10 +416,14 @@ const notifyEnabled = () => loadAppSettings().monitorNotify !== false;
 function sendMonitor(channel, info) {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(channel, info);
 }
-function notifyUser(title, body) {
+function notifyUser(title, body, level) {
+  // 分级提示音先发（与系统通知是否可用无关）：渲染层合成的音型才算「按等级发声」
+  emitAlertSound(level);
   try {
     if (!Notification.isSupported()) return;
-    const n = new Notification({ title: title, body: body, silent: false });
+    // silent 恒为 true：提示音一律由本软件按等级合成——既避免与系统提示音叠加成两声，
+    // 也让「禁用声音」是真正的全静音（系统通知音是关不掉的，只能靠 silent 抑制）
+    const n = new Notification({ title: title, body: body, silent: true });
     n.on('click', () => { if (mainWin && !mainWin.isDestroyed()) { if (mainWin.isMinimized()) mainWin.restore(); mainWin.focus(); } });
     // 通知对象须保活至事件触发：局部引用可能被 GC，导致通知不显示/点击失效（告警漏报）。
     // 保活集封顶：部分平台 close 事件不可靠（条目永不回收），超限丢弃最旧引用防 Set 无界增长
@@ -424,7 +457,7 @@ function fireOffline(info) {
     return;
   }
   recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
-  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
+  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线', levelOf('offline'));
 }
 monitor.on('probe', (info) => {
   sendMonitor('monitor:probe', info);
@@ -463,7 +496,7 @@ monitor.on('probe', (info) => {
         recordMonitorEvent(info, 'recovery', '探测恢复在线' + tail);
         if (notifyEnabled()) {
           notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备恢复',
-            info.name + '（' + info.host + '）已恢复在线' + tail);
+            info.name + '（' + info.host + '）已恢复在线' + tail, levelOf('recovery'));
           for (const k of ((agg && agg.stillDownKeys) || [])) {
             const i = k.lastIndexOf('@');
             const devId = i > 0 ? k.slice(0, i) : k;
@@ -473,7 +506,7 @@ monitor.on('probe', (info) => {
             recordMonitorEvent({ key: k, deviceId: devId, host, name: nm }, 'offline',
               '仍不可达（此前因 ' + (agg && agg.rootName) + ' 失联，离线通知已归并）');
             notifyForDevice(devId, '网络拓扑管理软件 · 设备仍不可达',
-              nm + (host ? '（' + host + '）' : '') + '仍未恢复在线（此前因 ' + (agg && agg.rootName) + ' 失联未单独通知）');
+              nm + (host ? '（' + host + '）' : '') + '仍未恢复在线（此前因 ' + (agg && agg.rootName) + ' 失联未单独通知）', levelOf('offline'));
           }
         }
       }
@@ -494,11 +527,11 @@ monitor.on('alert', (info) => {
       lastAlertOn.set(info.key, true);
       lastAlertPatterns.set(info.key, cur);
       recordMonitorEvent(info, 'alert', detail);
-      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
+      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail, levelOf('alert'));
     } else if (added.length) {
       lastAlertPatterns.set(info.key, cur);
       recordMonitorEvent(info, 'alert', detail + '（新增 ' + added.join('、') + '）');
-      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
+      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail, levelOf('alert'));
     }
   } else if (lastAlertOn.get(info.key) === true) {
     lastAlertOn.set(info.key, false);
@@ -507,9 +540,9 @@ monitor.on('alert', (info) => {
   }
 });
 monitor.on('trust', (info) => {
-  // 首次连接自动信任主机指纹：安全敏感事件，始终通知用户（不随 monitorNotify 开关关闭）
+  // 首次连接自动信任主机指纹：安全敏感事件，始终通知用户（不随 monitorNotify 开关关闭；仍受「告警提示音」开关约束）
   notifyUser('网络拓扑管理软件 · 首次信任主机指纹',
-    info.name + '（' + info.host + '）首次连接已自动信任指纹 ' + info.fp + '；后续指纹变化将拒绝连接');
+    info.name + '（' + info.host + '）首次连接已自动信任指纹 ' + info.fp + '；后续指纹变化将拒绝连接', levelOf('trust'));
 });
 const lastBackupChangeAt = new Map(); // key -> 上次变更通知时间（节流）
 monitor.on('compliance', (info) => {
@@ -518,7 +551,7 @@ monitor.on('compliance', (info) => {
     ? '合规巡检通过（' + info.total + ' 项）'
     : '合规违规 ' + info.failed + '/' + info.total + '：' + (info.items || []).map(i => i.name).join('、');
   recordMonitorEvent(info, 'compliance', detail);
-  if (!info.ok && notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail);
+  if (!info.ok && notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail, levelOf('compliance'));
 });
 monitor.on('sysinfo', (info) => sendMonitor('monitor:sysinfo', info));
 // SNMP 性能采样（CPU/内存/sysUpTime）：实时推送监控中心「性能」页
@@ -528,7 +561,7 @@ monitor.on('reboot', (info) => {
   sendMonitor('monitor:reboot', info);
   const detail = '设备可能已重启（sysUpTime ' + fmtUptimeTicks(info.prev) + ' → ' + fmtUptimeTicks(info.cur) + '）';
   recordMonitorEvent(info, 'reboot', detail);
-  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备重启', info.name + '（' + info.host + '）' + detail);
+  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备重启', info.name + '（' + info.host + '）' + detail, levelOf('reboot'));
 });
 // SNMP 接口流量：实时采样推送主窗口；接口 up/down 跳变记入事件时间线并弹通知（接口离线才弹）
 monitor.on('iftraffic', (info) => sendMonitor('monitor:iftraffic', info));
@@ -538,7 +571,7 @@ monitor.on('ifstatus', (info) => {
     recordMonitorEvent(info, ch.to === 'down' ? 'if-down' : 'if-up',
       '接口 ' + ch.name + ' ' + (ch.to === 'down' ? 'DOWN（离线）' : 'UP（恢复）'));
     if (ch.to === 'down' && notifyEnabled()) {
-      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 接口离线', info.name + '（' + info.host + '）接口 ' + ch.name + ' DOWN');
+      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 接口离线', info.name + '（' + info.host + '）接口 ' + ch.name + ' DOWN', levelOf('if-down'));
     }
   }
 });
@@ -549,7 +582,7 @@ monitor.on('metric-alert', (info) => {
   const detail = (info.detail || (info.alerting ? '指标超阈值' : '指标告警解除'));
   recordMonitorEvent(info, info.alerting ? 'metric' : 'metric-clear', detail);
   if (info.alerting && notifyEnabled()) {
-    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 指标告警', info.name + '（' + info.host + '）' + detail);
+    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 指标告警', info.name + '（' + info.host + '）' + detail, levelOf('metric'));
   }
 });
 // HTTP 健康探测：状态沿（失败/恢复）记入时间线并弹通知（与在线探测同口径）
@@ -560,11 +593,11 @@ monitor.on('http', (info) => {
   if (info.ok === false && prev !== false) {
     lastHttpOk.set(info.key, false);
     recordMonitorEvent(info, 'http-fail', 'HTTP 探测失败：' + info.url + (info.error ? '（' + info.error + '）' : ''));
-    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测失败', info.name + '（' + info.host + '）' + info.url + ' 探测失败' + (info.error ? '：' + info.error : ''));
+    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测失败', info.name + '（' + info.host + '）' + info.url + ' 探测失败' + (info.error ? '：' + info.error : ''), levelOf('http-fail'));
   } else if (info.ok === true && prev === false) {
     lastHttpOk.set(info.key, true);
     recordMonitorEvent(info, 'http-ok', 'HTTP 探测恢复：' + info.url + (info.status ? '（HTTP ' + info.status + '）' : ''));
-    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测恢复', info.name + '（' + info.host + '）' + info.url + ' 已恢复');
+    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测恢复', info.name + '（' + info.host + '）' + info.url + ' 已恢复', levelOf('http-ok'));
   } else {
     lastHttpOk.set(info.key, info.ok);
   }
@@ -577,7 +610,7 @@ monitor.on('cert-alert', (info) => {
     : '证书剩余 ' + info.days + ' 天，已高于告警阈值：' + info.url;
   recordMonitorEvent(info, info.alerting ? 'cert' : 'cert-clear', detail);
   if (info.alerting && notifyEnabled()) {
-    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 证书即将到期', info.name + '（' + info.host + '）' + detail);
+    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 证书即将到期', info.name + '（' + info.host + '）' + detail, levelOf('cert'));
   }
 });
 monitor.on('backup', (info) => {
@@ -595,7 +628,7 @@ monitor.on('backup', (info) => {
       if (now - last > 30 * 60 * 1000) {
         lastBackupChangeAt.set(info.key, now);
         notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置变更',
-          info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）' + (info.summary ? '：' + info.summary : ''));
+          info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）' + (info.summary ? '：' + info.summary : ''), levelOf('backup-change'));
       }
     }
   } else {
@@ -604,7 +637,7 @@ monitor.on('backup', (info) => {
     const prevErr = lastBackupErrAt.get(info.key) || 0;
     if (now - prevErr > 10 * 60 * 1000) {
       lastBackupErrAt.set(info.key, now);
-      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
+      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'), levelOf('backup-error'));
     }
   }
 });
@@ -1137,14 +1170,35 @@ ipcMain.handle('monitor:event-unack', (e, p) => monitorGuard(e) ? clearAck(monit
 ipcMain.handle('monitor:alert-deps', (e) => monitorGuard(e)
   ? { ok: true, pending: alertDeps.pending(), stats: alertDeps.stats(), debug: alertDeps.debugView() }
   : { ok: false, error: 'forbidden', pending: [], stats: null, debug: [] });
-ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? { ok: true, notify: loadAppSettings().monitorNotify !== false, tray: trayEnabled() } : { ok: false, error: 'forbidden' });
+/* 监控/告警全局设置：通知开关、托盘常驻、告警等级覆盖表（alertLevels）与分级提示音（alertSound）。
+ * 渲染层的「设备监控」与「告警等级与提示音…」共用这一对接口（settings.json 单点持久化） */
+function monitorSettingsView() {
+  return {
+    ok: true,
+    notify: loadAppSettings().monitorNotify !== false,
+    tray: trayEnabled(),
+    sound: alertSoundSettings(),
+    levels: alertLevelOverrides()
+  };
+}
+ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? monitorSettingsView() : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:set-settings', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
-  if (p && typeof p.notify === 'boolean') {
-    loadAppSettings().monitorNotify = p.notify;
-    saveAppSettings();
+  const s = loadAppSettings();
+  let dirty = false;
+  if (p && typeof p.notify === 'boolean') { s.monitorNotify = p.notify; dirty = true; }
+  // 声音与等级覆盖一律经 alert-level 归一化后落盘：渲染层传来的脏数据不会写出半有效的设置。
+  // 声音设置按字段合并（局部更新不会把未提交的字段重置回默认）
+  if (p && p.sound && typeof p.sound === 'object' && !Array.isArray(p.sound)) {
+    s.alertSound = AL.normalizeSoundSettings(Object.assign({}, s.alertSound, p.sound));
+    dirty = true;
   }
-  return { ok: true, notify: loadAppSettings().monitorNotify !== false };
+  if (p && p.levels && typeof p.levels === 'object' && !Array.isArray(p.levels)) {
+    s.alertLevels = AL.normalizeOverrides(p.levels);
+    dirty = true;
+  }
+  if (dirty) saveAppSettings();
+  return monitorSettingsView();
 });
 ipcMain.handle('monitor:overview', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1411,8 +1465,8 @@ ipcMain.handle('deploy:run', async (e, p) => {
     + (doSave ? (r.saved.ok ? '；已保存配置' : '；保存配置失败') : '')
     + (saved.ok && saved.maskedCount ? '；记录已打码 ' + saved.maskedCount + ' 行' : '');
   recordMonitorEvent(info, r.ok ? 'deploy' : 'deploy-error', kindLabel + '：' + detail);
-  if (!r.ok) notifyForDevice(info.deviceId, '网络拓扑管理软件 · ' + kindLabel + '失败', dh.device + '（' + dh.host + '）：' + (r.error || '未知错误'));
-  else if (doSave && !r.saved.ok) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 保存配置失败', dh.device + '（' + dh.host + '）：变更已下发但保存配置失败，设备重启后可能丢失');
+  if (!r.ok) notifyForDevice(info.deviceId, '网络拓扑管理软件 · ' + kindLabel + '失败', dh.device + '（' + dh.host + '）：' + (r.error || '未知错误'), levelOf('deploy-error'));
+  else if (doSave && !r.saved.ok) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 保存配置失败', dh.device + '（' + dh.host + '）：变更已下发但保存配置失败，设备重启后可能丢失', levelOf('deploy-error'));
   sendMonitor('monitor:deploy', { host: dh.host, deviceId: info.deviceId, ok: r.ok, error: r.error || null, appliedCount: r.appliedCount, kind });
   return Object.assign({}, r, {
     backupFile, vendorLabel: v.label,
@@ -1444,7 +1498,7 @@ ipcMain.handle('proto:record', (e, p) => {
   const first = items[0];
   if (first && notifyEnabled()) {
     notifyForDevice(String(first.deviceId || ''), '网络拓扑管理软件 · 三层邻居异常',
-      String(first.device || first.host || '') + '：共 ' + items.length + ' 条邻居异常（详见事件时间线）');
+      String(first.device || first.host || '') + '：共 ' + items.length + ' 条邻居异常（详见事件时间线）', levelOf('proto'));
   }
   return { ok: true, recorded: n };
 });
@@ -2044,7 +2098,7 @@ async function runAiDailyReportNow() {
   const cfg = aiCfgFromSettings();
   const client = new AiClient(cfg);
   if (!client.ready) {
-    notifyUser('网络拓扑管理软件 · AI 巡检日报未生成', '请先在「AI ▾ AI 设置」中配置 API 地址与模型名');
+    notifyUser('网络拓扑管理软件 · AI 巡检日报未生成', '请先在「AI ▾ AI 设置」中配置 API 地址与模型名', levelOf('ai-daily-error'));
     return { ok: false, error: 'AI 未配置' };
   }
   const snapshot = buildDailySnapshotMain();
@@ -2060,13 +2114,13 @@ async function runAiDailyReportNow() {
         content: (cut.truncated ? '【输入已截断：原文共 ' + cut.totalBytes + ' 字节】\n\n' : '') + r.text
       });
       if (!hist.ok) console.warn('[ai] 定时日报保存失败：' + hist.error);
-      notifyUser('网络拓扑管理软件 · AI 巡检日报已生成', '已保存到「AI ▾ 分析记录」（' + fmtDTMain(new Date()).slice(11, 16) + '）');
+      notifyUser('网络拓扑管理软件 · AI 巡检日报已生成', '已保存到「AI ▾ 分析记录」（' + fmtDTMain(new Date()).slice(11, 16) + '）', levelOf('ai-daily'));
       return { ok: true };
     }
-    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((r && r.error) || '未知错误').slice(0, 200));
+    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((r && r.error) || '未知错误').slice(0, 200), levelOf('ai-daily-error'));
     return { ok: false, error: (r && r.error) || 'unknown' };
   } catch (err) {
-    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((err && err.message) || err).slice(0, 200));
+    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((err && err.message) || err).slice(0, 200), levelOf('ai-daily-error'));
     return { ok: false, error: String((err && err.message) || err) };
   }
 }
@@ -2188,7 +2242,7 @@ app.whenReady().then(() => {
       const { safeStorage } = require('electron');
       if (safeStorage.getSelectedStorageBackend && safeStorage.getSelectedStorageBackend() === 'basic_text') {
         setTimeout(() => notifyUser('网络拓扑管理软件 · 凭据保护降级',
-          '未检测到系统密钥环（gnome-keyring/kwallet），设备密码仅以弱混淆方式保存在本机工程文件中，请注意文件访问权限'), 3000);
+          '未检测到系统密钥环（gnome-keyring/kwallet），设备密码仅以弱混淆方式保存在本机工程文件中，请注意文件访问权限', levelOf('cred-degraded')), 3000);
       }
     } catch (e) { /* ignore */ }
   }

@@ -6513,6 +6513,7 @@ function openHelp() {
       <li><b>监控中心…</b>（监控 ▾ 或右键设备）：聚合全部设备状态与统计、<b>近 7 天在线率</b>；「事件时间线 / 配置备份 / 接口流量 / 性能」标签页切换，点击设备名或管理地址可筛选时间线，事件带设备徽标、告警显示匹配内容；「导出巡检数据」一键导出指标与 HTTP / 证书历史 CSV</li>
       <li><b>监控日志…</b>：按设备 / 日期浏览，支持<b>全局跨文件搜索</b>，点击结果定位到对应行</li>
       <li><b>告警静默</b>：右键设备「告警静默 1 小时」快速静默；或在监控配置弹窗设每日<b>维护窗口</b>（支持跨午夜）——静默期内通知不弹、<b>事件时间线照常记录</b>，计划内重启不再刷屏</li>
+      <li><b>告警等级与提示音…</b>（监控 ▾）：告警分<b>提示 / 警告 / 严重 / 紧急</b>四级，不同等级发出不同音型（本机合成，无需音频文件）；可设<b>最低发声等级</b>与<b>音量</b>，也可<b>整体关闭提示音</b>（关闭后系统通知一并静音，事件照常记录）；每种事件的等级可逐项改写，事件时间线按等级标注</li>
       <li><b>拓扑状态叠加</b>（监控 ▾）：节点右上角状态圆点实时刷新（绿=在线 / 红=离线·告警 / 橙=连接中）</li>
       <li><b>链路流量叠加</b>（监控 ▾）：连线中点徽标显示实时利用率（绿 &lt;50% / 橙 &lt;80% / 红 ≥80%，接口 DOWN 灰显）——数据取各设备「接口流量」SNMP 采集的收发速率，按跨厂家规范化接口名对齐连线两端，悬浮查看收发速率与采样时间</li>
       <li><b>托盘常驻</b>：开启后关闭主窗口仅最小化到托盘，后台监控继续运行</li>
@@ -6852,6 +6853,7 @@ function wire() {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds && renderer.selIds.size ? [...renderer.selIds][0] : '');
       if (selId) openMonitorConfig(selId); else toast('请先选中一台设备，或右键设备进入');
     } },
+    { ic: 'bell', label: '告警等级与提示音…', act: openAlertSoundConfig },
     { ic: 'shield', label: '凭据库（设备访问凭据集中维护）…', act: () => openCredManager() },
     { sep: true },
     { ic: 'doc', label: '监控日志…', act: () => {
@@ -7334,6 +7336,13 @@ function wire() {
       refreshPanel();
       renderSelCard();
       syncMonOverlay();
+    });
+  }
+  // 分级提示音：主进程已按「声音开关 + 最低发声等级」筛过，这里只负责合成与节流
+  if (window.topoMonitor && window.topoMonitor.onAlertSound) {
+    window.topoMonitor.onAlertSound((info) => {
+      if (!info) return;
+      playAlertSound(info.level, info.volume);
     });
   }
   if (window.topoMonitor && window.topoMonitor.onBackup) {
@@ -7895,6 +7904,214 @@ async function muteAlertsFor(id) {
       toast('已静默 1 小时' + (t ? '（至 ' + U.fmtDateTime(t).slice(11, 16) + '）' : '') + '：事件仍记录，不再弹通知');
     } else toast((r && r.error) || '静默失败');
   } catch (e) { toast('静默失败：' + String((e && e.message) || e)); }
+}
+
+/* ================= 告警等级与分级提示音 =================
+ * 等级定义、事件默认等级、音型规格都在 js/alert-level.js（与主进程同一份，避免两处口径漂移）；
+ * 这里负责三件事：① 用 WebAudio 现场合成各等级音型（无音频文件、无外链，CSP 下可用）；
+ * ② 「告警等级与提示音…」设置界面；③ 事件时间线上的等级徽标。 */
+const ALV = globalThis.TopoAlertLevel || null;
+const ALERT_LEVEL_FALLBACK = ['info', 'warning', 'critical', 'emergency'];
+const ALERT_LEVEL_CN = { info: '提示', warning: '警告', critical: '严重', emergency: '紧急' };
+/** 事件等级取值数组（alert-level.js 缺失时的兜底，保证界面不至于整块空白） */
+function alertLevelList() { return (ALV && ALV.LEVELS) || ALERT_LEVEL_FALLBACK; }
+function alertLevelName(lv) { return (ALV && ALV.levelName(lv)) || ALERT_LEVEL_CN[lv] || String(lv == null ? '' : lv); }
+function alertLevelRank(lv) { return ALV ? ALV.rankOf(lv) : alertLevelList().indexOf(lv); }
+/** 事件默认等级（渲染层只用于界面提示，权威判定在主进程） */
+function alertLevelOf(type) { return ALV ? ALV.levelFor(type, null) : 'warning'; }
+
+/* ---- 发声：WebAudio 合成。多台设备同时掉线时按最高等级合并 + 固定间隔，避免糊成一片长鸣 ---- */
+const alertAudio = { ctx: null, pending: null, timer: null, busyUntil: 0, volume: 0.6 };
+function alertAudioCtx() {
+  if (alertAudio.ctx) return alertAudio.ctx;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  try { alertAudio.ctx = new Ctx(); } catch (e) { alertAudio.ctx = null; }
+  return alertAudio.ctx;
+}
+/** 播放一个等级的音型：返回是否真的发声（无 WebAudio 环境返回 false） */
+function playAlertTone(level, volume) {
+  const spec = ALV && ALV.soundSpec ? ALV.soundSpec(level) : null;
+  const ac = alertAudioCtx();
+  if (!spec || !ac) return false;
+  // 自动播放策略：首个用户手势前 AudioContext 可能处于 suspended；这里顺手 resume，
+  // 恢复不了就这一次静默（值班场景下用户总有交互，不会一直哑）
+  if (ac.state === 'suspended') { try { ac.resume(); } catch (e) { /* ignore */ } }
+  const v = Math.max(0, Math.min(1, Number(volume))) * (Number(spec.gain) || 0.7) * 0.3;
+  let at = ac.currentTime + 0.02;
+  try {
+    for (const w of (spec.waves || [])) {
+      const dur = Number(w.d) || 0.1;
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.type = w.type || 'sine';
+      osc.frequency.value = Number(w.f) || 800;
+      // 梯形包络（起落各 8ms）：直接开关增益会有咔哒爆音
+      g.gain.setValueAtTime(0, at);
+      g.gain.linearRampToValueAtTime(v, at + 0.008);
+      g.gain.setValueAtTime(v, at + Math.max(0.008, dur - 0.008));
+      g.gain.linearRampToValueAtTime(0, at + dur);
+      osc.connect(g); g.connect(ac.destination);
+      osc.start(at); osc.stop(at + dur + 0.01);
+      at += dur + (Number(w.after) || 0);
+    }
+  } catch (e) { return false; }
+  return true;
+}
+/** 主进程告警音入口：冷却期内的多次告警只保留最高等级（一条紧急不会淹没在十条提示里） */
+function playAlertSound(level, volume) {
+  if (!ALV || !ALV.isLevel(level)) return;
+  if (Number.isFinite(Number(volume))) alertAudio.volume = Math.max(0, Math.min(1, Number(volume)));
+  if (!alertAudio.pending || alertLevelRank(level) > alertLevelRank(alertAudio.pending)) alertAudio.pending = level;
+  pumpAlertSound();
+}
+function pumpAlertSound() {
+  if (alertAudio.timer) return;
+  const now = Date.now();
+  if (now < alertAudio.busyUntil) {
+    alertAudio.timer = setTimeout(() => { alertAudio.timer = null; pumpAlertSound(); }, alertAudio.busyUntil - now);
+    return;
+  }
+  const lv = alertAudio.pending;
+  if (!lv) return;
+  alertAudio.pending = null;
+  const dur = (ALV && ALV.soundDurationMs) ? ALV.soundDurationMs(lv) : 600;
+  alertAudio.busyUntil = Date.now() + dur + ((ALV && ALV.MIN_GAP_MS) || 900);
+  playAlertTone(lv, alertAudio.volume);
+}
+/** 试听：无视冷却与最低等级门槛（用户显式点的），但会占用冷却窗口避免与真实告警叠音 */
+function previewAlertSound(level, volume) {
+  if (Number.isFinite(Number(volume))) alertAudio.volume = Math.max(0, Math.min(1, Number(volume)));
+  const dur = (ALV && ALV.soundDurationMs) ? ALV.soundDurationMs(level) : 600;
+  alertAudio.pending = null;
+  if (alertAudio.timer) { clearTimeout(alertAudio.timer); alertAudio.timer = null; }
+  alertAudio.busyUntil = Date.now() + dur + 300;
+  if (!playAlertTone(level, alertAudio.volume)) toast('当前环境不支持提示音（需桌面版 / 支持 WebAudio 的浏览器）');
+}
+/** 音型摘要（设置界面展示：几声、最高频率），让「等级不同声音不同」看得见 */
+function alertToneText(level) {
+  const spec = ALV && ALV.soundSpec ? ALV.soundSpec(level) : null;
+  if (!spec || !spec.waves || !spec.waves.length) return '';
+  const freqs = spec.waves.map(w => Number(w.f) || 0);
+  return spec.waves.length + ' 声 · ' + Math.min.apply(null, freqs) + '~' + Math.max.apply(null, freqs) + ' Hz';
+}
+
+/** 「告警等级与提示音…」：声音开关 / 最低发声等级 / 音量 / 逐事件等级改写（存主进程 settings.json） */
+function openAlertSoundConfig() {
+  const bridge = monitorBridge();
+  if (!bridge || !bridge.getSettings) { toast('告警等级与提示音需要桌面版（Electron）环境'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const levels = alertLevelList();
+  const lvOptions = (cur) => levels.map(lv => '<option value="' + U.escHtml(lv) + '"' + (lv === cur ? ' selected' : '') + '>' + U.escHtml(alertLevelName(lv)) + '</option>').join('');
+  const evTypes = (ALV && ALV.EVENT_TYPES) || [];
+  const evRows = evTypes.map(e => {
+    const dft = alertLevelOf(e.type);
+    return '<div class="as-ev" data-type="' + U.escHtml(e.type) + '"><span class="as-ev-nm">' + U.escHtml(e.label)
+      + ' <span class="as-ev-dft" title="默认等级（本项已被改写）" hidden>默认 ' + U.escHtml(alertLevelName(dft)) + '</span></span>'
+      + '<select class="as-ev-sel" title="该事件的告警等级">' + lvOptions(dft) + '</select></div>';
+  }).join('');
+  ov.innerHTML = `
+    <div class="modal ws-dialog as-dialog" role="dialog" style="width:660px">
+      <h3>告警等级与提示音</h3>
+      <div class="m-sub">告警按 <b>提示 &lt; 警告 &lt; 严重 &lt; 紧急</b> 四级提醒，不同等级发出不同音型（现场合成，不依赖音频文件）。等级决定两件事：<b>是否发声</b>（低于「最低发声等级」的告警只记事件、不出声）与<b>怎么响</b>。事件时间线同样按等级标注，便于值班时快速分辨轻重缓急。</div>
+      <div class="frow" style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
+        <label class="as-ck" title="关闭后所有告警都不再发声，系统通知也一并静音（事件时间线照常记录）"><input id="asEnabled" type="checkbox" checked/>告警时按等级发出提示音</label>
+        <label class="as-ck">最低发声等级 <select id="asMin">${lvOptions('warning')}</select></label>
+        <label class="as-ck">音量 <input id="asVol" type="range" min="0" max="100" step="1" value="60" style="width:110px"/>
+          <span id="asVolTxt" class="as-vol">60%</span></label>
+        <button type="button" class="tb as-tryall" id="asTryAll" title="依次试听四个等级的音型">依次试听</button>
+      </div>
+      <div class="as-sect">各等级音型</div>
+      <div class="as-tone-list">${levels.map(lv => '<div class="as-tone"><span class="as-lv lvl-' + U.escHtml(lv) + '">' + U.escHtml(alertLevelName(lv)) + '</span><span class="as-tone-t">' + U.escHtml(alertToneText(lv)) + '</span><button type="button" class="tb as-try" data-lv="' + U.escHtml(lv) + '">试听</button></div>').join('')}</div>
+      <div class="as-sect">事件等级（逐项可改；「设备离线」等已有合理默认）</div>
+      <div class="as-ev-list">${evRows || '<div class="m-sub">等级表不可用</div>'}</div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="reset" title="恢复全部默认等级与提示音设置">恢复默认</button>
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const volEl = ov.querySelector('#asVol');
+  const volTxt = ov.querySelector('#asVolTxt');
+  const curVolume = () => Math.max(0, Math.min(100, parseInt(volEl.value, 10) || 0)) / 100;
+  // 「默认 X」小标只在等级被改写后出现：与下拉同值时是冗余信息，一堆重复标签只会让人看不清哪几项被改过
+  const syncDftChip = (row) => {
+    const dft = alertLevelOf(row.dataset.type);
+    const chip = row.querySelector('.as-ev-dft');
+    if (!chip) return;
+    chip.hidden = (row.querySelector('.as-ev-sel').value === dft);
+    chip.textContent = '默认 ' + alertLevelName(dft);
+  };
+  ov.querySelectorAll('.as-ev').forEach(row => {
+    row.querySelector('.as-ev-sel').onchange = () => syncDftChip(row);
+    syncDftChip(row);
+  });
+  volEl.oninput = () => { volTxt.textContent = volEl.value + '%'; };
+  // 音量滑条即点即听：拖动时能直接听出音量大小（不试听就不知道该设多少）
+  volEl.onchange = () => previewAlertSound('warning', curVolume());
+  ov.querySelectorAll('.as-try').forEach(btn => { btn.onclick = () => previewAlertSound(btn.dataset.lv, curVolume()); });
+  ov.querySelector('#asTryAll').onclick = () => {
+    // 依次试听：靠合成器排程错开，不阻塞界面（点一次听全，不用逐个点）
+    let i = 0;
+    const next = () => {
+      if (!document.body.contains(ov) || i >= levels.length) return;
+      previewAlertSound(levels[i], curVolume());
+      const ms = ((ALV && ALV.soundDurationMs) ? ALV.soundDurationMs(levels[i]) : 600) + 250;
+      i++;
+      setTimeout(next, ms);
+    };
+    next();
+  };
+  // 读当前设置（含用户已改写的等级表）
+  bridge.getSettings().then((r) => {
+    if (!r || !r.ok || !document.body.contains(ov)) return;
+    const snd = r.sound || {};
+    ov.querySelector('#asEnabled').checked = snd.enabled !== false;
+    ov.querySelector('#asMin').value = snd.minLevel || 'warning';
+    const pct = Math.round((snd.volume != null ? snd.volume : 0.6) * 100);
+    volEl.value = String(pct);
+    volTxt.textContent = pct + '%';
+    const lvMap = r.levels || {};
+    ov.querySelectorAll('.as-ev').forEach(row => {
+      const v = lvMap[row.dataset.type];
+      if (v) row.querySelector('.as-ev-sel').value = v;
+      syncDftChip(row);
+    });
+  }).catch(() => { /* 读取失败按默认展示，保存时会覆盖 */ });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=reset]').onclick = () => {
+    ov.querySelector('#asEnabled').checked = true;
+    ov.querySelector('#asMin').value = (ALV && ALV.DEFAULT_MIN_LEVEL) || 'warning';
+    volEl.value = String(Math.round(((ALV && ALV.DEFAULT_VOLUME) || 0.6) * 100));
+    volTxt.textContent = volEl.value + '%';
+    ov.querySelectorAll('.as-ev').forEach(row => { row.querySelector('.as-ev-sel').value = alertLevelOf(row.dataset.type); syncDftChip(row); });
+    toast('已恢复默认等级与提示音设置，点「保存」生效');
+  };
+  ov.querySelector('[data-act=save]').onclick = async () => {
+    const levels2 = {};
+    ov.querySelectorAll('.as-ev').forEach(row => {
+      const v = row.querySelector('.as-ev-sel').value;
+      // 只提交与默认不同的项：默认表升级后未被用户改写的类型自动跟随新默认
+      if (v && v !== alertLevelOf(row.dataset.type)) levels2[row.dataset.type] = v;
+    });
+    const sound = { enabled: ov.querySelector('#asEnabled').checked, minLevel: ov.querySelector('#asMin').value, volume: curVolume() };
+    alertAudio.volume = sound.volume;
+    try {
+      if (bridge.setSound) await bridge.setSound(sound);
+      if (bridge.setAlertLevels) await bridge.setAlertLevels(levels2);
+    } catch (e) { toast('保存失败：' + String((e && e.message) || e)); return; }
+    close();
+    toast(sound.enabled
+      ? '已保存：' + alertLevelName(sound.minLevel) + '及以上告警发声，音量 ' + Math.round(sound.volume * 100) + '%'
+      : '已保存：告警提示音已关闭（事件与系统通知照常，通知本身也静音）');
+  };
 }
 
 /** 让启用了监控的设备与主进程运行状态对齐：期望集合 = deviceId@host，停止多余任务、启动缺失任务 */
@@ -10021,6 +10238,11 @@ function openMonitorCenter() {
         }
         const devTag = '<span class="mc-tag dev" data-dev="' + U.escHtml(e.deviceId || '') + '" data-name="' + U.escHtml(e.name || e.deviceId || '') + '"' + (e.host ? ' data-host="' + U.escHtml(e.host) + '"' : '') + ' title="点击筛选该设备的事件">' + U.escHtml(e.name || e.deviceId || '?') + '</span>';
         const typeTag = '<span class="mc-tag ' + U.escHtml(e.type || '') + '">' + U.escHtml(evTypeLabel[e.type] || e.type || '事件') + '</span>';
+        // 告警等级徽标（提示级不标：时间线里绝大多数是提示，标出来只剩噪声）
+        const evLv = (e.level && alertLevelRank(e.level) >= 1) ? e.level : '';
+        const lvTag = evLv
+          ? '<span class="mc-tag as-lv lvl-' + U.escHtml(evLv) + '" title="告警等级：' + U.escHtml(alertLevelName(evLv)) + '（可在「监控 ▾ 告警等级与提示音…」中逐项调整）">' + U.escHtml(alertLevelName(evLv)) + '</span>'
+          : '';
         // 确认状态：未确认的条目左侧加竖条提示，已确认显示确认时刻 + 备注（值班交接一眼看出谁看过）
         const acked = !!e.ackAt;
         const ackHtml = acked
@@ -10028,7 +10250,7 @@ function openMonitorCenter() {
           : '';
         evRows.push('<div class="mc-ev' + (acked ? ' acked' : ' unacked') + '" data-ev="' + Number(e.ts) + '">'
           + '<span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span>'
-          + devTag + typeTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + ackHtml + '</span>'
+          + devTag + typeTag + lvTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + ackHtml + '</span>'
           + '<button type="button" class="tb mc-ackbtn" data-ack="' + Number(e.ts) + '" title="' + (acked ? '撤销确认' : '确认该事件（可留备注，便于交接）') + '">' + (acked ? '撤销' : '确认') + '</button>'
           + '</div>');
       }
@@ -11908,6 +12130,8 @@ if (typeof globalThis !== 'undefined') {
     exportPdf,
     openMonitorConfig,
     openMonitorCenter,
+    openAlertSoundConfig,
+    alertLevelOf,
     openMonitorLogs,
     openConfigBackups,
     openConfigDeploy,

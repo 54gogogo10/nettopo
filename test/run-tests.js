@@ -8157,6 +8157,84 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(A.unackedCount(null), 0, '容错：空列表计数为 0');
       eq(A.normalizeNote(null), '', '备注清洗：null → 空串');
     }
+
+    /* ================= 告警等级与分级提示音（js/alert-level.js） ================= */
+    {
+      const A = require('../js/alert-level.js');
+      // 等级与排序：四级固定次序，非法值一律回退默认（脏设置只能影响自己那一项）
+      eq(A.LEVELS.join(','), 'info,warning,critical,emergency', '等级：四级固定次序');
+      ok(A.rankOf('info') < A.rankOf('warning') && A.rankOf('warning') < A.rankOf('critical') && A.rankOf('critical') < A.rankOf('emergency'), '排序：提示 < 警告 < 严重 < 紧急');
+      eq(A.rankOf('nope'), -1, '排序：未知等级返回 -1（不参与比较）');
+      eq(A.normalizeLevel('critical'), 'critical', '归一化：合法等级原样返回');
+      eq(A.normalizeLevel('CRITICAL'), 'warning', '归一化：大小写不同视为非法（避免脏设置半生效）');
+      eq(A.normalizeLevel(null), 'warning', '归一化：空值回退默认等级');
+      eq(A.normalizeLevel('x', 'emergency'), 'emergency', '归一化：可指定回退等级');
+      eq(A.levelName('emergency'), '紧急', '名称：中文名映射');
+
+      // 事件默认等级表：告警类事件有明确等级，恢复/通知类为提示
+      eq(A.levelFor('offline'), 'emergency', '默认表：设备离线为紧急');
+      eq(A.levelFor('alert'), 'critical', '默认表：输出关键字告警为严重');
+      eq(A.levelFor('recovery'), 'info', '默认表：设备恢复为提示');
+      eq(A.levelFor('backup-change'), 'info', '默认表：配置有变化为提示（不值得半夜响铃）');
+      eq(A.levelFor('unknown-type'), 'warning', '默认表：未知事件类型回退警告');
+      let evAllLeveled = true;
+      for (const e of A.EVENT_TYPES) if (!A.isLevel(A.EVENT_LEVELS[e.type])) evAllLeveled = false;
+      ok(evAllLeveled && A.EVENT_TYPES.length >= 20, '默认表：配置界面的 ' + A.EVENT_TYPES.length + ' 类事件都有合法等级');
+
+      // 用户覆盖：只认合法键值，脏数据不污染其它类型，也不产生原型污染
+      const ov = A.normalizeOverrides({ offline: 'warning', 'alert-clear': 'bogus', '__proto__': 'emergency', nope: 'critical', constructor: 'critical' });
+      eq(Object.keys(ov).join(','), 'offline', '覆盖：只保留已知事件类型的合法等级');
+      eq(A.levelFor('offline', ov), 'warning', '覆盖：用户改写生效');
+      eq(A.levelFor('alert', ov), 'critical', '覆盖：未改写的类型仍按默认表');
+      ok(({}).offline === undefined, '覆盖：未发生原型污染');
+      eq(Object.keys(A.normalizeOverrides(null)).length, 0, '覆盖：空值归一为空表');
+      eq(Object.keys(A.normalizeOverrides([1, 2])).length, 0, '覆盖：数组视为非法输入');
+
+      // 声音设置：任何输入都返回可用三件套；音量夹取到 [0,1]
+      const sfx = A.normalizeSoundSettings(null);
+      ok(sfx.enabled === true && sfx.minLevel === 'warning' && sfx.volume === 0.6, '声音设置：缺省为 开启/警告/60%');
+      eq(A.normalizeSoundSettings({ enabled: false }).enabled, false, '声音设置：可整体关闭');
+      eq(A.normalizeSoundSettings({ volume: 5 }).volume, 1, '声音设置：音量上限夹到 1');
+      eq(A.normalizeSoundSettings({ volume: -3 }).volume, 0, '声音设置：音量下限夹到 0');
+      eq(A.normalizeSoundSettings({ volume: 'abc' }).volume, 0.6, '声音设置：非法音量回退默认');
+      eq(A.normalizeSoundSettings({ minLevel: 'emergency' }).minLevel, 'emergency', '声音设置：最低发声等级可设');
+      eq(A.normalizeSoundSettings({ minLevel: 'zzz' }).minLevel, 'warning', '声音设置：非法最低等级回退默认');
+
+      // 是否发声：总开关优先；低于最低等级不响
+      ok(A.shouldPlay('emergency', { enabled: true, minLevel: 'critical' }) === true, '发声：紧急 ≥ 严重门槛');
+      ok(A.shouldPlay('warning', { enabled: true, minLevel: 'critical' }) === false, '发声：警告低于严重门槛不响');
+      ok(A.shouldPlay('emergency', { enabled: false, minLevel: 'info' }) === false, '发声：总开关关闭后紧急也不响');
+      ok(A.shouldPlay('info', { enabled: true, minLevel: 'info' }) === true, '发声：门槛设为提示时提示也响');
+
+      // 音型规格：四个等级必须互不相同，否则「按等级发声」形同虚设
+      const sigs = A.LEVELS.map(lv => JSON.stringify(A.SOUNDS[lv].waves));
+      ok(new Set(sigs).size === 4, '音型：四个等级的音型互不相同');
+      ok(A.soundDurationMs('emergency') > A.soundDurationMs('info'), '音型：紧急比提示更长（更抓耳）');
+      let toneOk = true;
+      for (const lv of A.LEVELS) {
+        const sp = A.soundSpec(lv);
+        if (!sp || !Array.isArray(sp.waves) || !sp.waves.length || !sp.waves.every(w => w.f > 0 && w.d > 0)) toneOk = false;
+      }
+      ok(toneOk, '音型：每个等级的音都有合法频率与时长');
+      eq(A.soundSpec('bogus').waves.length, A.SOUNDS.warning.waves.length, '音型：未知等级回退默认等级音型');
+      ok(A.SOUNDS.emergency.gain >= A.SOUNDS.info.gain, '音量系数：越紧急越响');
+      ok(A.MIN_GAP_MS >= 300, '节流：最短发声间隔 ≥300ms（多台同时告警不糊成一片）');
+
+      // Syslog 级别 / Trap 含义映射
+      eq(A.levelFromSyslogSeverity(0), 'emergency', 'Syslog：emerg 为紧急');
+      eq(A.levelFromSyslogSeverity(3), 'critical', 'Syslog：err 为严重');
+      eq(A.levelFromSyslogSeverity(4), 'warning', 'Syslog：warning 为警告');
+      eq(A.levelFromSyslogSeverity(6), 'info', 'Syslog：info 为提示');
+      eq(A.levelFromSyslogSeverity(undefined), 'warning', 'Syslog：缺级别回退警告');
+      eq(A.levelFromTrap('linkDown（接口断开）'), 'critical', 'Trap：接口断开为严重');
+      eq(A.levelFromTrap('authenticationFailure（认证失败）'), 'critical', 'Trap：认证失败为严重');
+      eq(A.levelFromTrap('linkUp（接口恢复）'), 'info', 'Trap：接口恢复为提示');
+      eq(A.levelFromTrap('coldStart（冷启动）'), 'warning', 'Trap：冷启动为警告');
+      eq(A.levelFromTrap('enterprise（1.3.6.1.4.1.9）'), 'warning', 'Trap：企业自定义为警告');
+
+      // 双形态导出：渲染层无打包器，经 globalThis 取用同一份定义
+      ok(!!globalThis.TopoAlertLevel && globalThis.TopoAlertLevel.LEVELS.length === 4, '双形态导出：挂载 globalThis.TopoAlertLevel（渲染层可用）');
+    }
 })().then(() => {
   suiteFinished = true;
   console.log('');
