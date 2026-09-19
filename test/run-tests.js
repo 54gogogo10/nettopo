@@ -8235,6 +8235,233 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       // 双形态导出：渲染层无打包器，经 globalThis 取用同一份定义
       ok(!!globalThis.TopoAlertLevel && globalThis.TopoAlertLevel.LEVELS.length === 4, '双形态导出：挂载 globalThis.TopoAlertLevel（渲染层可用）');
     }
+
+    /* ================= 端到端链路连通性监测：路径与判定（js/link-path.js） ================= */
+    {
+      const L = require('../js/link-path.js');
+      const g = {
+        nodes: [
+          { id: 'a', name: 'SW1', mgmt: '10.0.0.1' },
+          { id: 'b', name: 'SW2', mgmt: '10.0.0.2' },
+          { id: 'c', name: 'SW3', mgmt: '10.0.0.3' },
+          { id: 'd', name: 'ISO', mgmt: '' }
+        ],
+        links: [
+          { id: 'l1', a: 'a', b: 'b', aIp: '', bIp: '10.1.0.2', aIf: 'GE0/0/1', bIf: 'GE0/0/1', bw: 1000 },
+          { id: 'l2', a: 'b', b: 'c', aIp: '10.2.0.1', bIp: '10.2.0.2', aIf: 'GE0/0/2', bIf: 'GE0/0/1', bw: 1000 },
+          { id: 'l3', a: 'c', b: 'd', aIp: '', bIp: '', aIf: 'GE0/0/9', bIf: 'eth0', bw: 100 }
+        ]
+      };
+
+      // 地址与主机名校验：任何会跑进命令行的字符串都必须先过这里（'-t' 之类会被 ping 当选项）
+      ok(L.isIpv4('10.0.0.1') && !L.isIpv4('10.0.0.256') && !L.isIpv4('10.0.0'), '校验：IPv4 字面量');
+      ok(L.isHost('sw1.core') && L.isHost('10.0.0.1'), '校验：主机名与地址都能用');
+      ok(!L.isHost('-t') && !L.isHost('a b') && !L.isHost('a\nb') && !L.isHost('x'.repeat(80)), '校验：选项前缀/空白/换行/超长一律拒绝');
+      eq(L.mgmtHostsOf({ mgmt: '10.0.0.1', mgmts: ['10.0.0.2', '10.0.0.1'] }).join(','), '10.0.0.1,10.0.0.2', '管理地址：去重保序');
+      eq(L.mgmtHostsOf(null).length, 0, '管理地址：空节点返回空表');
+
+      // 连线级任务：每条连线一个任务、双向各一段（只认接口 IP——管理地址通不代表这条链路通）
+      const built = L.buildLinkTasks(g, { idOf: (i) => 'lk' + (i + 1) });
+      eq(built.tasks.length, 2, '连线任务：两端有接口 IP 的连线各建一个任务（l3 两端都没接口 IP 被跳过）');
+      eq(built.skipped.length, 1, '连线任务：没接口 IP 的连线如实计入 skipped，且说明管理地址不能代表链路');
+      const t1 = built.tasks[0];
+      eq(t1.kind, 'link', '连线任务：kind=link');
+      eq(t1.segments.length, 1, '连线任务：一侧缺接口 IP 时只建单向段');
+      eq(t1.segments[0].target, '10.1.0.2', '连线任务：目标取对端接口 IP');
+      ok(/仅单向监测/.test(t1.name), '连线任务：单向监测在名称里如实标注（' + t1.name + '）');
+      eq(built.tasks[1].segments.length, 2, '连线任务：两端都有接口 IP 时双向各一段');
+      eq(built.tasks[1].linkIds.join(','), 'l2,l2', '连线任务：两段都挂在同一条连线上（画布着色用）');
+      ok(/SW2/.test(t1.name) && /SW1/.test(t1.name), '连线任务：名称含两端设备（' + t1.name + '）');
+
+      // 端到端路径：沿拓扑选路 + 逐段目标；跳数上限与不可达都要如实报错
+      const p = L.buildPathTask(g, 'a', 'c', { id: 'p1', bestPath: null });
+      ok(p.ok === true && p.task.nodeIds.join(',') === 'a,b,c', '路径任务：选到 A→B→C（' + (p.ok ? p.task.nodeIds.join('→') : p.error) + '）');
+      eq(p.task.segments.length, 2, '路径任务：2 跳 = 2 段');
+      eq(p.task.segments[1].target, '10.2.0.2', '路径任务：第二段目标取该跳对端接口 IP');
+      eq(p.task.kind, 'path', '路径任务：kind=path');
+      ok(/端到端/.test(p.task.name) && /2 跳/.test(p.task.name), '路径任务：名称写明端到端与跳数（' + p.task.name + '）');
+      const pSelf = L.buildPathTask(g, 'a', 'a', { id: 'p2' });
+      ok(pSelf.ok === false && /相同/.test(pSelf.error), '路径任务：起止相同如实拒绝');
+      const pIso = L.buildPathTask(g, 'a', 'd', { id: 'p3' });
+      ok(pIso.ok === true && pIso.skipped.length === 1 && /无可用地址/.test(pIso.task.name), '路径任务：有跳没有地址时仍建任务，但名称如实标注未纳入探测（' + (pIso.ok ? pIso.task.name : pIso.error) + '）');
+      const pMissing = L.buildPathTask(g, 'a', 'nope', { id: 'p4' });
+      ok(pMissing.ok === false && /不存在/.test(pMissing.error), '路径任务：设备不存在如实报错');
+      // 注入的最宽路径选择（渲染层传 U.bestPath）：走注入实现而不是内建 BFS
+      let injected = false;
+      const pInj = L.buildPathTask(g, 'a', 'c', { id: 'p5', bestPath: () => { injected = true; return { nodeIds: ['a', 'b', 'c'], linkIds: ['l1', 'l2'], bottleneck: 1000 }; } });
+      ok(injected && pInj.ok, '路径任务：注入的 bestPath 被采用（与「路径分析」同一套聚合/最宽语义）');
+
+      // 归一化：渲染层载荷当不可信输入
+      ok(L.normTask(null) === null, '归一化：空载荷拒绝');
+      ok(L.normTask({ id: 'bad id!', segments: [{ target: '10.0.0.1' }] }) === null, '归一化：非法 id 拒绝');
+      ok(L.normTask({ id: 'x1', segments: [] }) === null, '归一化：没有可探测段的任务拒绝');
+      ok(L.normTask({ id: 'x1', segments: [{ target: '-t' }] }) === null, '归一化：目标地址非法的段被丢弃（任务随之作废）');
+      const nt = L.normTask({ id: 'x1', name: 'n', mode: 'device', protocol: 'tcp', port: 99999, intervalSec: 1, timeoutMs: 1, failThreshold: 99, vendor: 'huawei',
+        segments: [{ index: 0, target: '10.0.0.2', from: { deviceId: 'a', host: '10.0.0.1', password: 'p' } }, { target: 'bad host' }] });
+      eq(nt.id, 'x1', '归一化：保留合法 id（主进程按 id 建任务）');
+      eq(nt.segments.length, 1, '归一化：非法段被丢弃');
+      eq(nt.intervalSec, 10, '归一化：间隔下限钳制到 10s（防误填 1s 打爆设备）');
+      eq(nt.timeoutMs, 500, '归一化：超时下限钳制到 500ms');
+      eq(nt.port, 65535, '归一化：端口钳制到上限（' + nt.port + '）');
+      eq(nt.failThreshold, 5, '归一化：去抖阈值上限钳制到 5');
+      eq(nt.mode, 'device', '归一化：探测方式保留');
+      eq(nt.vendor, 'huawei', '归一化：厂家保留');
+
+      // 本机逐跳目标去重（同一地址只发一次包）
+      const tgt = L.localTargets({ segments: [{ index: 0, target: '10.0.0.9' }, { index: 1, target: '10.0.0.9' }, { index: 2, target: '10.0.0.8' }] });
+      eq(tgt.length, 2, '本机目标：重复地址去重');
+      eq(tgt[0].segIndexes.join(','), '0,1', '本机目标：记下引用同一地址的段（结果回填用）');
+
+      // 设备侧命令：各厂家语法
+      eq(L.probeCommand('linux', '10.0.0.1', { count: 2, timeoutMs: 3000 }), 'ping -c 2 -W 3 10.0.0.1', '命令：Linux/通用语法');
+      eq(L.probeCommand('huawei', '10.0.0.1', { count: 2, timeoutMs: 2000 }), 'ping -c 2 -t 2 10.0.0.1', '命令：华为 VRP 语法（-c 次数 / -t 超时）');
+      eq(L.probeCommand('h3c', '10.0.0.1', { count: 3, timeoutMs: 3000 }), 'ping -c 3 10.0.0.1', '命令：H3C 语法');
+      eq(L.probeCommand('cisco', '10.0.0.1', { count: 2, timeoutMs: 4000 }), 'ping 10.0.0.1 repeat 2 timeout 4', '命令：思科 IOS 语法');
+      eq(L.probeCommand('ruijie', '10.0.0.1', { count: 2, timeoutMs: 3000 }), 'ping -c 2 10.0.0.1', '命令：锐捷语法');
+      eq(L.probeCommand('huawei', '-t', {}), '', '命令：目标地址非法时不出命令（防命令注入）');
+
+      // 回显判定：四类厂家 + 判不出来返回 null（不改状态）
+      eq(L.judgeProbeText('3 packets transmitted, 3 received, 0% packet loss\nrtt min/avg/max = 0.045/0.050/0.058 ms', '10.0.0.1'), true, '判定：Linux 通');
+      eq(L.judgeProbeText('3 packets transmitted, 0 received, 100% packet loss', '10.0.0.1'), false, '判定：Linux 100% 丢包');
+      eq(L.judgeProbeText('    5 packet(s) transmitted\n    5 packet(s) received\n    0.00% packet loss', '10.0.0.1'), true, '判定：华为/H3C 通');
+      eq(L.judgeProbeText('    5 packet(s) transmitted\n    0 packet(s) received\n    100.00% packet loss', '10.0.0.1'), false, '判定：华为/H3C 不通');
+      eq(L.judgeProbeText('Success rate is 100 percent (2/2), round-trip min/avg/max = 1/2/4 ms', '10.0.0.1'), true, '判定：思科通');
+      eq(L.judgeProbeText('.....\nSuccess rate is 0 percent (0/2)', '10.0.0.1'), false, '判定：思科不通');
+      eq(L.judgeProbeText('来自 10.0.0.1 的回复: 字节=32 时间<1ms TTL=255\n数据包: 已发送 = 2，已接收 = 2，丢失 = 0 (0% 丢失)', '10.0.0.1'), true, '判定：中文 Windows 通');
+      eq(L.judgeProbeText('请求超时。\n数据包: 已发送 = 2，已接收 = 0，丢失 = 2 (100% 丢失)', '10.0.0.1'), false, '判定：中文 Windows 超时');
+      eq(L.judgeProbeText('Reply from 10.0.0.9: Destination host unreachable.', '10.0.0.1'), false, '判定：中途不可达算不通（Windows 会把它算成 Received=1 的陷阱）');
+      eq(L.judgeProbeText('Error: Unrecognized command found at \'^\' position.', '10.0.0.1'), null, '判定：命令不认/输出无关 → 无法判定');
+      eq(L.judgeProbeText('', '10.0.0.1'), null, '判定：空回显 → 无法判定');
+      eq(L.parseProbeLatency('rtt min/avg/max/mdev = 0.045/0.050/0.058/0.005 ms'), 0.05, '时延：Linux rtt 取平均');
+      eq(L.parseProbeLatency('Success rate is 100 percent'), null, '时延：取不到返回 null');
+
+      // 结论与状态机
+      const ev1 = L.evaluateSegments([{ index: 0, ok: true, latencyMs: 3 }, { index: 1, ok: true, latencyMs: 5 }]);
+      ok(ev1.state === 'up' && ev1.latencyMs === 8, '结论：全段通 → up，时延为各段之和（' + ev1.latencyMs + 'ms）');
+      const ev2 = L.evaluateSegments([{ index: 0, ok: true, latencyMs: 3 }, { index: 1, ok: false }, { index: 2, ok: false }]);
+      ok(ev2.state === 'down' && ev2.brokenAt === 1 && ev2.down === 2, '结论：有明确失败 → down，断点=第一段失败处');
+      const ev3 = L.evaluateSegments([{ index: 0, ok: null }, { index: 1, ok: null }]);
+      ok(ev3.state === 'unknown' && ev3.unknown === 2, '结论：全无法判定 → unknown');
+      const ev4 = L.evaluateSegments([{ index: 0, ok: null }, { index: 1, ok: false }]);
+      ok(ev4.state === 'down', '结论：混合时以明确失败为准（不可判定段不掩盖真故障）');
+
+      // 基线：首个能判定的结论直接作为初始状态且不报警（防「本机天生不通」刷屏）
+      const b1 = L.applyProbe(null, [{ index: 0, ok: false }], { failThreshold: 2, okThreshold: 1, ts: 1000 });
+      ok(b1.state === 'down' && b1.baseline === true && b1.changed === false && b1.event === null, '基线：首轮结论直接作为初始状态、不产生事件');
+      const b2 = L.applyProbe(b1, [{ index: 0, ok: false }], { failThreshold: 2, okThreshold: 1, ts: 2000 });
+      ok(b2.state === 'down' && b2.changed === false && b2.event === null, '基线：持续不通不再重复告警');
+      const b3 = L.applyProbe(b2, [{ index: 0, ok: true }], { failThreshold: 2, okThreshold: 1, ts: 3000 });
+      ok(b3.state === 'up' && b3.changed === true && b3.event === 'link-up', '基线：相对基线翻转为通 → link-up 事件');
+      const b4 = L.applyProbe(b3, [{ index: 0, ok: false }], { failThreshold: 2, okThreshold: 1, ts: 4000 });
+      ok(b4.state === 'up' && b4.changed === false, '去抖：单次失败不改状态（默认连续 2 次才判中断）');
+      const b5 = L.applyProbe(b4, [{ index: 0, ok: false }], { failThreshold: 2, okThreshold: 1, ts: 5000 });
+      ok(b5.state === 'down' && b5.event === 'link-down', '去抖：连续 2 次失败判中断并产生 link-down 事件');
+      const b6 = L.applyProbe(b5, [{ index: 0, ok: null }], { failThreshold: 2, okThreshold: 1, ts: 6000 });
+      ok(b6.state === 'down' && b6.failStreak === b5.failStreak, '去抖：无法判定既不计成功也不计失败（streak 不变）');
+      const b7 = L.applyProbe(null, [{ index: 0, ok: null }], { baselineFirst: true, ts: 7000 });
+      ok(b7.baselined === false, '基线：首轮判不出来时不消费基线（留给下一次能判定时再建）');
+      const b8 = L.applyProbe(null, [{ index: 0, ok: false }], { baselineFirst: false, failThreshold: 1, okThreshold: 1, ts: 8000 });
+      ok(b8.state === 'down' && b8.event === 'link-down' && b8.baseline === false, '基线：关掉「首轮只建基线」时首轮即告警');
+      eq(L.stateLabel('down'), '中断', '展示：状态中文名');
+
+      ok(!!globalThis.TopoLinkPath && globalThis.TopoLinkPath.LIMITS.segments === 12, '双形态导出：挂载 globalThis.TopoLinkPath（渲染层可用）');
+    }
+
+    /* ================= 端到端链路连通性监测：调度器（js/link-monitor.js） ================= */
+    {
+      const { LinkMonitor, mapLimit, probeLocal } = require('../js/link-monitor.js');
+      const mkTask = (over) => Object.assign({
+        id: 'k1', name: '测试链路', kind: 'link', enabled: true, intervalSec: 60, timeoutMs: 1000,
+        failThreshold: 1, okThreshold: 1, baselineFirst: true,
+        segments: [{ index: 0, target: '10.0.0.1', from: { deviceId: 'a', name: 'A', host: '10.0.0.9' } }]
+      }, over || {});
+
+      // 载入校验
+      const m0 = new LinkMonitor({ probes: { local: async () => ({ ok: true, latencyMs: 1 }) } });
+      ok(m0.start({ id: 'bad', segments: [] }).ok === false, '启动：没有可探测段的任务拒绝');
+      const badDev = m0.start(mkTask({ id: 'd0', mode: 'device', segments: [{ index: 0, target: '10.0.0.1', from: { deviceId: 'a' } }] }));
+      ok(badDev.ok === false && /管理地址/.test(badDev.error), '启动：设备模式缺段起点管理地址直接拒绝（不让每轮白跑）');
+      m0.stopAll();
+
+      // mapLimit：保序 + 单项异常不影响其余
+      const mapped = await mapLimit([1, 2, 3, 4, 5], 2, async (n) => { if (n === 3) throw new Error('boom'); return n * 2; });
+      ok(mapped[0] === 2 && mapped[4] === 10 && mapped[2] && mapped[2].ok === null, 'mapLimit：保序返回，异常项兜成 ok=null（不中断整轮、不改状态）');
+
+      // 状态机与事件：基线 → 中断（真实调度路径，注入探测）
+      // 探测序列：OK OK 失败 失败 —— 基线取首轮，默认连续 2 次失败才判中断
+      let n = 0;
+      const mon = new LinkMonitor({ probes: { local: async () => ({ ok: (n++ < 2), latencyMs: 7 }) } });
+      const states = [];
+      let results = 0;
+      mon.on('state', (i) => { if (i.reason) return; states.push(i.state + (i.event ? ':' + i.event : '')); });
+      mon.on('result', () => { results++; });
+      const st = mon.start(mkTask({ id: 'k1', failThreshold: 2 }));
+      ok(st.ok === true && st.key === 'k1', '启动：任务建立并返回 key');
+      await mon.probeNow('k1');
+      eq(mon.status().items[0].state, 'up', '探测：首轮建立基线（通）');
+      await mon.probeNow('k1');
+      await mon.probeNow('k1');
+      eq(mon.status().items[0].state, 'up', '去抖：单次失败不改状态（未达连续 2 次阈值）');
+      await mon.probeNow('k1');
+      eq(mon.status().items[0].state, 'down', '探测：连续失败达阈值判中断');
+      ok(states.indexOf('down:link-down') >= 0, '事件：状态翻转发出 link-down（' + states.join(' | ') + '）');
+      eq(results, 4, '事件：每轮探测都发 result（面板可看过程）');
+      eq(mon.status().items[0].latencyMs, null, '结果：中断轮次没有时延');
+      const hist = mon.history('k1').items;
+      ok(hist.length === 4 && hist[0].state === 'up' && hist[3].state === 'down', '历史：逐轮记录（' + hist.map(h => h.state).join(',') + '）');
+      ok(mon.stop('k1').ok === true && mon.status().count === 0, '停止：任务移除');
+      ok(mon.history('k1').ok === false, '停止后：历史不可查（任务已不存在）');
+      ok(mon.probeNow('k1').then !== undefined, '停止后：探测调用返回 Promise 结果而非抛异常');
+
+      // 本机模式：同地址去重（只发一次包），结果回填到所有引用它的段
+      const probedHosts = [];
+      const m2 = new LinkMonitor({ probes: { local: async (h) => { probedHosts.push(h); return { ok: true, latencyMs: 2 }; } } });
+      m2.start(mkTask({
+        id: 'k2', segments: [
+          { index: 0, target: '10.9.9.9', from: { deviceId: 'a', name: 'A', host: '10.0.0.9' } },
+          { index: 1, target: '10.9.9.9', from: { deviceId: 'b', name: 'B', host: '10.0.0.8' } }
+        ]
+      }));
+      await m2.probeNow('k2');
+      eq(probedHosts.length, 1, '本机模式：同一目标地址一轮只探测一次（去重）');
+      eq(m2.status().items[0].segments.length, 2, '本机模式：段结果按原段数回填');
+      eq(m2.status().items[0].latencyMs, 4, '本机模式：两段时延各自累计（' + m2.status().items[0].latencyMs + 'ms）');
+      m2.stopAll();
+
+      // 设备模式：串行下发厂家命令，逐段独立判定
+      const cmds = [];
+      const m3 = new LinkMonitor({
+        probes: { device: async (seg, task, o) => { cmds.push(o.command); return { ok: seg.index === 0, latencyMs: 3 }; } }
+      });
+      m3.start(mkTask({
+        id: 'k3', mode: 'device', vendor: 'huawei', baselineFirst: false, failThreshold: 1,
+        segments: [
+          { index: 0, target: '10.0.0.1', from: { deviceId: 'a', name: 'A', host: '10.0.0.9' } },
+          { index: 1, target: '10.0.0.2', from: { deviceId: 'b', name: 'B', host: '10.0.0.8' } }
+        ]
+      }));
+      await m3.probeNow('k3');
+      eq(cmds.length, 2, '设备模式：逐段执行一次探测');
+      eq(cmds[0], 'ping -c 2 -t 1 10.0.0.1', '设备模式：按厂家生成命令（' + cmds[0] + '）');
+      const dev3 = m3.status().items[0];
+      ok(dev3.state === 'down' && dev3.brokenAt === 1, '设备模式：第二段不通 → 断点定位到第 2 段');
+      m3.stopAll();
+
+      // 探测实现异常：不误判（保持 unknown 并记错误）
+      const m4 = new LinkMonitor({ probes: { local: async () => { throw new Error('boom'); } } });
+      m4.start(mkTask({ id: 'k4' }));
+      await m4.probeNow('k4');
+      eq(m4.status().items[0].state, 'unknown', '异常探测：保持 unknown，不误判断链');
+      ok(/boom/.test(m4.status().items[0].lastError), '异常探测：错误如实记进任务状态（' + m4.status().items[0].lastError + '）');
+      m4.stopAll();
+
+      // 本机真实探测实现（回环地址必通）与地址白名单
+      const rLoop = await probeLocal('127.0.0.1', { protocol: 'icmp', timeoutMs: 2000 });
+      ok(rLoop.ok === true, '本机探测：回环地址判定为通（' + JSON.stringify({ ok: rLoop.ok, ms: rLoop.latencyMs }) + '）');
+      const rBad = await probeLocal('-t', { protocol: 'icmp' });
+      ok(rBad.ok === null && /非法/.test(rBad.error), '本机探测：非法地址直接拒绝（不拼进 ping 参数）');
+      eq(require('../js/link-path.js').LIMITS.segments, 12, '上限：单条路径段数上限 12');
+    }
 })().then(() => {
   suiteFinished = true;
   console.log('');

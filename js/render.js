@@ -39,6 +39,7 @@ class Renderer {
     this.showSubnets = false;    // 子网分组显示开关
     this.subnetNames = {};       // 子网 -> 自定义名称
     this.downLinks = new Set();  // 故障链路 id 集合（模拟断链）
+    this.linkStates = new Map(); // 链路连通性监测状态：linkId -> 'up'|'down'|'unknown'
 
     this._buildDefs();
     this.world = el('g', { id: 'world' }, this.svg);
@@ -219,6 +220,15 @@ class Renderer {
   setDownLinks(set) {
     this.downLinks = set || new Set();
     this.update();
+  }
+  /** 链路连通性监测状态：{linkId: 'up'|'down'|'unknown'}（同一连线被多个任务覆盖时取最坏状态，
+   *  由调用方聚合；渲染层只负责上色）。状态未变时不触发重绘（探测结果按间隔高频到达） */
+  setLinkStates(map) {
+    const next = map || new Map();
+    let changed = next.size !== this.linkStates.size;
+    if (!changed) { for (const [k, v] of next) { if (this.linkStates.get(k) !== v) { changed = true; break; } } }
+    this.linkStates = next;
+    if (changed) this.update();
   }
 
   /* ---------- 子网分组 ---------- */
@@ -487,6 +497,12 @@ class Renderer {
       if (!q) continue;
       const ln = g.querySelector('.ln'), hit = g.querySelector('.hit');
       g.classList.toggle('down', this.downLinks.has(l.id));
+      // 端到端链路连通性监测结果（监控 ▾ 链路连通性监测）：按状态给连线上色，
+      // 手动「故障标记」（.down）优先——用户显式标的断链不该被监测结论覆盖
+      const lk = this.linkStates.get(l.id) || '';
+      g.classList.toggle('lk-up', lk === 'up');
+      g.classList.toggle('lk-down', lk === 'down');
+      g.classList.toggle('lk-unknown', lk === 'unknown' || lk === 'degraded');
       // SNMP 转发表推断出来的链路：虚线显示，与实测（LLDP/CDP）链路一眼可分（绝不冒充实测结果）
       g.classList.toggle('inferred', !!l.inferred);
       g.style.setProperty('--bw-c', U.bwColor(l.bw)); // 带宽颜色（图上不显示带宽文字）

@@ -119,6 +119,20 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   eventUnack: (p) => ipcRenderer.invoke('monitor:event-unack', p)
 });
 
+/* 端到端链路连通性监测（监控 ▾ 链路连通性监测…）：任务由渲染层按拓扑算好后下发（js/link-path.js），
+ * 主进程按间隔探测（本机 ICMP/TCP，或从段起点设备执行 ping）并回推逐段结果与状态变化 */
+contextBridge.exposeInMainWorld('topoLink', {
+  start: (task) => ipcRenderer.invoke('link:start', task),
+  stop: (key) => ipcRenderer.invoke('link:stop', { key }),
+  stopAll: () => ipcRenderer.invoke('link:stop-all'),
+  status: () => ipcRenderer.invoke('link:status'),
+  probeNow: (key) => ipcRenderer.invoke('link:probe', { key }),
+  probeAll: () => ipcRenderer.invoke('link:probe-all'),
+  history: (key) => ipcRenderer.invoke('link:history', { key }),
+  onResult: sub('link:result'),
+  onState: sub('link:state')
+});
+
 /* 本机诊断工具箱（Ping / 路由跟踪 / TCP 端口 / DNS / 网段存活扫描 / SNMP Walk）：
  * 命令与探测全部在主进程完成 */
 contextBridge.exposeInMainWorld('topoDiag', {

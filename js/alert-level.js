@@ -52,6 +52,8 @@ const EVENT_LEVELS = {
   'deploy-error': 'critical',
   deploy: 'info',
   proto: 'warning',            // BGP/OSPF 邻居异常
+  'link-down': 'critical',     // 端到端链路/路径中断（连通性监测）
+  'link-up': 'info',           // 链路恢复
   trust: 'warning',            // 首次信任主机指纹（安全敏感）
   file: 'info',                // 内置网络服务收到设备推送的文件
   'ai-daily': 'info',          // AI 巡检日报已生成
@@ -81,6 +83,8 @@ const EVENT_TYPES = [
   { type: 'syslog-alert', label: 'Syslog 告警' },
   { type: 'deploy-error', label: '配置下发失败' },
   { type: 'proto', label: '三层邻居异常' },
+  { type: 'link-down', label: '链路中断' },
+  { type: 'link-up', label: '链路恢复' },
   { type: 'trust', label: '首次信任主机指纹' },
   { type: 'file', label: '收到设备推送文件' },
   { type: 'ai-daily', label: 'AI 巡检日报已生成' },

@@ -11,13 +11,15 @@ const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-back
 const { CredentialStore } = require('./js/credential-store.js');
 const { AlertDeps } = require('./js/alert-deps.js');
 const AL = require('./js/alert-level.js');
+const { LinkMonitor } = require('./js/link-monitor.js');
+const LP = require('./js/link-path.js');
 const { applyAck, clearAck, unackedCount } = require('./js/event-ack.js');
 const { buildReport: buildSlaReport, rangeOf: slaRangeOf, fmtPct: slaFmtPct } = require('./js/sla-report.js');
 const { DeployStore, deployVendor } = require('./js/config-deploy.js');
 const { NetServices } = require('./js/net-services.js');
 const { SEV_NAMES: SYSLOG_SEV_NAMES } = require('./js/svc-syslog.js');
 const { Maintenance, nextDailyRun } = require('./js/maintenance.js');
-const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList, expandScanTargets, scanSubnet } = require('./js/diag.js');
+const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList, expandScanTargets, scanSubnet, parsePingStats, pingEvidenceAlive } = require('./js/diag.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
 const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, buildShellPrompt, buildCompliancePrompt, buildDailyReportPrompt, parseShellCommands, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
@@ -292,9 +294,9 @@ function rebuildTrayMenu() {
   items.push({ label: '显示主窗口', click: () => {
     if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); }
   } });
-  items.push({ label: '停止全部监控', click: () => { monitor.stopAll(); trayJobCount = 0; rebuildTrayMenu(); } });
+  items.push({ label: '停止全部监控', click: () => { monitor.stopAll(); linkMon.stopAll(); trayJobCount = 0; rebuildTrayMenu(); } });
   items.push({ type: 'separator' });
-  items.push({ label: '退出', click: () => { trayQuitting = true; monitor.stopAll(); shell.closeAll(); app.quit(); } });
+  items.push({ label: '退出', click: () => { trayQuitting = true; monitor.stopAll(); linkMon.stopAll(); shell.closeAll(); app.quit(); } });
   tray.setContextMenu(Menu.buildFromTemplate(items));
 }
 function applyTray() {
@@ -640,6 +642,79 @@ monitor.on('backup', (info) => {
       notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'), levelOf('backup-error'));
     }
   }
+});
+
+/* ================= 端到端链路连通性监测（调度器 js/link-monitor.js + 本进程注入的探测实现） =================
+ * 分层：拓扑与任务由渲染层用 js/link-path.js 算好后送来（段/目标地址），主进程只管
+ * 「按间隔发包 → 状态机 → 事件」；本机探测用 link-monitor 的内置实现（diag 的判定口径），
+ * 设备侧探测复用 Shell 的一次性会话——凭据要么给统一凭据库的 credId，要么给监控配置的明文快照
+ * （只在主进程内存里，与 monitor:start 同一条口径，不落盘）。 */
+const linkMon = new LinkMonitor({
+  probes: {
+    /** 段起点设备上执行 ping：命令由 link-path.probeCommand 按厂家生成（见该模块 VENDOR_PING） */
+    device: async (seg, task, o) => {
+      const cred = credPatchOf({ credId: seg.from.credId });
+      if (!cred.ok) return { ok: null, latencyMs: null, raw: '', error: cred.error };
+      const p = cred.patch || {};
+      const conn = {
+        host: seg.from.host,
+        port: seg.from.port || p.port || '',
+        protocol: seg.from.protocol || p.protocol || '',
+        username: seg.from.username || p.username || '',
+        password: seg.from.password || p.password || '',
+        privateKey: seg.from.privateKey || p.privateKey || '',
+        keyPassphrase: seg.from.keyPassphrase || p.keyPassphrase || '',
+        preCmd: seg.from.preCmd || p.preCmd || '',
+        expectFp: seg.from.expectFp || ''
+      };
+      let r = null;
+      try {
+        r = await shell.runOneShot(Object.assign({}, conn, {
+          commands: [o.command],
+          waitMs: 1500,
+          cmdTimeoutMs: Math.max(4000, (o.timeoutMs || 3000) + 3000),
+          readyTimeoutMs: 12000
+        }));
+      } catch (e) {
+        return { ok: null, latencyMs: null, raw: '', error: String((e && e.message) || e) };
+      }
+      if (!r || !r.ok) return { ok: null, latencyMs: null, raw: '', error: (r && r.error) || '设备会话建立失败' };
+      const text = String(((r.outputs || [])[0] || {}).text || '');
+      // 判定与「在线探测/诊断工具箱」同一口径；判不出来就返回 null（不改链路状态，见 link-path 头注）
+      const stats = parsePingStats(text);
+      let ok = stats ? pingEvidenceAlive(text, stats, seg.target) : null;
+      if (ok === null) ok = LP.judgeProbeText(text, seg.target);
+      return { ok: ok, latencyMs: LP.parseProbeLatency(text), raw: text.slice(0, 400), error: ok === null ? '未能从设备回显判定（命令语法/权限/输出格式不匹配？）' : '' };
+    }
+  }
+});
+/** 链路状态变化的中文描述（事件时间线与通知共用） */
+function linkEventDetail(info, down) {
+  const where = info.kind === 'path' ? '端到端路径' : '链路';
+  const view = info.mode === 'device' ? '设备视角' : '本机视角';
+  if (down) {
+    const at = (info.brokenAt != null && info.segments && info.segments[info.brokenAt])
+      ? '；断点：第 ' + (info.brokenAt + 1) + ' 段 ' + (info.segments[info.brokenAt].fromName || '') + ' → ' + (info.segments[info.brokenAt].target || '')
+      : '';
+    const why = info.lastError ? '（' + info.lastError + '）' : '';
+    return where + '中断：' + info.name + at + why + '（' + view + '）';
+  }
+  return where + '恢复：' + info.name + (info.latencyMs != null ? '；往返时延 ' + info.latencyMs + 'ms' : '') + '（' + view + '）';
+}
+linkMon.on('result', (info) => { try { sendMonitor('link:result', info); } catch (e) { logCrash('linkMon', e); } });
+linkMon.on('state', (info) => {
+  sendMonitor('link:state', info);
+  if (info.reason === 'started' || info.reason === 'stopped') return;   // 启停不是链路事件
+  if (!info.event) return;
+  const down = info.event === 'link-down';
+  const detail = linkEventDetail(info, down);
+  const src = { key: 'link:' + info.key, deviceId: info.deviceId || '', host: info.host || '', name: info.name || '' };
+  recordMonitorEvent(src, info.event, detail, levelOf(info.event));
+  if (!notifyEnabled()) return;
+  const title = '网络拓扑管理软件 · ' + (down ? '链路中断' : '链路恢复');
+  const body = detail;
+  if (info.deviceId) notifyForDevice(info.deviceId, title, body, levelOf(info.event));
+  else notifyUser(title, body, levelOf(info.event));
 });
 
 /* ---- Web Shell 会话录制（JSONL 录像：{t, dir, d} 每行一条；渲染层缓冲批量追加） ---- */
@@ -1200,11 +1275,21 @@ ipcMain.handle('monitor:set-settings', (e, p) => {
   if (dirty) saveAppSettings();
   return monitorSettingsView();
 });
+/* 端到端链路连通性监测：任务载荷由渲染层（js/link-path.js）算好，主进程只调度探测并回推结果。
+ * 状态与历史只存内存——链路任务是「运行态」，重启后由渲染层按工程配置重新下发（与监控任务同口径）。 */
+ipcMain.handle('link:start', (e, p) => monitorGuard(e) ? linkMon.start(p || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:stop', (e, p) => monitorGuard(e) ? linkMon.stop((p && p.key) || p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:stop-all', (e) => monitorGuard(e) ? linkMon.stopAll() : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:status', (e) => monitorGuard(e) ? linkMon.status() : { ok: false, error: 'forbidden', items: [] });
+ipcMain.handle('link:probe', (e, p) => monitorGuard(e) ? linkMon.probeNow((p && p.key) || p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:probe-all', (e) => monitorGuard(e) ? linkMon.probeAll() : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:history', (e, p) => monitorGuard(e) ? linkMon.history((p && p.key) || p) : { ok: false, error: 'forbidden', items: [] });
 ipcMain.handle('monitor:overview', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   return {
     ok: true,
     jobs: monitor.status(),
+    links: linkMon.status().items,
     events: monitorEvents.slice(-200).reverse(),
     unacked: unackedCount(monitorEvents),
     backups: (configBackup.hosts().items || []).slice(0, 100)
@@ -2320,6 +2405,7 @@ app.whenReady().then(() => {
 app.on('before-quit', () => { trayQuitting = true; });
 app.on('will-quit', () => {
   monitor.stopAll();
+  linkMon.stopAll();
   shell.closeAll();
   uptimeStore.flush();
   netSvc.stopAll();

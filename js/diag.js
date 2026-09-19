@@ -329,4 +329,4 @@ async function trace(host) {
   return { ok: !!r.ok, output: r.output, error: r.error };
 }
 
-module.exports = { isValidDiagHost, parsePortList, parsePingStats, pingEvidenceAlive, scanPorts, tcpProbe, dnsLookup, ping, trace, expandScanTargets, parseLocalArp, scanSubnet, localArpTable };
+module.exports = { isValidDiagHost, parsePortList, parsePingStats, pingEvidenceAlive, scanPorts, tcpProbe, dnsLookup, ping, trace, expandScanTargets, parseLocalArp, scanSubnet, localArpTable, decodeCmdOutput };

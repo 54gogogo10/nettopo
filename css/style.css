@@ -1247,3 +1247,60 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .as-ev-nm { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .as-ev-nm .as-ev-dft { color: var(--muted); font-size: 10.5px; border: 1px solid var(--border); border-radius: 8px; padding: 0 5px; }
 .as-ev-sel { flex: 0 0 auto; width: 76px; }
+
+/* ---- 链路连通性监测：连线按状态着色（监控 ▾ 链路连通性监测…）
+ * 与手动「故障标记」（.link.down 红虚线）并存：手动标记语义更强，选择器显式排除 .down，
+ * 因此同一条连线同时被标记与监测时，看到的仍是用户显式标注的断链 */
+.link.lk-up:not(.down) .ln { stroke: #22c55e; stroke-width: 2.6; }
+.link.lk-down:not(.down) .ln { stroke: #ef4444; stroke-width: 3; stroke-dasharray: 7 4; animation: monPulse 1.6s ease-in-out infinite; }
+.link.lk-unknown:not(.down) .ln { stroke: #94a3b8; stroke-width: 2.2; stroke-dasharray: 2 4; }
+.link.lk-up.selected .ln, .link.lk-down.selected .ln { stroke-width: 3.2; }
+
+/* ---- 链路连通性监测面板 / 监控中心「链路」页签（监控 ▾ 链路连通性监测…）---- */
+.lm-dialog .lm-stats { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 6px 0 8px; font-size: 12.5px; }
+.lm-dialog .lm-st b { font-size: 14px; }
+.lm-dialog .lm-st.ok b { color: #22c55e; }
+.lm-dialog .lm-st.bad b { color: #ef4444; }
+.lm-dialog .lm-st.unk b { color: var(--muted); }
+.lm-dialog .lm-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.lm-hint { color: var(--muted); font-size: 11.5px; }
+.lm-list, .mc-links { flex: 1; min-height: 160px; max-height: 52vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; }
+.mc-links { max-height: none; border: none; padding: 0; }
+.lm-empty { padding: 18px 10px; color: var(--muted); text-align: center; font-size: 12.5px; }
+.lm-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px; border-bottom: 1px dashed var(--border); font-size: 12.5px; }
+.lm-row:last-of-type { border-bottom: none; }
+.lm-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--border); }
+.lm-dot.up { background: #22c55e; }
+.lm-dot.down { background: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,.25); animation: monPulse 1.6s ease-in-out infinite; }
+.lm-dot.unknown { background: #f59e0b; }
+.lm-dot.off { background: var(--muted); }
+.lm-name { flex: 1 1 auto; min-width: 0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lm-name:hover { color: var(--accent); }
+.lm-kind { margin-left: 6px; font-size: 10px; color: var(--muted); background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; }
+.lm-state { flex: 0 0 auto; font-size: 12px; }
+.lm-state.up { color: #16a34a; }
+.lm-state.down { color: #dc2626; font-weight: 600; }
+.lm-state.unknown { color: var(--muted); }
+.lm-state.off { color: var(--muted); }
+.lm-lat { flex: 0 0 56px; text-align: right; color: var(--muted); font-size: 11.5px; }
+.lm-time { flex: 0 0 44px; text-align: right; color: var(--muted); font-size: 11px; }
+.lm-ops { flex: 0 0 auto; display: flex; gap: 2px; }
+.lm-err { margin-left: 6px; color: var(--danger); font-weight: 700; cursor: help; }
+.lm-segs { padding: 4px 2px 8px 20px; }
+.lm-seg { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; padding: 1px 0; }
+.lm-seg.broken { background: rgba(239,68,68,.09); border-left: 3px solid #ef4444; padding-left: 5px; }
+.lm-seg-i { flex: 0 0 16px; color: var(--muted); font: 10.5px/1 Consolas, monospace; }
+.lm-seg-from { flex: 0 0 auto; }
+.lm-seg-arrow { color: var(--muted); }
+.lm-seg-t { flex: 0 0 auto; font-family: Consolas, monospace; }
+.lm-seg-v { flex: 0 0 auto; }
+.lm-seg-v.ok { color: #16a34a; }
+.lm-seg-v.bad { color: #dc2626; font-weight: 600; }
+.lm-seg-v.unk, .lm-seg-v.none { color: var(--muted); }
+.lm-seg-e { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-lk-sum { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.mc-lk-row { font-size: 12px; }
+/* 侧栏设备列表的链路监测标记：方形小点，与圆形「监控」标记区分 */
+.pitem .lk-badge { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 2px; display: inline-block; user-select: none; cursor: help; }
+.pitem .lk-badge.ok { background: #22c55e; }
+.pitem .lk-badge.down { background: #ef4444; animation: monPulse 1.6s ease-in-out infinite; }

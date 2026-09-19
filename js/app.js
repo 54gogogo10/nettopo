@@ -6026,6 +6026,8 @@ function refreshAll() {
   updateStats();
   refreshPanel();
   updateLegend();
+  // 拓扑重建（setData）会重建连线元素，这里按监测结论重新上色（状态未变时渲染层内部跳过重绘）
+  syncLinkMonOverlay();
   $('#empty').classList.toggle('hidden', state.blank || state.nodes.length > 0);
   $('#zoomCtl').classList.toggle('hidden', state.nodes.length === 0);
 }
@@ -6055,6 +6057,7 @@ function refreshPanel() {
         <span class="dot" style="background:${t.c1}"></span>
         <span class="nm">${U.escHtml(n.name)}<span class="sub">${U.escHtml(t.label)}${n.note ? ' · ' + U.escHtml(n.note) : ''}</span></span>
         ${monitorBadgeHtml(n.id)}
+        ${linkBadgeHtml(n.id)}
         <span class="cnt2">${cnt} 线</span>
       </div>`;
     }).join('');
@@ -6228,7 +6231,8 @@ function restoreGraph() {
       if (saved && typeof saved === 'object' && Object.keys(saved).length) state.monitorCfg = saved;
       syncMonitorStatus();  // 对齐主进程监控运行状态
       reconcileMonitors(); // 自启动已启用的监控
-    }).catch(() => { syncMonitorStatus(); reconcileMonitors(); });
+      reconcileLinkMon();  // 自启动链路连通性监测（任务持久化在 localStorage，不含凭据）
+    }).catch(() => { syncMonitorStatus(); reconcileMonitors(); reconcileLinkMon(); });
     return true;
   } catch (e) { return false; }
 }
@@ -6514,6 +6518,7 @@ function openHelp() {
       <li><b>监控日志…</b>：按设备 / 日期浏览，支持<b>全局跨文件搜索</b>，点击结果定位到对应行</li>
       <li><b>告警静默</b>：右键设备「告警静默 1 小时」快速静默；或在监控配置弹窗设每日<b>维护窗口</b>（支持跨午夜）——静默期内通知不弹、<b>事件时间线照常记录</b>，计划内重启不再刷屏</li>
       <li><b>告警等级与提示音…</b>（监控 ▾）：告警分<b>提示 / 警告 / 严重 / 紧急</b>四级，不同等级发出不同音型（本机合成，无需音频文件）；可设<b>最低发声等级</b>与<b>音量</b>，也可<b>整体关闭提示音</b>（关闭后系统通知一并静音，事件照常记录）；每种事件的等级可逐项改写，事件时间线按等级标注</li>
+      <li><b>链路连通性监测…</b>（监控 ▾）：把<b>链路本身</b>当监测对象——「为全部连线生成」给每条连线建「两端接口 IP 互探」任务；「＋ 端到端路径监测」指定起止设备后<b>沿拓扑自动选路并逐段探测</b>，断在哪一段是测出来的。探测可选<b>本机</b>（零配置，本机逐跳 ICMP/TCP）或<b>设备侧</b>（从每段起点设备执行 ping，复用监控/凭据库凭据，各厂家语法已内置）；结论连通/中断/未知，中断与恢复记入事件时间线并按<b>分级告警</b>通知。画布连线按结论着色（连通绿 / 中断红虚线闪烁 / 未知灰，可关），侧栏设备带链路标记（方形小点），监控中心新增「<b>链路</b>」页签看逐段明细与断点。解析不出结论时保持原状态不误报；默认「首轮探测只建基线」，避免本机天生不可达的地址刷屏</li>
       <li><b>拓扑状态叠加</b>（监控 ▾）：节点右上角状态圆点实时刷新（绿=在线 / 红=离线·告警 / 橙=连接中）</li>
       <li><b>链路流量叠加</b>（监控 ▾）：连线中点徽标显示实时利用率（绿 &lt;50% / 橙 &lt;80% / 红 ≥80%，接口 DOWN 灰显）——数据取各设备「接口流量」SNMP 采集的收发速率，按跨厂家规范化接口名对齐连线两端，悬浮查看收发速率与采样时间</li>
       <li><b>托盘常驻</b>：开启后关闭主窗口仅最小化到托盘，后台监控继续运行</li>
@@ -6854,6 +6859,13 @@ function wire() {
       if (selId) openMonitorConfig(selId); else toast('请先选中一台设备，或右键设备进入');
     } },
     { ic: 'bell', label: '告警等级与提示音…', act: openAlertSoundConfig },
+    { ic: 'link', label: '链路连通性监测…', act: openLinkMonitor },
+    { ic: 'link', label: (linkOverlayOn() ? '✓ ' : '') + '链路状态叠加（连线着色）', act: () => {
+      const on = !linkOverlayOn();
+      try { localStorage.setItem(LINK_OVERLAY_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+      syncLinkMonOverlay();
+      toast(on ? '已开启链路状态叠加：连通绿 / 中断红（虚线闪烁）/ 未知灰' : '已关闭链路状态叠加');
+    } },
     { ic: 'shield', label: '凭据库（设备访问凭据集中维护）…', act: () => openCredManager() },
     { sep: true },
     { ic: 'doc', label: '监控日志…', act: () => {
@@ -7343,6 +7355,27 @@ function wire() {
     window.topoMonitor.onAlertSound((info) => {
       if (!info) return;
       playAlertSound(info.level, info.volume);
+    });
+  }
+  // 链路连通性监测：逐段结果与状态翻转（主进程已记事件时间线并弹通知，这里只更新界面与画布）
+  if (window.topoLink && window.topoLink.onResult) {
+    window.topoLink.onResult((info) => {
+      if (!info || !info.key) return;
+      if (!state.linkStatus || typeof state.linkStatus !== 'object') state.linkStatus = {};
+      state.linkStatus[info.key] = info;
+      syncLinkMonOverlay();
+      refreshPanel();   // 侧栏链路标记
+      for (const fn of linkViewRefreshers) { try { fn(); } catch (e) { /* 单个视图刷新失败不影响其余 */ } }
+    });
+  }
+  if (window.topoLink && window.topoLink.onState) {
+    window.topoLink.onState((info) => {
+      if (!info || !info.key) return;
+      if (!state.linkStatus || typeof state.linkStatus !== 'object') state.linkStatus = {};
+      state.linkStatus[info.key] = info;
+      syncLinkMonOverlay();
+      refreshPanel();
+      for (const fn of linkViewRefreshers) { try { fn(); } catch (e) { /* ignore */ } }
     });
   }
   if (window.topoMonitor && window.topoMonitor.onBackup) {
@@ -8112,6 +8145,565 @@ function openAlertSoundConfig() {
       ? '已保存：' + alertLevelName(sound.minLevel) + '及以上告警发声，音量 ' + Math.round(sound.volume * 100) + '%'
       : '已保存：告警提示音已关闭（事件与系统通知照常，通知本身也静音）');
   };
+}
+
+/* ================= 端到端链路连通性监测（监控 ▾ 链路连通性监测…） =================
+ * 拓扑 → 任务（逐段与目标地址）由 js/link-path.js 的公用逻辑算好，下发主进程后按间隔探测
+ * （本机 ICMP/TCP，或从段起点设备执行 ping），结果经 link:result / link:state 回推，
+ * 逐段明细与状态翻转事件都在面板与监控中心「链路」页签里呈现。
+ * 持久化只存「拓扑与策略」：探测凭据要么是统一凭据库的 credId，要么在**发送前**从该设备的
+ * 监控配置现取——明文只经 IPC 进主进程内存，不落 localStorage（与监控任务同一条安全口径）。 */
+const LP = globalThis.TopoLinkPath || null;
+const LINK_TASKS_KEY = 'nettopo.linkTasks';
+const LINK_OVERLAY_KEY = 'nettopo.linkOverlay';
+const LINK_STATE_CN = { up: '连通', down: '中断', unknown: '未知' };
+const LINK_MODE_CN = { local: '本机', device: '设备侧' };
+/** 视图刷新回调（面板与监控中心「链路」页签各自注册，探测结果到达时统一刷新） */
+const linkViewRefreshers = new Set();
+
+function linkBridge(silent) {
+  if (window.topoLink && window.topoLink.start) return window.topoLink;
+  if (!silent) toast('链路连通性监测需要桌面版（Electron）环境');
+  return null;
+}
+function linkTasks() { if (!Array.isArray(state.linkTasks)) state.linkTasks = []; return state.linkTasks; }
+function linkTaskOf(key) { return linkTasks().find(t => t && t.id === key) || null; }
+function linkStatusOf(key) { return (state.linkStatus && state.linkStatus[key]) || null; }
+/** 链路任务 → 可持久化形态（剥离凭据：只留 credId / 跟随监控配置的标记） */
+function stripLinkTask(t) {
+  if (!t || !t.id) return null;
+  return {
+    id: String(t.id), kind: t.kind === 'path' ? 'path' : 'link', name: String(t.name || ''),
+    enabled: t.enabled !== false, mode: t.mode === 'device' ? 'device' : 'local',
+    protocol: t.protocol === 'tcp' ? 'tcp' : 'icmp', port: parseInt(t.port, 10) || 80,
+    intervalSec: parseInt(t.intervalSec, 10) || 60, timeoutMs: parseInt(t.timeoutMs, 10) || 3000,
+    vendor: String(t.vendor || 'generic'), failThreshold: parseInt(t.failThreshold, 10) || 2,
+    okThreshold: parseInt(t.okThreshold, 10) || 1, baselineFirst: t.baselineFirst !== false,
+    credMode: t.credMode === 'cred' ? 'cred' : 'monitor', credId: String(t.credId || ''),
+    linkIds: (Array.isArray(t.linkIds) ? t.linkIds : []).map(String).slice(0, 24),
+    nodeIds: (Array.isArray(t.nodeIds) ? t.nodeIds : []).map(String).slice(0, 13),
+    segments: (Array.isArray(t.segments) ? t.segments : []).slice(0, 12).map(s => ({
+      index: s.index, linkId: String(s.linkId || ''), aId: String(s.aId || ''), bId: String(s.bId || ''),
+      aName: String(s.aName || ''), bName: String(s.bName || ''), target: String(s.target || ''),
+      targetKind: s.targetKind === 'mgmt' ? 'mgmt' : 'ifip', aIf: String(s.aIf || ''), bIf: String(s.bIf || ''),
+      from: { deviceId: String((s.from && s.from.deviceId) || ''), name: String((s.from && s.from.name) || ''), host: String((s.from && s.from.host) || '') }
+    }))
+  };
+}
+function saveLinkTasks() {
+  try { localStorage.setItem(LINK_TASKS_KEY, JSON.stringify(linkTasks().map(stripLinkTask).filter(Boolean))); } catch (e) { /* 存储超限忽略 */ }
+}
+function loadLinkTasks() {
+  try {
+    const raw = localStorage.getItem(LINK_TASKS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.map(stripLinkTask).filter(Boolean) : [];
+  } catch (e) { return []; }
+}
+/** 发送给主进程的载荷：补上探测凭据（设备模式）。凭据只在这一次 IPC 里出现，不写 state、不落盘 */
+function linkPayloadOf(t) {
+  const out = stripLinkTask(t);
+  if (!out || out.mode !== 'device') return out;
+  for (const s of out.segments) {
+    const f = s.from;
+    if (out.credMode === 'cred' && out.credId) { f.credId = out.credId; continue; }
+    // 跟随该设备「设备监控」配置的凭据：优先匹配同一个管理地址，其次该设备的第一行
+    const rows = normalizeMonitorHosts(state.monitorCfg[f.deviceId]);
+    const row = rows.find(r => String(r.host) === String(f.host)) || rows[0];
+    if (!row) continue;                       // 无凭据：主进程会以「缺少管理地址」如实拒绝启动
+    f.host = f.host || String(row.host || '');
+    f.port = row.port || ''; f.protocol = row.protocol || 'ssh';
+    f.username = row.username || ''; f.password = row.password || '';
+    f.privateKey = row.privateKey || ''; f.keyPassphrase = row.keyPass || '';
+    f.expectFp = f.expectFp || trustedFpOf(f.host, row.port);
+  }
+  return out;
+}
+/** 配置签名：内容变了才重启任务（主进程不比对配置，重下发即生效） */
+function linkTaskSignature(t) {
+  const c = stripLinkTask(t);
+  if (!c) return '';
+  return JSON.stringify(c);
+}
+function nextLinkTaskId(prefix) {
+  const used = new Set(linkTasks().map(t => t.id));
+  for (let i = 1; i < 9999; i++) { const id = (prefix || 'lk') + i; if (!used.has(id)) return id; }
+  return (prefix || 'lk') + Date.now();
+}
+/** 链路状态叠加开关（默认开）：连线按监测结论着色 */
+function linkOverlayOn() { try { return localStorage.getItem(LINK_OVERLAY_KEY) !== '0'; } catch (e) { return true; } }
+/** 取最坏状态：中断 > 未知 > 连通（一条连线被多个任务覆盖时以最差者告警） */
+function worstLinkState(a, b) {
+  const rank = { '': 0, up: 1, unknown: 2, down: 3 };
+  return (rank[b] || 0) > (rank[a] || 0) ? b : a;
+}
+/** 把监测结论画到连线上（结果按间隔高频到达，渲染层内部做状态比较，未变不重绘） */
+function syncLinkMonOverlay() {
+  const map = new Map();
+  if (linkOverlayOn()) {
+    for (const t of linkTasks()) {
+      const st = linkStatusOf(t.id);
+      if (!st || !st.baselined || !st.state) continue;
+      for (const lid of (t.linkIds || [])) map.set(lid, worstLinkState(map.get(lid), st.state));
+    }
+  }
+  renderer.setLinkStates(map);
+}
+/** 侧栏设备的链路监测标记（方形小点，与圆形「监控」标记区分）：有中断标红，全部连通标绿 */
+function linkBadgeHtml(nodeId) {
+  let total = 0, down = 0;
+  for (const t of linkTasks()) {
+    if (!t.enabled) continue;
+    const hit = (t.nodeIds || []).indexOf(nodeId) >= 0
+      || (t.segments || []).some(s => s.aId === nodeId || s.bId === nodeId || (s.from && s.from.deviceId === nodeId));
+    if (!hit) continue;
+    total++;
+    const st = linkStatusOf(t.id);
+    if (st && st.state === 'down') down++;
+  }
+  if (!total) return '';
+  return down
+    ? '<span class="lk-badge down" title="端到端链路监测：' + down + '/' + total + ' 条中断（监控 ▾ 链路连通性监测…）"></span>'
+    : '<span class="lk-badge ok" title="端到端链路监测：' + total + ' 条全部连通"></span>';
+}
+/** 拉取主进程运行态并刷新画布着色 / 面板 / 监控中心 */
+async function syncLinkStatus() {
+  const bridge = linkBridge(true);
+  if (!bridge || !bridge.status) return;
+  try {
+    const r = await bridge.status();
+    const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+    const map = {};
+    for (const it of items) map[it.key] = it;
+    state.linkStatus = map;
+  } catch (e) { /* 拉取失败保留上次状态 */ }
+  syncLinkMonOverlay();
+  for (const fn of linkViewRefreshers) { try { fn(); } catch (e) { /* 单个视图刷新失败不影响其余 */ } }
+}
+/** 与主进程运行态对齐：停掉多余任务、启动缺失或配置已变的任务（与 reconcileMonitors 同口径的置脏重跑） */
+async function reconcileLinkMon() {
+  const bridge = linkBridge(true);
+  if (!bridge) return;
+  if (reconcileLinkMon._busy) { reconcileLinkMon._dirty = true; return; }
+  reconcileLinkMon._busy = true;
+  try {
+    let items = [];
+    try { const r = await bridge.status(); items = (r && r.ok && Array.isArray(r.items)) ? r.items : []; } catch (e) { /* 视为无运行任务 */ }
+    const running = new Map(items.map(i => [i.key, i]));
+    const sent = (state.linkSentSig && typeof state.linkSentSig === 'object') ? state.linkSentSig : (state.linkSentSig = {});
+    const desired = new Map();
+    for (const t of linkTasks()) if (t.enabled) desired.set(t.id, t);
+    for (const key of running.keys()) {
+      if (!desired.has(key)) { try { await bridge.stop(key); } catch (e) { /* ignore */ } delete sent[key]; }
+    }
+    for (const [key, t] of desired) {
+      const sig = linkTaskSignature(t);
+      if (running.has(key) && sent[key] === sig) continue;   // 在跑且配置没变：不动它
+      if (running.has(key)) { try { await bridge.stop(key); } catch (e) { /* ignore */ } }
+      const res = await bridge.start(linkPayloadOf(t));
+      if (res && res.ok) sent[key] = sig;
+      else { delete sent[key]; toast('链路监测「' + t.name + '」启动失败：' + ((res && res.error) || '未知错误')); }
+    }
+    await syncLinkStatus();
+  } finally {
+    reconcileLinkMon._busy = false;
+    if (reconcileLinkMon._dirty) { reconcileLinkMon._dirty = false; reconcileLinkMon(); }
+  }
+}
+/** 任务增删改的统一出口：落盘 + 与主进程对齐 */
+function commitLinkTasks(msg) {
+  saveLinkTasks();
+  reconcileLinkMon();
+  for (const fn of linkViewRefreshers) { try { fn(); } catch (e) { /* ignore */ } }
+  if (msg) toast(msg);
+}
+function removeLinkTask(key) {
+  const arr = linkTasks();
+  const i = arr.findIndex(t => t.id === key);
+  if (i < 0) return;
+  arr.splice(i, 1);
+  if (state.linkStatus) delete state.linkStatus[key];
+  const bridge = linkBridge(true);
+  if (bridge && bridge.stop) { try { bridge.stop(key); } catch (e) { /* ignore */ } }
+  if (state.linkSentSig) delete state.linkSentSig[key];
+  commitLinkTasks('已删除链路监测任务');
+}
+/** 为当前图纸的全部连线生成监测任务（已有任务覆盖的连线跳过；无可用地址的连线如实计数） */
+function addLinkTasksForAllLinks() {
+  if (!LP) { toast('链路监测逻辑未加载'); return; }
+  if (!state.links.length) { toast('当前图纸没有连线'); return; }
+  const covered = new Set();
+  for (const t of linkTasks()) for (const lid of (t.linkIds || [])) covered.add(lid);
+  const todo = state.links.filter(l => !covered.has(l.id));
+  if (!todo.length) { toast('当前图纸的连线都已建立监测任务'); return; }
+  const built = LP.buildLinkTasks({ nodes: state.nodes, links: todo });
+  if (!built.tasks.length) {
+    toast('没有可监测的连线：' + (built.skipped[0] ? built.skipped[0].reason : '缺少地址'));
+    return;
+  }
+  for (const t of built.tasks) {
+    t.id = nextLinkTaskId('lk');
+    t.mode = 'local';
+    linkTasks().push(stripLinkTask(t));
+  }
+  commitLinkTasks('已为 ' + built.tasks.length + ' 条连线建立监测'
+    + (built.skipped.length ? '；' + built.skipped.length + ' 条跳过（' + built.skipped[0].reason + '）' : ''));
+}
+/** 新建端到端路径监测：选起点/终点 + 探测方式（本机逐跳 / 从源设备侧） */
+function openLinkPathDialog() {
+  if (!LP) { toast('链路监测逻辑未加载'); return; }
+  if (state.nodes.length < 2) { toast('至少需要两台设备才能建立端到端路径监测'); return; }
+  const nodeOpts = (selId) => state.nodes.map(n => '<option value="' + U.escHtml(n.id) + '"' + (n.id === selId ? ' selected' : '') + '>' + U.escHtml(n.name) + '</option>').join('');
+  const optsFrom = nodeOpts(state.nodes[0].id);
+  const optsTo = nodeOpts((state.nodes[1] || state.nodes[0]).id);   // 终点默认第二台：默认两端同一台会让「建立监测」直接被拒
+  const byId = new Map(state.nodes.map(n => [n.id, n]));
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ws-dialog" role="dialog" style="width:560px">
+      <h3>新建端到端路径监测</h3>
+      <div class="m-sub">沿拓扑自动选路（最宽路径），逐段探测并定位断点。<b>本机</b>模式从本机逐跳探测目标接口 IP（零配置，要求本机能到达这些地址）；<b>设备侧</b>模式从每段起点设备执行 ping（设备视角最准，需该设备有可用凭据）。</div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>起点设备</label><select id="lkFrom">${optsFrom}</select></div>
+        <div class="frow"><label>终点设备</label><select id="lkTo">${optsTo}</select></div>
+      </div></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>探测方式</label><select id="lkMode">
+          <option value="local">本机逐跳探测</option>
+          <option value="device">从段起点设备探测</option>
+        </select></div>
+        <div class="frow"><label>协议</label><select id="lkProto"><option value="icmp">ICMP（ping）</option><option value="tcp">TCP 端口</option></select></div>
+        <div class="frow" id="lkPortRow" hidden><label>TCP 端口</label><input id="lkPort" type="number" min="1" max="65535" value="80"/></div>
+      </div></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>探测间隔（秒）</label><input id="lkInterval" type="number" min="10" max="3600" value="60"/></div>
+        <div class="frow"><label>连续失败判中断</label><input id="lkFail" type="number" min="1" max="5" value="2"/></div>
+        <div class="frow"><label>超时（毫秒）</label><input id="lkTimeout" type="number" min="500" max="30000" step="500" value="3000"/></div>
+      </div></div>
+      <div class="frow" id="lkDevRow" hidden><label>设备厂家（设备侧模式的 ping 语法）</label><select id="lkVendor">
+        <option value="generic">通用 / Linux（ping -c N -W S）</option>
+        <option value="huawei">华为 VRP（ping -c N -t S）</option>
+        <option value="h3c">H3C Comware（ping -c N）</option>
+        <option value="cisco">思科 IOS（ping ip repeat N timeout S）</option>
+        <option value="ruijie">锐捷（ping -c N）</option>
+      </select></div>
+      <div class="frow" id="lkCredRow" hidden><label>探测凭据</label>
+        <select id="lkCred">
+          <option value="monitor">跟随各段起点设备的「设备监控」凭据</option>
+          <option value="cred">统一凭据库条目</option>
+        </select>
+        <select id="lkCredId" hidden title="统一凭据库条目"></select>
+      </div>
+      <div class="frow"><label class="ck-field"><input id="lkBaseline" type="checkbox" checked/><span>首轮探测只建立基线（不报警），此后仅状态翻转时告警——避免「本机天生到不了该地址」刷屏</span></label></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="ok">建立监测</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const syncRows = () => {
+    const dev = ov.querySelector('#lkMode').value === 'device';
+    ov.querySelector('#lkDevRow').hidden = !dev;
+    ov.querySelector('#lkCredRow').hidden = !dev;
+    ov.querySelector('#lkPortRow').hidden = ov.querySelector('#lkProto').value !== 'tcp';
+    const byCred = ov.querySelector('#lkCred').value === 'cred';
+    ov.querySelector('#lkCredId').hidden = !dev || !byCred;
+    if (dev && byCred) loadCredOptions();
+  };
+  ov.querySelector('#lkMode').onchange = syncRows;
+  ov.querySelector('#lkProto').onchange = syncRows;
+  ov.querySelector('#lkCred').onchange = syncRows;
+  /** 统一凭据库条目按需拉取（只回 id 与展示名，不含口令） */
+  const loadCredOptions = async () => {
+    const sel = ov.querySelector('#lkCredId');
+    if (sel.dataset.loaded === '1') return;
+    sel.dataset.loaded = '1';
+    try {
+      const r = await window.topoCred.list();
+      const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+      sel.innerHTML = items.length
+        ? items.map(c => '<option value="' + U.escHtml(c.id) + '">' + U.escHtml(c.name || c.username || c.id) + '</option>').join('')
+        : '<option value="">（凭据库为空）</option>';
+    } catch (e) { sel.innerHTML = '<option value="">（读取失败）</option>'; }
+  };
+  syncRows();
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=ok]').onclick = () => {
+    const from = ov.querySelector('#lkFrom').value, to = ov.querySelector('#lkTo').value;
+    if (from === to) { toast('起点与终点不能相同'); return; }
+    const id = nextLinkTaskId('p');
+    // 渲染层传 U.bestPath：选路语义（聚合组求和、最宽路径）与「路径分析」完全一致
+    const r = LP.buildPathTask({ nodes: state.nodes, links: state.links }, from, to, {
+      id: id, bestPath: U.bestPath,
+      mode: ov.querySelector('#lkMode').value,
+      protocol: ov.querySelector('#lkProto').value,
+      port: parseInt(ov.querySelector('#lkPort').value, 10) || 80,
+      intervalSec: parseInt(ov.querySelector('#lkInterval').value, 10) || 60,
+      timeoutMs: parseInt(ov.querySelector('#lkTimeout').value, 10) || 3000,
+      failThreshold: parseInt(ov.querySelector('#lkFail').value, 10) || 2,
+      vendor: ov.querySelector('#lkVendor').value,
+      baselineFirst: ov.querySelector('#lkBaseline').checked,
+      fromExtra: (deviceId) => {
+        const n = byId.get(deviceId);
+        const row = normalizeMonitorHosts(state.monitorCfg[deviceId])[0];
+        return {
+          deviceId: deviceId, name: String((n && n.name) || ''),
+          host: (row && row.host) || U.nodeMgmts(n)[0] || '',
+          port: row ? row.port : '', protocol: row ? row.protocol : '',
+          expectFp: trustedFpOf((row && row.host) || U.nodeMgmts(n)[0] || '', row && row.port)
+        };
+      }
+    });
+    if (!r.ok) { toast(r.error); return; }
+    const t = stripLinkTask(r.task);
+    t.credMode = ov.querySelector('#lkCred') && ov.querySelector('#lkCred').value === 'cred' ? 'cred' : 'monitor';
+    if (t.mode === 'device' && t.credMode === 'cred') {
+      const cid = String(ov.querySelector('#lkCredId').value || '');
+      if (!cid) { toast('请先选择统一凭据库条目（或在「监控 ▾ 凭据库…」中新增）'); return; }
+      t.credId = cid;
+    }
+    linkTasks().push(t);
+    close();
+    commitLinkTasks('已建立' + t.name + '（' + (t.mode === 'device' ? '设备侧' : '本机') + '探测）'
+      + (r.skipped && r.skipped.length ? '；' + r.skipped.length + ' 段跳过' : ''));
+  };
+}
+/** 编辑任务：间隔 / 阈值 / 探测方式 / 启停（不改段结构——段由拓扑决定，拓扑变了请重建） */
+function openLinkTaskEdit(key) {
+  const t = linkTaskOf(key);
+  if (!t) { toast('任务不存在'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ws-dialog" role="dialog" style="width:520px">
+      <h3>链路监测设置</h3>
+      <div class="m-sub">${U.escHtml(t.name)}<br/>共 ${t.segments.length} 段：${U.escHtml(t.segments.map(s => s.from.name + ' → ' + s.target).join('；'))}</div>
+      <div class="frow"><label>任务名称</label><input id="leName" type="text" maxlength="120" value="${U.escHtml(t.name)}"/></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>探测方式</label><select id="leMode">
+          <option value="local"${t.mode !== 'device' ? ' selected' : ''}>本机逐跳探测</option>
+          <option value="device"${t.mode === 'device' ? ' selected' : ''}>从段起点设备探测</option>
+        </select></div>
+        <div class="frow"><label>协议</label><select id="leProto">
+          <option value="icmp"${t.protocol !== 'tcp' ? ' selected' : ''}>ICMP（ping）</option>
+          <option value="tcp"${t.protocol === 'tcp' ? ' selected' : ''}>TCP 端口</option>
+        </select></div>
+        <div class="frow"><label>TCP 端口</label><input id="lePort" type="number" min="1" max="65535" value="${U.escHtml(t.port)}"/></div>
+      </div></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>探测间隔（秒）</label><input id="leInterval" type="number" min="10" max="3600" value="${U.escHtml(t.intervalSec)}"/></div>
+        <div class="frow"><label>连续失败判中断</label><input id="leFail" type="number" min="1" max="5" value="${U.escHtml(t.failThreshold)}"/></div>
+        <div class="frow"><label>连续成功判恢复</label><input id="leOk" type="number" min="1" max="5" value="${U.escHtml(t.okThreshold)}"/></div>
+      </div></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>厂家（设备侧 ping 语法）</label><select id="leVendor">
+          <option value="generic"${t.vendor === 'generic' ? ' selected' : ''}>通用 / Linux</option>
+          <option value="huawei"${t.vendor === 'huawei' ? ' selected' : ''}>华为 VRP</option>
+          <option value="h3c"${t.vendor === 'h3c' ? ' selected' : ''}>H3C Comware</option>
+          <option value="cisco"${t.vendor === 'cisco' ? ' selected' : ''}>思科 IOS</option>
+          <option value="ruijie"${t.vendor === 'ruijie' ? ' selected' : ''}>锐捷</option>
+        </select></div>
+        <div class="frow"><label>凭据来源</label><select id="leCred">
+          <option value="monitor"${t.credMode !== 'cred' ? ' selected' : ''}>跟随设备监控配置</option>
+          <option value="cred"${t.credMode === 'cred' ? ' selected' : ''}>统一凭据库</option>
+        </select></div>
+      </div></div>
+      <div class="frow"><label class="ck-field"><input id="leBaseline" type="checkbox"${t.baselineFirst !== false ? ' checked' : ''}/><span>首轮探测只建立基线（不报警）</span></label></div>
+      <div class="frow"><label class="ck-field"><input id="leEnabled" type="checkbox"${t.enabled !== false ? ' checked' : ''}/><span>启用该监测任务</span></label></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="del">删除</button>
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=del]').onclick = () => { close(); removeLinkTask(key); };
+  ov.querySelector('[data-act=save]').onclick = () => {
+    t.name = ov.querySelector('#leName').value.trim().slice(0, 120) || t.name;
+    t.mode = ov.querySelector('#leMode').value === 'device' ? 'device' : 'local';
+    t.protocol = ov.querySelector('#leProto').value === 'tcp' ? 'tcp' : 'icmp';
+    t.port = parseInt(ov.querySelector('#lePort').value, 10) || 80;
+    t.intervalSec = Math.max(10, Math.min(3600, parseInt(ov.querySelector('#leInterval').value, 10) || 60));
+    t.timeoutMs = t.timeoutMs || 3000;
+    t.failThreshold = Math.max(1, Math.min(5, parseInt(ov.querySelector('#leFail').value, 10) || 2));
+    t.okThreshold = Math.max(1, Math.min(5, parseInt(ov.querySelector('#leOk').value, 10) || 1));
+    t.vendor = ov.querySelector('#leVendor').value;
+    t.credMode = ov.querySelector('#leCred').value === 'cred' ? 'cred' : 'monitor';
+    t.baselineFirst = ov.querySelector('#leBaseline').checked;
+    t.enabled = ov.querySelector('#leEnabled').checked;
+    close();
+    commitLinkTasks('已保存链路监测设置');
+  };
+}
+/** 段明细 HTML（面板与监控中心共用）：逐段给出目标地址与结论，断点高亮——「定位断在哪一段」的证据面 */
+function linkSegsHtml(t, st) {
+  const rows = (t.segments || []).map((s, i) => {
+    const r = st && st.segments ? st.segments.find(x => x.index === i) : null;
+    const cls = r ? (r.ok === true ? 'ok' : r.ok === false ? 'bad' : 'unk') : 'none';
+    const txt = r ? (r.ok === true ? '通' : r.ok === false ? '不通' : '无法判定') : '未探测';
+    const isBroken = !!(st && st.brokenAt === i);
+    return '<div class="lm-seg' + (isBroken ? ' broken' : '') + '">'
+      + '<span class="lm-seg-i">' + (i + 1) + '</span>'
+      + '<span class="lm-seg-from">' + U.escHtml((s.from && s.from.name) || '') + '</span>'
+      + '<span class="lm-seg-arrow">→</span>'
+      + '<span class="lm-seg-t">' + U.escHtml(s.target) + (s.targetKind === 'mgmt' ? '（管理地址）' : '') + '</span>'
+      + '<span class="lm-seg-v ' + cls + '">' + txt + (r && Number.isFinite(r.latencyMs) ? ' · ' + r.latencyMs + 'ms' : '') + '</span>'
+      + (r && r.error ? '<span class="lm-seg-e">' + U.escHtml(r.error) + '</span>' : '')
+      + '</div>';
+  }).join('');
+  return '<div class="lm-segs">' + (rows || '<div class="lm-empty">无探测段</div>') + '</div>';
+}
+/** 任务行的状态文案（面板与监控中心共用口径） */
+function linkStateText(t, s) {
+  if (t.enabled === false) return '未启用';
+  if (!s || !s.baselined) return '等待首轮探测';
+  if (s.state === 'down') {
+    const seg = (s.brokenAt != null && s.segments && s.segments[s.brokenAt]) ? s.segments[s.brokenAt] : null;
+    return '中断' + (seg ? '（第 ' + (s.brokenAt + 1) + ' 段 ' + U.escHtml((seg.fromName || '') + ' → ' + seg.target) + '）' : '');
+  }
+  return s.state === 'up' ? '连通' : '未知';
+}
+
+/** 链路连通性监测面板：任务列表 + 逐段明细 + 一键生成/启停/探测 */
+function openLinkMonitor() {
+  const bridge = linkBridge();
+  if (!bridge) return;
+  if (!LP) { toast('链路监测逻辑未加载'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ws-dialog lm-dialog" role="dialog" style="width:900px">
+      <h3>链路连通性监测</h3>
+      <div class="m-sub">把<b>链路本身</b>当作监测对象：连线级任务两端接口 IP 互探；端到端路径任务沿拓扑选路后<b>逐段探测</b>，断在哪一段是测出来的。<b>本机</b>探测零配置（要求本机能到达目标接口 IP）；<b>设备侧</b>从每段起点设备执行 ping（设备视角最准，需凭据）。解析不出结论时保持原状态不误报；「首轮只建基线」可避免本机天生不可达地址刷屏。</div>
+      <div class="lm-stats" id="lmStats"></div>
+      <div class="lm-actions">
+        <button type="button" class="tb" data-act="addPath">＋ 端到端路径监测…</button>
+        <button type="button" class="tb" data-act="addLinks" title="为当前图纸的每条连线建立「两端接口 IP 互探」任务">为全部连线生成</button>
+        <button type="button" class="tb" data-act="probeAll">立即探测全部</button>
+        <button type="button" class="tb" data-act="startAll">全部启动</button>
+        <button type="button" class="tb" data-act="stopAll">全部停止</button>
+        <span class="lm-hint" id="lmHint"></span>
+      </div>
+      <div class="lm-list" id="lmList"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => { linkViewRefreshers.delete(render); ov.remove(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const listEl = ov.querySelector('#lmList');
+
+  /** 段明细 / 状态文案统一走公用实现（与监控中心「链路」页签同口径） */
+  const segsHtml = (t, st) => linkSegsHtml(t, st);
+  const render = () => {
+    const tasks = linkTasks();
+    const st = { up: 0, down: 0, unknown: 0, off: 0 };
+    for (const t of tasks) {
+      if (!t.enabled) { st.off++; continue; }
+      const s = linkStatusOf(t.id);
+      if (!s || !s.baselined) { st.unknown++; continue; }
+      if (s.state === 'down') st.down++;
+      else if (s.state === 'up') st.up++;
+      else st.unknown++;
+    }
+    ov.querySelector('#lmStats').innerHTML =
+      '<span class="lm-st">任务 <b>' + tasks.length + '</b></span>'
+      + '<span class="lm-st ok">连通 <b>' + st.up + '</b></span>'
+      + '<span class="lm-st bad">中断 <b>' + st.down + '</b></span>'
+      + '<span class="lm-st unk">未知/未探测 <b>' + st.unknown + '</b></span>'
+      + '<span class="lm-st off">未启用 <b>' + st.off + '</b></span>';
+    ov.querySelector('#lmHint').textContent = linkOverlayOn() ? '画布连线已按监测结论着色' : '（画布着色已关闭：监控 ▾ 链路状态叠加）';
+    if (!tasks.length) {
+      listEl.innerHTML = '<div class="lm-empty">暂无链路监测任务：点「为全部连线生成」批量建立，或用「＋ 端到端路径监测」指定起止设备。</div>';
+      return;
+    }
+    listEl.innerHTML = tasks.map(t => {
+      const s = linkStatusOf(t.id);
+      const state = !t.enabled ? 'off' : (s && s.baselined ? s.state : 'unknown');
+      const stateTxt = linkStateText(t, s);
+      const latency = (s && Number.isFinite(s.latencyMs)) ? s.latencyMs + 'ms' : '—';
+      const lastAt = (s && s.lastProbeAt) ? U.fmtDateTime(new Date(s.lastProbeAt)).slice(11) : '—';
+      const probeTxt = !s ? ''
+        : (s.probeState === s.state ? '' : '（本轮探测：' + (LINK_STATE_CN[s.probeState] || s.probeState || '—') + '）');
+      const err = (s && s.lastError) ? '<span class="lm-err" title="' + U.escHtml(s.lastError) + '">!</span>' : '';
+      return '<div class="lm-row" data-key="' + U.escHtml(t.id) + '">'
+        + '<span class="lm-dot ' + U.escHtml(state) + '" title="' + U.escHtml(LINK_STATE_CN[state] || state) + '"></span>'
+        + '<span class="lm-name" title="' + U.escHtml(t.name) + '">' + U.escHtml(t.name)
+          + '<span class="lm-kind">' + (t.kind === 'path' ? '端到端 ' + t.segments.length + ' 跳' : '连线') + '</span>'
+          + '<span class="lm-kind">' + (LINK_MODE_CN[t.mode] || t.mode) + '·' + (t.protocol === 'tcp' ? 'TCP ' + t.port : 'ICMP') + '·' + t.intervalSec + 's</span></span>'
+        + '<span class="lm-state ' + U.escHtml(state) + '">' + stateTxt + probeTxt + err + '</span>'
+        + '<span class="lm-lat">' + latency + '</span>'
+        + '<span class="lm-time">' + U.escHtml(lastAt) + '</span>'
+        + '<span class="lm-ops">'
+          + '<button type="button" class="tb icon" data-op="probe" title="立即探测一轮">⟳</button>'
+          + '<button type="button" class="tb icon" data-op="toggle" title="' + (t.enabled ? '停用' : '启用') + '">' + (t.enabled ? '⏸' : '▶') + '</button>'
+          + '<button type="button" class="tb icon" data-op="edit" title="设置">⚙</button>'
+          + '<button type="button" class="tb icon" data-op="del" title="删除">✕</button>'
+        + '</span>'
+        + '</div>'
+        + '<div class="lm-detail" hidden>' + segsHtml(t, s) + '</div>';
+    }).join('');
+    listEl.querySelectorAll('.lm-row').forEach(row => {
+      const key = row.dataset.key;
+      const t = linkTaskOf(key);
+      row.querySelector('.lm-name').onclick = () => {
+        const detail = row.nextElementSibling;
+        if (!detail) return;
+        detail.hidden = !detail.hidden;
+        if (!detail.hidden) { try { renderer.highlightPath(t.nodeIds || [], t.linkIds || []); } catch (e) { /* 无路径高亮能力时忽略 */ } }
+      };
+      row.querySelector('[data-op=probe]').onclick = async (e) => {
+        e.stopPropagation();
+        const r = await bridge.probeNow(key);
+        if (!r || !r.ok) toast('探测失败：' + ((r && r.error) || '未知错误'));
+        await syncLinkStatus();
+      };
+      row.querySelector('[data-op=toggle]').onclick = (e) => {
+        e.stopPropagation();
+        t.enabled = !t.enabled;
+        commitLinkTasks(t.enabled ? '已启用该链路监测' : '已停用该链路监测');
+        render();
+      };
+      row.querySelector('[data-op=edit]').onclick = (e) => { e.stopPropagation(); openLinkTaskEdit(key); };
+      row.querySelector('[data-op=del]').onclick = (e) => {
+        e.stopPropagation();
+        confirmBox('删除链路监测任务「' + t.name + '」？').then((yes) => { if (yes) removeLinkTask(key); });
+      };
+    });
+  };
+  ov.querySelector('[data-act=addPath]').onclick = () => { openLinkPathDialog(); };
+  ov.querySelector('[data-act=addLinks]').onclick = () => { addLinkTasksForAllLinks(); render(); };
+  ov.querySelector('[data-act=probeAll]').onclick = async () => { await bridge.probeAll(); await syncLinkStatus(); };
+  ov.querySelector('[data-act=startAll]').onclick = () => {
+    for (const t of linkTasks()) t.enabled = true;
+    commitLinkTasks('已启动全部链路监测');
+    render();
+  };
+  ov.querySelector('[data-act=stopAll]').onclick = () => {
+    for (const t of linkTasks()) t.enabled = false;
+    commitLinkTasks('已停止全部链路监测');
+    render();
+  };
+  linkViewRefreshers.add(render);
+  render();
+  syncLinkStatus();
+  reconcileLinkMon();
 }
 
 /** 让启用了监控的设备与主进程运行状态对齐：期望集合 = deviceId@host，停止多余任务、启动缺失任务 */
@@ -9683,6 +10275,7 @@ function openMonitorCenter() {
             <button type="button" class="mc-tab" data-pane="baks">配置备份</button>
             <button type="button" class="mc-tab" data-pane="ifaces">接口流量</button>
             <button type="button" class="mc-tab" data-pane="perf">性能</button>
+            <button type="button" class="mc-tab" data-pane="links">链路<span id="mcLinkBad" class="mc-badge" hidden></span></button>
             <span id="mcFilter" class="mc-filt" hidden></span>
           </div>
           <div class="mc-pane" data-pane="events">
@@ -9697,6 +10290,9 @@ function openMonitorCenter() {
           <div class="mc-pane" data-pane="perf" hidden>
             <div class="mc-perfs" id="mcPerfs"></div>
           </div>
+          <div class="mc-pane" data-pane="links" hidden>
+            <div class="mc-links" id="mcLinks"></div>
+          </div>
         </div>
       </div>
       <div class="m-actions">
@@ -9710,7 +10306,7 @@ function openMonitorCenter() {
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
   const mcSubs = []; // ipc 订阅退订函数：关闭弹窗时全部注销（onX 每次调用都新增监听器，反复打开会累积）
-  const close = () => { while (mcSubs.length) { try { mcSubs.pop()(); } catch (e) { /* ignore */ } } ov.remove(); };
+  const close = () => { linkViewRefreshers.delete(linkCenterRefresh); while (mcSubs.length) { try { mcSubs.pop()(); } catch (e) { /* ignore */ } } ov.remove(); };
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
@@ -9886,14 +10482,16 @@ function openMonitorCenter() {
     backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️',
     'if-down': '🔻', 'if-up': '🔺', reboot: '🔄',
     metric: '📈', 'metric-clear': '📉', 'http-fail': '🌐', 'http-ok': '🌐', cert: '🔐', 'cert-clear': '🔓',
-    trap: '📨', 'syslog-alert': '📋', deploy: '🚀', 'deploy-error': '💥', proto: '🔗'
+    trap: '📨', 'syslog-alert': '📋', deploy: '🚀', 'deploy-error': '💥', proto: '🔗',
+    'link-down': '🔌', 'link-up': '🔗'
   }[t] || '•');
   const evTypeLabel = {
     offline: '离线', recovery: '恢复', alert: '告警', 'alert-clear': '解除',
     backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规',
     'if-down': '接口离线', 'if-up': '接口恢复', reboot: '设备重启',
     metric: '指标告警', 'metric-clear': '指标恢复', 'http-fail': 'HTTP 失败', 'http-ok': 'HTTP 恢复', cert: '证书告警', 'cert-clear': '证书恢复',
-    trap: 'SNMP Trap', 'syslog-alert': 'Syslog 告警', deploy: '配置下发', 'deploy-error': '下发失败', proto: '三层邻居'
+    trap: 'SNMP Trap', 'syslog-alert': 'Syslog 告警', deploy: '配置下发', 'deploy-error': '下发失败', proto: '三层邻居',
+    'link-down': '链路中断', 'link-up': '链路恢复'
   };
   // 事件时间线筛选：null = 全部；curDev = 设备；curHost = 具体管理地址
   let curDev = null, curHost = null, curDevName = '';
@@ -10052,6 +10650,59 @@ function openMonitorCenter() {
     if (document.body.contains(ov)) renderIfaces(lastJobs);
   }
 
+  /* ---------- 链路页（端到端链路连通性监测：任务状态 + 断点 + 逐段明细） ---------- */
+  const linksEl = ov.querySelector('#mcLinks');
+  /** 渲染链路页：数据取渲染层的任务表 + 主进程回推的实时状态（比 overview 快照更新） */
+  function renderLinks() {
+    if (!linksEl || !document.body.contains(ov)) return;
+    const tasks = linkTasks();
+    let up = 0, down = 0, unknown = 0, off = 0;
+    for (const t of tasks) {
+      if (t.enabled === false) { off++; continue; }
+      const s = linkStatusOf(t.id);
+      if (!s || !s.baselined) { unknown++; continue; }
+      if (s.state === 'down') down++;
+      else if (s.state === 'up') up++;
+      else unknown++;
+    }
+    const badge = ov.querySelector('#mcLinkBad');
+    if (badge) { badge.hidden = !down; badge.textContent = down ? String(down) : ''; }
+    if (!tasks.length) {
+      linksEl.innerHTML = '<div class="mc-empty">暂无链路监测任务：在「监控 ▾ 链路连通性监测…」里为全部连线批量生成，或建立端到端路径监测</div>';
+      return;
+    }
+    linksEl.innerHTML = '<div class="mc-lk-sum">任务 <b>' + tasks.length + '</b> · 连通 <b class="t-ok">' + up
+      + '</b> · 中断 <b class="t-off">' + down + '</b> · 未知 <b>' + unknown + '</b> · 未启用 <b>' + off + '</b></div>'
+      + tasks.map(t => {
+        const s = linkStatusOf(t.id);
+        const state = t.enabled === false ? 'off' : (s && s.baselined ? s.state : 'unknown');
+        const lat = (s && Number.isFinite(s.latencyMs)) ? s.latencyMs + 'ms' : '—';
+        const at = (s && s.lastProbeAt) ? U.fmtDateTime(new Date(s.lastProbeAt)).slice(5, 16) : '—';
+        return '<div class="lm-row mc-lk-row" data-key="' + U.escHtml(t.id) + '">'
+          + '<span class="lm-dot ' + U.escHtml(state) + '"></span>'
+          + '<span class="lm-name" title="' + U.escHtml(t.name) + '">' + U.escHtml(t.name)
+            + '<span class="lm-kind">' + (t.kind === 'path' ? '端到端 ' + t.segments.length + ' 跳' : '连线')
+            + '</span><span class="lm-kind">' + (LINK_MODE_CN[t.mode] || t.mode) + '·' + (t.protocol === 'tcp' ? 'TCP ' + t.port : 'ICMP') + '</span></span>'
+          + '<span class="lm-state ' + U.escHtml(state) + '">' + linkStateText(t, s) + '</span>'
+          + '<span class="lm-lat">' + lat + '</span>'
+          + '<span class="lm-time">' + U.escHtml(at) + '</span>'
+          + '</div>'
+          + '<div class="lm-detail" hidden>' + linkSegsHtml(t, s) + '</div>';
+      }).join('');
+    linksEl.querySelectorAll('.mc-lk-row .lm-name').forEach(el => {
+      el.onclick = () => {
+        const row = el.parentElement;
+        const t = linkTaskOf(row.dataset.key);
+        const detail = row.nextElementSibling;
+        if (!detail) return;
+        detail.hidden = !detail.hidden;
+        if (!detail.hidden && t) { try { renderer.highlightPath(t.nodeIds || [], t.linkIds || []); } catch (e) { /* ignore */ } }
+      };
+    });
+  }
+  const linkCenterRefresh = () => { try { renderLinks(); } catch (e) { /* ignore */ } };
+  linkViewRefreshers.add(linkCenterRefresh);
+
   /* ---------- 性能页（SNMP CPU/内存/sysUpTime + SSH 磁盘/内存/负载 + HTTP 探测/证书：当前值 + 采样趋势线） ---------- */
   let curPerfDev = null;
   const perfCache = new Map();               // key -> SNMP 采样历史 [{ts, up, cpu, mem}]
@@ -10189,6 +10840,7 @@ function openMonitorCenter() {
       const jobs = r.jobs || [];
       renderIfacesAsync(jobs); // 接口流量页（异步，不阻塞主视图）
       renderPerfAsync(jobs);   // 性能页（异步，不阻塞主视图）
+      renderLinks();           // 链路页（端到端连通性监测）
       const byDev = new Map();
       for (const j of jobs) {
         if (!byDev.has(j.deviceId)) byDev.set(j.deviceId, []);
@@ -10345,6 +10997,7 @@ function openMonitorCenter() {
     }
   }
   load();
+  syncLinkStatus();   // 链路页首屏：拉一次主进程运行态（link 事件只推变化，历史状态要靠这次拉取）
 }
 
 /* ================= 监控日志浏览器（按设备/日期浏览、搜索） ================= */
@@ -12132,6 +12785,10 @@ if (typeof globalThis !== 'undefined') {
     openMonitorCenter,
     openAlertSoundConfig,
     alertLevelOf,
+    openLinkMonitor,
+    addLinkTasksForAllLinks,
+    reconcileLinkMon,
+    syncLinkMonOverlay,
     openMonitorLogs,
     openConfigBackups,
     openConfigDeploy,
