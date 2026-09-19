@@ -2138,6 +2138,43 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     await Promise.race([new Promise((res) => loginServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
   }
 
+  // Telnet：自动登录防重发——华为 VRP 真机在收下口令后单独回包一个 \r\n（口令换行），
+  // 随后才是登录横幅与提示符；滑窗尾串 "Password: \r\n" 不得被当作提示符重印而重发口令
+  // （旧口径 \s*$ 允许 \r\n 收尾：口令被二次发送、落在 <HUAWEI> 提示符上明文回显成命令）
+  {
+    const vrpRecv = [];
+    let pwdCount = 0;
+    const vrpSocks = new Set();
+    const vrpServer = net.createServer((sock) => {
+      vrpSocks.add(sock);
+      sock.on('close', () => vrpSocks.delete(sock));
+      sock.on('error', () => {});
+      sock.write('Warning: Telnet is not a secure protocol.\r\n\r\nUsername: ');
+      sock.on('data', (d) => {
+        const t = d.toString('latin1');
+        vrpRecv.push(t);
+        if (t.includes('admin')) sock.write('\r\nPassword: ');
+        else if (t.includes('secret')) {
+          pwdCount++;
+          sock.write('\r\n'); // 单独回包：口令换行（真机实测的分包边界）
+          setTimeout(() => sock.write('Info: The max number of VTY users is 21.\r\n<HUAWEI>'), 30);
+        }
+      });
+    });
+    await new Promise((res) => vrpServer.listen(0, '127.0.0.1', res));
+    const mgrV = new ShellManager();
+    const outsV = [];
+    mgrV.on('output', (id, d) => outsV.push(d));
+    mgrV.connect({ protocol: 'telnet', host: '127.0.0.1', port: vrpServer.address().port, username: 'admin', password: 'secret', autoLogin: true, timeout: 5000 });
+    await waitFor(() => outsV.join('').includes('<HUAWEI>'), 5000);
+    await new Promise((res) => setTimeout(res, 600)); // 留出可能的重发窗口
+    ok(pwdCount === 1, 'VRP 分包边界下口令仅发送一次（实际 ' + pwdCount + ' 次）');
+    ok(!outsV.join('').includes('secret'), '口令不回显进会话输出');
+    ok(outsV.join('').includes('<HUAWEI>'), '登录横幅后收到命令提示符');
+    for (const s of vrpSocks) s.destroy();
+    await Promise.race([new Promise((res) => vrpServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+  }
+
   // Telnet：自动登录认证失败——密码提交后设备重新索要用户名，应报错断开而非挂死
   {
     const failSocks = new Set();
@@ -8314,7 +8351,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
       // 设备侧命令：各厂家语法
       eq(L.probeCommand('linux', '10.0.0.1', { count: 2, timeoutMs: 3000 }), 'ping -c 2 -W 3 10.0.0.1', '命令：Linux/通用语法');
-      eq(L.probeCommand('huawei', '10.0.0.1', { count: 2, timeoutMs: 2000 }), 'ping -c 2 -t 2 10.0.0.1', '命令：华为 VRP 语法（-c 次数 / -t 超时）');
+      eq(L.probeCommand('huawei', '10.0.0.1', { count: 2, timeoutMs: 2000 }), 'ping -c 2 10.0.0.1', '命令：华为语法（-c 次数；-t 量纲两代不一故不带）');
       eq(L.probeCommand('h3c', '10.0.0.1', { count: 3, timeoutMs: 3000 }), 'ping -c 3 10.0.0.1', '命令：H3C 语法');
       eq(L.probeCommand('cisco', '10.0.0.1', { count: 2, timeoutMs: 4000 }), 'ping 10.0.0.1 repeat 2 timeout 4', '命令：思科 IOS 语法');
       eq(L.probeCommand('ruijie', '10.0.0.1', { count: 2, timeoutMs: 3000 }), 'ping -c 2 10.0.0.1', '命令：锐捷语法');
@@ -8442,7 +8479,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       }));
       await m3.probeNow('k3');
       eq(cmds.length, 2, '设备模式：逐段执行一次探测');
-      eq(cmds[0], 'ping -c 2 -t 1 10.0.0.1', '设备模式：按厂家生成命令（' + cmds[0] + '）');
+      eq(cmds[0], 'ping -c 2 10.0.0.1', '设备模式：按厂家生成命令（' + cmds[0] + '）');
       const dev3 = m3.status().items[0];
       ok(dev3.state === 'down' && dev3.brokenAt === 1, '设备模式：第二段不通 → 断点定位到第 2 段');
       m3.stopAll();

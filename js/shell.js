@@ -1220,11 +1220,14 @@ class ShellManager extends EventEmitter {
     const loginFeed = (plain) => {
       if (loginPhase >= 3) return;
       loginBuf = (loginBuf + plain).slice(-160); // 提示符可能跨包拆分（"Usernam"+"e: "），滑窗匹配尾部
-      if (/(?:user\s*name|username|login)\s*[:：]\s*$/i.test(loginBuf)) {
+      // 提示符后的尾随空白只认空格/制表符：登录提示总是行内等待输入，永不被 \r\n 收尾。
+      // 华为 VRP 真机会在收下口令后单独回包一个 \r\n 换行，若尾随 \s 也匹配，滑窗尾串
+      // "Password: \r\n" 仍命中重发逻辑，口令被二次发送并落在命令行提示符上明文回显。
+      if (/(?:user\s*name|username|login)[ \t]*[:：][ \t]*$/i.test(loginBuf)) {
         if (loginPhase === 2) { loginFail('Telnet 认证失败：用户名或密码被设备拒绝'); return; } // 密码已提交仍要用户名＝凭据被拒
         if (loginPhase === 0) { loginPhase = 1; send(String(o.username) + '\r\n'); }
         // phase 1 的重复 Username:（重印提示）不重复发送，等 Password:
-      } else if (/password\s*[:：]\s*$/i.test(loginBuf)) {
+      } else if (/password[ \t]*[:：][ \t]*$/i.test(loginBuf)) {
         if (loginPhase === 2) {
           if (loginPwdRetry) { loginFail('Telnet 认证失败：密码被设备拒绝'); return; }
           loginPwdRetry = true; // 密码提示重印（探测空行落在提示上）：容忍一次重发
