@@ -8383,7 +8383,7 @@ function openLinkPathDialog() {
       </div></div>
       <div class="frow" id="lkDevRow" hidden><label>设备厂家（设备侧模式的 ping 语法）</label><select id="lkVendor">
         <option value="generic">通用 / Linux（ping -c N -W S）</option>
-        <option value="huawei">华为 VRP（ping -c N -t S）</option>
+        <option value="huawei">华为（ping -c N，经典 VRP / 云路由通用）</option>
         <option value="h3c">H3C Comware（ping -c N）</option>
         <option value="cisco">思科 IOS（ping ip repeat N timeout S）</option>
         <option value="ruijie">锐捷（ping -c N）</option>

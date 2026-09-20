@@ -62,6 +62,10 @@ function cleanBackupLines(lines, cmds) {
     if (t.length <= 160 && /^[<\[][A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/.test(t)) continue;
     // 分页提示行（仅由连字符/空白组成 + More 字样）
     if (/^[\s-]*more[\s-]*$/i.test(t)) continue;
+    // 分页续行：真机翻页时设备以「ESC[nD + 空格串」擦除标记，ANSI 剥除后标记与下一行合并成一行
+    //（「  ---- More ----        cipher-suite …」）——剥掉行首标记段，保住被截断在页尾的真实配置行
+    const pg = t.replace(/^[\s-]*more[\s-]+/i, '');
+    if (pg !== t && !pg) continue;
     // 行首提示符剥除后的行内容：残片匹配对「提示符+残片」「残片+残渣」两种粘连形态生效
     const m = t.match(/^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]][ :]?/);
     const body = (m && m[0].length < t.length) ? t.slice(m[0].length) : t;
@@ -69,7 +73,7 @@ function cleanBackupLines(lines, cmds) {
       || (c.length >= 8 && (
         (body.length >= 2 && (c.startsWith(body) || c.endsWith(body)))  // 锚定命令首/尾的残片（≥2 字符）
         || (body.length >= 4 && c.includes(body)))))) continue;          // 居中片段（≥4 字符）
-    out.push(raw);
+    out.push(pg !== t ? pg : raw);
   }
   return out;
 }
@@ -1932,6 +1936,24 @@ class MonitorManager extends EventEmitter {
     }
     const parts = job.lineBuf.split('\n');
     job.lineBuf = parts.pop(); // 保留半行
+    // 分页提示自动翻页（华为/H3C「  ---- More ----」/思科「--More--」）：未关分页的设备上，
+    // 会话内备份与周期命令输出会被截断在第一屏（真机实测：云路由 running-config 首屏即断）。
+    // 提示行不带换行、落在半行缓冲里——尾部恰为 More 标记时补一个空格继续（与 runOneShot/runDeploy
+    // 同口径）。节流窗口内的标记不能丢：真机整屏输出可短至 ~50ms，节流直接跳过会让设备静默等键而死锁
+    // （备份窗口随后关闭、内容拦腰截断）——安排一次性重试，窗口过后标记仍在则补发。
+    const sendMoreSpace = () => {
+      job._lastMoreAt = Date.now();
+      try { this.shell.write(job.sid, ' '); } catch (e) { /* 会话已断 */ }
+    };
+    if (/^[\s-]*more[\s-]*$/i.test(job.lineBuf.trim())) {
+      if (Date.now() - (job._lastMoreAt || 0) > 150) sendMoreSpace();
+      else if (!job._moreRetry) {
+        job._moreRetry = setTimeout(() => {
+          job._moreRetry = null;
+          if (job.enabled && !job.stopping && job.sid && /^[\s-]*more[\s-]*$/i.test(String(job.lineBuf || '').trim())) sendMoreSpace();
+        }, 160);
+      }
+    }
     const captured = [];
     for (const ln of parts) {
       let t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
@@ -2213,6 +2235,11 @@ class MonitorManager extends EventEmitter {
       if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) { job._backupCap = null; return; }
       try { this.shell.write(job.sid, cmd + eol); } catch (e) { job._backupCap = null; this._finishBackup(job, gen, { ok: false, error: '写入失败' }); return; }
       await sleep(job.backup.waitMs);
+    }
+    // 分页仍在进行（半行缓冲尾部是 More 标记，_onOutput 已自动补空格翻页）：逐屏延长等待，
+    // 否则未关分页设备的多屏配置会被固定等待窗口拦腰截断（真机实测：云路由 running-config 约 8 屏）。上限 10 屏 × 500ms。
+    for (let i = 0; i < 10 && /^[\s-]*more[\s-]*$/i.test(String(job.lineBuf || '').trim()); i++) {
+      await sleep(500);
     }
     await sleep(300); // 尾部输出缓冲
     const cap = job._backupCap;

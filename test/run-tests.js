@@ -2677,6 +2677,57 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(contentD, 'sysname HW\nreturn', '监控输出尾部/More/迟到命令回显均不混入备份（实际：' + JSON.stringify(contentD) + '）');
       rmTmp(tmpD);
     }
+    // 14) 会话备份分页自动翻页（真机回归）：华为/H3C 未关分页时，More 提示（不带换行的半行）自动补空格翻页，
+    //     备份不得截断在第一屏（云路由 running-config 首屏即断的实测缺陷），标记行本身不落备份
+    {
+      const { MonitorManager } = require('../js/monitor.js');
+      const { ConfigBackupStore } = require('../js/config-backup.js');
+      const tmpP = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-shpg-'));
+      const storeP = new ConfigBackupStore(path.join(tmpP, 'cfg'));
+      const outP = [];
+      const writesP = [];
+      const stubP = {
+        on(ev, fn) { if (ev === 'output') outP.push(fn); },
+        removeListener(ev, fn) { const i = outP.indexOf(fn); if (i >= 0) outP.splice(i, 1); },
+        write() {},
+        close() {},
+        connect() { return { ok: true, id: 's13' }; },
+        trustFingerprint() { return true; }
+      };
+      const mgrP = new MonitorManager(stubP, tmpP, null, { backupStore: storeP });
+      const vP = mgrP._validate({
+        key: 'n13@10.0.0.13', host: '10.0.0.13', protocol: 'ssh', username: 'admin', password: 'pw', commands: ['display clock'],
+        backup: { enabled: true, mode: 'session', command: ['display current-configuration'], waitMs: 400 }
+      });
+      eq(vP.ok, true, '分页翻页任务参数校验通过');
+      const jobP = mgrP._newJob(vP.cfg);
+      mgrP.jobs.set(jobP.key, jobP);
+      jobP.sid = 's13'; jobP.state = 'monitoring'; jobP._ready = true;
+      jobP.logStream = { bytesWritten: 0, write() {}, end() {} };
+      mgrP._bySid.set('s13', jobP.key);
+      const emitP = (d) => { for (const fn of outP.slice()) fn('s13', d); };
+      stubP.write = (_sid, d) => {
+        writesP.push(String(d));
+        if (String(d).includes('display current-configuration')) {
+          setTimeout(() => emitP('#\r\nsysname PAGE1\r\ninterface GE0/0/0\r\n'), 30);
+          setTimeout(() => emitP('  ---- More ----'), 90);            // 第一屏标记：立即补空格
+        } else if (writesP.filter(w => w === ' ').length === 1) {
+          // 真机翻页形态：ESC[nD+空格串擦除标记（ANSI 已剥）→ 标记与续行合并；第二屏标记仅 50ms 后到（节流窗口内 → 重试定时器补发）
+          setTimeout(() => emitP('                cipher-suite PAGE2\r\n vlan 10\r\n  ---- More ----'), 50);
+        } else if (String(d) === ' ') {
+          setTimeout(() => emitP('\r\n ip address 10.1.1.1 255.255.255.0\r\n#\r\nreturn\r\n<HW>'), 30);
+        }
+      };
+      await mgrP._runBackupShared(jobP, jobP.gen);
+      const devKeyP = jobP.name || jobP.deviceId;
+      const nameP = storeP.latest(devKeyP, jobP.host);
+      ok(!!nameP, '分页场景备份已保存');
+      const contentP = nameP ? storeP.read(devKeyP, jobP.host, nameP).content : '';
+      ok(/PAGE1/.test(contentP) && /PAGE2/.test(contentP) && /10\.1\.1\.1/.test(contentP) && /return/.test(contentP), '三屏内容齐备（节流窗口内的标记经重试翻页，未截断）', JSON.stringify(contentP));
+      ok(!/More/i.test(contentP), 'More 标记行与标记合并段均不落备份');
+      ok(writesP.includes(' '), 'More 提示触发自动补空格（写回设备）');
+      rmTmp(tmpP);
+    }
 
     /* ================= 回归（R4 审查修复项·第二批） ================= */
     console.log('== 回归：isValidImg 收紧与节点图标口径统一（R4/F-2②③） ==');
