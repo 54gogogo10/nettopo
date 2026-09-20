@@ -3579,7 +3579,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
             if (cmd === 'screen-length 0 temporary') { sock.write(cmd + '\r\n' + prompt); return; }
             if (cmd === 'display current-configuration') {
               if (cfg.showErr) { sock.write(cmd + "\r\nError: Unrecognized command found at '^' position.\r\n" + prompt); return; }
-              sock.write(cmd + '\r\nsysname SW1\r\n#\r\ninterface Vlanif10\r\n ip address 10.0.10.1 255.255.255.0\r\nreturn\r\n' + prompt);
+              sock.write(cmd + '\r\nsysname SW1\r\n#\r\n' + (cfg.cfgLine ? cfg.cfgLine + '\r\n' : '') + 'interface Vlanif10\r\n ip address 10.0.10.1 255.255.255.0\r\nreturn\r\n' + prompt);
               return;
             }
             if (cmd === 'system-view') { st.mode = 'config'; sock.write(cmd + '\r\nEnter system view, return user view with Ctrl+Z.\r\n[SW1]'); return; }
@@ -3628,6 +3628,20 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(r.ok === true && r.appliedCount === 3 && r.failedAt === -1, 'runDeploy：3 行全部下发成功');
       ok(r.backup.ok === true && /interface Vlanif10/.test(r.backup.content), 'runDeploy：前置备份取到运行配置');
       ok(r.saved.ok === true && /saved successfully/.test(r.saved.out), 'runDeploy：保存命令的交互确认被自动应答');
+
+      // 真机回归：华为云路由运行配置含「error-down auto-recovery …」合法配置行，
+      // 旧口径 ^error 冒号可选会把它误判成设备报错，前置备份被拦、下发整体中止
+      {
+        const mEd = makeDeployMock({ cfgLine: 'error-down auto-recovery cause link-flap interval 60' });
+        await listen(mEd);
+        const rEd = await mgr.runDeploy(Object.assign({}, baseO, {
+          port: mEd.server.address().port, lines: ['x'],
+          showCmd: 'display current-configuration', screenCmd: 'screen-length 0 temporary',
+          enterCmd: 'system-view', exitCmd: 'return'
+        }));
+        ok(rEd.ok === true && rEd.backup.ok === true && /error-down auto-recovery/.test(rEd.backup.content || ''), 'runDeploy：配置含 error-down 合法行不误判报错（云路由真机回归）');
+        await mEd.close();
+      }
       ok(r.post.ok === true && /interface Vlanif10/.test(r.post.content), 'runDeploy：回采校验取到配置');
       const seq = m.st.cmds.map(x => x.replace(/\r?\n/g, ''));
       ok(seq[0] === 'screen-length 0 temporary' && seq[1] === 'display current-configuration' && seq[2] === 'system-view', 'runDeploy：顺序为 关分页 → 备份 → 进配置模式');

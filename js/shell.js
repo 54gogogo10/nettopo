@@ -633,7 +633,10 @@ class ShellManager extends EventEmitter {
       // 不接受该标签会漏判——配置下发就成了「以为下发成功、其实一条没生效」。
       const ERR_RES = [
         /^%\s*(?:\[[A-Za-z0-9_-]{1,16}\]\s*)?(invalid|incomplete|ambiguous|unrecognized|unknown|error|wrong|too many)/i,
-        /^(error|wrong parameter|invalid input|incomplete command|ambiguous command|unrecognized command|unknown command|too many parameters|failure)[:：]?/i,
+        // error/failure 起头必须带冒号：华为云路由配置里有形如「error-down auto-recovery cause …」的合法配置行，
+        // 冒号可选时 ^error 会把它误判成设备报错，前置备份被拦、下发整体中止
+        /^(error|failure)[:：]/i,
+        /^(wrong parameter|invalid input|incomplete command|ambiguous command|unrecognized command|unknown command|too many parameters)(\s|[:：]|$)/i,
         /(^|\s)(invalid input|incomplete command|ambiguous command|unrecognized command|unknown command|wrong parameter|too many parameters)(\s|$)/i,
         /^failed to\b/i
       ];
