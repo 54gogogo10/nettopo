@@ -1897,7 +1897,9 @@ U.subnetGroups = (nodes, links, names) => {
     return m0 ? U.subnetOf(m0) : null;
   };
   const groups = new Map();
+  const byId = new Map(); // id -> 节点：组内成员解析用（每成员线性 find 是 O(节点×成员)）
   for (const n of nodes) {
+    byId.set(n.id, n);
     const s = primaryOf(n);
     if (!s) continue;
     if (!groups.has(s)) groups.set(s, { key: s, nodeIds: [] });
@@ -1907,7 +1909,7 @@ U.subnetGroups = (nodes, links, names) => {
   const out = [...groups.values()]
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
     .map((g, i) => {
-      const rects = g.nodeIds.map(id => nodes.find(n => n.id === id)).filter(Boolean);
+      const rects = g.nodeIds.map(id => byId.get(id)).filter(Boolean);
       const [rx0] = U.spreadMinMax(rects.map(r => r.x));
       const [ry0] = U.spreadMinMax(rects.map(r => r.y));
       const [, rx2] = U.spreadMinMax(rects.map(r => r.x + r.w));
@@ -4685,7 +4687,6 @@ U.failureImpact = (nodes, links, kind, id, opts) => {
 /* ---------- 节点默认尺寸 ---------- */
 U.NODE_W = 160;
 U.NODE_H = 56;
-U.NODE_H_MGMT = 72; // 含管理地址的节点高度
 
 /* 节点全部管理地址（主地址 n.mgmt + 附加 n.mgmts，去重保序） */
 U.nodeMgmts = (n) => {
@@ -4715,11 +4716,15 @@ U.nodeHeightFor = (n) => {
   return c ? U.NODE_H + Math.min(c, 3) * 16 : U.NODE_H;
 };
 
-/* 文本宽度估算（CJK ≈ 字号，ASCII ≈ 0.56×字号） */
+/* 文本宽度估算（CJK ≈ 字号，ASCII ≈ 0.56×字号）。
+ * 逐字符码点范围比较而非正则：update 每帧每链路标注都要调，正则对象分配是纯浪费 */
 U.measureText = (text, size) => {
   let w = 0;
-  for (const ch of String(text == null ? '' : text)) {
-    w += /[\u4e00-\u9fff\uff00-\uffef]/.test(ch) ? size : size * 0.56;
+  const s = String(text == null ? '' : text);
+  for (let i = 0; i < s.length; i++) {
+    const c = s.codePointAt(i);
+    if (c > 0xffff) i++; // 代理对按一个码点计（与原 for...of 语义一致）
+    w += ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0xff00 && c <= 0xffef)) ? size : size * 0.56;
   }
   return w;
 };

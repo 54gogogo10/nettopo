@@ -96,9 +96,8 @@ const renderer = new TopoRender($('#svg'), {
   },
   onView(z) {
     $('#zVal').textContent = Math.round(z * 100) + '%';
-    // 视图平移/缩放也持久化（节流）
-    clearTimeout(saveGraph._t);
-    saveGraph._t = setTimeout(saveGraph, 500);
+    // 视图平移/缩放也持久化（saveGraph 自带防抖，高频滚轮不逐帧落盘）
+    saveGraph();
   }
 });
 // 显示开关初始状态
@@ -3653,11 +3652,13 @@ function setupAutoBackup() {
   setupAutoBackup._last = '';
   setupAutoBackup._timer = setInterval(async () => {
     if (!state.nodes.length) return;
-    const data = await buildProjectData();
-    // 变化检测须覆盖区域与其他图纸页：只改区域/他页内容时同样要产生自动备份
+    // 变化检测须覆盖区域与其他图纸页：只改区域/他页内容时同样要产生自动备份。
+    // 先算哈希再做工程数据：空闲 tick（工程无变化）跳过 buildProjectData 的整库克隆+序列化
     const hash = JSON.stringify([state.nodes, state.links, state.texts, state.regions || [], state.downLinks ? [...state.downLinks] : [], U.clone(state.sheets)]);
     if (hash === setupAutoBackup._last) return;
-    setupAutoBackup._last = hash;
+    const data = await buildProjectData();
+    // 建数据过程会把当前页 stash 进 sheets：基线对齐到 stash 后的状态，避免下一 tick 误判再备一份
+    setupAutoBackup._last = JSON.stringify([state.nodes, state.links, state.texts, state.regions || [], state.downLinks ? [...state.downLinks] : [], U.clone(state.sheets)]);
     if (window.topoBackup) {
       // 桌面版：写入本机备份库（备份管理可浏览/恢复）
       window.topoBackup.save({ content: JSON.stringify(data, null, 2), label: 'auto', keep: state.autoBackup.keep }).then((res) => {
@@ -6139,6 +6140,13 @@ function updateLegend() {
 const GRAPH_KEY = 'nettopo.graph';
 
 function saveGraph() {
+  // 落盘防抖：大工程（多页 + MB 级底图）的同步 stringify 可达数十 ms，拖拽结束/连续编辑
+  // 高频触发时合并为一次；关窗/刷新前由 flush 同步兜底（延迟读的仍是当时的最新 state）
+  if (saveGraph._dt) return;
+  saveGraph._dt = setTimeout(() => { saveGraph._dt = null; saveGraph.flush(); }, 400);
+}
+saveGraph.flush = () => {
+  if (saveGraph._dt) { clearTimeout(saveGraph._dt); saveGraph._dt = null; }
   try {
     sheetStash(); // 多页数据保持最新
     localStorage.setItem(GRAPH_KEY, JSON.stringify({
@@ -6159,7 +6167,10 @@ function saveGraph() {
       ts: Date.now()
     }));
   } catch (e) { /* 存储超限时忽略 */ }
-}
+};
+// 防抖窗口内关闭/刷新页面：同步落盘兜底（pagehide 兜 Electron 隐藏卸载，beforeunload 兜常规刷新）
+window.addEventListener('beforeunload', () => { try { saveGraph.flush(); } catch (e) { /* ignore */ } });
+window.addEventListener('pagehide', () => { try { saveGraph.flush(); } catch (e) { /* ignore */ } });
 
 function restoreGraph() {
   try {
@@ -6226,6 +6237,10 @@ function restoreGraph() {
     else renderer.fit();
     updateUndoBtns();
     refreshAll();
+    // 恢复持久化的链路监测任务（保存时已剥离凭据，凭据在启动载荷时按 credMode/credId 现解析）——
+    // 此前只存不读，重启后任务静默丢失（见 saveLinkTasks/commitLinkTasks 的落盘口径）
+    const savedLinkTasks = loadLinkTasks();
+    if (savedLinkTasks.length) state.linkTasks = savedLinkTasks;
     // 先解密加载持久化的监控配置，再对齐主进程状态并自启动已启用的监控
     loadMonitorCfg().then((saved) => {
       if (saved && typeof saved === 'object' && Object.keys(saved).length) state.monitorCfg = saved;
@@ -7138,6 +7153,24 @@ function wire() {
     const p = d.util * 100;
     return { cls: p >= 80 ? 'crit' : p >= 50 ? 'warn' : 'ok', text: (p >= 100 ? '≥100' : Math.round(p)) + '%' };
   };
+  /** 连线徽标锚点：直角模式沿折线取弧长中点（与线段重合），直线模式取两端中点（流量/协议徽标共用） */
+  const linkMid = (q) => {
+    if (q.pts) {
+      const segs = []; let total = 0;
+      for (let i = 1; i < q.pts.length; i++) { const L = Math.hypot(q.pts[i][0] - q.pts[i - 1][0], q.pts[i][1] - q.pts[i - 1][1]); segs.push(L); total += L; }
+      let t = total / 2;
+      let mx = q.pts[q.pts.length - 1][0], my = q.pts[q.pts.length - 1][1];
+      for (let i = 1; i < q.pts.length; i++) {
+        if (t <= segs[i - 1]) { const r = segs[i - 1] ? t / segs[i - 1] : 0; mx = q.pts[i - 1][0] + (q.pts[i][0] - q.pts[i - 1][0]) * r; my = q.pts[i - 1][1] + (q.pts[i][1] - q.pts[i - 1][1]) * r; break; }
+        t -= segs[i - 1];
+      }
+      return { mx, my };
+    }
+    return { mx: (q.x1 + q.x2) / 2, my: (q.y1 + q.y2) / 2 };
+  };
+  /* 徽标 title 文本缓存：键为 linkId+采样时间戳——拖拽/缩放期间位置变而采样不变，
+   * toLocaleTimeString 等字符串拼装每帧每链路重算纯浪费；容量超界整体清空（下一采样自然重建） */
+  const flowTitleCache = new Map();
   const syncLinkFlow = () => {
     if (linkFlowRaf || !window.topoMonitor) return;
     linkFlowRaf = requestAnimationFrame(() => {
@@ -7150,21 +7183,12 @@ function wire() {
       const data = U.buildLinkFlow(state.nodes, state.links, state.linkFlow, { now: Date.now() });
       const z = 1 / (renderer.zoom || 1);
       const NS = 'http://www.w3.org/2000/svg';
+      const nameById = new Map(state.nodes.map(n => [n.id, n.name]));
       for (const l of state.links) {
         const d = data[l.id], q = geom[l.id];
         if (!d || !q) continue;
         // 徽标锚点取走线中点（直角模式沿折线取弧长中点，与线段重合）
-        let mx, my;
-        if (q.pts) {
-          const segs = []; let total = 0;
-          for (let i = 1; i < q.pts.length; i++) { const L = Math.hypot(q.pts[i][0] - q.pts[i - 1][0], q.pts[i][1] - q.pts[i - 1][1]); segs.push(L); total += L; }
-          let t = total / 2;
-          mx = q.pts[q.pts.length - 1][0]; my = q.pts[q.pts.length - 1][1];
-          for (let i = 1; i < q.pts.length; i++) {
-            if (t <= segs[i - 1]) { const r = segs[i - 1] ? t / segs[i - 1] : 0; mx = q.pts[i - 1][0] + (q.pts[i][0] - q.pts[i - 1][0]) * r; my = q.pts[i - 1][1] + (q.pts[i][1] - q.pts[i - 1][1]) * r; break; }
-            t -= segs[i - 1];
-          }
-        } else { mx = (q.x1 + q.x2) / 2; my = (q.y1 + q.y2) / 2; }
+        const { mx, my } = linkMid(q);
         const bd = flowBadge(d);
         const g = document.createElementNS(NS, 'g');
         g.setAttribute('class', 'flow-badge ' + bd.cls);
@@ -7178,12 +7202,19 @@ function wire() {
         rect.setAttribute('x', String(-w / 2)); rect.setAttribute('y', '-9');
         rect.setAttribute('width', String(w)); rect.setAttribute('height', '18'); rect.setAttribute('rx', '9');
         g.appendChild(rect); g.appendChild(txt);
+        const tk = l.id + '|' + (d.ts || 0) + '|' + (nameById.get(l.a) ?? l.a ?? '') + '|' + (nameById.get(l.b) ?? l.b ?? '');
+        let title = flowTitleCache.get(tk);
+        if (title == null) {
+          if (flowTitleCache.size > state.links.length * 4 + 64) flowTitleCache.clear();
+          const nm = (id) => nameById.has(id) ? nameById.get(id) : (id || '');
+          title = nm(l.a) + (l.aIf ? ' ' + l.aIf : '') + ' ⇄ ' + nm(l.b) + (l.bIf ? ' ' + l.bIf : '')
+            + '\n↓ ' + FLOW_MBPS(d.inBps == null ? null : d.inBps / 1000) + ' · ↑ ' + FLOW_MBPS(d.outBps == null ? null : d.outBps / 1000)
+            + (d.speedBps ? '（基准 ' + FLOW_MBPS(d.speedBps / 1000) + '）' : '')
+            + (d.ts ? '\n采样 ' + new Date(d.ts).toLocaleTimeString() + (d.stale ? '（已过期）' : '') : '');
+          flowTitleCache.set(tk, title);
+        }
         const tt = document.createElementNS(NS, 'title');
-        const nm = (id) => { const n = state.nodes.find(x => x.id === id); return n ? n.name : (id || ''); };
-        tt.textContent = nm(l.a) + (l.aIf ? ' ' + l.aIf : '') + ' ⇄ ' + nm(l.b) + (l.bIf ? ' ' + l.bIf : '')
-          + '\n↓ ' + FLOW_MBPS(d.inBps == null ? null : d.inBps / 1000) + ' · ↑ ' + FLOW_MBPS(d.outBps == null ? null : d.outBps / 1000)
-          + (d.speedBps ? '（基准 ' + FLOW_MBPS(d.speedBps / 1000) + '）' : '')
-          + (d.ts ? '\n采样 ' + new Date(d.ts).toLocaleTimeString() + (d.stale ? '（已过期）' : '') : '');
+        tt.textContent = title;
         g.appendChild(tt);
         layer.appendChild(g);
       }
@@ -7224,47 +7255,49 @@ function wire() {
      在已匹配到连线的邻接上画徽标（BGP AS65002 Established / OSPF Full），异常红闪；
      数据由 openProtoNeighbors 采集后经 __protoView.set 注入，与「路径高亮」共用同一套高亮 ---- */
   let protoViewData = null;
+  let protoRaf = 0;
+  let protoDrawn = false; // 当前是否已画有徽标：无数据且无徽标时早退，不再每帧空扫 querySelectorAll
   const syncProtoView = () => {
-    const layer = renderer.linkLayer;
-    if (!layer) return;
-    for (const old of [...layer.querySelectorAll('.proto-badge')]) old.remove();
-    if (!protoViewData || !protoViewData.linkBadges) return;
-    const geom = U.linkGeom(state.nodes, state.links, { ortho: !!renderer.orthoLinks });
-    const z = 1 / (renderer.zoom || 1);
-    const NS = 'http://www.w3.org/2000/svg';
-    for (const l of state.links) {
-      const b = protoViewData.linkBadges[l.id], q = geom[l.id];
-      if (!b || !q) continue;
-      let mx, my;
-      if (q.pts) {
-        const segs = []; let total = 0;
-        for (let i = 1; i < q.pts.length; i++) { const L = Math.hypot(q.pts[i][0] - q.pts[i - 1][0], q.pts[i][1] - q.pts[i - 1][1]); segs.push(L); total += L; }
-        let t = total / 2;
-        mx = q.pts[q.pts.length - 1][0]; my = q.pts[q.pts.length - 1][1];
-        for (let i = 1; i < q.pts.length; i++) {
-          if (t <= segs[i - 1]) { const r = segs[i - 1] ? t / segs[i - 1] : 0; mx = q.pts[i - 1][0] + (q.pts[i][0] - q.pts[i - 1][0]) * r; my = q.pts[i - 1][1] + (q.pts[i][1] - q.pts[i - 1][1]) * r; break; }
-          t -= segs[i - 1];
-        }
-      } else { mx = (q.x1 + q.x2) / 2; my = (q.y1 + q.y2) / 2; }
-      const label = String(b.label || '').slice(0, 42);
-      const g = document.createElementNS(NS, 'g');
-      // 与流量徽标同处连线中点会重叠：协议视图上移 14px 避让
-      g.setAttribute('class', 'proto-badge ' + (b.stateOk ? 'ok' : 'bad'));
-      g.setAttribute('transform', 'translate(' + mx + ' ' + (my - 14) + ') scale(' + z + ')');
-      const rect = document.createElementNS(NS, 'rect');
-      const txt = document.createElementNS(NS, 'text');
-      txt.setAttribute('text-anchor', 'middle');
-      txt.setAttribute('dominant-baseline', 'central');
-      txt.textContent = label;
-      const w = Math.max(34, U.measureText(label, 10) + 12);
-      rect.setAttribute('x', String(-w / 2)); rect.setAttribute('y', '-9');
-      rect.setAttribute('width', String(w)); rect.setAttribute('height', '18'); rect.setAttribute('rx', '9');
-      g.appendChild(rect); g.appendChild(txt);
-      const tt = document.createElementNS(NS, 'title');
-      tt.textContent = label + (b.stateOk ? '（邻居状态正常）' : '（存在未建立/异常邻居）');
-      g.appendChild(tt);
-      layer.appendChild(g);
-    }
+    if (protoRaf) return;
+    protoRaf = requestAnimationFrame(() => {
+      protoRaf = 0;
+      const layer = renderer.linkLayer;
+      if (!layer) return;
+      if (!protoViewData || !protoViewData.linkBadges) {
+        if (!protoDrawn) return;
+        protoDrawn = false;
+        for (const old of [...layer.querySelectorAll('.proto-badge')]) old.remove();
+        return;
+      }
+      protoDrawn = true;
+      for (const old of [...layer.querySelectorAll('.proto-badge')]) old.remove(); // 先清旧再画新（位置随拖拽/缩放更新）
+      const geom = U.linkGeom(state.nodes, state.links, { ortho: !!renderer.orthoLinks });
+      const z = 1 / (renderer.zoom || 1);
+      const NS = 'http://www.w3.org/2000/svg';
+      for (const l of state.links) {
+        const b = protoViewData.linkBadges[l.id], q = geom[l.id];
+        if (!b || !q) continue;
+        const { mx, my } = linkMid(q);
+        const label = String(b.label || '').slice(0, 42);
+        const g = document.createElementNS(NS, 'g');
+        // 与流量徽标同处连线中点会重叠：协议视图上移 14px 避让
+        g.setAttribute('class', 'proto-badge ' + (b.stateOk ? 'ok' : 'bad'));
+        g.setAttribute('transform', 'translate(' + mx + ' ' + (my - 14) + ') scale(' + z + ')');
+        const rect = document.createElementNS(NS, 'rect');
+        const txt = document.createElementNS(NS, 'text');
+        txt.setAttribute('text-anchor', 'middle');
+        txt.setAttribute('dominant-baseline', 'central');
+        txt.textContent = label;
+        const w = Math.max(34, U.measureText(label, 10) + 12);
+        rect.setAttribute('x', String(-w / 2)); rect.setAttribute('y', '-9');
+        rect.setAttribute('width', String(w)); rect.setAttribute('height', '18'); rect.setAttribute('rx', '9');
+        g.appendChild(rect); g.appendChild(txt);
+        const tt = document.createElementNS(NS, 'title');
+        tt.textContent = label + (b.stateOk ? '（邻居状态正常）' : '（存在未建立/异常邻居）');
+        g.appendChild(tt);
+        layer.appendChild(g);
+      }
+    });
   };
   globalThis.__protoView = {
     set: (data) => {

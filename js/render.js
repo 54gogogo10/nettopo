@@ -25,6 +25,7 @@ class Renderer {
     this.regions = [];          // 区域分组容器（几何包含：设备中心点落在框内即属于该区域）
     this.nodeEls = new Map();
     this.linkEls = new Map();
+    this._linkParts = new Map();  // linkId -> {ln, hit, lab, texts}：构建时缓存的子元素引用（update 每帧要用，省去每链路 4 次 querySelector）
     this.textEls = new Map();
     this.regionEls = new Map();
     this._regionSig = '';         // 区域层重建签名（update 高频路径防抖，见 _buildRegions）
@@ -87,7 +88,7 @@ class Renderer {
     this.update();
   }
 
-  zoomBy(factor, cx, cy) {
+  zoomBy(factor, cx, cy, soon) {
     const r = this.svg.getBoundingClientRect();
     // px/py 是 svg 本地坐标（pan 相对 svg 左上角）：显式传入时减 r.left 归一，缺省取画布中心
     const px = cx != null ? cx - r.left : r.width / 2;
@@ -98,7 +99,9 @@ class Renderer {
     this.pan.y = py - (py - this.pan.y) * k;
     this.zoom = nz;
     this.applyView();
-    this.update();
+    // 滚轮为指针级高频事件（触控板单帧可多次）：视图变换即时生效，全量重绘合并到下一帧
+    if (soon) this.updateSoon();
+    else this.update();
   }
 
   fit() {
@@ -160,6 +163,7 @@ class Renderer {
     if (regions !== undefined) this.regions = regions || [];
     this.nodeEls.clear();
     this.linkEls.clear();
+    this._linkParts.clear();
     this.textEls.clear();
     this.regionEls.clear();
     this._regionSig = ''; // regionLayer 已清空：强制下次 update 重建，不吃签名缓存
@@ -382,15 +386,17 @@ class Renderer {
   _buildLink(l) {
     const g = el('g', { class: 'link', 'data-id': l.id }, this.linkLayer);
     // fill none 显式落在属性上：直角折线（多点路径）不设 fill 会被 SVG 默认黑色填充封闭成楔形
-    el('path', { class: 'ln', d: 'M0 0', fill: 'none' }, g);
-    el('path', { class: 'hit', d: 'M0 0', fill: 'none' }, g);
+    const ln = el('path', { class: 'ln', d: 'M0 0', fill: 'none' }, g);
+    const hit = el('path', { class: 'hit', d: 'M0 0', fill: 'none' }, g);
     // 标注组：三行（A端接口IP / B端接口IP / 带宽），防碰撞后定位
     const lab = el('g', { class: 'lab' }, g);
+    const texts = [];
     for (let i = 0; i < 3; i++) {
-      el('text', { class: 'lb', y: 0 }, lab);
+      texts.push(el('text', { class: 'lb', y: 0 }, lab));
     }
     el('title', {}, g).textContent = '链路';
     this.linkEls.set(l.id, g);
+    this._linkParts.set(l.id, { ln, hit, lab, texts });
   }
 
   /* ---------- 全量位置更新 ---------- */
@@ -446,7 +452,11 @@ class Renderer {
     this._buildGroups();
     for (const n of this.nodes) {
       const g = this.nodeEls.get(n.id);
-      if (g) g.setAttribute('transform', `translate(${n.x} ${n.y})`);
+      if (!g) continue;
+      // 位置未变不重写 transform（纯缩放/平移视图时节点世界坐标不变；元素重建后 _tx 为 undefined 必写一次）
+      if (g._tx === n.x && g._ty === n.y) continue;
+      g._tx = n.x; g._ty = n.y;
+      g.setAttribute('transform', `translate(${n.x} ${n.y})`);
     }
     const tz = 1 / this.zoom;
     for (const t of this.texts) {
@@ -492,10 +502,11 @@ class Renderer {
     const z = 1 / this.zoom;
     for (const l of this.links) {
       const g = this.linkEls.get(l.id);
-      if (!g) continue;
+      const parts = this._linkParts.get(l.id);
+      if (!g || !parts) continue;
       const q = geom[l.id];
       if (!q) continue;
-      const ln = g.querySelector('.ln'), hit = g.querySelector('.hit');
+      const ln = parts.ln, hit = parts.hit;
       g.classList.toggle('down', this.downLinks.has(l.id));
       // 端到端链路连通性监测结果（监控 ▾ 链路连通性监测）：按状态给连线上色，
       // 手动「故障标记」（.down）优先——用户显式标的断链不该被监测结论覆盖
@@ -505,7 +516,8 @@ class Renderer {
       g.classList.toggle('lk-unknown', lk === 'unknown' || lk === 'degraded');
       // SNMP 转发表推断出来的链路：虚线显示，与实测（LLDP/CDP）链路一眼可分（绝不冒充实测结果）
       g.classList.toggle('inferred', !!l.inferred);
-      g.style.setProperty('--bw-c', U.bwColor(l.bw)); // 带宽颜色（图上不显示带宽文字）
+      // 带宽颜色（图上不显示带宽文字）：带宽值只在编辑链路时变化，命中缓存时跳过 6 个正则的规格化
+      if (parts.bw !== l.bw) { parts.bw = l.bw; g.style.setProperty('--bw-c', U.bwColor(l.bw)); }
       // 直角模式走 pts 折线，直线模式退化为两段式 path（元素统一为 path，命中/样式不变）
       const d = q.pts
         ? 'M' + q.pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' L')
@@ -515,11 +527,11 @@ class Renderer {
       const box = labelBoxes[bi];
       const ld = labelData[bi];
       bi++;
-      const lab = g.querySelector('.lab');
-      if (!this.showLabels || !box || !ld || !lab) { lab && lab.setAttribute('display', 'none'); continue; }
+      const lab = parts.lab;
+      if (!this.showLabels || !box || !ld || !lab) { lab.setAttribute('display', 'none'); continue; }
       lab.setAttribute('display', '');
       lab.setAttribute('transform', `translate(${box.x} ${box.y}) scale(${z})`);
-      const texts = lab.querySelectorAll('text');
+      const texts = parts.texts;
       ld.lines.forEach((ln2, i) => {
         const t = texts[i];
         if (!t) return;
@@ -532,6 +544,14 @@ class Renderer {
     }
     // 画布更新后回调（链路流量叠加等外部叠加层的重定位入口；异常不阻断渲染）
     if (typeof this.onAfterUpdate === 'function') { try { this.onAfterUpdate(); } catch (e) { /* ignore */ } }
+  }
+
+  /** 帧合并刷新：指针级高频路径（拖拽移动/滚轮缩放）用，同一帧内多次请求只做一次全量 update。
+   *  其余调用方仍走同步 update()（导出/适配视图等依赖更新后立即可读的 DOM 状态） */
+  updateSoon() {
+    if (this._updateRaf) return;
+    this._updateRaf = true;
+    requestAnimationFrame(() => { this._updateRaf = false; this.update(); });
   }
 
   /* 更新 pdf/vsdx 风格三行标注不再需要 _setLabel，删除 */
@@ -714,7 +734,7 @@ class Renderer {
       // 计算每格仅 ~0.5% 缩放（本项目支持浏览器直接打开 index.html，此路径真实可达）
       const dy = e.deltaMode === 1 ? e.deltaY * 33 : (e.deltaMode === 2 ? e.deltaY * 300 : e.deltaY);
       const f = Math.exp(-dy * 0.0016);
-      this.zoomBy(f, e.clientX, e.clientY);
+      this.zoomBy(f, e.clientX, e.clientY, true);
     }, { passive: false });
 
     // hover 提示
@@ -760,7 +780,7 @@ class Renderer {
       }
       const f0 = byId.get(id);
       if (f0 && (Math.abs(f0.x - this._drag.orig[id].x) > 2 || Math.abs(f0.y - this._drag.orig[id].y) > 2)) this._drag.moved = true;
-      this.update();
+      this.updateSoon();
       this.cb.onDrag && this.cb.onDrag(id, f0 && f0.x, f0 && f0.y);
     };
     const up = (ev) => {
@@ -798,7 +818,7 @@ class Renderer {
       t.x = w2.x - this._drag.dx;
       t.y = w2.y - this._drag.dy;
       if (Math.abs(t.x - orig.x) > 2 || Math.abs(t.y - orig.y) > 2) this._drag.moved = true;
-      this.update();
+      this.updateSoon();
     };
     const up = (ev) => {
       svgElRemove(this.svg, 'pointermove', move);
@@ -843,7 +863,7 @@ class Renderer {
       r.x = nx; r.y = ny;
       for (const it of insideN) { it.n.x = nx + it.dx; it.n.y = ny + it.dy; }
       for (const it of insideT) { it.t.x = nx + it.dx; it.t.y = ny + it.dy; }
-      this.update();
+      this.updateSoon();
       this.cb.onDrag && this.cb.onDrag(id, r.x, r.y);
     };
     const up = (ev) => {

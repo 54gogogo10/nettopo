@@ -85,6 +85,14 @@ function cleanBackupLines(lines, cmds) {
 const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/;
 /** 会话就绪等待上限：设备登录/初始化（banner）通常数秒内完成，超时兜底照常执行不阻塞 */
 const READY_TIMEOUT_MS = 15000;
+/* _onOutput 热路径正则（所有监控会话的每个输出 chunk 都执行，提升为模块常量避免逐 chunk 分配新 RegExp；
+ * 带 /g 的只用于 String.replace——replace 从 0 起匹配且完成后复位 lastIndex，共享无状态污染） */
+const RE_ANSI_CSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+const RE_ANSI_CHARSET = /\u001b[()][0-9A-B]/g;
+const RE_CRLF = /\r\n/g;
+const RE_CR = /\r/g;
+const RE_CTRL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const RE_MORE = /^[\s-]*more[\s-]*$/i;
 
 const pad2 = (n) => String(n).padStart(2, '0');
 function fmtDateTime(d) {
@@ -1288,6 +1296,8 @@ class MonitorManager extends EventEmitter {
     if (job.probeTimer) { clearTimeout(job.probeTimer); job.probeTimer = null; }
     if (job.backupTimer) { clearTimeout(job.backupTimer); job.backupTimer = null; }
     if (job._alertTimer) { clearTimeout(job._alertTimer); job._alertTimer = null; }
+    if (job._moreRetry) { clearTimeout(job._moreRetry); job._moreRetry = null; }
+    if (job._sysInfoTimer) { clearTimeout(job._sysInfoTimer); job._sysInfoTimer = null; }
     if (job.snmpTimer) { clearTimeout(job.snmpTimer); job.snmpTimer = null; }
     if (job.metricTimer) { clearTimeout(job.metricTimer); job.metricTimer = null; }
     if (job.httpTimer) { clearTimeout(job.httpTimer); job.httpTimer = null; }
@@ -1425,7 +1435,7 @@ class MonitorManager extends EventEmitter {
     }
     return out;
   }
-  _logLine(job, text) {
+  _logLine(job, text, preMasked) {
     // 已拆除任务不再写日志：teardown 已关流并移出 jobs，迟到路径（采集/备份 await 期间恰好停止）
     // 若放行会重开写流——句柄永不关闭泄漏，且已停任务仍写日志/发事件（对照 _fetchSysInfo/_probeOnce 均有守卫）
     if (!job.enabled || job.stopping) return;
@@ -1436,7 +1446,7 @@ class MonitorManager extends EventEmitter {
     // 单文件超过大小上限即滚动新文件（防高输出设备占满磁盘）
     if (job.logStream.bytesWritten > MAX_LOG_BYTES) this._openLog(job, true);
     if (!job.logStream) return;
-    try { job.logStream.write('[' + fmtTimestamp() + '] ' + this._maskSecrets(job, text) + '\n'); } catch (e) { /* ignore */ }
+    try { job.logStream.write('[' + fmtTimestamp() + '] ' + (preMasked ? text : this._maskSecrets(job, text)) + '\n'); } catch (e) { /* ignore */ }
   }
   _logCmd(job, cmd) {
     this._logLine(job, '>> ' + cmd);
@@ -1497,7 +1507,8 @@ class MonitorManager extends EventEmitter {
     }
     // SNMP 自动识别：每次会话建立后执行一次（延迟 2s 等设备就绪），结果经 sysinfo 事件回填
     if (job.sysinfo && job.sysinfo.enabled) {
-      setTimeout(() => this._fetchSysInfo(job, gen), 2000);
+      clearTimeout(job._sysInfoTimer);
+      job._sysInfoTimer = setTimeout(() => { job._sysInfoTimer = null; this._fetchSysInfo(job, gen); }, 2000);
     }
     // SSH 指标采集：会话建立后启动定时轮询（复用监控会话执行指标命令）
     if (job.metrics && job.metrics.enabled && !job.readOnly) {
@@ -1924,13 +1935,13 @@ class MonitorManager extends EventEmitter {
     // 不能因 logStream 降级为 null 就整体退出：就绪判定/告警匹配/备份捕获都在本函数里，
     // 日志 I/O 失败只该丢日志（_logLine 内部自愈重开），仅读取任务的输出处理不能跟着停摆
     if (!job) return;
-    let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '');
+    let text = String(data || '').replace(RE_ANSI_CSI, '').replace(RE_ANSI_CHARSET, '');
     // 去掉独立的回车（CRLF / CR 均归一为换行）
-    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    text = text.replace(RE_CRLF, '\n').replace(RE_CR, '\n');
     job.lineBuf += text;
     // 设备长时间不输出换行时强制断行，防行缓冲无界增长（主进程内存）
     if (job.lineBuf.length > MAX_LINEBUF_CHARS) {
-      const cut = job.lineBuf.slice(0, MAX_LINEBUF_CHARS).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+      const cut = job.lineBuf.slice(0, MAX_LINEBUF_CHARS).replace(RE_CTRL, '');
       if (cut) this._logLine(job, cut);
       job.lineBuf = job.lineBuf.slice(MAX_LINEBUF_CHARS);
     }
@@ -1945,22 +1956,22 @@ class MonitorManager extends EventEmitter {
       job._lastMoreAt = Date.now();
       try { this.shell.write(job.sid, ' '); } catch (e) { /* 会话已断 */ }
     };
-    if (/^[\s-]*more[\s-]*$/i.test(job.lineBuf.trim())) {
+    if (RE_MORE.test(job.lineBuf.trim())) {
       if (Date.now() - (job._lastMoreAt || 0) > 150) sendMoreSpace();
       else if (!job._moreRetry) {
         job._moreRetry = setTimeout(() => {
           job._moreRetry = null;
-          if (job.enabled && !job.stopping && job.sid && /^[\s-]*more[\s-]*$/i.test(String(job.lineBuf || '').trim())) sendMoreSpace();
+          if (job.enabled && !job.stopping && job.sid && RE_MORE.test(String(job.lineBuf || '').trim())) sendMoreSpace();
         }, 160);
       }
     }
     const captured = [];
     for (const ln of parts) {
-      let t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+      let t = ln.replace(RE_CTRL, '');
       if (t) {
         // 凭据打码先行：日志、告警缓冲、备份捕获共用该行文本，恶意设备回显密码不得落到任何一处
         t = this._maskSecrets(job, t);
-        this._logLine(job, t);
+        this._logLine(job, t, true);
         if (!job._ready && PROMPT_RE.test(t.trim())) job._ready = true; // 会话就绪：收到命令提示符行（banner 期拼接的底层报文不触发）
         // 告警缓冲：周期循环、连接时执行命令、仅读取模式的设备主动输出，全部纳入关键字告警匹配。
         // 字节上限 + 丢最旧：行数上限挡不住「行数少但单行极长」的组合，join 前内存必须有界

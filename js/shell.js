@@ -89,6 +89,9 @@ class ShellManager extends EventEmitter {
    *  按天归档为 <logDir>/WebShell-<主机>/<日期>/<主机>_<端口>_<时间>.log，与监控日志共用浏览/搜索） */
   constructor(opts) {
     super();
+    // 每个在飞的一次性会话（runOneShot/runDeploy/监控独立备份）都在 manager 上挂 3 个临时监听器，
+    // 批量巡检/链路监测并发 ≥9 时会超 EventEmitter 默认 10 上限刷告警——抬高阈值（监听器均有 finish 清理，无泄漏）
+    this.setMaxListeners(100);
     opts = opts || {};
     this.sessions = new Map();
     this._seq = 0;
