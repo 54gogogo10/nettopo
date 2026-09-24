@@ -28,6 +28,7 @@ class RegexLab {
    * 返回与 items 等长的结果数组：
    *   test → { ok, hit:boolean, line:string|null }
    *   scan → { ok, hits:number[] }
+   *   规则非法/执行失败 → { ok:false, error:string }（与「跑了但没命中」区分开，调用方据此按无法评估处理）
    *   被拉黑/线程失败 → { ok:false, blocked:true, hit:false, hits:[] }
    * 单个模式超时只拉黑该模式，其余结果仍然返回。
    */
@@ -50,7 +51,9 @@ class RegexLab {
         const outIdx = remaining[k];
         const r = res.results[k];
         if (r) {
-          out[outIdx] = { ok: true, blocked: false, hit: !!r.hit, line: r.line || null, hits: r.hits || [] };
+          // worker 对非法/执行失败的正则返回 { ok:false, error }：必须原样透出，否则调用方无法区分
+          // 「跑了没命中」与「规则坏了」（monitor.js 的「无法评估」分支会成死代码）
+          out[outIdx] = { ok: r.ok !== false, blocked: false, hit: !!r.hit, line: r.line || null, hits: r.hits || [], error: r.error || null };
         } else if (k === res.badIndex) {
           // 该项执行超时被处决：拉黑并标记
           this.blocked.add(String(list[outIdx].pattern));
@@ -75,6 +78,9 @@ class RegexLab {
     return new Promise((resolve) => {
       let worker = null;
       let settled = false;
+      // 当前项下标必须闭包局部：RegexLab 实例在 MonitorManager 内被多任务共享，并发 run 时
+      // 实例级状态会被后启动批次的 begin 覆盖——超时处决会拉黑无辜模式（永久静默其告警）
+      let curIndex = 0;
       const finish = (val) => {
         if (settled) return;
         settled = true;
@@ -82,14 +88,14 @@ class RegexLab {
         if (worker) { try { worker.terminate(); } catch (e) { /* ignore */ } }
         resolve(val);
       };
-      const timer = setTimeout(() => finish({ results: [], badIndex: this._curIndex, timedOut: true }), budget);
+      const timer = setTimeout(() => finish({ results: [], badIndex: curIndex, timedOut: true }), budget);
       try {
         worker = new Worker(path.join(__dirname, 'regex-lab-worker.js'));
       } catch (e) { finish(null); return; }
       let id = 0;
       worker.on('message', (msg) => {
         if (!msg || typeof msg !== 'object') return;
-        if (msg.type === 'begin' && msg.id === id) this._curIndex = msg.index;
+        if (msg.type === 'begin' && msg.id === id) curIndex = msg.index;
         else if (msg.type === 'done' && msg.id === id) {
           const results = Array.isArray(msg.results) ? msg.results : [];
           finish({ results, badIndex: -1, timedOut: false });

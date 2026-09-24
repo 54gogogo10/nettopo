@@ -31,8 +31,10 @@ const state = {
   autoBackup: { on: lsGet('nettopo.autoBackup', '0') === '1', minutes: Number(lsGet('nettopo.autoBackupMin', '10') || 10), keep: Math.min(200, Math.max(1, Number(lsGet('nettopo.autoBackupKeep', '30') || 30) || 30)) },
   texts: [],  // 画布文本框（自定义字体样式）
   regions: [], // 区域分组容器（几何包含，双击编辑/拖动整体移动；随图纸保存）
+  underlay: null, // 机房平面图底图（每张图纸一张；图片以 dataURL 存进工程文件，体积有硬上限）
   monitorCfg: {},   // 设备后台监控配置：nodeId -> {hosts:[{host,protocol,port,username,password,commands,onConnect,readOnly,...}],intervalSec,cmdDelayMs,enabled}
   monitorStatus: {}, // 设备后台监控运行状态：nodeId -> {state,text,since}（运行时态，不持久化）
+  linkFlow: {},      // 链路流量叠加数据：nodeId -> {ts, ifs:[{n,oper,speed,in,out}]}（最新 ifTable 采样，运行时态）
   sheets: [],       // 多图纸：[{id,name,nodes,links,texts,pan,zoom}]；活动页数据即 state.nodes/links/texts 本体
   sheetIdx: 0,      // 当前活动页索引
   sheetSeq: 0       // 页 id 生成计数（跨保存持久，避免恢复后撞 id）
@@ -41,6 +43,7 @@ let layoutCancel = false;
 
 U.loadCustomTypes(); // 恢复自定义设备类型
 U.loadCustomCfgTemplates(); // 恢复自定义配置模板
+U.loadDeviceFields();       // 恢复设备自定义字段定义（责任人/部门/资产编号/维保/机柜/U 位…）
 
 const renderer = new TopoRender($('#svg'), {
   onDown(e, kind, id) {
@@ -66,7 +69,7 @@ const renderer = new TopoRender($('#svg'), {
     renderSelCard();
     refreshPanel();
   },
-  onDbl(kind, id) { kind === 'node' ? editNode(id) : (kind === 'region' ? editRegion(id) : editLink(id)); },
+  onDbl(kind, id) { kind === 'node' ? editNode(id) : (kind === 'region' ? editRegion(id) : (kind === 'text' ? editText(id) : editLink(id))); },
   onCtx(e, kind, id) { openCtx(e, kind, id); },
   onDrag() {},
   onDragEnd(id, moved) {
@@ -93,9 +96,8 @@ const renderer = new TopoRender($('#svg'), {
   },
   onView(z) {
     $('#zVal').textContent = Math.round(z * 100) + '%';
-    // 视图平移/缩放也持久化（节流）
-    clearTimeout(saveGraph._t);
-    saveGraph._t = setTimeout(saveGraph, 500);
+    // 视图平移/缩放也持久化（saveGraph 自带防抖，高频滚轮不逐帧落盘）
+    saveGraph();
   }
 });
 // 显示开关初始状态
@@ -103,12 +105,15 @@ renderer.showLabels = state.showLabels;
 renderer.showSubnets = state.showSubnets;
 renderer.subnetNames = state.subnetNames;
 setupAutoBackup(); // 自动备份（若有配置）
+loadCreds();       // 预热统一凭据库清单（各采集/下发面板首帧即可列出档案；失败静默，面板回落手工输入）
 
 /* ================= 选中 ================= */
 function select(kind, id, opts) {
   opts = opts || {};
-  state.sel = { kind, id };
-  renderer.select(kind, id, opts);
+  // renderer.select 会因 multi 切换/清空而修正最终选中（如 Ctrl 取消后 sel.id 可为 null）：
+  // 以返回值为准同步 state.sel，否则详情卡片与 Delete 作用于「已取消选中」的元素
+  const s = renderer.select(kind, id, opts);
+  state.sel = s || { kind, id };
   renderSelCard();
   if (opts.center && id) {
     centerOn(kind, id);
@@ -195,18 +200,24 @@ function restore(s) {
   }
   state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
   state.regions = s.regions || [];
+  state.underlay = U.sanitizeUnderlay(s.underlay);
   state.sel = { kind: null, id: null };
-  if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; state.sheets[state.sheetIdx].regions = state.regions; }
+  if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; state.sheets[state.sheetIdx].regions = state.regions; state.sheets[state.sheetIdx].underlay = state.underlay; }
   if (Array.isArray(s.downLinks)) { state.downLinks = new Set(s.downLinks); renderer.setDownLinks(state.downLinks); }
   if (s.subnetNames && typeof s.subnetNames === 'object') { state.subnetNames = s.subnetNames; renderer.subnetNames = s.subnetNames; }
   renderer.setSubnetView(state.showSubnets, state.subnetNames);
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
+  applyUnderlay();
   refreshAll();
   updateLegend();
   renderSelCard(); // 隐藏可能残留的选中卡
-  // deleteNode 随快照带走的监控配置（含加密口令）：撤销删除时一并放回
+  // deleteNode/deleteNodes 随快照带走的监控配置（含加密口令）：撤销删除时一并放回
   if (s.monitorCfgUndo && s.monitorCfgUndo.cfg) {
     state.monitorCfg[s.monitorCfgUndo.id] = s.monitorCfgUndo.cfg;
+    saveMonitorCfg().catch(() => {});
+  }
+  if (Array.isArray(s.monitorCfgUndoList)) {
+    for (const it of s.monitorCfgUndoList) { if (it && it.cfg) state.monitorCfg[it.id] = it.cfg; }
     saveMonitorCfg().catch(() => {});
   }
   reconcileMonitors(); // 撤销/重做后对齐后台监控
@@ -272,6 +283,8 @@ async function loadGraph(graph, msg) {
   state.links = cleaned.links;
   state.texts = cleaned.texts;
   state.regions = []; // 导入的表格无区域数据
+  state.downLinks = new Set(); // 整体替换拓扑：故障标记一并重置（残留 id 指向已不存在的链路）
+  renderer.setDownLinks(state.downLinks);
   state.sel = { kind: null, id: null };
   state.undoStack = []; // 初始状态无需撤销
   state.redoStack = [];
@@ -307,13 +320,18 @@ function monitorCredOf(nodeId) {
   const rows = normalizeMonitorHosts(state.monitorCfg[nodeId]);
   return rows.find(x => x.protocol === 'ssh') || rows[0] || null;
 }
-/** 已信任主机指纹（TOFU）：与 Web Shell/监控同一份记录；采集前传入 expectFp 严格比对（变化即拒连） */
-function trustedFpOf(host) {
-  try { const fp = localStorage.getItem('topoShellFp:' + host); return (fp && fp.indexOf('SHA256:') === 0) ? fp : ''; } catch (e) { return ''; }
+/** 已信任主机指纹（TOFU）：与 Web Shell/监控同一份记录；采集前传入 expectFp 严格比对（变化即拒连）。
+ *  非默认端口（≠22）键含端口后缀（与 ssh known_hosts 口径一致，同 IP 不同端口互不挤掉）；读取兼容旧版 host-only 键 */
+function fpKeyOf(host, port) { return 'topoShellFp:' + host + (port && Number(port) !== 22 ? ':' + Number(port) : ''); }
+function trustedFpOf(host, port) {
+  try {
+    const fp = localStorage.getItem(fpKeyOf(host, port)) || localStorage.getItem('topoShellFp:' + host);
+    return (fp && fp.indexOf('SHA256:') === 0) ? fp : '';
+  } catch (e) { return ''; }
 }
-function rememberTrustedFp(host, fp) {
+function rememberTrustedFp(host, port, fp) {
   if (!host || !fp) return;
-  try { localStorage.setItem('topoShellFp:' + host, fp); } catch (e) { /* ignore */ }
+  try { localStorage.setItem(fpKeyOf(host, port), fp); } catch (e) { /* ignore */ }
 }
 function openNeighborImport(prefillText, presetLocalId) {
   if (!state.nodes.length) { toast('当前画布为空：请先添加或导入本端设备'); return; }
@@ -339,8 +357,7 @@ function openNeighborImport(prefillText, presetLocalId) {
         <div class="frow" style="margin:0"><label>协议</label><select id="nbProto"><option value="ssh">SSH</option><option value="telnet">Telnet</option></select></div>
         <div class="frow" style="margin:0"><label>地址</label><input id="nbHost" type="text" style="width:120px" spellcheck="false" autocomplete="off"/></div>
         <div class="frow" style="margin:0"><label>端口</label><input id="nbPort" type="number" style="width:60px" value="22"/></div>
-        <div class="frow" style="margin:0"><label>账号</label><input id="nbUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
-        <div class="frow" style="margin:0"><label>密码</label><input id="nbPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        ${credPickerHtml('nb', credCache || [])}
         <div class="frow" style="margin:0"><label>厂家</label>
           <select id="nbVendor"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="ruijie">锐捷</option></select>
         </div>
@@ -358,6 +375,8 @@ function openNeighborImport(prefillText, presetLocalId) {
   const close = () => ov.remove();
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const nbCred = bindCredPicker(ov, 'nb');
+  hydrateCredPickers(ov);
   let parsed = null;
   const prevEl = ov.querySelector('#nbPrev');
   const goBtn = ov.querySelector('#nbGo');
@@ -405,16 +424,18 @@ function openNeighborImport(prefillText, presetLocalId) {
     prevEl.innerHTML = '<div class="bk-empty">连接中…（首次连接自动信任主机指纹；命令执行约数秒）</div>';
     const vendor = ov.querySelector('#nbVendor').value;
     try {
-      const r = await window.topoShell.runOneShot({
-        protocol: ov.querySelector('#nbProto').value,
-        host, port: ov.querySelector('#nbPort').value,
-        username: ov.querySelector('#nbUser').value.trim() || 'admin',
-        password: ov.querySelector('#nbPass').value,
+      const cpNb = nbCred.patch();
+      const params = {
+        host,
         encoding: ov.querySelector('#nbGbk').checked ? 'gbk' : 'utf8',
-        commands: NB_COLLECT_CMDS[vendor] || NB_COLLECT_CMDS.auto,
-        expectFp: trustedFpOf(host)
-      });
-      if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.fp);
+        commands: NB_COLLECT_CMDS[vendor] || NB_COLLECT_CMDS.auto
+      };
+      // 选了凭据库档案：协议/端口以档案为准（主进程解析后补齐）；手填路径仍用面板上的协议与端口
+      if (!cpNb.credId) { params.protocol = ov.querySelector('#nbProto').value; params.port = ov.querySelector('#nbPort').value; }
+      Object.assign(params, cpNb);
+      params.expectFp = trustedFpOf(host, params.port || ov.querySelector('#nbPort').value);
+      const r = await window.topoShell.runOneShot(params);
+      if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || ov.querySelector('#nbPort').value, r.fingerprint.fp);
       const text = (r.outputs || []).map(o => o.text).filter(t => t && t.trim()).join('\n');
       if (text) ov.querySelector('#nbText').value = text;
       const errs = (r.errors || []).filter(Boolean);
@@ -454,6 +475,254 @@ function openNeighborImport(prefillText, presetLocalId) {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#nbText').focus(); }, 250);
 }
 
+/* ================= 统一凭据库（监控 ▾ 凭据库…） =================
+ * 设备访问凭据集中在一处维护，各采集/下发面板改为「优先选档案、必要时手填」。
+ * 机密语义：选中档案时只把 id（credId）交给主进程解析，口令明文不回渲染层；手填账号仍是渲染层内存态。
+ * credCache 只缓存清单元数据（hasPassword / hasKey 布尔，不含任何机密），增删改后 loadCreds(true) 刷新。 */
+let credCache = null;
+async function loadCreds(force) {
+  if (!(window.topoCred && window.topoCred.list)) return [];
+  if (credCache && !force) return credCache;
+  try {
+    const r = await window.topoCred.list();
+    credCache = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+  } catch (e) { credCache = []; }
+  return credCache;
+}
+const CRED_VENDORS = [['', '不限（不参与自动匹配）'], ['huawei', '华为 VRP'], ['h3c', 'H3C Comware'], ['cisco', '思科 IOS'], ['ruijie', '锐捷'], ['linux', 'Linux']];
+function credVendorLabel(k) { const f = CRED_VENDORS.find(v => v[0] === String(k || '')); return f ? f[1] : String(k || ''); }
+/** 下拉里的档案摘要：账号 / 协议端口 / 有无口令 / 有无前置命令——选之前就能确认是哪一条 */
+function credOptionLabel(e) {
+  const bits = [e.username || '无账号'];
+  if (e.protocol === 'telnet') bits.push('Telnet' + (e.port && e.port !== 23 ? ':' + e.port : ''));
+  if (!e.hasPassword) bits.push('无口令');
+  if (e.preCmd) bits.push('前置命令');
+  return e.name + '（' + bits.join(' · ') + '）';
+}
+/** 下拉选项（含「手工输入」空项）：面板自定义紧凑布局时复用 */
+function credOptionsHtml(list, selected) {
+  const items = Array.isArray(list) ? list : [];
+  const sel = items.some(e => e.id === selected) ? String(selected) : '';
+  return ['<option value="">手工输入</option>'].concat(items.map(e =>
+    `<option value="${U.escHtml(e.id)}"${e.id === sel ? ' selected' : ''}>${U.escHtml(credOptionLabel(e))}</option>`)).join('');
+}
+/** 凭据选择器 HTML：档案下拉 + 手填账号/口令（选中档案时手填行自动隐藏）。
+ *  pfx 为元素 id 前缀（如 mt → #mtCred/#mtUser/#mtPass），data-cred-manual 按前缀精确归属 */
+function credPickerHtml(pfx, list, opts) {
+  const o = opts || {};
+  const defU = o.userDefault == null ? 'admin' : o.userDefault;
+  return `<div class="frow" style="margin:0"><label>凭据库</label><select id="${pfx}Cred" style="max-width:210px" title="凭据库档案（监控 ▾ 凭据库… 维护）：只把档案标识交给主进程解析，口令不回界面">${credOptionsHtml(list, o.selected)}</select></div>`
+    + `<div class="frow" style="margin:0" data-cred-manual="${pfx}"><label>${U.escHtml(o.userLabel || '账号')}</label><input id="${pfx}User" type="text" style="width:${o.userWidth || 90}px" value="${U.escHtml(defU)}" spellcheck="false" autocomplete="off"/></div>`
+    + `<div class="frow" style="margin:0" data-cred-manual="${pfx}"><label>${U.escHtml(o.passLabel || '密码')}</label><input id="${pfx}Pass" type="password" style="width:${o.passWidth || 100}px" autocomplete="new-password"/></div>`;
+}
+/** 接线凭据选择器：返回 {patch(), any()}。
+ *  patch() 可直接展开进 runOneShot / deploy 参数：选了档案给 {credId}，否则给手填账号口令。 */
+function bindCredPicker(ov, pfx) {
+  const selEl = ov.querySelector('#' + pfx + 'Cred');
+  const userEl = ov.querySelector('#' + pfx + 'User');
+  const passEl = ov.querySelector('#' + pfx + 'Pass');
+  const manual = Array.prototype.slice.call(ov.querySelectorAll('[data-cred-manual="' + pfx + '"]'));
+  const sync = () => { const has = !!(selEl && selEl.value); for (const el of manual) el.style.display = has ? 'none' : ''; };
+  if (selEl) selEl.addEventListener('change', sync);
+  sync();
+  return {
+    patch() {
+      if (selEl && selEl.value) return { credId: selEl.value };
+      return { username: userEl ? userEl.value.trim() : '', password: passEl ? passEl.value : '' };
+    },
+    /** 是否配置了任何回退凭据（沿用既有「两项都空则跳过该设备」的语义） */
+    any() { return !!((selEl && selEl.value) || (userEl && userEl.value.trim()) || (passEl && passEl.value)); }
+  };
+}
+/** 凭据池选择器（拓扑自动发现要多组凭据按顺序试）：多选档案 + 手填行。
+ *  返回 {ids(), lines()}：ids 供逐条解析，lines 为手填的「账号 密码」行 */
+function credPoolHtml(pfx, list, opts) {
+  const o = opts || {};
+  const items = Array.isArray(list) ? list : [];
+  const selHtml = items.map(e => `<option value="${U.escHtml(e.id)}">${U.escHtml(credOptionLabel(e))}</option>`).join('');
+  return `<div class="m-sub" style="margin:0 0 2px">备用凭据池（<b>凭据库档案</b>可多选，按列表顺序尝试；下方手填行排在档案之后）</div>`
+    + `<select id="${pfx}Creds" multiple size="4" style="width:100%;font-size:12px" title="Ctrl / Shift 多选；顺序即尝试顺序（档案内部顺序）">${selHtml}</select>`
+    + `<textarea id="${pfx}Lines" spellcheck="false" style="width:100%;height:${o.linesHeight || 46}px;margin-top:4px;font-family:ui-monospace,Consolas,monospace;font-size:12px" placeholder="手工补一组：admin Admin@123"></textarea>`;
+}
+function bindCredPool(ov, pfx) {
+  const selEl = ov.querySelector('#' + pfx + 'Creds');
+  const linesEl = ov.querySelector('#' + pfx + 'Lines');
+  return {
+    ids() { return selEl ? Array.prototype.slice.call(selEl.selectedOptions).map(o => o.value).filter(Boolean) : []; },
+    lines() { return linesEl ? linesEl.value : ''; }
+  };
+}
+/** 面板打开后异步补全凭据下拉：首帧用缓存渲染，缓存冷（刚启动）时这里再填一次。
+ *  选择值由 bindCredPicker 在提交时刻读取，补全不会丢用户已选内容 */
+async function hydrateCredPickers(ov) {
+  const list = await loadCreds();
+  if (!list.length || !document.body.contains(ov)) return;
+  const optHtml = (e) => `<option value="${U.escHtml(e.id)}">${U.escHtml(credOptionLabel(e))}</option>`;
+  ov.querySelectorAll('select[id$="Creds"]').forEach(sel => {
+    if (sel.options.length) return;
+    const keep = Array.prototype.slice.call(sel.selectedOptions).map(o => o.value);
+    sel.innerHTML = list.map(optHtml).join('');
+    Array.prototype.slice.call(sel.options).forEach(o => { if (keep.indexOf(o.value) >= 0) o.selected = true; });
+  });
+  ov.querySelectorAll('select[id$="Cred"]').forEach(sel => {
+    if (sel.options.length > 1) return;
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">手工输入</option>' + list.map(optHtml).join('');
+    sel.value = keep;
+  });
+}
+/** 凭据库管理面板：清单 + 新增/编辑表单（口令只填不回显，留空即保持不变） */
+async function openCredManager() {
+  if (!(window.topoCred && window.topoCred.list)) { toast('凭据库需要桌面版（Electron）环境'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:900px;height:82vh;display:flex;flex-direction:column">
+      <h3>凭据库</h3>
+      <div class="m-sub">设备访问凭据集中维护：各面板（邻居表采集 / MAC·ARP 定位 / 批量巡检 / 三层邻居 / IPAM 实网核对 / 拓扑发现 / 配置变更下发）可直接选用这里的档案。口令经系统加密（Windows DPAPI）仅存本机、<b>不回显也不回传界面</b>；凭据库文件损坏时进入只读保护并如实报错，不会静默重建。</div>
+      <div id="cmBody" style="flex:1;overflow:auto;min-height:160px"></div>
+      <div class="m-actions">
+        <span id="cmHint" class="m-sub" style="margin:0;flex:1"></span>
+        <button type="button" class="tb" id="cmNew"><i class="ic" data-ic="shield"></i>新增凭据</button>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const bodyEl = ov.querySelector('#cmBody'), hintEl = ov.querySelector('#cmHint');
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+
+  const esc = (s) => U.escHtml(String(s == null ? '' : s));
+  const renderList = async () => {
+    const items = await loadCreds(true);
+    hintEl.textContent = window.topoCred ? ('共 ' + items.length + ' 条（上限 50）') : '';
+    if (!items.length) { bodyEl.innerHTML = '<div class="bk-empty">凭据库为空：点右下角「新增凭据」录入第一条（如「核心交换机 · netops」）。</div>'; return; }
+    const rows = items.map(e => `<tr>
+      <td>${e.isDefault ? '<b style="color:var(--accent)">默认</b> ' : ''}${esc(e.name)}</td>
+      <td>${esc(e.username || '—')}</td>
+      <td>${e.protocol === 'telnet' ? 'Telnet' : 'SSH'}:${e.port}</td>
+      <td>${e.vendor ? esc(credVendorLabel(e.vendor)) : '—'}</td>
+      <td>${e.preCmd ? esc(e.preCmd) : '—'}</td>
+      <td>${e.hasPassword ? '已存' : (e.hasKey ? '密钥' : '<span style="color:#f59e0b">未存</span>')}</td>
+      <td style="white-space:nowrap"><button type="button" class="tb" data-edit="${esc(e.id)}">编辑</button> <button type="button" class="tb" data-del="${esc(e.id)}">删除</button></td>
+    </tr>`).join('');
+    bodyEl.innerHTML = `<table class="nb-table"><tr><th>名称</th><th>账号</th><th>协议</th><th>厂家匹配</th><th>前置命令</th><th>口令</th><th>操作</th></tr>${rows}</table>
+      <div class="m-sub" style="margin-top:8px">厂家匹配：拓扑自动发现等「按厂家自动挑凭据」的流程会优先用与目标厂家一致的档案（同厂家多条时按清单顺序）；标为<b>默认</b>的档案兜底。不会把整库口令挨个去试——乱试会锁设备账号。</div>`;
+    bodyEl.querySelectorAll('[data-edit]').forEach(b => { b.onclick = () => renderForm(items.find(x => x.id === b.getAttribute('data-edit'))); });
+    bodyEl.querySelectorAll('[data-del]').forEach(b => { b.onclick = async () => {
+      const id = b.getAttribute('data-del');
+      const it = items.find(x => x.id === id);
+      if (!confirm('删除凭据「' + ((it && it.name) || id) + '」？使用该档案的面板会回落到手填账号。')) return;
+      const r = await window.topoCred.remove(id);
+      if (!r || !r.ok) { toast('删除失败：' + ((r && r.error) || '未知错误')); return; }
+      await loadCreds(true); renderList();
+    } });
+  };
+  const renderForm = (entry) => {
+    const e = entry || null;
+    const vOpts = CRED_VENDORS.map(v => `<option value="${v[0]}"${e && String(e.vendor || '') === v[0] ? ' selected' : ''}>${U.escHtml(v[1])}</option>`).join('');
+    bodyEl.innerHTML = `
+      <div class="frow"><label>名称 <span class="req">*</span></label><input id="cfName" type="text" maxlength="40" value="${esc(e && e.name)}" placeholder="如：核心交换机 · netops" spellcheck="false"/></div>
+      <div class="frow"><label>账号</label><input id="cfUser" type="text" maxlength="128" value="${esc(e && e.username)}" spellcheck="false" autocomplete="off"/></div>
+      <div class="frow"><label>口令${e ? '（留空 = 保持不变）' : ''}</label><input id="cfPass" type="password" autocomplete="new-password" placeholder="${e && e.hasPassword ? '已保存（不回显）：留空即不改动' : '输入口令'}"/></div>
+      <div class="frow" style="display:flex;gap:8px">
+        <div style="flex:1"><label>协议</label><select id="cfProto"><option value="ssh"${!e || e.protocol === 'ssh' ? ' selected' : ''}>SSH</option><option value="telnet"${e && e.protocol === 'telnet' ? ' selected' : ''}>Telnet</option></select></div>
+        <div style="flex:1"><label>端口（留空按协议默认 22 / 23）</label><input id="cfPort" type="number" min="1" max="65535" value="${e ? e.port : ''}"/></div>
+      </div>
+      <div class="frow"><label>厂家（供「按厂家自动匹配」使用）</label><select id="cfVendor">${vOpts}</select></div>
+      <div class="frow"><label>前置命令（可选，如思科用户模式需先 <code>enable</code>）</label><input id="cfPre" type="text" maxlength="256" value="${esc(e && e.preCmd)}" spellcheck="false" autocomplete="off"/></div>
+      <div class="frow"><label>私钥（可选，公钥认证用；留空${e ? ' = 保持不变' : ''}）</label><textarea id="cfKey" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></div>
+      <div class="frow"><label>私钥口令（可选${e ? '，留空 = 保持不变' : ''}）</label><input id="cfKeyPass" type="password" autocomplete="new-password"/></div>
+      <div class="frow"><label>备注</label><input id="cfNote" type="text" maxlength="200" value="${esc(e && e.note)}" spellcheck="false"/></div>
+      <div class="frow"><label style="display:flex;align-items:center;gap:6px"><input id="cfDefault" type="checkbox"${e && e.isDefault ? ' checked' : ''}/> 设为默认凭据（厂家未匹配时的兜底）</label></div>`;
+    hintEl.innerHTML = '<button type="button" class="tb" id="cfCancel">返回清单</button> <button type="button" class="tb primary" id="cfSave">保存</button>';
+    ov.querySelector('#cfCancel').onclick = () => { renderList(); };
+    ov.querySelector('#cfSave').onclick = async () => {
+      const payload = {
+        name: ov.querySelector('#cfName').value,
+        username: ov.querySelector('#cfUser').value,
+        protocol: ov.querySelector('#cfProto').value,
+        port: ov.querySelector('#cfPort').value,
+        vendor: ov.querySelector('#cfVendor').value,
+        preCmd: ov.querySelector('#cfPre').value,
+        note: ov.querySelector('#cfNote').value,
+        isDefault: ov.querySelector('#cfDefault').checked
+      };
+      if (e) payload.id = e.id;
+      // 机密字段只在填了内容时提交：字段缺席 = 保持不变（口令不回显，空串提交会被当成「清空」）
+      const pv = ov.querySelector('#cfPass').value; if (pv) payload.password = pv;
+      const kv = ov.querySelector('#cfKey').value.trim(); if (kv) payload.privateKey = kv;
+      const kp = ov.querySelector('#cfKeyPass').value; if (kp) payload.keyPassphrase = kp;
+      const r = await window.topoCred.save(payload);
+      if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '未知错误')); return; }
+      await loadCreds(true);
+      toast(r.warn ? ('已保存，但' + r.warn) : ('已保存凭据「' + payload.name + '」'));
+      renderList();
+    };
+    const f = ov.querySelector('#cfName'); if (f) f.focus();
+  };
+  ov.querySelector('#cmNew').onclick = () => renderForm(null);
+  renderList();
+}
+
+/* ================= 配置变更的「易变行」忽略规则 =================
+ * 设备配置里天天变却不代表有人改配置的行（时钟、运行时长、构建时间戳、会话计数器……）——
+ * 不忽略它们，「配置有变化」告警每天必然误报。规则为正则（大小写不敏感、逐行匹配），
+ * 命中即视为噪声行：既不参与变更判定，也不产生新备份文件。规则存本机设置、全局生效。 */
+async function openConfigIgnoreRules() {
+  if (!(window.topoConfigBackup && window.topoConfigBackup.ignoreGet)) { toast('该功能需要桌面版（Electron）环境'); return; }
+  const cur = await window.topoConfigBackup.ignoreGet();
+  if (!cur || !cur.ok) { toast('读取规则失败：' + ((cur && cur.error) || '未知错误')); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:760px;height:74vh;display:flex;flex-direction:column">
+      <h3>配置变更忽略规则（易变行）</h3>
+      <div class="m-sub">每行一条<b>正则</b>（大小写不敏感、逐行匹配）：命中的行视为噪声，<b>不参与「配置有变化」判定</b>，也不会因此新增备份文件。用于时钟、运行时长、构建时间戳、会话/计数器这类天天变但不代表有人改配置的行。最多 30 条。</div>
+      <div class="frow" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <label>规则列表（一行一条，留空行忽略）</label>
+        <textarea id="igText" spellcheck="false" style="flex:1;min-height:120px;font-family:ui-monospace,Consolas,monospace;font-size:12px"></textarea>
+      </div>
+      <div id="igHint" class="m-sub" style="margin:2px 0"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="igDefaults">恢复默认规则</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="close">关闭</button>
+        <button type="button" class="tb primary" id="igSave">保存</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const ta = ov.querySelector('#igText'), hintEl = ov.querySelector('#igHint');
+  ta.value = (cur.rules || []).join('\n');
+  hintEl.textContent = '当前 ' + (cur.rules || []).length + ' 条' + (cur.isDefault ? '（内置默认）' : '（自定义）');
+  ov.querySelector('#igDefaults').onclick = () => {
+    ta.value = (cur.defaults || []).join('\n');
+    hintEl.textContent = '已填入内置默认规则（' + (cur.defaults || []).length + ' 条），点「保存」生效';
+  };
+  ov.querySelector('#igSave').onclick = async () => {
+    const rules = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+    // 先本地编译一遍，把「第几条写坏了」直接指出来（主进程也会再校验一次）
+    for (let i = 0; i < rules.length; i++) {
+      try { new RegExp(rules[i], 'i'); } catch (e) { toast('第 ' + (i + 1) + ' 条正则无法编译：' + ((e && e.message) || e)); return; }
+    }
+    const r = await window.topoConfigBackup.ignoreSet(rules);
+    if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '未知错误')); return; }
+    toast('已保存 ' + (r.rules || []).length + ' 条忽略规则（对后续备份变更判定立即生效）');
+    close();
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ta.focus(); }, 200);
+}
+
 /* ================= MAC/ARP 终端定位 =================
  * 输入 IP 或 MAC，并发 SSH/Telnet 采集范围内设备的 ARP / MAC 地址表（凭据取自各设备监控配置，
  * 无则用弹窗内的备用账号），U.traceMacHops 沿拓扑逐跳追踪到接入端口并高亮。 */
@@ -484,8 +753,7 @@ function openMacTrace(prefill) {
         <div class="frow" style="margin:0"><label>厂家</label>
           <select id="mtVendor"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="linux">Linux</option></select>
         </div>
-        <div class="frow" style="margin:0"><label>备用账号</label><input id="mtUser" type="text" style="width:90px" value="admin" spellcheck="false" autocomplete="off"/></div>
-        <div class="frow" style="margin:0"><label>备用密码</label><input id="mtPass" type="password" style="width:100px" autocomplete="new-password"/></div>
+        ${credPickerHtml('mt', credCache || [])}
         <button type="button" class="tb primary" id="mtRun"><i class="ic" data-ic="search"></i>开始定位</button>
       </div>
       <div class="frow" style="display:flex;gap:8px;align-items:center">
@@ -517,30 +785,37 @@ function openMacTrace(prefill) {
   const resultEl = ov.querySelector('#mtResult');
   const hintEl = ov.querySelector('#mtHint');
   const runBtn = ov.querySelector('#mtRun');
+  const mtCred = bindCredPicker(ov, 'mt');
+  hydrateCredPickers(ov);
   const queryResults = {};   // nodeId → parseArpMacTables 结果（跨「继续查询」轮次累积）
   let lastUnqueried = [];    // 上一轮定位中「拓扑下游存在但未采集」的设备，供「继续查询下游」增量采集
   const nameOf = (id) => { const n = state.nodes.find(x => x.id === id); return n ? n.name : id; };
-  /** 采集一组设备（并发 2）：返回 {got, fails} */
-  const collectDevices = async (items, vendor, fbUser, fbPass) => {
+  /** 采集一组设备（并发 2）：返回 {got, fails}；fb 为凭据选择器（档案 → credId / 手填账号口令） */
+  const collectDevices = async (items, vendor, fb) => {
     const got = [], fails = [];
     const CONC = 2;
     for (let i = 0; i < items.length; i += CONC) {
       const batch = items.slice(i, i + CONC);
       await Promise.all(batch.map(async (c) => {
         const host = c.cred ? c.cred.host : (U.nodeMgmts(c.node)[0] || '');
-        if (!host || (!c.cred && !fbUser && !fbPass)) { fails.push(c.node.name + '（无凭据，跳过）'); return; }
+        if (!host || (!c.cred && !fb.any())) { fails.push(c.node.name + '（无凭据，跳过）'); return; }
         const proto = c.cred ? c.cred.protocol : 'ssh';
         try {
           hintEl.textContent = '采集中：' + c.node.name + '（' + host + '）…';
-          const r = await window.topoShell.runOneShot({
-            protocol: proto, host,
-            port: c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22),
-            username: c.cred ? c.cred.username : fbUser,
-            password: c.cred ? c.cred.password : fbPass,
-            commands: MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto,
-            expectFp: trustedFpOf(host)
-          });
-          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.fp);
+          const p = { host, commands: MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto };
+          if (c.cred) {
+            // 设备自身「设备监控」里的凭据优先（原有语义不变）
+            p.protocol = proto;
+            p.port = c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22);
+            p.username = c.cred.username;
+            p.password = c.cred.password;
+          } else {
+            // 回退到凭据选择器：选中档案时只给 credId，协议/端口由主进程按档案补齐
+            Object.assign(p, fb.patch());
+          }
+          p.expectFp = trustedFpOf(host, p.port || (proto === 'telnet' ? 23 : 22));
+          const r = await window.topoShell.runOneShot(p);
+          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port, r.fingerprint.fp);
           const text = (r.outputs || []).map(o => o.text).join('\n');
           const t = U.parseArpMacTables(text);
           if (t.arp.length || t.mac.length) { queryResults[c.node.id] = t; got.push(c.node.name); }
@@ -588,13 +863,11 @@ function openMacTrace(prefill) {
     const moreBtn = resultEl.querySelector('#mtMore');
     if (moreBtn) moreBtn.onclick = async () => {
       const vendor = ov.querySelector('#mtVendor').value;
-      const fbUser = ov.querySelector('#mtUser').value.trim();
-      const fbPass = ov.querySelector('#mtPass').value;
       const items = lastUnqueried.map(id => cands.find(c => c.node.id === id)).filter(Boolean);
       if (!items.length) { toast('没有可继续查询的下游设备'); return; }
       runBtn.disabled = true;
       resultEl.innerHTML = '<div class="bk-empty">继续采集下游设备…</div>';
-      await collectDevices(items, vendor, fbUser, fbPass);
+      await collectDevices(items, vendor, mtCred);
       runBtn.disabled = false;
       runTrace();
     };
@@ -603,19 +876,1110 @@ function openMacTrace(prefill) {
   };
   runBtn.onclick = async () => {
     const vendor = ov.querySelector('#mtVendor').value;
-    const fbUser = ov.querySelector('#mtUser').value.trim();
-    const fbPass = ov.querySelector('#mtPass').value;
     const items = devsEl.querySelectorAll('input[type=checkbox]');
     const chosen = [...items].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
     if (!chosen.length) { toast('请勾选至少一台要查询的设备'); return; }
     runBtn.disabled = true;
     resultEl.innerHTML = '<div class="bk-empty">采集中…（并发 2 台，每台执行 ' + (MAC_TRACE_CMDS[vendor] || MAC_TRACE_CMDS.auto).length + ' 条只读命令）</div>';
-    const { got, fails } = await collectDevices(chosen, vendor, fbUser, fbPass);
+    const { got, fails } = await collectDevices(chosen, vendor, mtCred);
     hintEl.textContent = '采集完成：成功 ' + got.length + ' 台' + (fails.length ? '，失败 ' + fails.length + ' 台' : '');
     runTrace();
     runBtn.disabled = false;
   };
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#mtTarget').focus(); }, 250);
+}
+
+/* ================= 批量巡检（设备清单并发执行只读命令，结果汇总/查看/导出） ================= */
+function openBatchInspect() {
+  if (!(window.topoShell && window.topoShell.runOneShot)) { toast('批量巡检需要桌面版（Electron）环境'); return; }
+  const cands = state.nodes
+    .filter(n => U.nodeMgmts(n).length || normalizeMonitorHosts(state.monitorCfg[n.id]).length)
+    .map(n => ({ node: n, cred: monitorCredOf(n.id) }));
+  if (!cands.length) { toast('当前没有配置管理地址或监控凭据的设备：先为设备填写管理地址'); return; }
+  const BI_VENDOR_LB = { auto: '自动尝试', huawei: '华为 VRP', h3c: 'H3C Comware', cisco: '思科 IOS', ruijie: '锐捷', linux: 'Linux' };
+  const biVendorOpts = Object.keys(U.INSPECT_PRESETS)
+    .map(k => `<option value="${k}">${BI_VENDOR_LB[k] || k}（${U.INSPECT_PRESETS[k].length} 条）</option>`).join('');
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:920px;height:82vh;display:flex;flex-direction:column">
+      <h3>批量巡检（只读命令）</h3>
+      <div class="m-sub">并发登录勾选的设备执行<b>只读白名单命令</b>（版本 / 时钟 / CPU / 内存 / 接口概览等），汇总各设备输出，可查看与导出 CSV。凭据优先取各设备「设备监控」里保存的账号；未保存的设备用下方备用账号（留空则跳过）。不会修改设备配置。</div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>厂家命令集</label>
+          <select id="biVendor">${biVendorOpts}</select>
+        </div>
+        ${credPickerHtml('bi', credCache || [])}
+        <button type="button" class="tb primary" id="biRun"><i class="ic" data-ic="search"></i>开始巡检</button>
+        <span id="biHint" class="m-sub" style="margin:0;flex:1">巡检范围（默认勾选已保存凭据的设备）：</span>
+        <label style="display:flex;align-items:center;gap:4px;margin:0"><input id="biAll" type="checkbox"/>全选</label>
+      </div>
+      <div id="biDevs" style="max-height:130px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
+      <div id="biResult" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:120px;margin-top:8px"><div class="bk-empty">点「开始巡检」后结果汇总在这里。</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="biCsv" disabled>导出 CSV</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const devsEl = ov.querySelector('#biDevs');
+  devsEl.innerHTML = cands.map((c, i) => {
+    const host = c.cred ? c.cred.host : U.nodeMgmts(c.node)[0] || '';
+    const mark = c.cred ? '<span style="color:var(--ok,#22c55e)" title="使用监控配置里保存的凭据">●</span>'
+      : (host ? '<span style="color:#f59e0b" title="无保存凭据，将使用备用账号">●</span>' : '<span style="color:var(--danger)" title="无管理地址，不可查询">✕</span>');
+    return `<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" data-idx="${i}" ${c.cred && host ? 'checked' : ''}/> ${mark} ${U.escHtml(c.node.name)}<span style="opacity:.6">（${U.escHtml(host || '无地址')}）</span></label>`;
+  }).join('');
+  ov.querySelector('#biAll').addEventListener('change', (e) => {
+    devsEl.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = e.target.checked; });
+  });
+  const resultEl = ov.querySelector('#biResult');
+  const hintEl = ov.querySelector('#biHint');
+  const runBtn = ov.querySelector('#biRun');
+  const csvBtn = ov.querySelector('#biCsv');
+  const biCred = bindCredPicker(ov, 'bi');
+  hydrateCredPickers(ov);
+  const results = [];   // {node, host, proto, ok, cmds:[{cmd, text}], error, ms}
+  /** 查看单设备输出：按命令分节，可复制全文 */
+  const viewOutput = (r) => {
+    const v = document.createElement('div');
+    v.className = 'overlay';
+    const body = (r.cmds || []).map(o => '<h4 style="margin:10px 0 4px;font-size:12.5px">' + U.escHtml(o.cmd) + '</h4>' +
+      '<pre class="nsv-view" spellcheck="false">' + (o.text ? U.escHtml(o.text) : '（无输出）') + '</pre>').join('')
+      || '<div class="bk-empty">（无输出' + (r.error ? '：' + U.escHtml(r.error) : '') + '）</div>';
+    v.innerHTML = '<div class="modal" role="dialog" style="width:860px;height:80vh;display:flex;flex-direction:column">' +
+      '<h3>' + U.escHtml(r.node.name) + '（' + U.escHtml(r.host || '—') + '）巡检输出</h3>' +
+      '<div class="m-sub">' + (r.ok ? '巡检成功' : '巡检失败：' + U.escHtml(r.error || '未知错误')) + ' · ' + r.ms + ' ms · ' + (r.cmds || []).length + ' 条命令</div>' +
+      '<div style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:4px">' + body + '</div>' +
+      '<div class="m-actions"><button type="button" class="tb" id="biCopy">复制全部输出</button><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+    $('#modalRoot').appendChild(v);
+    v.tabIndex = -1; v.focus();
+    const vc = () => v.remove();
+    v.addEventListener('pointerdown', (e) => { if (e.target === v) vc(); });
+    v.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); vc(); } });
+    v.querySelector('[data-act=close]').onclick = vc;
+    v.querySelector('#biCopy').onclick = () => {
+      const text = (r.cmds || []).map(o => '<' + r.node.name + '> ' + o.cmd + '\n' + o.text).join('\n\n');
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => toast('已复制全部输出')).catch(() => toast('复制失败'));
+    };
+  };
+  const renderResults = () => {
+    if (!results.length) { resultEl.innerHTML = '<div class="bk-empty">无结果。</div>'; return; }
+    const rows = results.map((r, i) => `<tr>` +
+      `<td>${r.ok ? '<b style="color:var(--ok,#22c55e)">✓ 成功</b>' : '<b style="color:var(--danger)">✕ 失败</b>'}</td>` +
+      `<td>${U.escHtml(r.node.name)}</td><td>${U.escHtml(r.host || '—')}</td><td>${U.escHtml(r.proto.toUpperCase())}</td>` +
+      `<td>${(r.cmds || []).length} 条</td><td>${r.ms} ms</td>` +
+      `<td>${r.error ? '<span title="' + U.escHtml(r.error) + '" style="color:var(--danger)">' + U.escHtml(r.error.slice(0, 40)) + (r.error.length > 40 ? '…' : '') + '</span> ' : ''}` +
+      `<button type="button" class="tb nsv-mini-btn" data-i="${i}">查看</button></td></tr>`).join('');
+    resultEl.innerHTML = '<table class="nb-table"><tr><th>状态</th><th>设备</th><th>地址</th><th>协议</th><th>命令</th><th>耗时</th><th>明细</th></tr>' + rows + '</table>';
+    resultEl.querySelectorAll('button[data-i]').forEach(btn => {
+      btn.onclick = () => viewOutput(results[parseInt(btn.dataset.i, 10)]);
+    });
+  };
+  csvBtn.onclick = () => {
+    if (!results.length) { toast('还没有巡检结果'); return; }
+    const rows = [['设备', '地址', '协议', '命令', '状态', '输出']];
+    for (const r of results) {
+      if (r.ok && (r.cmds || []).length) {
+        for (const o of r.cmds) rows.push([r.node.name, r.host || '', r.proto, o.cmd, '成功', o.text || '']);
+      } else {
+        rows.push([r.node.name, r.host || '', r.proto, '', '失败', r.error || '（无输出）']);
+      }
+    }
+    U.download('批量巡检_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出巡检结果 CSV（' + (rows.length - 1) + ' 行）');
+  };
+  runBtn.onclick = async () => {
+    const vendor = ov.querySelector('#biVendor').value;
+    const chosen = [...devsEl.querySelectorAll('input[type=checkbox]')].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
+    if (!chosen.length) { toast('请勾选至少一台要巡检的设备'); return; }
+    const cmds = U.INSPECT_PRESETS[vendor] || U.INSPECT_PRESETS.auto;
+    const guard = U.checkInspectCommands(cmds);
+    if (!guard.ok) { toast('命令集未通过只读白名单校验：' + guard.error); return; }
+    results.length = 0;
+    runBtn.disabled = true; csvBtn.disabled = true;
+    resultEl.innerHTML = '<div class="bk-empty">巡检中…（并发 2 台，每台 ' + cmds.length + ' 条只读命令）</div>';
+    const CONC = 2;
+    for (let i = 0; i < chosen.length; i += CONC) {
+      await Promise.all(chosen.slice(i, i + CONC).map(async (c) => {
+        const host = c.cred ? c.cred.host : (U.nodeMgmts(c.node)[0] || '');
+        if (!host || (!c.cred && !biCred.any())) {
+          results.push({ node: c.node, host, proto: c.cred ? c.cred.protocol : 'ssh', ok: false, cmds: [], error: '无凭据，已跳过', ms: 0 });
+          renderResults();
+          return;
+        }
+        const proto = c.cred ? c.cred.protocol : 'ssh';
+        const t0 = Date.now();
+        hintEl.textContent = '巡检中：' + c.node.name + '（' + host + '）…';
+        try {
+          const p = { host, commands: cmds };
+          if (c.cred) {
+            p.protocol = proto;
+            p.port = c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22);
+            p.username = c.cred.username;
+            p.password = c.cred.password;
+          } else {
+            Object.assign(p, biCred.patch());
+          }
+          p.expectFp = trustedFpOf(host, p.port || (proto === 'telnet' ? 23 : 22));
+          const r = await window.topoShell.runOneShot(p);
+          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port, r.fingerprint.fp);
+          const textOf = (o) => { const t = String((o && o.text) || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, ''); return t.trim(); };
+          const got = (r.outputs || []).map(o => ({ cmd: o.cmd, text: textOf(o) })).filter(o => o.text);
+          const okDev = r.ok && got.length > 0;
+          results.push({ node: c.node, host, proto, ok: okDev, cmds: got, error: okDev ? '' : (r.error || '未取得有效输出'), ms: Date.now() - t0 });
+        } catch (e) {
+          results.push({ node: c.node, host, proto, ok: false, cmds: [], error: String((e && e.message) || e), ms: Date.now() - t0 });
+        }
+        renderResults();
+      }));
+    }
+    hintEl.textContent = '巡检完成：成功 ' + results.filter(r => r.ok).length + ' / ' + results.length + ' 台';
+    runBtn.disabled = false; csvBtn.disabled = false;
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#biVendor').focus(); }, 250);
+}
+
+/* ================= 配置变更下发（变更单 → dry-run → 强制前置备份 → 逐行下发 → 回滚/审计） =================
+ * 这是**会改动设备**的功能，整条链路按「先看后做」设计：
+ *  ① 变更集解析 + 安全闸门：重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝（不可覆盖）；
+ *     删除与关闭类命令（undo / no / clear / reset / shutdown）必须显式勾选确认才放行
+ *  ② dry-run 预判：与最近一次配置备份逐行比对（新增 / 覆盖 / 删除 / 幂等）+ 自断管理面风险提示
+ *  ③ 主进程在**一条会话内**：强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停）
+ *     → 退出配置模式 → 可选保存 → 可选回采校验（厂家模式命令由主进程按厂家表决定）
+ *  ④ 依前置备份生成回滚变更单（逆序 + 逆操作求逆），回滚同样走 ①②③，不是旁路
+ *  ⑤ 每次下发落审计记录（口令类关键字打码），可回看 / 载入 / 导出 */
+function deployTargetsOf() {
+  return state.nodes
+    .filter(n => U.nodeMgmts(n).length || normalizeMonitorHosts(state.monitorCfg[n.id]).length)
+    .map(n => {
+      const cred = monitorCredOf(n.id);
+      const host = cred ? cred.host : (U.nodeMgmts(n)[0] || '');
+      return { node: n, cred, host, protocol: cred ? cred.protocol : 'ssh', port: cred && cred.port ? cred.port : (cred && cred.protocol === 'telnet' ? 23 : 22) };
+    });
+}
+/** 该设备在配置备份库里的最近一份备份正文（dry-run 与回滚生成的基线）；无则返回 '' */
+async function deployBaselineOf(device, host) {
+  if (!(window.topoConfigBackup && window.topoConfigBackup.list)) return { text: '', name: '', error: '配置备份库不可用' };
+  try {
+    const ls = await window.topoConfigBackup.list(device, host);
+    if (!ls.ok || !(ls.items || []).length) return { text: '', name: '', error: '' };
+    const rd = await window.topoConfigBackup.read(device, host, ls.items[0].name);
+    if (!rd.ok) return { text: '', name: '', error: rd.error || '读取备份失败' };
+    return { text: String(rd.content || ''), name: ls.items[0].name, error: '' };
+  } catch (e) { return { text: '', name: '', error: String((e && e.message) || e) }; }
+}
+function openConfigDeploy(presetNodeId) {
+  if (!(window.topoDeploy && window.topoDeploy.run)) { toast('配置变更下发需要桌面版（Electron）环境'); return; }
+  const cands = deployTargetsOf();
+  if (!cands.length) { toast('当前没有配置管理地址的设备：先为设备填写管理地址'); return; }
+  const VK = Object.keys(U.DEPLOY_VENDORS);
+  const vOpts = VK.map(k => `<option value="${k}">${U.DEPLOY_VENDORS[k].label}</option>`).join('');
+  const selIdx = Math.max(0, cands.findIndex(c => c.node.id === (presetNodeId || (state.sel && state.sel.kind === 'node' ? state.sel.id : ''))));
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1020px;height:88vh;display:flex;flex-direction:column">
+      <h3>配置变更下发</h3>
+      <div class="m-sub">把「生成设备配置」的产物或手写配置片段下发到设备：<b>先 dry-run 预判</b> → <b>强制前置备份</b> → 逐行下发（设备报错即停）→ 可选保存 / 回采。失败时依前置备份生成<b>回滚变更单</b>。下发记录经口令打码后落本机审计。</div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>目标设备</label>
+          <select id="cdDev">${cands.map((c, i) => `<option value="${i}"${i === selIdx ? ' selected' : ''}>${U.escHtml(c.node.name)}（${U.escHtml(c.host || '无地址')}）</option>`).join('')}</select>
+        </div>
+        <div class="frow" style="margin:0"><label>厂家口径</label><select id="cdVendor">${vOpts}</select></div>
+        <div class="frow" style="margin:0"><label>前置命令</label><input id="cdPre" type="text" style="width:110px" spellcheck="false" autocomplete="off" placeholder="如 enable（可空）" title="连接后、读配置前先执行的一条命令：部分设备（如思科用户模式、直连 vty 的 FRR）需要先 enable 才能读配置与进配置模式。留空则不发。"/></div>
+        ${credPickerHtml('cd', credCache || [], { userDefault: '' })}
+        <label style="display:flex;align-items:center;gap:4px;margin:0" title="把当前运行配置写入启动配置（华为 save / 思科 write memory）。多数平台会二次确认，工具会自动应答"><input id="cdSave" type="checkbox"/>下发后保存配置</label>
+        <label style="display:flex;align-items:center;gap:4px;margin:0" title="下发完成后再次抓取运行配置作为结果记录（便于与变更前对比）"><input id="cdVerify" type="checkbox" checked/>回采校验</label>
+      </div>
+      <div class="m-sub" id="cdBase" style="margin:4px 0">基线：读取中…</div>
+      <div style="display:flex;gap:6px;align-items:center;margin:2px 0">
+        <b style="font-size:12.5px">变更集</b>
+        <button type="button" class="tb nsv-mini-btn" id="cdGen">从「生成设备配置」填充</button>
+        <button type="button" class="tb nsv-mini-btn" id="cdHist">下发记录…</button>
+        <button type="button" class="tb nsv-mini-btn" id="cdWipe">清空变更集</button>
+        <span id="cdSkip" class="m-sub" style="margin:0;flex:1"></span>
+      </div>
+      <textarea id="cdPlan" spellcheck="false" style="height:22vh;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;white-space:pre" placeholder="每行一条配置命令，子命令请保留缩进（与设备回显一致）：&#10;&#10;# 变更单：新增 VLAN 30 与 SVI（注释行与空行会被忽略）&#10;vlan 30&#10;interface Vlanif30&#10; ip address 10.0.30.1 255.255.255.0&#10; description TO-CORE&#10;&#10;也可直接粘贴「生成设备配置」的输出，或点上方按钮填充。"></textarea>
+      <div id="cdPrev" style="flex:1;overflow:auto;border-top:1px solid var(--border);margin-top:6px;padding-top:6px;min-height:140px"><div class="bk-empty">粘贴或填充变更集后自动预判（不连接设备）。</div></div>
+      <div class="m-actions">
+        <label id="cdAckWrap" class="m-sub" style="display:flex;align-items:center;gap:4px;margin:0"><input type="checkbox" id="cdAck"/>我已核对预览与风险</label>
+        <label id="cdWarnWrap" class="m-sub" style="display:none;align-items:center;gap:4px;margin:0;color:#f59e0b"><input type="checkbox" id="cdWarnAck"/>确认包含删除/关闭类命令</label>
+        <label id="cdLockWrap" class="m-sub" style="display:none;align-items:center;gap:4px;margin:0;color:var(--danger)"><input type="checkbox" id="cdLockAck"/>确认可能中断管理连接</label>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" id="cdCsv" disabled>导出结果 CSV</button>
+        <button type="button" class="tb" id="cdRoll" disabled>生成回滚变更单</button>
+        <button type="button" class="tb primary" id="cdRun" disabled><i class="ic" data-ic="terminal"></i>执行下发</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !runBtn.disabled) { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+
+  const devEl = ov.querySelector('#cdDev'), vEl = ov.querySelector('#cdVendor');
+  const userEl = ov.querySelector('#cdUser'), passEl = ov.querySelector('#cdPass');
+  const cdCred = bindCredPicker(ov, 'cd');
+  hydrateCredPickers(ov);
+  const saveEl = ov.querySelector('#cdSave'), verifyEl = ov.querySelector('#cdVerify');
+  const planEl = ov.querySelector('#cdPlan'), prevEl = ov.querySelector('#cdPrev');
+  const baseEl = ov.querySelector('#cdBase'), skipEl = ov.querySelector('#cdSkip');
+  const ackEl = ov.querySelector('#cdAck'), warnAckEl = ov.querySelector('#cdWarnAck'), lockAckEl = ov.querySelector('#cdLockAck');
+  const warnWrap = ov.querySelector('#cdWarnWrap'), lockWrap = ov.querySelector('#cdLockWrap');
+  const runBtn = ov.querySelector('#cdRun'), csvBtn = ov.querySelector('#cdCsv'), rollBtn = ov.querySelector('#cdRoll');
+  let baseline = { text: '', name: '', error: '' };   // 当前设备的基线（最近一次配置备份）
+  let preview = null;                                  // 最近一次 dry-run 结果
+  let parsed = { ok: true, lines: [], skipped: { comment: 0, blank: 0, dup: 0, mode: 0, save: 0 } };
+  let lastResult = null;                               // 最近一次下发结果（含 backupFile）
+  let baseToken = 0;
+
+  const cur = () => cands[parseInt(devEl.value, 10)] || cands[0];
+  const curDevice = () => { const c = cur(); return { device: String(c.node.name || c.node.id), ...c }; };
+  /** 目标设备变化：预填凭据与厂家、重新拉基线 */
+  const syncDevice = async () => {
+    const c = cur();
+    vEl.value = VK.indexOf(c.node.vendor) >= 0 ? c.node.vendor : 'huawei';
+    userEl.value = c.cred ? c.cred.username : (userEl.value || 'admin');
+    passEl.value = c.cred ? (c.cred.password || '') : passEl.value;
+    const tok = ++baseToken;
+    baseline = { text: '', name: '', error: '' };
+    if (!c.host) { baseEl.innerHTML = '<span style="color:var(--danger)">该设备没有管理地址，无法下发。</span>'; return; }
+    baseEl.textContent = '基线：读取最近一次配置备份…';
+    const b = await deployBaselineOf(String(c.node.name || c.node.id), c.host);
+    if (tok !== baseToken) return;                     // 设备已切换：丢弃过期结果
+    baseline = b;
+    baseEl.innerHTML = baseline.text
+      ? '基线：<b>' + U.escHtml(baseline.name) + '</b>（' + U.cfgSplit(baseline.text).length + ' 行，用于 dry-run 预判与回滚生成）'
+      : (baseline.error
+        ? '<span style="color:#f59e0b">基线：读取失败（' + U.escHtml(baseline.error) + '）——仍可下发，但 dry-run 无法预判、失败后也无法自动生成回滚</span>'
+        : '<span style="color:#f59e0b">基线：该设备还没有配置备份——下发时会先强制备份一次（拿不到基线即中止）；dry-run 暂无对比基准</span>');
+    refreshPreview();
+  };
+  /** 变更集与基线 → dry-run 预览 + 可执行性判定 */
+  const refreshPreview = () => {
+    if (lastResult) return;                            // 结果视图展示中：不覆盖（点「返回预览」才刷新）
+    parsed = U.parseChangeSet(planEl.value);
+    const sk = parsed.skipped || {};
+    const skTxt = [];
+    if (sk.comment) skTxt.push('注释 ' + sk.comment);
+    if (sk.blank) skTxt.push('空行 ' + sk.blank);
+    if (sk.dup) skTxt.push('重复 ' + sk.dup);
+    if (sk.mode) skTxt.push('模式控制 ' + sk.mode);
+    if (sk.save) skTxt.push('保存命令 ' + sk.save);
+    skipEl.textContent = skTxt.length ? '（已忽略：' + skTxt.join('、') + '）' : '';
+    if (!parsed.ok) {
+      preview = null;
+      prevEl.innerHTML = '<div class="bk-empty" style="color:var(--danger)">变更集解析失败：' + U.escHtml(parsed.error) + '</div>';
+      updateRunState();
+      return;
+    }
+    if (!parsed.lines.length) {
+      preview = null;
+      prevEl.innerHTML = '<div class="bk-empty">' + (planEl.value.trim() ? '没有可下发的配置行（整份内容都是注释 / 空行 / 模式控制命令）。' : '粘贴或填充变更集后自动预判（不连接设备）。') + '</div>';
+      updateRunState();
+      return;
+    }
+    const c = cur();
+    preview = U.deployPreview(parsed.lines, baseline.text, vEl.value, c.host);
+    const risk = preview.risk;
+    const KIND = { add: ['新增', 'var(--ok,#22c55e)'], modify: ['覆盖', '#f59e0b'], remove: ['删除', 'var(--danger)'], same: ['幂等', 'var(--muted)'], context: ['上下文', 'var(--muted)'] };
+    const head = '<div class="m-sub" style="margin:0 0 4px">将下发 <b>' + preview.count + '</b> 行'
+      + '（新增 <b>' + preview.add + '</b> · 覆盖 <b>' + preview.modify + '</b> · 删除/关闭 <b style="color:' + (preview.remove ? 'var(--danger)' : 'inherit') + '">' + preview.remove + '</b> · 幂等 ' + preview.same + '）'
+      + (preview.noBaseline ? ' · <b style="color:#f59e0b">无基线，无法预判差异</b>' : '')
+      + (preview.persist ? ' · 含保存命令' : '') + '</div>';
+    const issues = [];
+    if ((parsed.hard || []).length) { /* 硬禁止已在 check 阶段拦截，这里不会到 */ }
+    for (const h of (parsed.hard || [])) issues.push('<div style="color:var(--danger)">⛔ 禁止下发：' + U.escHtml(h.line) + '（' + U.escHtml(h.why) + '）</div>');
+    for (const w of (preview.risk.selfLock ? risk.why : [])) issues.push('<div style="color:var(--danger)">⚠ ' + U.escHtml(w) + '</div>');
+    const rows = preview.rows.slice(0, 60).map((r, i) => {
+      const k = KIND[r.kind] || ['', ''];
+      return '<tr><td style="text-align:right;opacity:.6">' + (i + 1) + '</td>'
+        + '<td><code style="font-size:12px">' + U.escHtml(r.text) + '</code></td>'
+        + '<td style="color:' + k[1] + '">' + k[0] + '</td>'
+        + '<td style="opacity:.75">' + U.escHtml(r.note || '') + '</td></tr>';
+    }).join('');
+    prevEl.innerHTML = head + issues.join('')
+      + '<table class="nb-table" style="margin-top:4px"><tr><th style="width:36px">#</th><th>配置行</th><th style="width:60px">性质</th><th>说明</th></tr>' + rows + '</table>'
+      + (preview.rows.length > 60 ? '<div class="bk-empty">（仅显示前 60 行，共 ' + preview.rows.length + ' 行）</div>' : '');
+    updateRunState();
+  };
+  /** 执行按钮可用性：解析通过 + 无硬禁止 + 必勾选项齐备 */
+  const updateRunState = () => {
+    const gate = parsed.ok ? U.checkChangeSet(parsed.lines || []) : { ok: false, warn: [] };
+    const hasLines = !!(parsed.ok && parsed.lines && parsed.lines.length);
+    const needWarn = hasLines && (gate.warn || []).length > 0;
+    const needLock = hasLines && !!(preview && preview.risk.selfLock);
+    warnWrap.style.display = needWarn ? 'flex' : 'none';
+    lockWrap.style.display = needLock ? 'flex' : 'none';
+    if (!needWarn) warnAckEl.checked = false;
+    if (!needLock) lockAckEl.checked = false;
+    const gateOk = hasLines && gate.ok !== false && (!needWarn || warnAckEl.checked) && (!needLock || lockAckEl.checked);
+    runBtn.disabled = !(gateOk && ackEl.checked);
+    runBtn.title = !hasLines ? '请先填写变更集'
+      : (gate.ok === false ? ('禁止下发：' + gate.error)
+        : (!ackEl.checked ? '请先勾选「我已核对预览与风险」' : ''));
+  };
+
+  ov.querySelector('#cdGen').onclick = () => {
+    const c = cur();
+    const text = U.generateConfigs(state.nodes, state.links, vEl.value, { only: new Set([c.node.id]) });
+    if (!text || !text.trim()) { toast('该设备没有可生成的配置（缺少接口/地址等信息）'); return; }
+    planEl.value = text;
+    lastResult = null;
+    refreshPreview();
+    toast('已按当前拓扑生成该设备的配置片段，请核对后再下发');
+  };
+  ov.querySelector('#cdWipe').onclick = () => { planEl.value = ''; lastResult = null; rollBtn.disabled = true; refreshPreview(); };
+  ackEl.onchange = updateRunState;
+  warnAckEl.onchange = updateRunState;
+  lockAckEl.onchange = updateRunState;
+  // 输入防抖：变更集较大时避免每次按键都全量预判；**编辑后原确认作废**（必须重新核对预览）
+  let deb = 0;
+  planEl.addEventListener('input', () => {
+    lastResult = null; rollBtn.disabled = true;
+    ackEl.checked = false;
+    clearTimeout(deb);
+    deb = setTimeout(refreshPreview, 250);
+  });
+  devEl.onchange = () => { lastResult = null; rollBtn.disabled = true; ackEl.checked = false; syncDevice(); };
+  vEl.onchange = () => { ackEl.checked = false; refreshPreview(); };
+
+  /** 结果视图：逐行成功/失败 + 设备回显 */
+  const renderResult = (r) => {
+    const head = r.ok
+      ? '<div style="color:var(--ok,#22c55e);margin-bottom:4px"><b>✓ 下发成功</b>：' + r.appliedCount + ' 行 · 前置备份 ' + U.escHtml(r.backupFile || '未入库') + ' · 保存配置 ' + (saveEl.checked ? (r.saved.ok ? '成功' : '失败') : '未执行') + ' · 回采 ' + (r.post && r.post.ok ? '成功' : (verifyEl.checked ? '失败' : '未执行')) + (r.maskedCount ? ' · 记录已打码 ' + r.maskedCount + ' 行' : '') + '</div>'
+      : '<div style="color:var(--danger);margin-bottom:4px"><b>✕ 下发未完成</b>：' + U.escHtml(r.error || '未知错误') + '（剩余 ' + (r.remaining || 0) + ' 行未下发）· 前置备份 ' + U.escHtml(r.backupFile || (r.backup && r.backup.ok ? '未入库' : '未取得')) + (r.backup && r.backup.error ? '（' + U.escHtml(r.backup.error) + '）' : '') + '</div>';
+    const rows = (r.applied || []).map((a, i) => '<tr>'
+      + '<td style="text-align:right;opacity:.6">' + (i + 1) + '</td>'
+      + '<td><code style="font-size:12px">' + U.escHtml(a.line) + '</code></td>'
+      + '<td>' + (a.ok ? '<span style="color:var(--ok,#22c55e)">✓</span>' : '<span style="color:var(--danger)">✕</span>') + '</td>'
+      + '<td style="color:var(--danger);font-size:12px">' + U.escHtml(a.error || '') + '</td>'
+      + '<td>' + (a.out ? '<button type="button" class="tb nsv-mini-btn" data-out="' + i + '">回显</button>' : '') + '</td></tr>').join('');
+    const extra = [];
+    if (r.saved && saveEl.checked) extra.push('<div class="m-sub" style="margin:4px 0">保存配置：' + (r.saved.ok ? '成功' : '<span style="color:var(--danger)">失败：' + U.escHtml(r.saved.error || '') + '</span>') + '</div>');
+    if (r.post && verifyEl.checked) extra.push('<div class="m-sub" style="margin:2px 0">回采校验：' + (r.post.ok ? '已取回 ' + r.post.content.split('\n').length + ' 行运行配置' : '<span style="color:var(--danger)">失败：' + U.escHtml(r.post.error || '') + '</span>') + '</div>');
+    if (r.recordError) extra.push('<div class="m-sub" style="margin:2px 0;color:#f59e0b">审计记录写入失败：' + U.escHtml(r.recordError) + '（本次下发未留痕，请检查磁盘）</div>');
+    prevEl.innerHTML = head + extra.join('')
+      + '<table class="nb-table"><tr><th style="width:36px">#</th><th>配置行</th><th style="width:40px">结果</th><th>失败原因</th><th style="width:56px">设备</th></tr>' + rows + '</table>'
+      + '<div style="margin-top:6px"><button type="button" class="tb nsv-mini-btn" id="cdBack">← 返回预览</button></div>';
+    const back = prevEl.querySelector('#cdBack');
+    if (back) back.onclick = () => { lastResult = null; refreshPreview(); };
+    prevEl.querySelectorAll('button[data-out]').forEach(b => {
+      b.onclick = () => {
+        const a = (r.applied || [])[parseInt(b.dataset.out, 10)];
+        if (a) deployShowOutput(a);
+      };
+    });
+  };
+  const deployShowOutput = (a) => {
+    const v = document.createElement('div');
+    v.className = 'overlay';
+    v.innerHTML = '<div class="modal" role="dialog" style="width:820px;height:70vh;display:flex;flex-direction:column">'
+      + '<h3>命令回显</h3><div class="m-sub"><code>' + U.escHtml(a.line) + '</code></div>'
+      + '<pre class="nsv-view" style="flex:1;overflow:auto" spellcheck="false">' + (a.out ? U.escHtml(a.out) : '（无回显）') + '</pre>'
+      + '<div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+    $('#modalRoot').appendChild(v);
+    v.tabIndex = -1; v.focus();
+    const vc = () => v.remove();
+    v.addEventListener('pointerdown', (e) => { if (e.target === v) vc(); });
+    v.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); vc(); } });
+    v.querySelector('[data-act=close]').onclick = vc;
+  };
+
+  runBtn.onclick = async () => {
+    const c = cur();
+    if (!c.host) { toast('该设备没有管理地址'); return; }
+    if (!parsed.ok || !parsed.lines.length) { toast('变更集为空或解析失败'); return; }
+    const gate = U.checkChangeSet(parsed.lines);
+    if (!gate.ok) { toast('已拦截：' + gate.error); return; }
+    const port = c.port;
+    const proto = c.protocol;
+    // 账号来源：手填 / 设备监控配置（预填在上方字段里）优先；字段为空时才回落到凭据库档案
+    const cdPatch = (!userEl.value.trim() && !passEl.value && cdCred.any()) ? cdCred.patch() : {};
+    const user = userEl.value.trim() || (c.cred ? c.cred.username : '');
+    const pass = passEl.value || (c.cred ? c.cred.password : '');
+    if (!user && !cdPatch.credId) { toast('请填写账号，或在「凭据库」里选一条档案'); return; }
+    runBtn.disabled = true; csvBtn.disabled = true; rollBtn.disabled = true;
+    lastResult = null;
+    prevEl.innerHTML = '<div class="bk-empty">下发中：' + U.escHtml(c.node.name) + '（' + U.escHtml(c.host) + '）——先强制备份当前运行配置，再逐行下发 ' + parsed.lines.length + ' 行…</div>';
+    let r;
+    try {
+      r = await window.topoDeploy.run(Object.assign({
+        device: String(c.node.name || c.node.id), deviceId: c.node.id, host: c.host, port, protocol: proto,
+        username: user, password: pass,
+        privateKey: c.cred && c.cred.authMode === 'key' ? c.cred.privateKey : '',
+        keyPassphrase: c.cred ? c.cred.keyPass : '',
+        encoding: c.cred ? c.cred.encoding : '',
+        vendor: vEl.value,
+        preCmd: ov.querySelector('#cdPre').value.trim(),
+        lines: parsed.lines.map(l => l.text),
+        plan: planEl.value,
+        kind: 'change',
+        doSave: saveEl.checked, verify: verifyEl.checked,
+        expectFp: trustedFpOf(c.host, port)
+      }, cdPatch));
+    } catch (e) {
+      r = { ok: false, error: String((e && e.message) || e), applied: [], appliedCount: 0, remaining: parsed.lines.length, backup: {}, saved: {}, post: {} };
+    }
+    if (r && r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || c.host, r.fingerprint.port, r.fingerprint.fp);
+    lastResult = r;
+    renderResult(r);
+    ackEl.checked = false;
+    updateRunState();
+    csvBtn.disabled = false;
+    rollBtn.disabled = !(r && r.backupFile);          // 有前置备份才谈得上回滚
+    toast(r.ok ? '下发完成：' + r.appliedCount + ' 行' : ('下发未完成：' + (r.error || '未知错误')));
+  };
+
+  csvBtn.onclick = () => {
+    if (!lastResult) { toast('还没有下发结果'); return; }
+    const r = lastResult, c = cur();
+    const rows = [['设备', '地址', '厂家', '序号', '配置行', '结果', '失败原因', '设备回显', '下发时间']];
+    const ts = new Date().toLocaleString();
+    (r.applied || []).forEach((a, i) => {
+      rows.push([String(c.node.name || c.node.id), c.host || '', (U.DEPLOY_VENDORS[vEl.value] || {}).label || '', String(i + 1), a.line, a.ok ? '成功' : '失败', a.error || '', a.out || '', ts]);
+    });
+    if (!(r.applied || []).length) rows.push([String(c.node.name || c.node.id), c.host || '', '', '', '', '未下发', r.error || '', '', ts]);
+    U.download('配置变更下发_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出下发结果 CSV（' + (rows.length - 1) + ' 行）');
+  };
+
+  rollBtn.onclick = async () => {
+    const r = lastResult, c = cur();
+    if (!r || !r.backupFile) { toast('没有可用的前置备份，无法生成回滚变更单'); return; }
+    const bd = await window.topoConfigBackup.read(String(c.node.name || c.node.id), c.host, r.backupFile);
+    if (!bd.ok) { toast('读取前置备份失败：' + (bd.error || '')); return; }
+    const rb = U.buildRollback(parsed.lines, bd.content, vEl.value);
+    if (!rb.ok) { toast(rb.error); return; }
+    deployShowRollback(rb, r, c);
+  };
+  /** 回滚变更单预览：确认后载入变更集（回滚同样走 dry-run → 备份 → 下发，不是旁路） */
+  const deployShowRollback = (rb, r, c) => {
+    const v = document.createElement('div');
+    v.className = 'overlay';
+    v.innerHTML = '<div class="modal" role="dialog" style="width:860px;height:80vh;display:flex;flex-direction:column">'
+      + '<h3>回滚变更单（依 ' + U.escHtml(r.backupFile) + ' 生成）</h3>'
+      + '<div class="m-sub">对本次已下发的 ' + (r.appliedCount || 0) + ' 行逐行求逆、逆序下发：可自动回滚 <b>' + rb.reversible + '</b> 行' + (rb.manual.length ? '，<b style="color:#f59e0b">' + rb.manual.length + ' 行无法自动求逆</b>（已作为注释列在下方，不会下发）' : '') + '。载入后<b>不会立即下发</b>，仍需核对预览并点「执行下发」。</div>'
+      + '<pre style="flex:1;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;border:1px solid var(--border);border-radius:8px;padding:8px" spellcheck="false">' + U.escHtml(rb.text) + '</pre>'
+      + (rb.manual.length ? '<div class="m-sub" style="color:#f59e0b">需人工处理：' + rb.manual.map(m => U.escHtml(m.line) + '（' + U.escHtml(m.why) + '）').join('；') + '</div>' : '')
+      + '<div class="m-actions"><span class="m-sub" style="margin:0;flex:1">提示：部分平台不接受带参数的 undo/no 形式，个别行下发失败时按结果报告手工处理。</span>'
+      + '<button type="button" class="tb primary" id="rbLoad">载入到变更集</button><button type="button" class="tb" data-act="close">关闭</button></div></div>';
+    $('#modalRoot').appendChild(v);
+    v.tabIndex = -1; v.focus();
+    const vc = () => v.remove();
+    v.addEventListener('pointerdown', (e) => { if (e.target === v) vc(); });
+    v.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); vc(); } });
+    v.querySelector('[data-act=close]').onclick = vc;
+    v.querySelector('#rbLoad').onclick = () => {
+      planEl.value = rb.text;
+      lastResult = null;
+      rollBtn.disabled = true;
+      vc();
+      refreshPreview();
+      toast('回滚变更单已载入：请核对预览后执行（记为回滚下发）');
+    };
+  };
+
+  ov.querySelector('#cdHist').onclick = () => openDeployHistory({
+    onLoad: (plan) => { planEl.value = plan; lastResult = null; rollBtn.disabled = true; refreshPreview(); }
+  });
+
+  setTimeout(async () => { await syncDevice(); planEl.focus(); }, 60);
+}
+
+/** 下发记录（审计）浏览器：列表 / 详情 / 载入变更集 / 导出 / 删除 / 打开目录 */
+function openDeployHistory(opts) {
+  opts = opts || {};
+  if (!(window.topoDeploy && window.topoDeploy.history)) { toast('下发记录需要桌面版（Electron）环境'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1000px;height:82vh;display:flex;flex-direction:column">
+      <h3>配置变更下发记录</h3>
+      <div class="m-sub">每次下发（含回滚）一条记录：设备 / 厂家 / 逐行结果 / 前置备份文件名 / 保存与回采结论。记录在落盘前对 <code>password</code>、<code>community</code> 等口令类内容打码（打码行数见「打码」列）。</div>
+      <div id="dhList" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"><div class="bk-empty">读取中…</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="dhFolder">打开记录目录</button>
+        <button type="button" class="tb" id="dhCsv" disabled>导出记录清单 CSV</button>
+        <button type="button" class="tb" id="dhClear">清空记录</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const listEl = ov.querySelector('#dhList'), csvBtn = ov.querySelector('#dhCsv');
+  let items = [];
+  const fmtT = (ts) => { try { return new Date(ts).toLocaleString(); } catch (e) { return String(ts || ''); } };
+  const render = () => {
+    if (!items.length) { listEl.innerHTML = '<div class="bk-empty">还没有下发记录。</div>'; csvBtn.disabled = true; return; }
+    csvBtn.disabled = false;
+    const rows = items.map((it, i) => '<tr>'
+      + '<td>' + (it.ok ? '<b style="color:var(--ok,#22c55e)">✓ 成功</b>' : '<b style="color:var(--danger)">✕ 失败</b>') + '</td>'
+      + '<td>' + U.escHtml(it.device || '') + '<div style="opacity:.6;font-size:11.5px">' + U.escHtml(it.host || '') + '</div></td>'
+      + '<td>' + U.escHtml(it.vendorLabel || '') + '</td>'
+      + '<td>' + (it.kind === 'rollback' ? '<span style="color:#f59e0b">回滚</span>' : '变更') + '</td>'
+      + '<td>' + it.appliedCount + '/' + it.lineCount + (it.failedAt ? '（第 ' + (it.failedAt + 1) + ' 行失败）' : '') + '</td>'
+      + '<td>' + (it.backupFile ? '<code style="font-size:11.5px">' + U.escHtml(it.backupFile) + '</code>' : '<span style="color:#f59e0b">无</span>') + '</td>'
+      + '<td>' + (it.saved ? '✓' : '—') + '</td>'
+      + '<td>' + (it.maskedCount ? it.maskedCount : '—') + '</td>'
+      + '<td>' + U.escHtml(fmtT(it.ts)) + '</td>'
+      + '<td><button type="button" class="tb nsv-mini-btn" data-view="' + i + '">详情</button>'
+      + '<button type="button" class="tb nsv-mini-btn" data-load="' + i + '">载入</button>'
+      + '<button type="button" class="tb nsv-mini-btn" data-del="' + i + '">删除</button></td></tr>').join('');
+    listEl.innerHTML = '<table class="nb-table"><tr><th>结果</th><th>设备</th><th>厂家</th><th>类型</th><th>行数</th><th>前置备份</th><th>已保存</th><th>打码</th><th>时间</th><th>操作</th></tr>' + rows + '</table>'
+      + (items.length >= 200 ? '<div class="bk-empty">（仅显示最近 200 条）</div>' : '');
+    listEl.querySelectorAll('button[data-view]').forEach(b => { b.onclick = () => viewRec(items[parseInt(b.dataset.view, 10)]); });
+    listEl.querySelectorAll('button[data-load]').forEach(b => {
+      b.onclick = async () => {
+        const it = items[parseInt(b.dataset.load, 10)];
+        const rd = await window.topoDeploy.record(it.name);
+        if (!rd.ok) { toast('读取记录失败：' + (rd.error || '')); return; }
+        if (typeof opts.onLoad === 'function') { opts.onLoad(String(rd.rec.plan || rd.rec.lines.join('\n'))); close(); toast('已载入该次变更集：请核对后重新下发'); }
+        else toast('请从「配置变更下发…」面板打开记录后再载入');
+      };
+    });
+    listEl.querySelectorAll('button[data-del]').forEach(b => {
+      b.onclick = async () => {
+        const it = items[parseInt(b.dataset.del, 10)];
+        const r = await window.topoDeploy.recordRemove(it.name);
+        if (!r.ok) { toast('删除失败：' + (r.error || '')); return; }
+        items = items.filter(x => x.name !== it.name);
+        render();
+      };
+    });
+  };
+  const viewRec = async (it) => {
+    const rd = await window.topoDeploy.record(it.name);
+    if (!rd.ok) { toast('读取记录失败：' + (rd.error || '')); return; }
+    const rec = rd.rec;
+    const v = document.createElement('div');
+    v.className = 'overlay';
+    const lines = (rec.applied || []).map((a, i) => '<tr><td style="text-align:right;opacity:.6">' + (i + 1) + '</td><td><code style="font-size:12px">' + U.escHtml(a.line) + '</code></td><td>' + (a.ok ? '<span style="color:var(--ok,#22c55e)">✓</span>' : '<span style="color:var(--danger)">✕</span>') + '</td><td style="color:var(--danger);font-size:12px">' + U.escHtml(a.error || '') + '</td></tr>').join('');
+    v.innerHTML = '<div class="modal" role="dialog" style="width:900px;height:82vh;display:flex;flex-direction:column">'
+      + '<h3>' + U.escHtml(rec.device) + '（' + U.escHtml(rec.host) + '）' + (rec.kind === 'rollback' ? ' · 回滚下发' : ' · 配置变更') + '</h3>'
+      + '<div class="m-sub">' + U.escHtml(rec.at || '') + ' · ' + U.escHtml(rec.vendorLabel || '') + ' · ' + U.escHtml(rec.protocol) + ':' + rec.port + ' · 账号 ' + U.escHtml(rec.user || '') + ' · ' + (rec.result.ok ? '成功 ' + rec.result.appliedCount + '/' + rec.lineCount + ' 行' : '失败：' + U.escHtml(rec.result.error || '')) + (rec.maskedCount ? ' · 已打码 ' + rec.maskedCount + ' 行' : '') + '</div>'
+      + '<div class="m-sub">前置备份：' + (rec.backup.file ? '<code>' + U.escHtml(rec.backup.file) + '</code>' : '<span style="color:#f59e0b">未入库</span>' + (rec.backup.error ? '（' + U.escHtml(rec.backup.error) + '）' : '')) + ' · 保存配置：' + (rec.saved.ok ? '成功' : (rec.saved.error ? '失败' : '未执行')) + ' · 回采：' + (rec.verify.ok ? '成功' : (rec.verify.error ? '失败' : '未执行')) + '</div>'
+      + '<div style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:4px"><table class="nb-table"><tr><th style="width:36px">#</th><th>配置行</th><th style="width:40px">结果</th><th>失败原因</th></tr>' + lines + '</table></div>'
+      + '<div class="m-actions"><button type="button" class="tb" id="dhPlan">查看变更集原文</button><span style="flex:1"></span><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+    $('#modalRoot').appendChild(v);
+    v.tabIndex = -1; v.focus();
+    const vc = () => v.remove();
+    v.addEventListener('pointerdown', (e) => { if (e.target === v) vc(); });
+    v.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); vc(); } });
+    v.querySelector('[data-act=close]').onclick = vc;
+    v.querySelector('#dhPlan').onclick = () => {
+      const w = document.createElement('div');
+      w.className = 'overlay';
+      w.innerHTML = '<div class="modal" role="dialog" style="width:820px;height:70vh;display:flex;flex-direction:column">'
+        + '<h3>变更集原文（已打码）</h3><pre style="flex:1;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;border:1px solid var(--border);border-radius:8px;padding:8px" spellcheck="false">' + U.escHtml(rec.plan || '') + '</pre>'
+        + '<div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+      $('#modalRoot').appendChild(w);
+      w.tabIndex = -1; w.focus();
+      const wc = () => w.remove();
+      w.addEventListener('pointerdown', (e) => { if (e.target === w) wc(); });
+      w.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); wc(); } });
+      w.querySelector('[data-act=close]').onclick = wc;
+    };
+  };
+  const load = async () => {
+    try {
+      const r = await window.topoDeploy.history(200);
+      items = (r && r.items) || [];
+    } catch (e) { items = []; }
+    render();
+  };
+  ov.querySelector('#dhFolder').onclick = () => { if (window.topoDeploy.openFolder) window.topoDeploy.openFolder().catch(() => {}); };
+  ov.querySelector('#dhClear').onclick = async () => {
+    if (!items.length) { toast('没有记录可清空'); return; }
+    const r = await window.topoDeploy.clear();
+    if (!r.ok) { toast('清空失败：' + (r.error || '')); return; }
+    items = []; render(); toast('已清空下发记录');
+  };
+  csvBtn.onclick = () => {
+    if (!items.length) return;
+    const rows = [['时间', '设备', '地址', '厂家', '类型', '结果', '成功行', '总行数', '失败行', '前置备份', '已保存', '打码行', '错误']];
+    for (const it of items) {
+      rows.push([fmtT(it.ts), it.device || '', it.host || '', it.vendorLabel || '', it.kind === 'rollback' ? '回滚' : '变更',
+        it.ok ? '成功' : '失败', String(it.appliedCount), String(it.lineCount), it.failedAt ? String(it.failedAt + 1) : '',
+        it.backupFile || '', it.saved ? '是' : '否', String(it.maskedCount || 0), it.error || '']);
+    }
+    U.download('下发记录_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出 ' + items.length + ' 条记录');
+  };
+  load();
+}
+
+/* ================= 拓扑自动发现（种子设备 + 凭据池 → 递归爬 LLDP/CDP 邻居 → 合并进拓扑） =================
+ * 与「从邻居表导入」的关系：那个是**单台**设备手工/自动采集一次；这里是**多台递归**测绘——
+ * 从种子出发按 LLDP/CDP 的「对端管理地址」下钻 N 层，最后一并合并进当前拓扑。
+ * 关键前提：邻居表必须带对端管理地址（verbose 形态）才能继续下钻；只有名称的邻居会进结果但不再展开。
+ * 爬取状态机（层数/去重/升格/上限）在 U.createDiscovery（纯逻辑，单测覆盖）；这里只负责 I/O 与界面。 */
+const DISCO_CMDS = {
+  auto: ['display lldp neighbor', 'display lldp neighbor-information verbose', 'show lldp neighbors detail', 'show cdp neighbors detail'],
+  huawei: ['screen-length 0 temporary', 'display lldp neighbor'],
+  h3c: ['screen-length disable', 'display lldp neighbor-information verbose'],
+  cisco: ['terminal length 0', 'show lldp neighbors detail', 'show cdp neighbors detail'],
+  ruijie: ['terminal length 0', 'show lldp neighbors detail', 'show cdp neighbors detail']
+};
+const DISCO_VERSION_CMD = { huawei: 'display version', h3c: 'display version', cisco: 'show version', ruijie: 'show version', auto: 'display version' };
+/** 凭据池解析：每行「账号 密码」（空格/逗号/制表符分隔），最多 5 组 */
+function parseCredPool(text) {
+  const out = [];
+  for (const raw of String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n')) {
+    const t = raw.trim();
+    if (!t || /^#/.test(t)) continue;
+    const parts = t.split(/[\s,;|]+/).filter(Boolean);
+    if (!parts.length) continue;
+    out.push({ username: parts[0].slice(0, 128), password: parts.slice(1).join(' ').slice(0, 256) });
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+function openTopoDiscovery() {
+  if (!(window.topoShell && window.topoShell.runOneShot)) { toast('拓扑自动发现需要桌面版（Electron）环境'); return; }
+  const seedCands = state.nodes.filter(n => U.nodeMgmts(n).length).map(n => ({ node: n, host: U.nodeMgmts(n)[0], cred: monitorCredOf(n.id) }));
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const vOpts = Object.keys(DISCO_CMDS).map(k => `<option value="${k}">${{ auto: '自动尝试', huawei: '华为 VRP', h3c: 'H3C Comware', cisco: '思科 IOS', ruijie: '锐捷' }[k] || k}</option>`).join('');
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1040px;height:88vh;display:flex;flex-direction:column">
+      <h3>拓扑自动发现</h3>
+      <div class="m-sub">从<b>种子设备</b>出发，自动登录并读取 LLDP / CDP 邻居表，沿邻居的<b>管理地址</b>递归下钻 N 层，最后把发现的设备与链路合并进当前拓扑（同名/同地址设备复用，已有节点回填管理地址与厂家）。纯本机操作，不上传任何数据。</div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>厂家命令集</label><select id="dcVendor">${vOpts}</select></div>
+        <div class="frow" style="margin:0"><label>最大层数</label><select id="dcDepth">${[1, 2, 3, 4, 5].map(d => `<option value="${d}"${d === 2 ? ' selected' : ''}>${d} 层</option>`).join('')}</select></div>
+        <div class="frow" style="margin:0"><label>并发</label><select id="dcConc">${[1, 2, 3, 4].map(c => `<option value="${c}"${c === 2 ? ' selected' : ''}>${c} 台</option>`).join('')}</select></div>
+        <label style="display:flex;align-items:center;gap:4px;margin:0" title="同一会话内附带执行 show/display version，识别厂家与型号并回填到设备（更慢但结果更完整）"><input id="dcVer" type="checkbox" checked/>识别厂家/型号</label>
+        <label style="display:flex;align-items:center;gap:4px;margin:0" title="只发现不合并：仅生成预览与 CSV，不动当前画布"><input id="dcDry" type="checkbox"/>仅预览（不改画布）</label>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:4px">
+        <div style="flex:1.2;min-width:0">
+          <div class="m-sub" style="margin:0 0 2px">种子设备（勾选拓扑中已有管理地址的设备）</div>
+          <div id="dcSeeds" style="max-height:92px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div class="m-sub" style="margin:0 0 2px">手工种子（每行一台：<code>IP</code> 或 <code>IP 名称</code>）</div>
+          <textarea id="dcManual" spellcheck="false" style="width:100%;height:92px;font-family:ui-monospace,Consolas,monospace;font-size:12px" placeholder="10.0.0.1 CORE&#10;10.0.0.2"></textarea>
+        </div>
+        <div style="flex:1;min-width:0">
+          ${credPoolHtml('dc', credCache || [], { linesHeight: 44 })}
+        </div>
+      </div>
+      <div id="dcProg" class="m-sub" style="margin:6px 0 2px;min-height:18px">待开始。</div>
+      <div id="dcRes" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px;min-height:150px"><div class="bk-empty">点「开始发现」后，发现的设备与链路汇总在这里。</div></div>
+      <div class="m-actions">
+        <span id="dcHint" class="m-sub" style="margin:0;flex:1"></span>
+        <button type="button" class="tb" id="dcCsv" disabled>导出发现结果 CSV</button>
+        <button type="button" class="tb" id="dcStop" disabled>停止</button>
+        <button type="button" class="tb primary" id="dcGo">开始发现</button>
+        <button type="button" class="tb" id="dcMerge" disabled>合并进拓扑</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  let busy = false;
+  const close = () => { if (busy) { toast('发现进行中：请先点「停止」'); return; } ov.remove(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+
+  const seedsEl = ov.querySelector('#dcSeeds'), manualEl = ov.querySelector('#dcManual');
+  const dcPool = bindCredPool(ov, 'dc');
+  hydrateCredPickers(ov);
+  const vEl = ov.querySelector('#dcVendor'), depthEl = ov.querySelector('#dcDepth'), concEl = ov.querySelector('#dcConc');
+  const verEl = ov.querySelector('#dcVer'), dryEl = ov.querySelector('#dcDry');
+  const progEl = ov.querySelector('#dcProg'), resEl = ov.querySelector('#dcRes'), hintEl = ov.querySelector('#dcHint');
+  const goBtn = ov.querySelector('#dcGo'), stopBtn = ov.querySelector('#dcStop'), csvBtn = ov.querySelector('#dcCsv'), mergeBtn = ov.querySelector('#dcMerge');
+  seedsEl.innerHTML = seedCands.length
+    ? seedCands.map((c, i) => `<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" data-idx="${i}"${c.cred ? ' checked' : ''}/> ${U.escHtml(c.node.name)}<span style="opacity:.6">（${U.escHtml(c.host)}${c.cred ? ' · 有凭据' : ''}）</span></label>`).join('')
+    : '<span class="bk-empty">拓扑中没有带管理地址的设备：可直接在右侧手工填写种子地址。</span>';
+  let disco = null, running = false, stopFlag = false, merged = false;
+  // 本次发现使用的凭据库档案顺序（开始发现时定：指定档案 + 按厂家命令集自动匹配的档案）
+  let libCredIds = [];
+
+  /** 该设备的候选凭据：监控配置优先，其次凭据库档案（只传 credId，主进程解析），最后手填池（按顺序） */
+  const credsFor = (host, name) => {
+    const node = state.nodes.find(n => String(n.name) === String(name));
+    const mc = node ? monitorCredOf(node.id) : null;
+    const out = [];
+    if (mc && mc.host === host && (mc.username || mc.password)) out.push({ username: mc.username, password: mc.password, protocol: mc.protocol, port: mc.port, privateKey: mc.authMode === 'key' ? mc.privateKey : '', keyPassphrase: mc.keyPass });
+    for (const id of libCredIds) out.push({ credId: id });
+    for (const c of parseCredPool(dcPool.lines())) out.push({ username: c.username, password: c.password });
+    if (!out.length) out.push({ username: 'admin', password: '' });
+    return out;
+  };
+  const renderProgress = () => {
+    if (!disco) return;
+    const st = disco.stats();
+    progEl.innerHTML = '已查询 <b>' + st.queried + '</b> / 共发现 <b>' + st.devices + '</b> 台（成功 ' + st.ok + ' · 失败 ' + st.failed + '）· 待查 ' + st.pending + ' · 链路 <b>' + st.links + '</b>'
+      + (st.truncated ? ' · <b style="color:#f59e0b">已达设备数上限（60），未继续展开</b>' : '');
+    hintEl.textContent = running ? '发现中…' : (st.queried ? '发现结束。' : '');
+  };
+  const renderResult = () => {
+    if (!disco) return;
+    const devs = disco.devices(), links = disco.links();
+    if (!devs.length) { resEl.innerHTML = '<div class="bk-empty">尚未开始发现。</div>'; return; }
+    const dRows = devs.map((d, i) => '<tr>'
+      + '<td>' + (d.queried ? (d.ok ? '<span style="color:var(--ok,#22c55e)">✓</span>' : '<span style="color:var(--danger)">✕</span>') : (d.claimed ? '…' : '待查')) + '</td>'
+      + '<td>' + U.escHtml(d.name || '（未知）') + (d.source === 'seed' ? ' <span style="opacity:.6">种子</span>' : '') + '</td>'
+      + '<td>' + U.escHtml(d.host || '—') + '</td>'
+      + '<td>' + d.depth + '</td>'
+      + '<td>' + U.escHtml(d.discoveredFrom || '—') + '</td>'
+      + '<td>' + d.neighborCount + '</td>'
+      + '<td>' + U.escHtml([d.vendor, d.model].filter(Boolean).join(' / ') || '—') + '</td>'
+      + '<td style="color:var(--danger);font-size:12px">' + U.escHtml(d.error || '') + '</td></tr>').join('');
+    const lRows = links.map((l, i) => '<tr><td style="text-align:right;opacity:.6">' + (i + 1) + '</td>'
+      + '<td>' + U.escHtml(l.aName || l.aHost || '?') + '</td><td><code style="font-size:12px">' + U.escHtml(l.aIf) + '</code></td>'
+      + '<td>' + U.escHtml(l.bName || l.bHost || '?') + '</td><td><code style="font-size:12px">' + U.escHtml(l.bIf) + '</code></td>'
+      + '<td>' + l.depth + '</td></tr>').join('');
+    resEl.innerHTML = '<b style="font-size:12.5px">发现的设备（' + devs.length + '）</b>'
+      + '<table class="nb-table" id="dcDevTable"><tr><th>状态</th><th>设备名</th><th>管理地址</th><th>层</th><th>发现自</th><th>邻居</th><th>厂家/型号</th><th>错误</th></tr>' + dRows + '</table>'
+      + '<b style="font-size:12.5px;display:block;margin-top:8px">发现的链路（' + links.length + '）</b>'
+      + '<table class="nb-table" id="dcLinkTable"><tr><th style="width:36px">#</th><th>本端</th><th>本端接口</th><th>对端</th><th>对端接口</th><th>层</th></tr>' + lRows + '</table>';
+    csvBtn.disabled = !devs.length;
+    const usable = links.length > 0;
+    mergeBtn.disabled = !usable || running || merged || dryEl.checked;
+    mergeBtn.title = dryEl.checked ? '已勾选「仅预览」：不会改动画布' : (!usable ? '没有可合并的链路' : '');
+  };
+
+  goBtn.onclick = async () => {
+    const seeds = [];
+    seedsEl.querySelectorAll('input[type=checkbox]').forEach(cb => { if (cb.checked) seeds.push({ host: seedCands[+cb.dataset.idx].host, name: seedCands[+cb.dataset.idx].node.name }); });
+    for (const raw of manualEl.value.replace(/\r\n?/g, '\n').split('\n')) {
+      const t = raw.trim();
+      if (!t) continue;
+      const parts = t.split(/[\s,;]+/).filter(Boolean);
+      if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(parts[0])) { toast('手工种子地址不合法：' + parts[0]); return; }
+      seeds.push({ host: parts[0], name: parts[1] || '' });
+    }
+    if (!seeds.length) { toast('请至少选择或填写一台种子设备'); return; }
+    const vendor = vEl.value, cmds = (DISCO_CMDS[vendor] || DISCO_CMDS.auto).slice(0, 15);
+    const withVer = verEl.checked;
+    const vcmd = DISCO_VERSION_CMD[vendor] || DISCO_VERSION_CMD.auto;
+    // 一次会话内：关分页 + 邻居命令若干 + （可选）版本命令；runOneShot 上限 16 条
+    const allCmds = withVer ? cmds.concat([vcmd]).slice(0, 16) : cmds;
+    // 凭据顺序：显式勾选的档案优先；若厂家命令集不是「自动尝试」，再按该厂家自动匹配档案补齐（默认项兜底）
+    const selIds = dcPool.ids();
+    libCredIds = selIds.slice();
+    if (vendor && vendor !== 'auto' && window.topoCred && window.topoCred.pick) {
+      try {
+        const pr = await window.topoCred.pick({ ids: selIds, vendor: vendor });
+        if (pr && pr.ok && Array.isArray(pr.ids) && pr.ids.length) libCredIds = pr.ids;
+      } catch (e) { /* 自动匹配失败就用手工勾选的 */ }
+    }
+    disco = U.createDiscovery({ maxDepth: parseInt(depthEl.value, 10), maxDevices: 60 });
+    for (const s of seeds) disco.addSeed(s);
+    running = true; stopFlag = false; merged = false;
+    goBtn.disabled = true; stopBtn.disabled = false; csvBtn.disabled = true; mergeBtn.disabled = true;
+    renderResult(); renderProgress();
+    const CONC = parseInt(concEl.value, 10) || 2;
+    const worker = async () => {
+      for (;;) {
+        if (stopFlag) return;
+        const t = disco.claim();
+        if (!t) return;
+        const cands = credsFor(t.host, t.name);
+        let lastErr = '未取得可用输出';
+        let done = false;
+        for (const c of cands) {
+          if (stopFlag) return;
+          const proto = c.protocol || 'ssh';
+          const port = c.port ? String(c.port) : (proto === 'telnet' ? '23' : '22');
+          try {
+            const p = { host: t.host, commands: allCmds, waitMs: 800, cmdTimeoutMs: 8000 };
+            if (c.credId) {
+              p.credId = c.credId;   // 凭据库档案：账号/口令/协议/端口/前置命令由主进程补齐
+            } else {
+              p.protocol = proto; p.port = port;
+              p.username = c.username || 'admin'; p.password = c.password || '';
+              p.privateKey = c.privateKey || ''; p.keyPassphrase = c.keyPassphrase || '';
+            }
+            p.expectFp = trustedFpOf(t.host, p.port || port);
+            const r = await window.topoShell.runOneShot(p);
+            if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || t.host, r.fingerprint.port || port, r.fingerprint.fp);
+            // 逐条命令解析邻居表：取命中邻居最多的一条（auto 命令集会同时下发多家命令）
+            let best = null;
+            for (const o of (r.outputs || [])) {
+              const p = U.parseNeighbors(o && o.text);
+              if (p.ok && p.entries.length && (!best || p.entries.length > best.entries.length)) best = p;
+            }
+            if (best) {
+              let ver = null;
+              if (withVer) {
+                const vt = (r.outputs || []).find(o => o && String(o.cmd || '').trim().toLowerCase() === vcmd);
+                ver = U.parseDeviceVersion(vt && vt.text);
+              }
+              disco.submit(t.id, {
+                ok: true, entries: best.entries,
+                vendor: (ver && ver.vendor) || (DISCO_CMDS[vendor] ? vendor : ''), model: ver && ver.model, version: ver && ver.version
+              });
+              done = true;
+              break;
+            }
+            lastErr = r.ok ? '未识别到邻居表输出（设备可能未启用 LLDP/CDP 或需 verbose 命令）' : (r.error || '连接失败');
+          } catch (e) {
+            lastErr = String((e && e.message) || e);
+          }
+        }
+        if (!done) disco.submit(t.id, { ok: false, error: lastErr });
+        renderResult(); renderProgress();
+      }
+    };
+    await Promise.all(Array.from({ length: CONC }, () => worker()));
+    running = false; stopFlag = false;
+    goBtn.disabled = false; stopBtn.disabled = true;
+    renderResult(); renderProgress();
+    const st = disco.stats();
+    toast('发现结束：' + st.devices + ' 台设备 / ' + st.links + ' 条链路（成功 ' + st.ok + '，失败 ' + st.failed + '）');
+    if (st.ok && !dryEl.checked && st.links) toast('点「合并进拓扑」把发现的设备与链路写入当前画布');
+  };
+  stopBtn.onclick = () => { stopFlag = true; toast('已请求停止：正在进行的设备查询完成后结束'); };
+  dryEl.onchange = renderResult;
+  csvBtn.onclick = () => {
+    if (!disco) return;
+    const devs = disco.devices(), links = disco.links();
+    const rows = [['类型', '名称', '管理地址', '层', '发现自', '邻居数', '厂家', '型号', '状态', '本端接口', '对端', '对端接口']];
+    for (const d of devs) rows.push(['设备', d.name || '', d.host || '', String(d.depth), d.discoveredFrom || '', String(d.neighborCount), d.vendor || '', d.model || '',
+      d.queried ? (d.ok ? '成功' : ('失败：' + (d.error || ''))) : (d.claimed ? '查询中' : '待查'), '', '', '']);
+    for (const l of links) rows.push(['链路', l.aName || l.aHost || '', l.aHost || '', String(l.depth), '', '', '', '', '', l.aIf, l.bName || l.bHost || '', l.bIf]);
+    U.download('拓扑自动发现_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出发现结果 CSV（' + devs.length + ' 台设备 / ' + links.length + ' 条链路）');
+  };
+  mergeBtn.onclick = () => {
+    if (!disco || dryEl.checked) { toast('没有可合并的结果'); return; }
+    const st = disco.stats();
+    if (!st.links) { toast('没有发现任何链路，无可合并'); return; }
+    pushUndo();
+    const r = U.applyDiscovery(state.nodes, state.links, disco, {});
+    if (!r.ok) { toast(r.error || '合并失败'); return; }
+    const cleaned = U.sanitizeGraph(state.nodes, state.links, state.texts);
+    state.nodes = cleaned.nodes; state.links = cleaned.links; state.texts = cleaned.texts;
+    Layout.separateOverlaps(state.nodes);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    refreshAll();
+    saveGraph();
+    merged = true;
+    renderResult();
+    const parts = [];
+    if (r.addedNodes) parts.push('新建 ' + r.addedNodes + ' 台设备');
+    if (r.filledMgmt) parts.push('回填 ' + r.filledMgmt + ' 个管理地址');
+    if (r.filledVendor) parts.push('回填 ' + r.filledVendor + ' 个厂家');
+    if (r.addedLinks) parts.push('新增 ' + r.addedLinks + ' 条连线');
+    if (r.updatedLinks) parts.push('补全 ' + r.updatedLinks + ' 条连线接口');
+    toast('已合并进拓扑：' + (parts.length ? parts.join('，') : '无变化'));
+  };
+  setTimeout(() => { if (document.body.contains(ov)) manualEl.focus(); }, 200);
+}
+
+/* ================= 三层邻居（BGP / OSPF）与协议视图 =================
+ * 并发登录设备执行只读命令（display bgp peer / display ospf peer / show ip bgp summary /
+ * show ip ospf neighbor），解析邻接关系与状态，匹配到拓扑后在画布上叠加徽标（连线中点）+ 高亮；
+ * 同时产出异常清单：状态非 Full/Established（邻居异常）、拓扑外邻居、规划外邻接。
+ * 解析与匹配都在 util.js 的纯函数里（U.parseProtoNeighbors / U.buildProtoTopology，单测覆盖）。 */
+function openProtoNeighbors() {
+  if (!(window.topoShell && window.topoShell.runOneShot)) { toast('三层邻居采集需要桌面版（Electron）环境'); return; }
+  const cands = deployTargetsOf();
+  if (!cands.length) { toast('当前没有配置管理地址的设备：先为设备填写管理地址'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1060px;height:86vh;display:flex;flex-direction:column">
+      <h3>三层邻居与协议视图（BGP / OSPF）</h3>
+      <div class="m-sub">并发登录设备执行<b>只读</b>命令读取三层邻居（华为 <code>display ospf peer brief</code> / <code>display bgp peer</code>、思科 <code>show ip ospf neighbor</code> / <code>show ip bgp summary</code>），把邻接关系匹配到拓扑后在画布连线上叠加徽标并高亮。异常清单包含：<b>邻居未建立/未达 Full</b>、<b>拓扑外邻居</b>（认不出是哪台设备）、<b>规划外邻接</b>（两台设备有邻接但拓扑里没有这条链路）。凭据优先取各设备监控配置，可填备用账号。</div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>协议</label>
+          <select id="pnProto"><option value="both">OSPF + BGP</option><option value="ospf">仅 OSPF</option><option value="bgp">仅 BGP</option></select>
+        </div>
+        <div class="frow" style="margin:0"><label>厂家命令集</label>
+          <select id="pnVendor"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="ruijie">锐捷</option></select>
+        </div>
+        ${credPickerHtml('pn', credCache || [])}
+        <label style="display:flex;align-items:center;gap:4px;margin:0"><input id="pnAll" type="checkbox" checked/>全选设备</label>
+        <span id="pnHint" class="m-sub" style="margin:0;flex:1">采集范围：</span>
+      </div>
+      <div id="pnDevs" style="max-height:104px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
+      <div id="pnProg" class="m-sub" style="margin:6px 0 2px;min-height:18px">待开始。</div>
+      <div id="pnRes" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px;min-height:140px"><div class="bk-empty">点「开始采集」后，邻接关系与异常清单汇总在这里。</div></div>
+      <div class="m-actions">
+        <input id="pnFilter" type="text" placeholder="筛选：设备 / 邻居 / 状态 / 接口…" style="flex:1"/>
+        <button type="button" class="tb" id="pnCsv" disabled>导出 CSV</button>
+        <button type="button" class="tb" id="pnClearView" disabled>清除协议视图</button>
+        <button type="button" class="tb" id="pnView" disabled>高亮协议视图</button>
+        <button type="button" class="tb" id="pnRecord" disabled>异常记入事件时间线</button>
+        <button type="button" class="tb" id="pnStop" disabled>停止</button>
+        <button type="button" class="tb primary" id="pnGo">开始采集</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  let busy = false;
+  const close = () => { if (busy) { toast('采集进行中：请先点「停止」'); return; } ov.remove(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+
+  const devsEl = ov.querySelector('#pnDevs'), protoEl = ov.querySelector('#pnProto'), vEl = ov.querySelector('#pnVendor');
+  const allEl = ov.querySelector('#pnAll');
+  const pnCred = bindCredPicker(ov, 'pn');
+  hydrateCredPickers(ov);
+  const progEl = ov.querySelector('#pnProg'), resEl = ov.querySelector('#pnRes'), filterEl = ov.querySelector('#pnFilter');
+  const goBtn = ov.querySelector('#pnGo'), stopBtn = ov.querySelector('#pnStop'), csvBtn = ov.querySelector('#pnCsv');
+  const viewBtn = ov.querySelector('#pnView'), clearViewBtn = ov.querySelector('#pnClearView'), recBtn = ov.querySelector('#pnRecord');
+  devsEl.innerHTML = cands.map((c, i) => {
+    const mark = c.cred ? '<span style="color:var(--ok,#22c55e)" title="使用监控配置里保存的凭据">●</span>' : '<span style="color:#f59e0b" title="无保存凭据，将使用备用账号">●</span>';
+    return `<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" data-idx="${i}" checked/> ${mark} ${U.escHtml(c.node.name)}<span style="opacity:.6">（${U.escHtml(c.host)}）</span></label>`;
+  }).join('');
+  allEl.onchange = () => devsEl.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = allEl.checked; });
+  let proto = null, running = false, stopFlag = false;
+
+  const renderProto = () => {
+    if (!proto) return;
+    const st = proto.stats;
+    const chip = (label, n, color) => `<span style="display:inline-block;margin-right:12px;color:${color || 'inherit'}"><b>${label}</b> ${n}</span>`;
+    const head = '<div style="margin:0 0 6px">' + chip('邻接会话', st.sessions)
+      + chip('状态正常', st.ok, 'var(--ok,#22c55e)') + chip('状态异常', st.bad, st.bad ? 'var(--danger)' : 'inherit')
+      + chip('覆盖连线', st.onLinks) + chip('拓扑外邻居', st.unmatched, st.unmatched ? '#f59e0b' : 'inherit')
+      + chip('规划外邻接', st.unplanned, st.unplanned ? '#f59e0b' : 'inherit') + '</div>';
+    const kw = (filterEl.value || '').trim().toLowerCase();
+    const keep = (s) => !kw || String(s).toLowerCase().includes(kw);
+    const adjRows = proto.adj.filter(a => keep([a.devName, a.peer, a.peerId, a.state, a.ifn, a.peerDevName, a.protocol].join(' '))).map(a => '<tr>'
+      + '<td>' + (a.protocol === 'bgp' ? 'BGP' : 'OSPF') + '</td>'
+      + '<td>' + U.escHtml(a.devName) + '</td>'
+      + '<td><code>' + U.escHtml(a.peer || a.peerId || '—') + '</code></td>'
+      + '<td>' + U.escHtml(a.as ? 'AS' + a.as : '—') + '</td>'
+      + '<td>' + (a.stateOk ? '<span style="color:var(--ok,#22c55e)">' + U.escHtml(a.state || '?') + '</span>' : '<b style="color:var(--danger)">' + U.escHtml(a.state || '未知') + '</b>') + '</td>'
+      + '<td><code style="font-size:11.5px">' + U.escHtml(a.ifn || '—') + '</code></td>'
+      + '<td>' + U.escHtml(a.peerDevName || '（未匹配）') + (a.matchedBy ? '<span style="opacity:.55"> · ' + U.escHtml({ ip: '地址', id: 'Router ID', iface: '接口' }[a.matchedBy] || a.matchedBy) + '</span>' : '') + '</td>'
+      + '<td>' + (a.linkId ? '<span style="color:var(--ok,#22c55e)">✓ 已标记</span>' : '<span style="opacity:.6">—</span>') + '</td></tr>').join('');
+    const anomRows = proto.anomalies.filter(a => keep([a.devName, a.peer, a.detail].join(' '))).map(a => '<tr>'
+      + '<td>' + ({ state: '<b style="color:var(--danger)">邻居异常</b>', unmatched: '<b style="color:#f59e0b">拓扑外邻居</b>', unplanned: '<b style="color:#f59e0b">规划外邻接</b>' }[a.kind] || a.kind) + '</td>'
+      + '<td>' + U.escHtml(a.devName) + '</td><td><code>' + U.escHtml(a.peer || '—') + '</code></td>'
+      + '<td>' + (a.protocol === 'bgp' ? 'BGP' : 'OSPF') + '</td><td style="font-size:12px">' + U.escHtml(a.detail) + '</td></tr>').join('');
+    resEl.innerHTML = head
+      + '<table class="nb-table" id="pnAdjTable"><tr><th>协议</th><th>本端设备</th><th>邻居</th><th>AS</th><th>状态</th><th>接口</th><th>匹配到</th><th>画布</th></tr>' + adjRows + '</table>'
+      + '<b style="font-size:12.5px;display:block;margin-top:8px">异常清单（' + proto.anomalies.length + '）</b>'
+      + (proto.anomalies.length
+        ? '<table class="nb-table" id="pnAnomTable"><tr><th style="width:92px">类型</th><th>本端设备</th><th>邻居</th><th>协议</th><th>说明</th></tr>' + anomRows + '</table>'
+        : '<div class="bk-empty">没有异常：所有已采集的邻接都建立且都能匹配到拓扑链路。</div>');
+    csvBtn.disabled = !proto.adj.length;
+    viewBtn.disabled = !proto.linkIds.length;
+    clearViewBtn.disabled = !proto.linkIds.length;
+    recBtn.disabled = !proto.anomalies.length;
+  };
+  filterEl.addEventListener('input', renderProto);
+
+  goBtn.onclick = async () => {
+    const chosen = [...devsEl.querySelectorAll('input[type=checkbox]')].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
+    if (!chosen.length) { toast('请勾选至少一台设备'); return; }
+    const mode = protoEl.value;
+    const protos = mode === 'both' ? ['ospf', 'bgp'] : [mode];
+    const vendor = vEl.value;
+    // 一条会话内跑完所选协议的命令（去重关分页命令；runOneShot 上限 16 条）
+    const cmds = [];
+    for (const p of protos) for (const c of (U.PROTO_PRESETS[p][vendor] || U.PROTO_PRESETS[p].auto)) if (cmds.indexOf(c) < 0) cmds.push(c);
+    const fbPatch = pnCred.any() ? pnCred.patch() : null;
+    running = true; stopFlag = false;
+    goBtn.disabled = true; stopBtn.disabled = false; csvBtn.disabled = true; viewBtn.disabled = true; clearViewBtn.disabled = true; recBtn.disabled = true;
+    proto = null;
+    const obs = [];
+    const errs = [];
+    let done = 0;
+    const CONC = 2;
+    resEl.innerHTML = '<div class="bk-empty">采集中：' + chosen.length + ' 台设备（并发 ' + CONC + '）…</div>';
+    for (let i = 0; i < chosen.length; i += CONC) {
+      if (stopFlag) break;
+      await Promise.all(chosen.slice(i, i + CONC).map(async (c) => {
+        const host = c.cred ? c.cred.host : c.host;
+        if (!host) return;
+        const proto2 = c.cred ? c.cred.protocol : c.protocol;
+        const port = c.cred && c.cred.port ? c.cred.port : (proto2 === 'telnet' ? 23 : 22);
+        try {
+          const p = {
+            host, commands: cmds.slice(0, 16), waitMs: 800, cmdTimeoutMs: 8000
+          };
+          if (c.cred) {
+            p.protocol = proto2; p.port = port;
+            p.username = c.cred.username; p.password = c.cred.password;
+            p.privateKey = c.cred.authMode === 'key' ? c.cred.privateKey : '';
+            p.keyPassphrase = c.cred.keyPass || '';
+          } else if (fbPatch) {
+            Object.assign(p, fbPatch);
+          } else return;
+          p.expectFp = trustedFpOf(host, p.port || port);
+          const r = await window.topoShell.runOneShot(p);
+          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || port, r.fingerprint.fp);
+          for (const p of protos) {
+            let best = null;
+            for (const o of (r.outputs || [])) {
+              const parsed = U.parseProtoNeighbors(o && o.text, p);
+              if (parsed.ok && parsed.entries.length && (!best || parsed.entries.length > best.entries.length)) best = parsed;
+            }
+            if (best) obs.push({ devId: c.node.id, devName: String(c.node.name || c.node.id), protocol: p, entries: best.entries, host });
+            else if (!r.ok) errs.push(c.node.name + '：' + (r.error || '连接失败'));
+          }
+        } catch (e) { errs.push(c.node.name + '：' + String((e && e.message) || e)); }
+        done++;
+        progEl.textContent = '采集进度 ' + done + ' / ' + chosen.length + ' 台…';
+      }));
+    }
+    proto = U.buildProtoTopology(state.nodes, state.links, obs);
+    proto.hosts = obs.reduce((m, o) => { m[o.devId] = o.host || m[o.devId] || ''; return m; }, {});
+    running = false; stopFlag = false;
+    goBtn.disabled = false; stopBtn.disabled = true;
+    const st = proto.stats;
+    progEl.innerHTML = '采集完成：' + obs.length + ' 组协议输出 · 邻接 ' + st.sessions + ' 条（正常 ' + st.ok + ' / 异常 ' + st.bad + '）· 覆盖连线 ' + st.onLinks + ' 条'
+      + (st.unmatched ? ' · <b style="color:#f59e0b">拓扑外邻居 ' + st.unmatched + '</b>' : '')
+      + (st.unplanned ? ' · <b style="color:#f59e0b">规划外邻接 ' + st.unplanned + '</b>' : '')
+      + (errs.length ? ' · <span style="color:var(--danger)">失败 ' + errs.length + ' 台（' + U.escHtml(errs.slice(0, 3).join('；')) + '）</span>' : '');
+    renderProto();
+    if (st.onLinks) { window.__protoView.set(proto); toast('已按协议视图高亮 ' + st.onLinks + ' 条连线（徽标显示邻接状态）'); }
+  };
+  stopBtn.onclick = () => { stopFlag = true; toast('已请求停止'); };
+  viewBtn.onclick = () => { if (proto) { window.__protoView.set(proto); toast('已高亮 ' + proto.linkIds.length + ' 条连线'); } };
+  clearViewBtn.onclick = () => { window.__protoView.clear(); toast('已清除协议视图叠加'); };
+  recBtn.onclick = async () => {
+    if (!proto) { toast('还没有采集结果'); return; }
+    if (!(window.topoProto && window.topoProto.record)) { toast('记入事件时间线需要桌面版（Electron）环境'); return; }
+    const items = proto.anomalies.map(a => ({
+      deviceId: a.devId, device: a.devName, host: (proto.hosts && proto.hosts[a.devId]) || '', detail: a.detail
+    }));
+    if (!items.length) { toast('没有异常可记录'); return; }
+    try {
+      const r = await window.topoProto.record({ items });
+      toast(r && r.ok ? ('已记入事件时间线 ' + r.recorded + ' 条（监控 ▾ 监控中心 → 事件时间线）') : ('记录失败：' + ((r && r.error) || '未知')));
+    } catch (e) { toast('记录失败：' + String((e && e.message) || e)); }
+  };
+  csvBtn.onclick = () => {
+    if (!proto) { toast('还没有采集结果'); return; }
+    const rows = [['类型', '协议', '本端设备', '邻居', 'Router ID', 'AS', '状态', '接口', '匹配到设备', '匹配依据', '画布连线', '说明']];
+    for (const a of proto.adj) {
+      rows.push(['邻接', a.protocol === 'bgp' ? 'BGP' : 'OSPF', a.devName, a.peer, a.peerId, a.as, a.state, a.ifn, a.peerDevName, a.matchedBy, a.linkId, a.stateOk ? '正常' : '异常']);
+    }
+    for (const a of proto.anomalies) rows.push(['异常', a.protocol === 'bgp' ? 'BGP' : 'OSPF', a.devName, a.peer, '', '', a.kind, '', '', '', '', a.detail]);
+    U.download('三层邻居_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出 CSV（邻接 ' + proto.adj.length + ' 条 / 异常 ' + proto.anomalies.length + ' 条）');
+  };
+  setTimeout(() => { if (document.body.contains(ov)) goBtn.focus(); }, 200);
 }
 
 /* ================= IP 地址管理（地址清单 / 网段汇总 / 冲突检测） =================
@@ -645,6 +2009,7 @@ function openIpam() {
       </div>
       <div id="ipamBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"></div>
       <div class="m-actions">
+        <button type="button" class="tb" data-act="audit">实网核对（存活扫描 + ARP/MAC 比对）…</button>
         <button type="button" class="tb" data-act="csv">导出 CSV</button>
         <span style="flex:1"></span>
         <button type="button" class="tb primary" data-act="close">关闭</button>
@@ -699,7 +2064,228 @@ function openIpam() {
     toast('已导出 IP 地址管理 CSV');
   };
   const conflictMapOf = (d) => new Map(d.conflicts.map(c => [c.ip, c]));
+  ov.querySelector('[data-act=audit]').onclick = () => openIpamAudit(data);
   render();
+}
+
+/* ================= IPAM 实网核对（规划清单 × 存活扫描 × 设备 ARP/MAC 表） =================
+ * 三块既有能力在这里打通：
+ *   ① 规划清单（U.buildIpamData：管理口 + 接口 IP，含跨设备冲突）
+ *   ② 实网存活（诊断工具箱的网段 ICMP 扫描 + 本机 ARP 的 MAC）
+ *   ③ 设备侧事实（MAC/ARP 定位那套并发采集：ARP 表给出 IP→MAC，MAC 表给出 MAC→端口）
+ * 比对结论：私接嫌疑（某登记 IP 的 MAC 出现在非登记设备端口）/ 规划冲突 / 未登记在用（黑户）/
+ * 登记未在线 / 登记在用；按网段给出容量与命中统计。纯本地：扫描从本机发出、采集只读。 */
+function openIpamAudit(data) {
+  if (!(window.topoDiag && window.topoDiag.subnetScan)) { toast('实网核对需要桌面版（Electron）环境'); return; }
+  const subnets = (data && data.subnets) || [];
+  if (!subnets.length) { toast('当前没有可核对的网段'); return; }
+  const cands = deployTargetsOf();
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1080px;height:86vh;display:flex;flex-direction:column">
+      <h3>IPAM 实网核对</h3>
+      <div class="m-sub">把<b>规划清单</b>与实网事实比对：从本机做<b>网段存活扫描</b>（ICMP + 本机 ARP 的 MAC），并可并发登录设备采集 <b>ARP / MAC 地址表</b>（只读命令）。结论分五类：<b style="color:var(--danger)">私接嫌疑</b>（某登记 IP 的 MAC 出现在非登记设备的端口上）、<b style="color:var(--danger)">规划冲突</b>、<b style="color:#f59e0b">未登记在用</b>（黑户）、<b style="color:#f59e0b">登记未在线</b>、登记在用。</div>
+      <div style="display:flex;gap:10px">
+        <div style="flex:1;min-width:0">
+          <div class="m-sub" style="margin:0 0 2px">核对网段（<span id="iaPick"></span>）</div>
+          <div id="iaSubnets" style="max-height:104px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px"></div>
+        </div>
+        <div style="flex:1.1;min-width:0">
+          <div class="m-sub" style="margin:0 0 2px">采集选项</div>
+          <div style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-direction:column;gap:3px;height:104px;box-sizing:border-box;overflow:auto">
+            <label style="display:flex;align-items:center;gap:5px"><input id="iaScan" type="checkbox" checked/>本机存活扫描（ICMP）</label>
+            <label style="display:flex;align-items:center;gap:5px" title="对本机 ARP 表中的存活主机取 MAC；也是「私接」判据在无设备凭据时的退路"><input id="iaMac" type="checkbox" checked/>取本机 ARP 的 MAC</label>
+            <label style="display:flex;align-items:center;gap:5px" title="对存活主机做 PTR 反查（较慢）"><input id="iaPtr" type="checkbox"/>PTR 反查主机名</label>
+            <label style="display:flex;align-items:center;gap:5px" title="并发登录设备采集 ARP/MAC 地址表（只读命令）：ARP 给出 IP→MAC，MAC 表给出 MAC→接入端口，二者串起来才能定位私接端口"><input id="iaDev" type="checkbox" checked/>设备侧 ARP/MAC 采集</label>
+          </div>
+        </div>
+        <div style="flex:0.9;min-width:0">
+          <div class="m-sub" style="margin:0 0 2px">设备采集凭据（优先取各设备监控配置，其次下方凭据库档案 / 手填账号）</div>
+          <div style="border:1px solid var(--border);border-radius:8px;padding:6px 10px;height:128px;box-sizing:border-box;font-size:12.5px;display:flex;flex-direction:column;gap:4px;overflow:auto">
+            <div style="display:flex;gap:6px;align-items:center"><label style="width:44px">厂家</label>
+              <select id="iaVendor" style="flex:1"><option value="auto">自动尝试</option><option value="huawei">华为 VRP</option><option value="h3c">H3C Comware</option><option value="cisco">思科 IOS</option><option value="linux">Linux</option></select>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center"><label style="width:44px">凭据库</label><select id="iaCred" style="flex:1">${credOptionsHtml(credCache || [])}</select></div>
+            <div style="display:flex;gap:6px;align-items:center" data-cred-manual="ia"><label style="width:44px">账号</label><input id="iaUser" type="text" style="flex:1" value="admin" spellcheck="false" autocomplete="off"/></div>
+            <div style="display:flex;gap:6px;align-items:center" data-cred-manual="ia"><label style="width:44px">密码</label><input id="iaPass" type="password" style="flex:1" autocomplete="new-password"/></div>
+          </div>
+        </div>
+      </div>
+      <div id="iaProg" class="m-sub" style="margin:6px 0 2px;min-height:18px">待开始。</div>
+      <div id="iaRes" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px;min-height:140px"><div class="bk-empty">点「开始核对」后，比对结果按结论分类汇总在这里。</div></div>
+      <div class="m-actions">
+        <input id="iaFilter" type="text" placeholder="筛选：IP / 状态 / 网段 / 设备…" style="flex:1"/>
+        <button type="button" class="tb" id="iaCsv" disabled>导出核对 CSV</button>
+        <button type="button" class="tb" id="iaStop" disabled>停止</button>
+        <button type="button" class="tb primary" id="iaGo">开始核对</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  let busy = false;
+  const close = () => { if (busy) { toast('核对进行中：请先点「停止」'); return; } ov.remove(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+
+  const subsEl = ov.querySelector('#iaSubnets'), pickEl = ov.querySelector('#iaPick');
+  const scanEl = ov.querySelector('#iaScan'), macEl = ov.querySelector('#iaMac'), ptrEl = ov.querySelector('#iaPtr'), devEl = ov.querySelector('#iaDev');
+  const vEl = ov.querySelector('#iaVendor'), userEl = ov.querySelector('#iaUser'), passEl = ov.querySelector('#iaPass');
+  const iaCred = bindCredPicker(ov, 'ia');
+  hydrateCredPickers(ov);
+  const progEl = ov.querySelector('#iaProg'), resEl = ov.querySelector('#iaRes'), filterEl = ov.querySelector('#iaFilter');
+  const goBtn = ov.querySelector('#iaGo'), stopBtn = ov.querySelector('#iaStop'), csvBtn = ov.querySelector('#iaCsv');
+  subsEl.innerHTML = subnets.map((s, i) => `<label style="display:block"><input type="checkbox" data-idx="${i}" checked/> <code>${U.escHtml(s.network)}/${s.bits}</code> · 已用 ${s.used}/${s.usable} · ${s.deviceCount} 台</label>`).join('');
+  const selSubnets = () => {
+    const out = [];
+    subsEl.querySelectorAll('input[type=checkbox]').forEach(cb => { if (cb.checked) out.push(subnets[+cb.dataset.idx]); });
+    return out;
+  };
+  const syncPick = () => { pickEl.textContent = '已选 ' + selSubnets().length + ' / ' + subnets.length + ' 个'; };
+  subsEl.addEventListener('change', syncPick);
+  syncPick();
+  let audit = null, running = false, stopFlag = false;
+
+  const ST = U.IPAM_AUDIT_STATUS;
+  const renderAudit = () => {
+    if (!audit) return;
+    const s = audit.summary;
+    const chip = (k, n) => `<span style="display:inline-block;margin-right:10px;color:${(ST[k] || {}).color || 'inherit'}"><b>${(ST[k] || {}).label || k}</b> ${n}</span>`;
+    const head = '<div class="m-sub" style="margin:0 0 4px">规划 <b>' + s.planned + '</b> 个地址 · 实测观测 <b>' + s.observed + '</b> 个'
+      + (s.unplannedSubnet ? ' · <b style="color:#f59e0b">' + s.unplannedSubnet + ' 个黑户落在规划网段之外</b>' : '')
+      + ' · 网段空闲合计 ' + s.free + '</div>'
+      + '<div style="margin:0 0 6px">' + chip('hijack', s.hijack) + chip('conflict', s.conflict) + chip('intruder', s.intruder) + chip('missing', s.missing) + chip('ok', s.ok) + (s.plannedOnly ? chip('planned', s.plannedOnly) : '') + '</div>';
+    const subRows = audit.subnetAudit.map(x => '<tr><td><code>' + U.escHtml(x.network) + '/' + x.bits + '</code></td><td>' + x.used + '/' + x.usable + '</td>'
+      + '<td>' + x.free + '</td><td>' + x.ok + '</td><td>' + (x.hijack ? '<b style="color:var(--danger)">' + x.hijack + '</b>' : '0') + '</td>'
+      + '<td>' + (x.intruder ? '<b style="color:#f59e0b">' + x.intruder + '</b>' : '0') + '</td><td>' + x.missing + '</td><td>' + x.conflict + '</td></tr>').join('');
+    const kw = (filterEl.value || '').trim().toLowerCase();
+    const rows = audit.rows.filter(r => {
+      if (!kw) return true;
+      return (r.ip + ' ' + r.status + ' ' + (ST[r.status] || {}).label + ' ' + r.network + ' ' + (r.plannedBy || []).join(' ') + ' ' + (r.note || '')).toLowerCase().includes(kw);
+    }).slice(0, 800);
+    const rowHtml = rows.map(r => {
+      const st = ST[r.status] || { label: r.status, color: 'inherit' };
+      const node = (r.plannedBy || []).map(nm => state.nodes.find(n => String(n.name) === String(nm))).filter(Boolean)[0];
+      return '<tr>'
+        + '<td><code>' + U.escHtml(r.ip) + '</code></td>'
+        + '<td style="color:' + st.color + '"><b>' + U.escHtml(st.label) + '</b></td>'
+        + '<td><code style="font-size:11.5px">' + U.escHtml(r.network) + '/' + r.bits + '</code></td>'
+        + '<td>' + U.escHtml((r.plannedBy || []).join('、') || '—') + '</td>'
+        + '<td style="font-size:11.5px">' + U.escHtml((r.macs || []).join(' ') || '—') + '</td>'
+        + '<td style="font-size:11.5px">' + U.escHtml((r.observedOn || []).map(x => x.devName + (x.ifn ? '/' + x.ifn : '') + (x.vlan ? '(V' + x.vlan + ')' : '')).join('、') || '—') + '</td>'
+        + '<td style="font-size:11.5px">' + U.escHtml(r.note || '') + '</td>'
+        + '<td>' + (node ? '<button type="button" class="tb nsv-mini-btn" data-loc="' + U.escHtml(node.id) + '">定位</button>' : '') + '</td></tr>';
+    }).join('');
+    resEl.innerHTML = head
+      + '<table class="nb-table" id="iaSubTable"><tr><th>网段</th><th>已用/容量</th><th>空闲</th><th>登记在用</th><th>私接</th><th>黑户</th><th>未在线</th><th>冲突</th></tr>' + subRows + '</table>'
+      + '<table class="nb-table" id="iaRowTable" style="margin-top:8px"><tr><th>IP</th><th>结论</th><th>网段</th><th>登记设备</th><th>MAC</th><th>观测点（设备/接口）</th><th>说明</th><th></th></tr>' + rowHtml + '</table>'
+      + (audit.rows.length > rows.length ? '<div class="bk-empty">（仅显示前 800 行，共 ' + audit.rows.length + ' 行；可用筛选缩小范围）</div>' : '');
+    resEl.querySelectorAll('button[data-loc]').forEach(b => { b.onclick = () => { select('node', b.dataset.loc); centerOn('node', b.dataset.loc); }; });
+  };
+  filterEl.addEventListener('input', renderAudit);
+
+  goBtn.onclick = async () => {
+    const picked = selSubnets();
+    if (!picked.length) { toast('请至少勾选一个核对网段'); return; }
+    const doScan = scanEl.checked, doDev = devEl.checked;
+    if (!doScan && !doDev) { toast('至少选择一种采集方式（本机扫描 / 设备侧 ARP·MAC）'); return; }
+    const deviceCands = devEl.checked ? cands : [];
+    running = true; stopFlag = false;
+    goBtn.disabled = true; stopBtn.disabled = false; csvBtn.disabled = true;
+    audit = null;
+    const alive = [];
+    const ipMac = [];
+    const log = [];
+    const targets = picked.map(s => s.network + '/' + s.bits).join('\n');
+    try {
+      // ① 本机存活扫描（ICMP + 本机 ARP 的 MAC）
+      if (doScan) {
+        progEl.textContent = '本机存活扫描中（' + picked.length + ' 个网段，最多 4096 个地址）…';
+        const r = await window.topoDiag.subnetScan({ targets, resolvePtr: ptrEl.checked });
+        if (r && r.ok !== false && Array.isArray(r.alive)) {
+          const macOn = macEl.checked;
+          for (const a of r.alive) alive.push({ ip: a.ip, mac: macOn ? (a.mac || '') : '', ptr: a.ptr || '' });
+          log.push('本机扫描：存活 ' + r.alive.length + '，未响应 ' + (r.dead || 0) + (macEl.checked ? '' : '（未取 MAC）'));
+        } else {
+          log.push('本机扫描失败：' + ((r && r.error) || '未知错误'));
+        }
+      }
+      // ② 设备侧 ARP / MAC 表采集（只读；ARP 给 IP→MAC，MAC 表给 MAC→端口）
+      if (doDev && !stopFlag) {
+        const cmds = MAC_TRACE_CMDS[vEl.value] || MAC_TRACE_CMDS.auto;
+        const fbPatch = iaCred.any() ? iaCred.patch() : null;
+        let done = 0;
+        const collected = [];
+        const CONC = 2;
+        for (let i = 0; i < deviceCands.length; i += CONC) {
+          if (stopFlag) break;
+          await Promise.all(deviceCands.slice(i, i + CONC).map(async (c) => {
+            const host = c.cred ? c.cred.host : c.host;
+            if (!host) return;
+            const proto = c.cred ? c.cred.protocol : c.protocol;
+            const port = c.cred && c.cred.port ? c.cred.port : (proto === 'telnet' ? 23 : 22);
+            if (!c.cred && !fbPatch) return;
+            try {
+              const p = { host, commands: cmds, waitMs: 800, cmdTimeoutMs: 8000 };
+              if (c.cred) {
+                p.protocol = proto; p.port = port;
+                p.username = c.cred.username; p.password = c.cred.password;
+                p.privateKey = c.cred.authMode === 'key' ? c.cred.privateKey : '';
+                p.keyPassphrase = c.cred.keyPass || '';
+              } else {
+                Object.assign(p, fbPatch);
+              }
+              p.expectFp = trustedFpOf(host, p.port || port);
+              const r = await window.topoShell.runOneShot(p);
+              if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || port, r.fingerprint.fp);
+              const arp = [], mac = [];
+              for (const o of (r.outputs || [])) {
+                const p = U.parseArpMacTables(o && o.text);
+                for (const x of p.arp) arp.push(x);
+                for (const x of p.mac) mac.push(x);
+              }
+              if (arp.length || mac.length) {
+                collected.push({ devId: c.node.id, devName: String(c.node.name || c.node.id), arp, mac });
+              }
+            } catch (e) { /* 单台失败不影响整体核对 */ }
+            done++;
+            progEl.textContent = '设备采集：' + done + ' / ' + deviceCands.length + ' 台（已采到 ' + collected.length + ' 台有 ARP/MAC 记录）…';
+          }));
+        }
+        const rs = U.resolveIpMacObservations(collected);
+        for (const x of rs.ipMac) ipMac.push(x);
+        log.push('设备采集：' + collected.length + '/' + deviceCands.length + ' 台有记录，ARP/MAC 观测点 ' + rs.ipMac.length + ' 条'
+          + (rs.orphanMac ? '（' + rs.orphanMac + ' 条纯二层 MAC 无 IP 佐证，未参与比对）' : ''));
+      }
+      audit = U.buildIpamAudit(data, { alive, ipMac, scanned: doScan });
+      csvBtn.disabled = false;
+      progEl.innerHTML = '核对完成。' + U.escHtml(log.join('；'));
+    } catch (e) {
+      progEl.innerHTML = '<span style="color:var(--danger)">核对异常：' + U.escHtml(String((e && e.message) || e)) + '</span>';
+    }
+    running = false; stopFlag = false;
+    goBtn.disabled = false; stopBtn.disabled = true;
+    renderAudit();
+  };
+  stopBtn.onclick = () => { stopFlag = true; toast('已请求停止'); };
+  csvBtn.onclick = () => {
+    if (!audit) { toast('还没有核对结果'); return; }
+    const rows = [['IP', '结论', '网段', '掩码位', '登记设备', 'MAC', '观测点', '说明']];
+    for (const r of audit.rows) {
+      rows.push([r.ip, (ST[r.status] || {}).label || r.status, r.network, '/' + r.bits,
+        (r.plannedBy || []).join('、'), (r.macs || []).join(' '),
+        (r.observedOn || []).map(x => x.devName + (x.ifn ? '/' + x.ifn : '')).join('、'), r.note || '']);
+    }
+    rows.push([]);
+    rows.push(['网段', '已用', '容量', '空闲', '登记在用', '私接', '黑户', '未在线', '冲突']);
+    for (const x of audit.subnetAudit) rows.push([x.network + '/' + x.bits, String(x.used), String(x.usable), String(x.free), String(x.ok), String(x.hijack), String(x.intruder), String(x.missing), String(x.conflict)]);
+    U.download('IPAM实网核对_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出核对结果 CSV（' + audit.rows.length + ' 行）');
+  };
+  setTimeout(() => { if (document.body.contains(ov)) goBtn.focus(); }, 200);
 }
 
 /* ================= 接口总表（全部链路两端接口集中编辑） =================
@@ -805,11 +2391,13 @@ function openIfTable() {
         if (v) { if (!l[side + 'VlanMode']) l[side + 'VlanMode'] = 'access'; }
         else l[side + 'VlanMode'] = '';
       }
+      if (e.ip !== undefined) l[side + 'Ip'] = String(e.ip).trim();
       if (e.l2 !== undefined) {
         l[side + 'L2'] = !!e.l2;
-        if (e.l2 && e.ip === undefined) l[side + 'Ip'] = ''; // 勾二层清空 IP（与连线弹窗一致）
+        // 勾二层无条件清空 IP（写入顺序在 ip 之后）：同一行既勾二层又改 IP 时不得产出
+        // 「二层接口却带 IP」的矛盾数据（与连线弹窗的「勾二层禁用 IP 输入」同口径）
+        if (e.l2) l[side + 'Ip'] = '';
       }
-      if (e.ip !== undefined) l[side + 'Ip'] = String(e.ip).trim();
       if (e.agg !== undefined) l.agg = String(e.agg).trim().slice(0, 32);
       applied++;
     }
@@ -1004,13 +2592,19 @@ function openPathAnalysis() {
       if (!path) { toast(state.downLinks.size ? '两台设备之间不可达（可能因故障链路导致）' : '两台设备之间不可达'); return; }
       renderer.highlightPath(path.nodeIds, path.linkIds);
       const names = path.nodeIds.map(id => { const n = state.nodes.find(x => x.id === id); return n ? n.name : id; });
-      const ifText = path.linkIds.map((lid, i) => {
-        const l = state.links.find(x => x.id === lid);
-        if (!l) return '';
-        const dir = (l.a === path.nodeIds[i] && l.b === path.nodeIds[i + 1]) || (l.a === path.nodeIds[i + 1] && l.b === path.nodeIds[i]);
-        return dir ? `（${l.aIf || '—'} / ${l.bIf || '—'}）` : '';
-      });
-      const steps = names.map((nm, i) => (i ? ifText[i - 1] + nm : nm)).join(' → ');
+      // 逐跳查找链路而非按下标对应：bestPath 会把聚合组的多条成员链路展开为连续 lid，
+      // linkIds 可能长于 nodeIds-1，按 ifText[i-1] 取值会整体错位导致接口标注丢失
+      let steps = names[0];
+      for (let i = 0; i + 1 < path.nodeIds.length; i++) {
+        const a = path.nodeIds[i], b2 = path.nodeIds[i + 1];
+        const hopLinks = path.linkIds
+          .map(lid => state.links.find(x => x.id === lid))
+          .filter(l => l && ((l.a === a && l.b === b2) || (l.a === b2 && l.b === a)));
+        const ift = hopLinks
+          .map(l => `（${(l.a === a ? l.aIf : l.bIf) || '—'} / ${(l.a === a ? l.bIf : l.aIf) || '—'}）`)
+          .join('');
+        steps += ' → ' + ift + names[i + 1];
+      }
       const bottleneck = Number.isFinite(path.bottleneck) ? U.formatBw(path.bottleneck) : '';
       showPathResult(names.length - 1, steps, bottleneck);
     }
@@ -1645,7 +3239,7 @@ function openIpPlan() {
     if (merges.length) ws['!merges'] = merges;
     // 列宽自适应
     const keys = Object.keys(rows[0] || {});
-    ws['!cols'] = keys.map(k => ({ wch: Math.min(30, Math.max(8, ...rows.map(r => String(r[k] == null ? '' : r[k]).length)) + 2) }));
+    ws['!cols'] = keys.map(k => ({ wch: Math.min(30, Math.max(8, U.spreadMinMax(rows.map(r => String(r[k] == null ? '' : r[k]).length))[1]) + 2) }));
     window.XLSX.utils.book_append_sheet(wb, ws, 'IP规划');
     window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(subnets.map(s => ({ 网段: s.cidr, 设备数: s.devices.length, 设备: s.devices.join(', ') }))), '子网统计');
     const buf = window.XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
@@ -1900,6 +3494,7 @@ function openProjectDiff() {
     if (!f) return;
     try {
       const { buffer } = await U.readFile(f);
+      if (!assertProjectSize(f, buffer)) return; // 与「打开工程」同一上限：防同步解析冻结渲染线程
       const data = await parseProjectText(U.decodeBytes(buffer), '对比的工程已加密，请输入口令');
       if (!data) return;
       if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) { toast('对比文件不是有效的 .nettopo 工程'); return; }
@@ -2057,11 +3652,13 @@ function setupAutoBackup() {
   setupAutoBackup._last = '';
   setupAutoBackup._timer = setInterval(async () => {
     if (!state.nodes.length) return;
-    const data = await buildProjectData();
-    // 变化检测须覆盖区域与其他图纸页：只改区域/他页内容时同样要产生自动备份
+    // 变化检测须覆盖区域与其他图纸页：只改区域/他页内容时同样要产生自动备份。
+    // 先算哈希再做工程数据：空闲 tick（工程无变化）跳过 buildProjectData 的整库克隆+序列化
     const hash = JSON.stringify([state.nodes, state.links, state.texts, state.regions || [], state.downLinks ? [...state.downLinks] : [], U.clone(state.sheets)]);
     if (hash === setupAutoBackup._last) return;
-    setupAutoBackup._last = hash;
+    const data = await buildProjectData();
+    // 建数据过程会把当前页 stash 进 sheets：基线对齐到 stash 后的状态，避免下一 tick 误判再备一份
+    setupAutoBackup._last = JSON.stringify([state.nodes, state.links, state.texts, state.regions || [], state.downLinks ? [...state.downLinks] : [], U.clone(state.sheets)]);
     if (window.topoBackup) {
       // 桌面版：写入本机备份库（备份管理可浏览/恢复）
       window.topoBackup.save({ content: JSON.stringify(data, null, 2), label: 'auto', keep: state.autoBackup.keep }).then((res) => {
@@ -2109,6 +3706,7 @@ function switchSheet(idx, opts) {
   state.sheetIdx = idx;
   state.nodes = s.nodes || []; state.links = s.links || []; state.texts = s.texts || [];
   state.regions = s.regions || [];
+  state.underlay = U.sanitizeUnderlay(s.underlay);
   state.sel = { kind: null, id: null };
   if (!opts.keepUndo) { state.undoStack = []; state.redoStack = []; }
   renderer.orthoLinks = state.orthoLinks;
@@ -2132,7 +3730,7 @@ function addSheet() {
   } else {
     sheetStash();
   }
-  state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 ' + (state.sheets.length + 1), nodes: [], links: [], texts: [], regions: [], pan: null, zoom: null });
+  state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 ' + (state.sheets.length + 1), nodes: [], links: [], underlay: null, texts: [], regions: [], pan: null, zoom: null });
   switchSheet(state.sheets.length - 1);
   toast('已新建图纸页（' + (state.sheets.length) + ' 页）');
 }
@@ -2233,10 +3831,48 @@ async function exportInventory() {
   }
 }
 
-function exportVisio() {
+/** 交互式拓扑 HTML：自包含单文件（内嵌 SVG + 点击看详情 + 监控状态点），发给同事离线可看 */
+function exportInteractiveHtml() {
+  if (!state.nodes.length) { toast('画布为空，请先添加设备'); return; }
+  const html = U.buildInteractiveHtml({
+    nodes: state.nodes, links: state.links, regions: state.regions,
+    monitorStatus: state.monitorStatus || {},
+    title: (state.projectName ? state.projectName + ' · ' : '') + '网络拓扑图',
+    appVersion: U.APP_VERSION
+  });
+  U.download('网络拓扑图_' + U.fmtDate() + '.html', new Blob([html], { type: 'text/html;charset=utf-8' }));
+  toast('已导出交互式拓扑 HTML（' + state.nodes.length + ' 台设备、' + state.links.length + ' 条链路；浏览器打开即可点击查看详情，无需安装软件）');
+}
+async function exportVisio() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
+  // 图标光栅化：VSDX 的 Foreign 图片形状仅接受位图
+  //  - 上传的 SVG dataURL：直接光栅化
+  //  - 内置图标 key（router/switch…）：U.ICONS[key] 是 24×24 的 currentColor 描边 SVG，
+  //    buildVSDX 是纯同步函数没有 canvas，无法自行光栅化——必须在这里包成带尺寸与颜色的
+  //    SVG dataURL 再转 PNG（否则内置图标在 Visio 导出中恒丢失：画布优先级是 n.icon > 类型图）
+  const iconSvgUrl = (key) => {
+    const raw = (U.ICONS && U.ICONS[key]) || '';
+    if (!raw) return '';
+    // currentColor 在独立 SVG 文档里没有继承源，必须显式给色，否则描边透明（导出空白图标）
+    const colored = raw.replace(/currentColor/g, '#1e293b');
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(colored.replace('<svg ', '<svg width="48" height="48" '));
+  };
+  const nodes = await Promise.all(state.nodes.map(async (n) => {
+    if (!n.icon) return n;
+    if (/^data:image\/svg/i.test(n.icon)) {
+      const png = await U.svgDataUrlToPng(n.icon);
+      return png ? Object.assign({}, n, { icon: png }) : Object.assign({}, n, { icon: '' });
+    }
+    if (U.NODE_ICON_KEYS && U.NODE_ICON_KEYS.includes(n.icon)) {
+      const png = await U.svgDataUrlToPng(iconSvgUrl(n.icon));
+      // 光栅化失败时清空而不是把 key 原样传下去：buildVSDX 对非 dataURL 的 icon 会回退类型图，
+      // 但显式清空更不容易在后续改动中把 key 当成图片源
+      return png ? Object.assign({}, n, { icon: png }) : Object.assign({}, n, { icon: '' });
+    }
+    return n;
+  }));
   // ortho 透传：直角连线模式下导出与画布/PDF/SVG 显示一致（否则画布直角、Visio 里变斜线）
-  const buf = TopoVsdx.buildVSDX({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+  const buf = TopoVsdx.buildVSDX({ nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   U.download(`网络拓扑图_${U.fmtDate()}.vsdx`,
     new Blob([buf], { type: 'application/vnd.ms-visio' }));
   toast('已导出 Visio 文件（.vsdx，Visio 2013+ 可直接打开编辑）');
@@ -2247,19 +3883,29 @@ function exportVisio() {
  * 空白 canvas（toDataURL 返回 "data:,"）并生成 0 字节图片流的“成功”PDF */
 function exportCanvasScale(img, wantScale) {
   const MAX_SIDE = 12000;
-  let s = wantScale;
-  if (Math.max(img.width, img.height) * s > MAX_SIDE) s = MAX_SIDE / Math.max(img.width, img.height);
-  return Math.max(0.1, Math.min(s, 4));
+  const maxDim = Math.max(1, img.width, img.height);
+  const s = Math.min(wantScale, MAX_SIDE / maxDim);
+  // 下限必须有，但**不能高到顶掉上限**：旧实现 max(0.1, …) 在 maxDim > 120000px 时会把
+  // s 顶回 0.1，画布尺寸远超浏览器单边上限 → toDataURL 返回 "data:," → 导出直接失败
+  // （注释声称的「超限自动降 scale」实际失效）。这里用极小下限保证数值有效，超限由调用方如实报错。
+  return Math.max(1e-6, Math.min(s, 4));
+}
+/** 导出画布尺寸是否超出浏览器 canvas 上限（单边 16384，留余量到 12000）：超限时调用方须如实提示，
+ *  否则拿到 "data:," 会静默产出 0 字节图片流的「成功」文件 */
+function exportCanvasTooLarge(img, scale) {
+  const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+  return !(w > 0 && h > 0) || w > 12000 || h > 12000;
 }
 
 function exportPdf() {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions, underlay: state.underlay }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
   img.onload = () => {
     const scale = exportCanvasScale(img, 2);
+    if (exportCanvasTooLarge(img, scale)) { URL.revokeObjectURL(url); toast('PDF 导出失败：画布尺寸 ' + img.width + '×' + img.height + ' 超出浏览器上限，请缩小画布或减少设备后重试'); return; }
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
@@ -2286,12 +3932,13 @@ function exportPdf() {
 
 /* ================= 导出图片（PNG / SVG / 剪贴板） ================= */
 function renderTopologyPng(cb) {
-  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+  const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions, underlay: state.underlay }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const img = new Image();
   img.onload = () => {
     const scale = exportCanvasScale(img, 2);
+    if (exportCanvasTooLarge(img, scale)) { URL.revokeObjectURL(url); toast('PNG 导出失败：画布尺寸 ' + img.width + '×' + img.height + ' 超出浏览器上限，请缩小画布或减少设备后重试'); cb(null); return; }
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
@@ -2309,7 +3956,7 @@ function renderTopologyPng(cb) {
 function exportImage(kind) {
   if (!state.nodes.length) { toast('画布为空，请先导入或添加设备'); return; }
   if (kind === 'svg') {
-    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
+    const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions, underlay: state.underlay }, { showLabels: state.showLabels, ortho: state.orthoLinks });
     U.download(`网络拓扑图_${U.fmtDate()}.svg`, new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
     toast('已导出 SVG 矢量图');
     return;
@@ -2464,6 +4111,7 @@ async function buildProjectData() {
     links: state.links,
     texts: state.texts,
     regions: state.regions,
+    underlay: state.underlay ? Object.assign({}, state.underlay, { adjust: false }) : null,
     pan: renderer.pan,
     zoom: renderer.zoom,
     sheets: U.clone(state.sheets),
@@ -2577,6 +4225,7 @@ async function applyProjectData(data) {
   state.links = cleaned.links;
   state.texts = cleaned.texts;
   state.regions = U.sanitizeRegions(data.regions);
+  state.underlay = U.sanitizeUnderlay(data.underlay);
   state.sel = { kind: null, id: null };
   state.undoStack = [];
   state.redoStack = [];
@@ -2597,6 +4246,7 @@ async function applyProjectData(data) {
         name: typeof sp.name === 'string' ? sp.name.trim().slice(0, 64) : ('页面 ' + (state.sheets.length + 1)),
         nodes: c.nodes, links: c.links, texts: c.texts,
         regions: U.sanitizeRegions(sp.regions),
+          underlay: U.sanitizeUnderlay(sp.underlay),
         pan: (sp.pan && typeof sp.pan === 'object') ? { x: Number(sp.pan.x) || 0, y: Number(sp.pan.y) || 0 } : null,
         zoom: Number(sp.zoom) || null
       };
@@ -2634,8 +4284,24 @@ async function applyProjectData(data) {
   return true;
 }
 
+/** 工程文件大小上限（20MB）：同步 JSON.parse 超大文本会冻结渲染线程（Electron 主窗口无响应，
+ *  只能强杀）。打开工程与工程对比走的是同一条 readFile→decodeBytes→parseProjectText 链路，
+ *  守卫必须两处都过——只补一处会留下同类路径（L13 修复遗漏点）。 */
+const PROJECT_MAX_BYTES = 20 * 1024 * 1024;
+function assertProjectSize(file, buffer) {
+  if (file && typeof file.size === 'number' && file.size > PROJECT_MAX_BYTES) { toast('工程文件过大（超过 20MB），已取消打开'); return false; }
+  if (buffer && buffer.byteLength > PROJECT_MAX_BYTES) { toast('工程文件过大（超过 20MB），已取消打开'); return false; }
+  return true;
+}
+
 async function loadProject(file) {
+  // 工程文件大小上限（20MB，与 CSV/Excel 导入同口径）：同步 JSON.parse 超大文本会冻结渲染线程。
+  // 两道判定都保留：file.size 在 readFile 前拦住（省掉一次全量读），byteLength 兜住其缺失/失真的浏览器差异
+  if (file && typeof file.size === 'number' && file.size > PROJECT_MAX_BYTES) {
+    toast('工程文件过大（超过 20MB），已取消打开'); return;
+  }
   const { buffer } = await U.readFile(file);
+  if (!assertProjectSize(file, buffer)) return;
   const data = await parseProjectText(U.decodeBytes(buffer), '该工程已加密，请输入口令打开');
   if (!data) return;
   if (!data || data.app !== 'NetTopo' || !Array.isArray(data.nodes)) {
@@ -2865,6 +4531,8 @@ async function newGraph() {
   state.links = [];
   state.texts = []; // 空白画布不保留旧文本框
   state.regions = []; // 空白画布不保留旧区域
+  state.downLinks = new Set(); // 故障标记一并重置（链路已不存在）
+  renderer.setDownLinks(state.downLinks);
   state.sel = { kind: null, id: null };
   state.undoStack = [];
   state.redoStack = [];
@@ -2874,6 +4542,231 @@ async function newGraph() {
   refreshAll();
   saveGraph();
   toast('已新建空白画布：点击「添加设备」或右键画布添加设备');
+}
+
+/* ================= 设备自定义字段（编辑 ▾ 自定义字段…） =================
+ * 字段定义（有哪些列）存本机 localStorage；字段值存节点 n.fields，随工程/图纸持久化。
+ * 用途：编辑设备弹窗直接填、资产清单导出附加列、机柜 U 位视图按「机柜」分组按「U 位」摆放。 */
+/** 生成「编辑/添加设备」弹窗里的自定义字段输入项（name 前缀 cf_ 便于回收集） */
+function customFieldInputs(node) {
+  return U.deviceFields().map(f => ({
+    name: 'cf_' + f.key,
+    label: f.label + (f.type === 'date' ? '（日期）' : ''),
+    value: node ? U.getNodeField(node, f.key) : '',
+    ph: f.key === 'rack' ? '例如 A01（机柜视图按它分组）' : (f.key === 'uPos' ? '例如 12 或 12-14' : '')
+  }));
+}
+/** 从弹窗返回值里回收自定义字段（空值不落盘） */
+function collectCustomFields(v) {
+  const out = {};
+  for (const f of U.deviceFields()) {
+    const val = String(v['cf_' + f.key] == null ? '' : v['cf_' + f.key]).trim();
+    if (val) out[f.key] = val.slice(0, 200);
+  }
+  return U.cleanNodeFields(out);
+}
+/** 「编辑 ▾ 自定义字段…」：增删改字段定义；已有节点的取值按 key 保留（删除定义不会删节点数据） */
+function openCustomFields() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const rowHtml = (f, i) => `<tr data-i="${i}">
+      <td><input type="text" data-f="label" value="${U.escHtml(f.label)}" style="width:100%" spellcheck="false"/></td>
+      <td><input type="text" data-f="key" value="${U.escHtml(f.key)}" style="width:100%" spellcheck="false"${f.custom ? '' : ' readonly title="内置字段键名不可改（资产清单/机柜视图按它取值）"'}/></td>
+      <td><select data-f="type"><option value="text"${f.type !== 'date' ? ' selected' : ''}>文本</option><option value="date"${f.type === 'date' ? ' selected' : ''}>日期</option></select></td>
+      <td><button type="button" class="tb nsv-mini-btn" data-del="${i}">删除</button></td>
+    </tr>`;
+  const builtin = new Set(U.DEFAULT_DEVICE_FIELDS.map(x => x.key));
+  let list = U.deviceFields().map(f => ({ key: f.key, label: f.label, type: f.type, custom: !builtin.has(f.key) }));
+  const render = () => {
+    ov.querySelector('#cfBody').innerHTML = list.length
+      ? list.map((f, i) => rowHtml(f, i)).join('')
+      : '<tr><td colspan="4" style="color:var(--muted)">已无字段：至少保留一个才能记录设备属性。</td></tr>';
+    ov.querySelectorAll('button[data-del]').forEach(b => {
+      b.onclick = () => { list.splice(parseInt(b.dataset.del, 10), 1); render(); };
+    });
+  };
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:720px;height:74vh;display:flex;flex-direction:column">
+      <h3>设备自定义字段</h3>
+      <div class="m-sub">给设备加自有属性（内置 6 项：责任人 / 部门 / 资产编号 / 维保到期 / 机柜 / U 位）。字段值保存在工程里，随工程/图纸持久化，并作为<b>资产清单导出</b>的附加列；<b>机柜视图</b>按「机柜」分组、按「U 位」摆放（U 位支持 <code>12</code> 或 <code>12-14</code>）。<b>删除字段定义不会删除设备上已填的值</b>（重新加回同名字段即可恢复显示）。</div>
+      <div style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 8px">
+        <table class="nb-table" id="cfTable"><tr><th>显示名称</th><th>字段键（英文，导出/机柜视图按它取值）</th><th style="width:90px">类型</th><th style="width:70px"></th></tr><tbody id="cfBody"></tbody></table>
+      </div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="cfAdd">添加字段</button>
+        <button type="button" class="tb" id="cfReset">恢复内置 6 项</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb primary" id="cfSave">保存</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  render();
+  ov.querySelector('#cfAdd').onclick = () => {
+    if (list.length >= 24) { toast('字段数量上限 24 个'); return; }
+    let n = 1;
+    while (list.some(f => f.key === 'field' + n)) n++;
+    list.push({ key: 'field' + n, label: '自定义字段' + n, type: 'text', custom: true });
+    render();
+    const inp = ov.querySelector('#cfBody tr:last-child input[data-f=label]');
+    if (inp) inp.focus();
+  };
+  ov.querySelector('#cfReset').onclick = () => {
+    list = U.DEFAULT_DEVICE_FIELDS.map(f => ({ key: f.key, label: f.label, type: f.type, custom: false }));
+    render();
+    toast('已恢复内置 6 项（设备上已填的值未动）');
+  };
+  ov.querySelector('#cfSave').onclick = () => {
+    const rows = [...ov.querySelectorAll('#cfBody tr[data-i]')];
+    const next = rows.map(tr => ({
+      key: (tr.querySelector('input[data-f=key]').value || '').trim(),
+      label: (tr.querySelector('input[data-f=label]').value || '').trim(),
+      type: tr.querySelector('select[data-f=type]').value
+    }));
+    const clean = U.cleanDeviceFields(next);
+    if (next.length && !clean.length) { toast('字段定义全部非法：键名只能是字母开头的英文/数字/下划线（≤32 字符）'); return; }
+    if (clean.length < next.length) toast('已忽略 ' + (next.length - clean.length) + ' 个非法/重复字段（键名需字母开头、不许重复）');
+    U.saveDeviceFields(clean);
+    close();
+    toast('已保存 ' + U.deviceFields().length + ' 个自定义字段（编辑设备即可填写）');
+  };
+}
+
+/** 「编辑 ▾ 机柜视图…」：按「机柜」字段分组的 U 位立面图 + 占用表导出 */
+function openRackView() {
+  const UH_KEY = 'nettopo.rackU';
+  const uH = (function () { const n = parseInt(localStorage.getItem(UH_KEY), 10); return (n >= 1 && n <= 60) ? n : 42; })();
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1080px;height:86vh;display:flex;flex-direction:column">
+      <h3>机柜 U 位视图</h3>
+      <div class="m-sub">按设备自定义字段「<b>机柜</b>」分组、按「<b>U 位</b>」摆放（U 位支持 <code>12</code> 或 <code>12-14</code>；U1 在最下方）。U 位重叠时该位置只画先声明的那台并标 <b style="color:var(--danger)">⚠</b>（悬浮看与谁重叠），顶部摘要给出重叠处数；缺机柜或 U 位的设备列在下方「未上架」。字段值在「编辑 ▾ 自定义字段…」里定义、在「编辑设备」里填写。</div>
+      <div class="frow" style="display:flex;gap:8px;align-items:center;margin:0 0 4px">
+        <div class="frow" style="margin:0"><label>机柜高度</label>
+          <select id="rvU">${[12, 18, 22, 24, 27, 32, 36, 42, 45, 47].map(n => `<option value="${n}"${n === uH ? ' selected' : ''}>${n}U</option>`).join('')}</select>
+        </div>
+        <div class="frow" style="margin:0"><label>机柜字段</label><input id="rvRackKey" type="text" value="rack" style="width:80px" spellcheck="false"/></div>
+        <div class="frow" style="margin:0"><label>U 位字段</label><input id="rvUKey" type="text" value="uPos" style="width:80px" spellcheck="false"/></div>
+        <button type="button" class="tb" id="rvCsv">导出占用表 CSV</button>
+        <button type="button" class="tb" id="rvSvg">导出全部机柜 SVG</button>
+        <span id="rvHint" class="m-sub" style="margin:0;flex:1"></span>
+      </div>
+      <div id="rvBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"></div>
+      <div class="m-actions"><span class="m-sub" style="margin:0;flex:1">提示：SVG 为矢量图，可直接插入交付文档或打印张贴。</span><button type="button" class="tb primary" data-act="close">关闭</button></div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const bodyEl = ov.querySelector('#rvBody'), hintEl = ov.querySelector('#rvHint');
+  const uEl = ov.querySelector('#rvU'), rackKeyEl = ov.querySelector('#rvRackKey'), uKeyEl = ov.querySelector('#rvUKey');
+  let data = null;
+  const build = () => {
+    const height = parseInt(uEl.value, 10) || 42;
+    try { localStorage.setItem(UH_KEY, String(height)); } catch (e) { /* ignore */ }
+    data = U.buildRackView(state.nodes, { uHeight: height, rackField: rackKeyEl.value.trim() || 'rack', uField: uKeyEl.value.trim() || 'uPos' });
+    render();
+  };
+  const render = () => {
+    if (!data) return;
+    const rv = data;
+    hintEl.innerHTML = rv.racks.length
+      ? ('机柜 <b>' + rv.racks.length + '</b> 个 · 上架设备 <b>' + rv.racks.reduce((a, r) => a + r.devices, 0) + '</b> 台'
+        + (rv.conflicts ? ' · <b style="color:var(--danger)">' + rv.conflicts + ' 处 U 位重叠</b>' : '')
+        + (rv.unplaced.length ? ' · <b style="color:#f59e0b">' + rv.unplaced.length + ' 台未上架</b>' : ''))
+      : '没有设备填写了「机柜」+「U 位」：先在「编辑设备」里填写这两个字段。';
+    if (!rv.racks.length) {
+      bodyEl.innerHTML = '<div class="bk-empty">没有可展示的机柜。已填字段的设备：'
+        + U.escHtml(state.nodes.filter(n => U.getNodeField(n, rackKeyEl.value.trim() || 'rack') || U.getNodeField(n, uKeyEl.value.trim() || 'uPos')).map(n => n.name).join('、') || '无')
+        + '</div>';
+      return;
+    }
+    const cols = rv.racks.map(r => {
+      const cells = [];
+      const byU = new Map();     // u → 声明该 U 的槽位（升序：U 位小的先）
+      for (const s of r.slots) for (let u = s.u; u < s.u + s.span && u <= r.uHeight; u++) {
+        if (!byU.has(u)) byU.set(u, []);
+        byU.get(u).push(s);
+      }
+      const claimed = new Set();  // 已由上面的多 U 设备块覆盖的 U，避免同一设备被重复渲染
+      for (let u = r.uHeight; u >= 1; u--) {
+        if (claimed.has(u)) continue;
+        const arr = byU.get(u) || [];
+        if (!arr.length) { cells.push('<div class="rv-u"><span class="rv-n">' + u + 'U</span></div>'); continue; }
+        const s = arr[0];
+        // 重叠判据：该 U 被多个槽位声明，或该槽位自身被算出冲突（两种都要标红）
+        const others = arr.slice(1).map(x => x.node.name).concat(s.conflicts || []);
+        const bad = others.length > 0;
+        const n = s.node;
+        const color = (U.getType(n.type) || {}).color || '#8fa0b8';
+        for (let k = u; k > u - s.span && k >= 1; k--) claimed.add(k);
+        cells.push('<div class="rv-u rv-filled' + (bad ? ' rv-bad' : '') + '" style="height:' + (22 * s.span) + 'px" title="' + U.escHtml(n.name + '（' + ((U.getType(n.type) || {}).label || '') + '）' + (n.model ? ' · ' + n.model : '') + (bad ? ' · U 位与 ' + [...new Set(others)].join('、') + ' 重叠' : '')) + '">'
+          + '<span class="rv-n">' + (s.span > 1 ? (s.u + '-' + (s.u + s.span - 1)) + 'U' : s.u + 'U') + '</span>'
+          + '<span class="rv-dev" style="border-left-color:' + U.escHtml(color) + '">' + U.escHtml(n.name) + (bad ? ' ⚠' : '') + '</span>'
+          + '</div>');
+      }
+      return '<div class="rv-rack"><div class="rv-hd"><b>' + U.escHtml(r.name) + '</b><span class="m-sub">' + r.devices + ' 台 · 已用 ' + r.used + 'U / 空 ' + r.free + 'U（' + r.occupancy + '%）</span></div><div class="rv-body">' + cells.join('') + '</div></div>';
+    }).join('');
+    const un = rv.unplaced.length
+      ? '<div class="bk-empty" style="color:#f59e0b">未上架（缺机柜或 U 位）：' + U.escHtml(rv.unplaced.map(n => n.name).join('、')) + '</div>'
+      : '';
+    bodyEl.innerHTML = '<div class="rv-wrap">' + cols + '</div>' + un;
+  };
+  uEl.onchange = build;
+  rackKeyEl.onchange = build;
+  uKeyEl.onchange = build;
+  ov.querySelector('#rvCsv').onclick = () => {
+    if (!data) return;
+    const rows = [['机柜', 'U 位', '跨度', '设备', '类型', '型号', '软件版本', '管理地址', '责任人', '资产编号', '重叠']];
+    const owner = U.deviceFields().some(f => f.key === 'owner') ? 'owner' : '';
+    const asset = U.deviceFields().some(f => f.key === 'asset') ? 'asset' : '';
+    for (const r of data.racks) {
+      for (const s of r.slots) {
+        const n = s.node;
+        rows.push([r.name, String(s.u), String(s.span), String(n.name || ''), (U.getType(n.type) || {}).label || '',
+          String(n.model || ''), String(n.osver || ''), U.nodeMgmts(n).join(' / '),
+          owner ? U.getNodeField(n, owner) : '', asset ? U.getNodeField(n, asset) : '', (s.conflicts || []).join('、')]);
+      }
+    }
+    for (const n of data.unplaced) rows.push(['（未上架）', '', '', String(n.name || ''), (U.getType(n.type) || {}).label || '', String(n.model || ''), String(n.osver || ''), U.nodeMgmts(n).join(' / '), '', '', '']);
+    U.download('机柜占用_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出机柜占用表 CSV（' + (rows.length - 1) + ' 行）');
+  };
+  ov.querySelector('#rvSvg').onclick = () => {
+    if (!data || !data.racks.length) { toast('没有可导出的机柜'); return; }
+    if (data.racks.length === 1) {
+      U.download('机柜_' + String(data.racks[0].name).replace(/[\\/:*?"<>|]/g, '_') + '_' + U.fmtDate() + '.svg',
+        new Blob([U.buildRackSvg(data.racks[0], { title: '机柜立面' })], { type: 'image/svg+xml;charset=utf-8' }));
+      toast('已导出机柜立面 SVG');
+      return;
+    }
+    // 多机柜：横向拼接为一个 SVG（每柜一列）
+    const parts = data.racks.map((r, i) => {
+      const one = U.buildRackSvg(r, { title: '机柜立面', width: 380 });
+      const inner = one.replace(/^<svg[^>]*>/, '').replace(/<\/svg>$/, '');
+      const w = 380, h = (parseInt(/height="(\d+)"/.exec(one)[1], 10) || 600);
+      return { inner, w, h, x: i * w, y: 0 };
+    });
+    const totalW = parts.reduce((a, p) => a + p.w, 0);
+    const maxH = Math.max.apply(null, parts.map(p => p.h));
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + totalW + '" height="' + maxH + '" viewBox="0 0 ' + totalW + ' ' + maxH + '">'
+      + '<rect width="' + totalW + '" height="' + maxH + '" fill="#ffffff"/>'
+      + parts.map(p => '<g transform="translate(' + p.x + ' ' + p.y + ')">' + p.inner + '</g>').join('')
+      + '</svg>';
+    U.download('机柜立面_' + U.fmtDate() + '.svg', new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+    toast('已导出 ' + data.racks.length + ' 个机柜的立面 SVG');
+  };
+  build();
 }
 
 /* ================= 设备 / 连线 增删改 ================= */
@@ -2890,7 +4783,7 @@ function addNodeAt(wx, wy) {
       { name: 'hasVlanIf', label: '三层 VLAN 接口', type: 'checkbox', value: false, tip: '有 VLAN 接口（生成 interface vlan 及 IP 地址）', toggles: 'vlans' },
       { name: 'vlans', label: 'VLAN 接口列表（VLAN 编号 + IP 地址）', type: 'vlans', value: [] },
       { name: 'note', label: '备注', type: 'textarea' }
-    ],
+    ].concat(customFieldInputs(null)),
     submit: '创建',
     onSubmit: (v) => {
       pushUndo(); // 变更前快照
@@ -2903,7 +4796,8 @@ function addNodeAt(wx, wy) {
         x: wx - U.nodeWidthForName(v.name) / 2, y: wy - U.NODE_H / 2,
         w: U.nodeWidthForName(v.name), h: U.NODE_H,
         note: v.note.trim(), mgmt: ms[0] || '', mgmts: ms.slice(1), web: U.normalizeWebUrl(v.web) || '',
-        vlans: (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : []
+        vlans: (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : [],
+        fields: collectCustomFields(v)
       };
       node.h = U.nodeHeightFor(node);
       node.y = wy - node.h / 2;
@@ -2911,6 +4805,7 @@ function addNodeAt(wx, wy) {
       renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll();
       select('node', node.id, { center: true });
+      saveGraph(); // pushUndo 里的 saveGraph 保存的是变更前状态，新增设备须显式再落一次（否则仅靠视图节流保存的 500ms 窗口内刷新即丢）
     }
   });
 }
@@ -3110,7 +5005,7 @@ function editNode(id) {
       { name: 'hasVlanIf', label: '三层 VLAN 接口', type: 'checkbox', value: !!(Array.isArray(n.vlans) && n.vlans.length), tip: '有 VLAN 接口（生成 interface vlan 及 IP 地址）', toggles: 'vlans' },
       { name: 'vlans', label: 'VLAN 接口列表（VLAN 编号 + IP 地址）', type: 'vlans', value: Array.isArray(n.vlans) ? n.vlans : [] },
       { name: 'note', label: '备注', type: 'textarea', value: n.note }
-    ],
+    ].concat(customFieldInputs(n)),
     submit: '保存',
     onSubmit: (v) => {
       pushUndo(); // 变更前快照
@@ -3131,6 +5026,7 @@ function editNode(id) {
       n.osver = (v.osver || '').trim();
       n.note = v.note.trim();
       n.vlans = (v.hasVlanIf && Array.isArray(v.vlans)) ? v.vlans : [];
+      n.fields = collectCustomFields(v);
       renderer.setData(state.nodes, state.links, state.texts, state.regions);
       refreshAll();
       select('node', n.id);
@@ -3149,6 +5045,7 @@ function deleteNode(id) {
   stopMonitorForNode(id); // 删除设备时停止其后台监控
   delete state.monitorCfg[id]; saveMonitorCfg().catch(() => {});
   const removed = state.links.filter(l => l.a === id || l.b === id);
+  for (const rl of removed) state.downLinks.delete(rl.id); // 故障标记随链路删除，防死 id 残留
   state.links = state.links.filter(l => l.a !== id && l.b !== id);
   state.nodes = state.nodes.filter(x => x.id !== id);
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
@@ -3294,6 +5191,7 @@ function deleteLink(id) {
   if (!l) return;
   pushUndo(); // 变更前快照
   state.links = state.links.filter(x => x.id !== id);
+  state.downLinks.delete(id); // 故障标记随链路删除：死 id 残留会让图例计数/路径分析排除集引用不存在的链路
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
@@ -3321,6 +5219,19 @@ function deleteNodes(ids) {
   const names = state.nodes.filter(n => set.has(n.id)).map(n => n.name);
   const removedLinks = state.links.filter(l => set.has(l.a) || set.has(l.b)).length;
   pushUndo();
+  // 与单删同口径：批量删除也要停止后台监控并清理监控配置（含凭据），
+  // 并随快照带走配置供撤销恢复——否则被删设备的采集任务仍在后台运行、继续写监控日志
+  const cfgUndo = [];
+  for (const id of set) {
+    const cfg = state.monitorCfg[id];
+    if (cfg) cfgUndo.push({ id, cfg: U.clone(cfg) });
+    stopMonitorForNode(id);
+    delete state.monitorCfg[id];
+  }
+  if (cfgUndo.length) state.undoStack[state.undoStack.length - 1].monitorCfgUndoList = cfgUndo;
+  saveMonitorCfg().catch(() => {});
+  // 连带删除的链路同步清故障标记（死 id 残留会污染图例计数与路径分析排除集）
+  for (const l of state.links) if (set.has(l.a) || set.has(l.b)) state.downLinks.delete(l.id);
   state.links = state.links.filter(l => !set.has(l.a) && !set.has(l.b));
   state.nodes = state.nodes.filter(n => !set.has(n.id));
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
@@ -3351,7 +5262,8 @@ function batchEditNodes() {
         if (!n) continue;
         if (v.type) n.type = v.type;
         if (ms.length) U.setNodeMgmts(n, ms);
-        if (String(v.web).trim()) n.web = String(v.web).trim();
+        // 与单设备编辑同口径：过 normalizeWebUrl（自动补 http://、拒绝 javascript:/data: 等危险协议与限长）
+        if (String(v.web).trim()) n.web = U.normalizeWebUrl(v.web) || '';
         if (String(v.note).trim()) n.note = String(v.note).trim();
         const nh = U.nodeHeightFor(n);
         if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
@@ -3375,6 +5287,7 @@ function deleteLinks(ids) {
   const removed = state.links.filter(l => set.has(l.id));
   pushUndo();
   state.links = state.links.filter(l => !set.has(l.id));
+  for (const rl of removed) state.downLinks.delete(rl.id); // 故障标记随链路删除，防死 id 残留
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
   refreshAll();
   select(null, null);
@@ -3461,6 +5374,7 @@ function setMode(mode, silent) {
     setHint('放置模式：点击画布空白处放置设备；Esc 或右键取消');
   } else {
     select(null, null);
+    clearTimeout(setHint._t); // 停掉倒计时循环：残留 tick 会在退出模式后继续改写已隐藏的提示条
     if (!silent && prev !== 'normal') toast(`已退出${prev === 'link' ? '连线' : '放置'}模式`);
   }
 }
@@ -3468,10 +5382,19 @@ function setMode(mode, silent) {
 function setHint(msg) {
   const t0 = Date.now();
   const DUR = 3;
+  const show = (left) => {
+    $('#hintBar').innerHTML = `<span class="hb-txt">${U.escHtml(msg)}</span>${left == null ? '' : `<span class="hb-ct">${Math.max(left, 0)}s</span>`}<button class="hb-x" type="button" title="退出当前模式">✕</button>`;
+  };
   const render = () => {
     const left = DUR - Math.floor((Date.now() - t0) / 1000);
-    $('#hintBar').innerHTML = `<span class="hb-txt">${U.escHtml(msg)}</span><span class="hb-ct">${Math.max(left, 0)}s</span><button class="hb-x" type="button" title="退出当前模式">✕</button>`;
-    if (left <= 0) { $('#hintBar').classList.add('hidden'); return; }
+    if (left <= 0) {
+      // 倒计时结束：模式仍激活则保留提示（去掉计时，模式提示不能自动消失——否则用户无感知
+      // 连线/放置仍在生效）；非模式场景（当前无调用方）维持旧的自动隐藏
+      if (state.mode !== 'normal') { show(null); return; }
+      $('#hintBar').classList.add('hidden');
+      return;
+    }
+    show(left);
     setHint._t = setTimeout(render, 500);
   };
   clearTimeout(setHint._t);
@@ -3503,7 +5426,8 @@ function handleModeClick(e, kind, id) {
     if (!state.linkPick) {
       state.linkPick = id;
       renderer.flash('node', id);
-      $('#hintBar').textContent = '再点击目标设备（Esc 取消）';
+      // 走 setHint 重新发起：直接改 textContent 会在 ≤500ms 后被倒计时 tick 用旧文案覆盖
+      setHint('已选源设备，再点击目标设备（Esc 取消）');
     } else {
       const a = state.linkPick, b = id;
       if (a === b) { toast('不能连接到自身'); return; }
@@ -3601,7 +5525,7 @@ function openModal(opts) {
     let ctrl = '';
     if (f.type === 'select') {
       ctrl = `<select name="${f.name}">${f.options.map(([v, lb]) =>
-        `<option value="${v}" ${String(f.value) === String(v) ? 'selected' : ''}>${U.escHtml(lb)}</option>`).join('')}</select>`;
+        `<option value="${U.escHtml(v)}" ${String(f.value) === String(v) ? 'selected' : ''}>${U.escHtml(lb)}</option>`).join('')}</select>`;
     } else if (f.type === 'checkbox') {
       ctrl = `<label class="ck-field"><input name="${f.name}" type="checkbox"${f.value ? ' checked' : ''}/><span>${U.escHtml(f.tip || '')}</span></label>`;
     } else if (f.type === 'mgmts') {
@@ -3623,7 +5547,7 @@ function openModal(opts) {
         <input type="hidden" name="${f.name}" value="${U.escHtml(curKey)}"/>
         <input type="hidden" name="${f.name}Data" value="${U.escHtml(curImg)}"/>
         <div class="icon-line">
-          <select name="${f.name}Sel">${optRows.map(([v, lb]) => `<option value="${v}"${String(curKey) === String(v) && !curImg ? ' selected' : ''}>${U.escHtml(lb)}</option>`).join('')}<option value="__upload">＋ 上传图片…（按正方形裁切显示）</option></select>
+          <select name="${f.name}Sel">${optRows.map(([v, lb]) => `<option value="${U.escHtml(v)}"${String(curKey) === String(v) && !curImg ? ' selected' : ''}>${U.escHtml(lb)}</option>`).join('')}<option value="__upload">＋ 上传图片…（按正方形裁切显示）</option></select>
           <button type="button" class="tb icon-clr" title="清除自定义图标">清除</button>
         </div>
         <div class="icon-prev-row">
@@ -4103,6 +6027,8 @@ function refreshAll() {
   updateStats();
   refreshPanel();
   updateLegend();
+  // 拓扑重建（setData）会重建连线元素，这里按监测结论重新上色（状态未变时渲染层内部跳过重绘）
+  syncLinkMonOverlay();
   $('#empty').classList.toggle('hidden', state.blank || state.nodes.length > 0);
   $('#zoomCtl').classList.toggle('hidden', state.nodes.length === 0);
 }
@@ -4114,6 +6040,7 @@ function updateStats() {
 }
 
 function refreshPanel() {
+  scheduleAlertTopology();   // 拓扑/监控配置变化后重推邻接表（防抖 + 去重，供主进程归并上游失联告警）
   const wrap = $('#listWrap');
   const q = state.search.trim().toLowerCase();
   if (state.tab === 'nodes') {
@@ -4131,6 +6058,7 @@ function refreshPanel() {
         <span class="dot" style="background:${t.c1}"></span>
         <span class="nm">${U.escHtml(n.name)}<span class="sub">${U.escHtml(t.label)}${n.note ? ' · ' + U.escHtml(n.note) : ''}</span></span>
         ${monitorBadgeHtml(n.id)}
+        ${linkBadgeHtml(n.id)}
         <span class="cnt2">${cnt} 线</span>
       </div>`;
     }).join('');
@@ -4192,6 +6120,10 @@ function updateLegend() {
   // 故障图例
   const faultHtml = state.downLinks.size
     ? `<span class="lg fault" title="已标记故障的链路（模拟断链）"><i></i>故障 ${state.downLinks.size}</span>` : '';
+  // 推断链路图例：SNMP 转发表推断出来的链路（虚线），与实测 LLDP/CDP 链路区分
+  const infCount = state.links.filter(l => l && l.inferred).length;
+  const inferredHtml = infCount
+    ? `<span class="lg" title="由 SNMP 网桥转发表推断出来的链路（非实测 LLDP/CDP），画布上以虚线显示"><i style="border-top:2px dashed var(--link-c);height:0"></i>推断 ${infCount}</span>` : '';
   // 子网分组图例（显示子网分组时展示配色）
   let subnetHtml = '';
   if (state.showSubnets) {
@@ -4200,7 +6132,7 @@ function updateLegend() {
       `<span class="lg subnet" title="${U.escHtml(g.cidr)}"><i style="border-color:${g.color};color:${g.color}"></i>${U.escHtml(g.name)}</span>`
     ).join('');
   }
-  const parts = [typeHtml, bwHtml, faultHtml, subnetHtml].filter(Boolean);
+  const parts = [typeHtml, bwHtml, faultHtml, inferredHtml, subnetHtml].filter(Boolean);
   $('#legend').innerHTML = parts.map((p, i) => i ? '<span class="lg-sep"></span>' + p : p).join('');
 }
 
@@ -4208,6 +6140,13 @@ function updateLegend() {
 const GRAPH_KEY = 'nettopo.graph';
 
 function saveGraph() {
+  // 落盘防抖：大工程（多页 + MB 级底图）的同步 stringify 可达数十 ms，拖拽结束/连续编辑
+  // 高频触发时合并为一次；关窗/刷新前由 flush 同步兜底（延迟读的仍是当时的最新 state）
+  if (saveGraph._dt) return;
+  saveGraph._dt = setTimeout(() => { saveGraph._dt = null; saveGraph.flush(); }, 400);
+}
+saveGraph.flush = () => {
+  if (saveGraph._dt) { clearTimeout(saveGraph._dt); saveGraph._dt = null; }
   try {
     sheetStash(); // 多页数据保持最新
     localStorage.setItem(GRAPH_KEY, JSON.stringify({
@@ -4228,19 +6167,31 @@ function saveGraph() {
       ts: Date.now()
     }));
   } catch (e) { /* 存储超限时忽略 */ }
-}
+};
+// 防抖窗口内关闭/刷新页面：同步落盘兜底（pagehide 兜 Electron 隐藏卸载，beforeunload 兜常规刷新）
+window.addEventListener('beforeunload', () => { try { saveGraph.flush(); } catch (e) { /* ignore */ } });
+window.addEventListener('pagehide', () => { try { saveGraph.flush(); } catch (e) { /* ignore */ } });
 
 function restoreGraph() {
   try {
     const raw = localStorage.getItem(GRAPH_KEY);
     if (!raw) return false;
     const d = JSON.parse(raw);
-    if (!d.nodes || !d.nodes.length) return false;
+    // 顶层 nodes 是「当前活动页」本体（可为空数组），其他页数据只在 sheets 里：
+    // 活动页为空但其他页有数据时必须照常恢复——否则 state.sheets 保持 []，刷新后的第一次
+    // saveGraph（滚轮缩放的 500ms 节流保存即触发）会以空 sheets 覆盖 localStorage，他页数据永久丢失
+    const hasSheetData = Array.isArray(d.sheets) && d.sheets.some(sp => sp && Array.isArray(sp.nodes) && sp.nodes.length);
+    const hasTopData = Array.isArray(d.nodes) && d.nodes.length;
+    if (!hasTopData && !hasSheetData) return false;
+    if (!Array.isArray(d.nodes)) d.nodes = [];
+    if (!Array.isArray(d.links)) d.links = [];
+    if (!Array.isArray(d.texts)) d.texts = [];
     const cleaned = U.sanitizeGraph(d.nodes, d.links, d.texts);
     state.nodes = cleaned.nodes;
     state.links = cleaned.links;
     state.texts = cleaned.texts;
     state.regions = U.sanitizeRegions(d.regions);
+      state.underlay = U.sanitizeUnderlay(d.underlay);
     U.seedCounters(state.nodes, state.links, state.texts, state.regions); // 避免新 ID 与恢复节点/文本框冲突
     state.sel = { kind: null, id: null };
     state.undoStack = []; // 初始状态无需撤销
@@ -4262,6 +6213,7 @@ function restoreGraph() {
           name: typeof sp.name === 'string' ? sp.name.trim().slice(0, 64) : ('页面 ' + (state.sheets.length + 1)),
           nodes: c.nodes, links: c.links, texts: c.texts,
           regions: U.sanitizeRegions(sp.regions),
+          underlay: U.sanitizeUnderlay(sp.underlay),
           pan: (sp.pan && typeof sp.pan === 'object') ? { x: Number(sp.pan.x) || 0, y: Number(sp.pan.y) || 0 } : null,
           zoom: Number(sp.zoom) || null
         };
@@ -4274,6 +6226,7 @@ function restoreGraph() {
       const act = state.sheets[state.sheetIdx];
       act.nodes = state.nodes; act.links = state.links; act.texts = state.texts;
       act.regions = state.regions;
+      refreshSheets(); // 页签栏须随 sheets 重建：启动序列的 refreshSheets 先于 restoreGraph 执行，此刻 sheets 仍为空——不补则刷新后页签栏隐藏、他页不可达（与 applyProjectData 同口径）
     }
     renderer.showLabels = state.showLabels;
     renderer.showSubnets = state.showSubnets;
@@ -4284,12 +6237,17 @@ function restoreGraph() {
     else renderer.fit();
     updateUndoBtns();
     refreshAll();
+    // 恢复持久化的链路监测任务（保存时已剥离凭据，凭据在启动载荷时按 credMode/credId 现解析）——
+    // 此前只存不读，重启后任务静默丢失（见 saveLinkTasks/commitLinkTasks 的落盘口径）
+    const savedLinkTasks = loadLinkTasks();
+    if (savedLinkTasks.length) state.linkTasks = savedLinkTasks;
     // 先解密加载持久化的监控配置，再对齐主进程状态并自启动已启用的监控
     loadMonitorCfg().then((saved) => {
       if (saved && typeof saved === 'object' && Object.keys(saved).length) state.monitorCfg = saved;
       syncMonitorStatus();  // 对齐主进程监控运行状态
       reconcileMonitors(); // 自启动已启用的监控
-    }).catch(() => { syncMonitorStatus(); reconcileMonitors(); });
+      reconcileLinkMon();  // 自启动链路连通性监测（任务持久化在 localStorage，不含凭据）
+    }).catch(() => { syncMonitorStatus(); reconcileMonitors(); reconcileLinkMon(); });
     return true;
   } catch (e) { return false; }
 }
@@ -4399,7 +6357,9 @@ function openTypeManager() {
         confirmBox(`删除类型「${U.customTypes.find(t => t.key === key).label}」？`).then(ok => {
           if (!ok) return;
           U.removeCustomType(key);
-          for (const n of state.nodes) {
+          // 跨全部页重写：只改当前页会让其他页节点的 type 悬空，切页后渐变引用失效
+          // （_buildDefs 只为现存类型生成渐变）节点卡片无底色，且悬空 key 随 saveGraph 持久化
+          for (const n of allSheetNodes()) {
             if (n.type === key) { n.type = 'other'; }
           }
           afterChange();
@@ -4466,6 +6426,7 @@ function openHelp() {
     <ul>
       <li><b>「文件 ▾ 导入表格…」</b>——选择连线关系表（CSV / Excel / TXT），自动生成拓扑</li>
       <li><b>「文件 ▾ 从邻居表导入（LLDP/CDP）…」</b>——粘贴或自动采集设备邻居表，自动生成拓扑（见③）</li>
+      <li><b>「文件 ▾ 拓扑自动发现…」</b>——从种子设备递归下钻测绘整片网络（见③b）</li>
       <li><b>「文件 ▾ 载入示例拓扑」</b>——体验内置数据；<b>「文件 ▾ 新建空白画布」</b>——直接手动画</li>
       <li>导入后自动布局：拖拽调整位置、双击编辑、右键更多操作，<kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd> 撤销重做</li>
     </ul>
@@ -4489,6 +6450,14 @@ function openHelp() {
       <li><b>合并规则</b>：同名对端复用画布设备、新设备按名称推断类型自动创建、已有链路回填空缺接口、重复导入幂等</li>
       <li>SSH 首次连接自动信任主机指纹（TOFU）并记忆，指纹变化即拒连；纯本机解析，不上传</li>
     </ul>
+    <h4>③b 拓扑自动发现（递归测绘）</h4>
+    <ul>
+      <li><b>文件 ▾ 拓扑自动发现…</b>：从<b>种子设备</b>出发自动登录读取 LLDP / CDP 邻居表，沿邻居的<b>管理地址</b>递归下钻 N 层（默认 2 层，可选 1~5 层），把整片网络一次性测绘出来</li>
+      <li><b>种子</b>：勾选拓扑中已有管理地址的设备，或手工填写（每行 <code>IP</code> 或 <code>IP 名称</code>）；<b>凭据</b>优先取该设备的监控配置，其次按「备用凭据池」（每行 <code>账号 密码</code>，最多 5 组、按顺序尝试）</li>
+      <li><b>前提</b>：邻居表需带对端管理地址（verbose 形态，如华为 <code>display lldp neighbor</code> 的 <code>Management address</code>）才能继续下钻；只有名称的邻居仍会进结果但不再展开</li>
+      <li><b>结果</b>：设备表（状态 / 名称 / 地址 / 层 / 发现自 / 邻居数 / 厂家型号）与链路表（两端设备与接口），可导出 CSV；「合并进拓扑」按<b>管理地址优先、名称次之</b>复用已有设备（同名大小写、域名后缀视为同一台），回填缺失的管理地址与厂家，重复执行幂等</li>
+      <li><b>仅预览</b>：勾选后只生成预览与 CSV，不改动画布。设备数上限 60 台、并发 1~4，可随时停止</li>
+    </ul>
     <h4>④ 画布操作与编辑</h4>
     <ul>
       <li><b>视图</b>：滚轮缩放（以光标为中心）、拖拽空白或中键平移、<kbd>L</kbd> 自动布局 / <kbd>F</kbd> 适应视图</li>
@@ -4497,12 +6466,15 @@ function openHelp() {
       <li><b>多图纸</b>：一个工程多张拓扑页（按机房 / 楼层拆分），页签切换 / 重命名 / 删除，各页独立视图</li>
       <li><b>区域分组</b>：「编辑 ▾ 添加区域」画背景分组框，设备拖入框内即归入该区域，拖动区域整体移动</li>
       <li><b>设备类型与模板</b>：内置类型 + 自定义类型可上传图片；「从模板添加设备」一键放置；「IP 子网计算器」即时算网段</li>
+      <li><b>自定义字段</b>（编辑 ▾）：给设备加自有属性（内置责任人 / 部门 / 资产编号 / 维保到期 / <b>机柜</b> / <b>U 位</b>，可增删改）；值在「编辑设备」里填写、随工程持久化，并进入<b>资产清单导出</b>的附加列</li>
+      <li><b>机柜视图（U 位）</b>（编辑 ▾）：按「机柜」分组画 <b>U 位立面图</b>（高度 12~47U；U 位支持 <code>12</code> / <code>12-14</code>），U 位重叠标 ⚠、缺机柜或 U 位的设备列「未上架」；可导出占用表 CSV 与矢量立面 SVG（多机柜拼一张）</li>
       <li><b>IP 地址管理</b>（编辑 ▾）：全部地址清单、网段汇总利用率、跨设备同 IP 冲突检测，可导出 CSV</li>
+      <li><b>实网核对</b>（IP 地址管理面板内）：把<b>规划清单</b>与实网事实比对——本机网段存活扫描（ICMP，附本机 ARP 的 MAC、可选 PTR）＋ 并发登录设备采集 <b>ARP / MAC 地址表</b>（只读）。结论：<b>IP 冲突/私接</b>（同一 IP 出现多个不同 MAC，附每个 MAC 的设备与端口）、<b>规划冲突</b>、<b>未登记在用（黑户）</b>、<b>登记未在线</b>、登记在用；按网段给出容量/空闲与各类计数，可筛选、定位到画布设备、导出 CSV</li>
     </ul>
     <h4>⑤ 工具栏菜单速览</h4>
     <ul>
       <li><b>文件</b>：新建 / 导入表格 / 从邻居表导入 / 示例 / 保存·打开工程(.nettopo) / 对比工程 / 自动备份 / 备份管理</li>
-      <li><b>编辑</b>：添加设备·连线·文本框·区域 / 从模板添加 / 对齐分布 / 批量重命名 / IP 批量改段 / IP 子网计算器 / <b>接口总表</b> / IP 地址管理 / 类型管理</li>
+      <li><b>编辑</b>：添加设备·连线·文本框·区域 / 从模板添加 / 对齐分布 / 批量重命名 / IP 批量改段 / IP 子网计算器 / <b>接口总表</b> / IP 地址管理 / 自定义字段 / 机柜视图 / 类型管理</li>
       <li><b>布局</b>：力导向 / 环形 / 分层 / 三层架构 / 拓扑分层 / 网格、适应视图、路径分析、网段分析、拓扑校验、单点故障分析</li>
       <li><b>显示</b>：链路标注、子网分组、清除故障标记、清除路径高亮</li>
       <li><b>导出</b>：CSV / Excel / 资产清单 / PDF / 图片(PNG/SVG) / 复制图片 / Visio / 设计报告 / 生成设备配置 / IP 规划清单（见⑧）</li>
@@ -4550,7 +6522,7 @@ function openHelp() {
       <li><b>在线探测</b>：TCP / ICMP，离线变红并弹通知</li>
       <li><b>输出关键字告警</b>：逐行正则匹配即告警（周期 / 连接时 / 仅读取输出均参与）；多关键字全部命中才显示、全部不再命中才解除，事件携带具体匹配行</li>
       <li><b>配置自动备份</b>：命令可多条、输出合并保存，连接方式可选复用监控连接或独立连接；首份显示「首次」；勾选<b>自动合规</b>后每次备份按合规模板自动扫描，违规进事件时间线并弹通知</li>
-      <li><b>SNMP 采集组</b>：SNMP 识别（sysDescr 自动回填软件版本）、重启检测（sysUpTime 骤减判定）、CPU / 内存采集（OID 可配置，华为 / 思科厂家预设一键填充，GET 失败自动 GETNEXT）、接口流量（ifTable 每接口 UP/DOWN 与收发速率）</li>
+      <li><b>SNMP 采集组</b>：SNMP 识别（sysDescr 自动回填软件版本）、重启检测（sysUpTime 骤减判定）、CPU / 内存采集（OID 可配置，华为 / 思科厂家预设一键填充，GET 失败自动 GETNEXT）、接口流量（ifTable 每接口 UP/DOWN 与收发速率）；SNMP 安全模式可选 <b>v2c 团体字或 v3（USM）</b>——无认证无加密 / 仅认证（SHA-1 / MD5）/ 认证加密（AES-128 / DES）三档，引擎发现与时间窗自动同步，v3 口令经系统级加密保存</li>
       <li><b>服务器管理组</b>：磁盘 / 内存（SSH）——复用监控会话执行 df/free 等并解析数值，超告警 / 严重双阈值记事件并弹通知；HTTP 探测 / 证书——本机按间隔探测 HTTP(S)（2xx/3xx 且可选关键字判定），HTTPS 同时读证书剩余天数，低于阈值告警、续期自动解除</li>
       <li><b>轻量模式</b>：仅读取（不执行周期命令，其余能力保留）/ 仅探测（不填命令，只做在线探测保持连接）</li>
       <li>断线自动重连；正在监控的设备在<b>右侧设备列表显示状态标记</b>（绿在线 / 琥珀红异常）</li>
@@ -4560,20 +6532,26 @@ function openHelp() {
       <li><b>监控中心…</b>（监控 ▾ 或右键设备）：聚合全部设备状态与统计、<b>近 7 天在线率</b>；「事件时间线 / 配置备份 / 接口流量 / 性能」标签页切换，点击设备名或管理地址可筛选时间线，事件带设备徽标、告警显示匹配内容；「导出巡检数据」一键导出指标与 HTTP / 证书历史 CSV</li>
       <li><b>监控日志…</b>：按设备 / 日期浏览，支持<b>全局跨文件搜索</b>，点击结果定位到对应行</li>
       <li><b>告警静默</b>：右键设备「告警静默 1 小时」快速静默；或在监控配置弹窗设每日<b>维护窗口</b>（支持跨午夜）——静默期内通知不弹、<b>事件时间线照常记录</b>，计划内重启不再刷屏</li>
+      <li><b>告警等级与提示音…</b>（监控 ▾）：告警分<b>提示 / 警告 / 严重 / 紧急</b>四级，不同等级发出不同音型（本机合成，无需音频文件）；可设<b>最低发声等级</b>与<b>音量</b>，也可<b>整体关闭提示音</b>（关闭后系统通知一并静音，事件照常记录）；每种事件的等级可逐项改写，事件时间线按等级标注</li>
+      <li><b>链路连通性监测…</b>（监控 ▾）：把<b>链路本身</b>当监测对象——「为全部连线生成」给每条连线建「两端接口 IP 互探」任务；「＋ 端到端路径监测」指定起止设备后<b>沿拓扑自动选路并逐段探测</b>，断在哪一段是测出来的。探测可选<b>本机</b>（零配置，本机逐跳 ICMP/TCP）或<b>设备侧</b>（从每段起点设备执行 ping，复用监控/凭据库凭据，各厂家语法已内置）；结论连通/中断/未知，中断与恢复记入事件时间线并按<b>分级告警</b>通知。画布连线按结论着色（连通绿 / 中断红虚线闪烁 / 未知灰，可关），侧栏设备带链路标记（方形小点），监控中心新增「<b>链路</b>」页签看逐段明细与断点。解析不出结论时保持原状态不误报；默认「首轮探测只建基线」，避免本机天生不可达的地址刷屏</li>
       <li><b>拓扑状态叠加</b>（监控 ▾）：节点右上角状态圆点实时刷新（绿=在线 / 红=离线·告警 / 橙=连接中）</li>
+      <li><b>链路流量叠加</b>（监控 ▾）：连线中点徽标显示实时利用率（绿 &lt;50% / 橙 &lt;80% / 红 ≥80%，接口 DOWN 灰显）——数据取各设备「接口流量」SNMP 采集的收发速率，按跨厂家规范化接口名对齐连线两端，悬浮查看收发速率与采样时间</li>
       <li><b>托盘常驻</b>：开启后关闭主窗口仅最小化到托盘，后台监控继续运行</li>
     </ul>
     <h4>⑬ 诊断与终端定位（桌面版）</h4>
     <ul>
-      <li><b>诊断工具箱…</b>（监控 ▾）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀）</li>
+      <li><b>诊断工具箱…</b>（监控 ▾）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（v2c 团体字或 v3 USM 用户遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀）</li>
       <li><b>MAC/ARP 终端定位…</b>（监控 ▾）：输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置，可填备用账号），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮；接口名跨厂家规范化匹配（GE / Gi / GigabitEthernet 视为同一接口），下游未查询设备可一键续查</li>
+      <li><b>批量巡检…</b>（监控 ▾）：勾选设备并发执行<b>只读白名单命令</b>（自动尝试 / 华为 / H3C / 思科 / 锐捷 / Linux 命令集：版本 / 时钟 / CPU / 内存 / 接口概览等），凭据取自各设备监控配置、可填备用账号；结果汇总可按设备查看输出、一键复制、<b>导出 CSV</b>——白名单拦截配置类命令，不会修改设备</li>
+      <li><b>配置变更下发…</b>（监控 ▾）：把「生成设备配置」的产物或手写配置片段<b>安全地下发到设备</b>——整条链路「先看后做」：① 变更集解析 + 安全闸门（<b>重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝且不可覆盖</b>；删除与关闭类命令、可能中断管理连接的变更需分别勾选确认）② dry-run 预判（与最近一次配置备份逐行比对：新增 / 覆盖 / 删除 / 幂等，并提示「管理地址被改写」「关闭管理通道」等自断风险）③ 主进程在<b>一条会话内</b>完成：（可选）<b>前置命令</b>（部分设备如思科用户模式需先 <code>enable</code>）→ 强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停，兼容 FRR 的 <code>% [ZEBRA] Unknown command</code> 形式）→ 退出配置模式 → 可选保存配置 → 可选回采校验 ④ 失败时依前置备份<b>生成回滚变更单</b>（逐行求逆、逆序下发，回滚同样走 ①②③；<code>vtysh -c "…"</code> 这类外壳包装行列人工项）⑤ 每次下发落审计记录（<code>password</code>/<code>community</code> 等口令类内容<b>打码</b>后落盘），可回看 / 载入 / 导出 CSV</li>
     </ul>
-    <h4>⑭ 网络服务：TFTP / FTP / Syslog（桌面版）</h4>
+    <h4>⑭ 网络服务：TFTP / FTP / Syslog / Trap（桌面版）</h4>
     <p>「监控 ▾ 网络服务…」把本机变成一台内网运维服务器：</p>
     <ul>
       <li><b>TFTP / FTP 服务器</b>：接收设备主动推送的配置文件（思科 <b>copy running-config tftp://本机地址/文件名</b>、华为/H3C <b>tftp 本机地址 put vrpcfg.zip</b>；FTP 需在面板配置账号），文件<b>按来源 IP 分目录</b>落盘、收到弹通知，可查看 / 删除并<b>一键导入配置备份库</b>（按来源 IP 自动匹配拓扑设备，进入备份 / 对比 / 合规体系）</li>
-      <li><b>Syslog 服务器</b>（UDP 可选 TCP）：收集设备日志（<b>info-center loghost</b> / <b>logging host</b> 指向本机），按来源主机 / 日期归档，实时滚动、级别与来源过滤、关键字检索历史</li>
-      <li>端口默认 69 / 21 / 514（可改，Linux 特权端口需 root）；面板展示本机地址与各厂家命令示例（点击复制），服务随设置自动启停</li>
+      <li><b>Syslog 服务器</b>（UDP 可选 TCP）：收集设备日志（<b>info-center loghost</b> / <b>logging host</b> 指向本机），按来源主机 / 日期归档，实时滚动、级别与来源过滤、关键字检索历史；可配置<b>日志告警</b>（级别阈值如 err 及以上、或自定义关键字），命中弹系统通知并记入事件时间线（受设备静默 / 维护窗口约束，同主机同规则 5 分钟冷却防刷屏），命中的日志行实时视图红色高亮</li>
+      <li><b>SNMP Trap 接收</b>（UDP）：设备把 trap 目标指向本机（<b>snmp-agent target-host trap address …</b> / <b>snmp-server host …</b>）后接收主动告警——支持 SNMP v1 / v2c / <b>v3</b>（v3 按面板配置的 USM 用户验签并解密），标准 Trap 识别（接口 Down/Up、冷/热启动、认证失败等，中文名显示）、企业自定义 Trap 保留完整 OID、InformRequest 按协议回应答；来源 IP 匹配到拓扑设备的标准 Trap <b>弹系统通知</b>（受该设备静默 / 维护窗口约束）并记入事件时间线，全部按来源 / 日期归档可回查</li>
+      <li>端口默认 69 / 21 / 514 / 162（可改，Linux 特权端口需 root）；面板展示本机地址与各厂家命令示例（点击复制），服务随设置自动启停</li>
     </ul>
     <h4>⑮ 配置合规基线检查（桌面版）</h4>
     <ul>
@@ -4692,7 +6670,12 @@ async function runUpdateCheck(btn) {
 }
 
 function openReleasePage(url) {
-  const u = String(url || 'https://github.com/54gogogo10/nettopo/releases');
+  // 发布页地址来自升级检查响应（外部数据）：限定 GitHub 发布/仓库域 + https，防响应被篡改后
+  // 触发 file:/ms-msdt: 等危险协议处理器（openExternal 由系统协议分发）
+  let u = String(url || '').trim();
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:[/?#].*)?$/i.test(u)) {
+    u = 'https://github.com/54gogogo10/nettopo/releases';
+  }
   if (window.topoShell && window.topoShell.openExternal) window.topoShell.openExternal(u);
   else window.open(u, '_blank');
 }
@@ -4717,6 +6700,7 @@ function showUpdateDialog(res) {
     <pre class="about-license" style="max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word">${U.escHtml(String(latest.notes || '').slice(0, 2000)) || '（发布说明见发布页）'}</pre>
     <div class="about-actions" id="updActions">
       <button type="button" class="tb primary" id="updGo">立即升级</button>
+      <button type="button" class="tb" id="updCancel" hidden>取消下载</button>
       <button type="button" class="tb" id="updPage">去发布页</button>
     </div>
     <div class="about-actions" id="updDone" hidden>
@@ -4735,13 +6719,21 @@ function showUpdateDialog(res) {
   const bridge = updateBridge();
   const actions = ov.querySelector('#updActions'), done = ov.querySelector('#updDone'), wrap = ov.querySelector('#updProgressWrap');
   const goBtn = ov.querySelector('#updGo');
+  const cancelBtn = ov.querySelector('#updCancel');
+  if (cancelBtn) cancelBtn.onclick = async () => {
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = '正在取消…';
+    try { await bridge.cancel(); } catch (e) { /* 取消请求失败由下载结果兜底 */ }
+  };
   if (goBtn) goBtn.onclick = async () => {
     if (!bridge) return;
     goBtn.disabled = true;
     goBtn.textContent = '下载中…';
+    if (cancelBtn) { cancelBtn.hidden = false; cancelBtn.disabled = false; cancelBtn.textContent = '取消下载'; }
     wrap.hidden = false;
     let r = null;
     try { r = await bridge.download(res.assets || null); } catch (e) { r = null; }
+    if (cancelBtn) cancelBtn.hidden = true;
     if (r && r.ok) {
       actions.hidden = true;
       done.hidden = false;
@@ -4810,6 +6802,7 @@ function wire() {
     { ic: 'fileplus', label: '新建空白画布', act: newGraph },
     { ic: 'upload', label: '导入表格…', act: () => $('#fileInput').click() },
     { ic: 'search', label: '从邻居表导入（LLDP/CDP）…', act: openNeighborImport },
+    { ic: 'grid', label: '拓扑自动发现…', act: openTopoDiscovery },
     { ic: 'wand', label: '载入示例拓扑', act: loadSample },
     { sep: true },
     { ic: 'save', label: '保存工程…', act: saveProject },
@@ -4831,6 +6824,9 @@ function wire() {
     { ic: 'wand', label: 'IP 子网计算器…', act: openSubnetCalc },
     { ic: 'list', label: '接口总表…', act: openIfTable },
     { ic: 'grid', label: 'IP 地址管理…', act: openIpam },
+    { sep: true },
+    { ic: 'tag', label: '自定义字段…', act: openCustomFields },
+    { ic: 'grid', label: '机柜视图（U 位）…', act: openRackView },
     { sep: true },
     { ic: 'tag', label: '类型管理…', act: openTypeManager },
     { ic: 'trash', label: '删除选中', danger: true, act: () => deleteSelection() }
@@ -4866,11 +6862,26 @@ function wire() {
       if (on) seedMonOverlay(); else syncMonOverlay();
       toast(on ? '已开启监控状态叠加：节点右上角显示状态圆点' : '已关闭监控状态叠加');
     } },
+    { ic: 'pulse', label: (linkFlowOn() ? '✓ ' : '') + '链路流量叠加（连线徽标）', act: () => {
+      const on = !linkFlowOn();
+      try { localStorage.setItem(LINK_FLOW_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+      if (on) seedLinkFlow(); else syncLinkFlow();
+      toast(on ? '已开启链路流量叠加：连线中点显示实时利用率（需设备开启「接口流量」SNMP 采集）' : '已关闭链路流量叠加');
+    } },
     { ic: 'archive', label: '配置合规检查…', act: () => openComplianceCheck() },
     { ic: 'pulse', label: '设备监控（静默采集）…', act: () => {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds && renderer.selIds.size ? [...renderer.selIds][0] : '');
       if (selId) openMonitorConfig(selId); else toast('请先选中一台设备，或右键设备进入');
     } },
+    { ic: 'bell', label: '告警等级与提示音…', act: openAlertSoundConfig },
+    { ic: 'link', label: '链路连通性监测…', act: openLinkMonitor },
+    { ic: 'link', label: (linkOverlayOn() ? '✓ ' : '') + '链路状态叠加（连线着色）', act: () => {
+      const on = !linkOverlayOn();
+      try { localStorage.setItem(LINK_OVERLAY_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+      syncLinkMonOverlay();
+      toast(on ? '已开启链路状态叠加：连通绿 / 中断红（虚线闪烁）/ 未知灰' : '已关闭链路状态叠加');
+    } },
+    { ic: 'shield', label: '凭据库（设备访问凭据集中维护）…', act: () => openCredManager() },
     { sep: true },
     { ic: 'doc', label: '监控日志…', act: () => {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
@@ -4880,9 +6891,14 @@ function wire() {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
       openConfigBackups(selId || '');
     } },
-    { ic: 'server', label: '网络服务（TFTP / FTP / Syslog）…', act: openNetServices },
+    { ic: 'server', label: '网络服务（TFTP / FTP / Syslog / Trap）…', act: openNetServices },
     { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / 网段 / SNMP）…', act: () => openDiagTools() },
+    { ic: 'grid', label: '二层拓扑推断（SNMP 转发表）…', act: () => openL2Infer() },
+    { ic: 'pulse', label: '可用性报表（SLA）…', act: () => openSlaReport() },
     { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
+    { ic: 'grid', label: '批量巡检（只读命令）…', act: () => openBatchInspect() },
+    { ic: 'terminal', label: '配置变更下发…', act: () => openConfigDeploy() },
+    { ic: 'pulse', label: '三层邻居与协议视图（BGP / OSPF）…', act: () => openProtoNeighbors() },
     { sep: true },
     { ic: 'tray', label: '托盘常驻（关闭窗口后台继续监控）', act: async () => {
       if (!window.topoMonitor || !window.topoMonitor.setTray) { toast('托盘常驻需要桌面版软件'); return; }
@@ -4903,6 +6919,7 @@ function wire() {
   $('#btnDropView').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'eye', label: '链路标注', active: state.showLabels, act: toggleLabels },
     { ic: 'layers', label: '子网分组', active: state.showSubnets, act: toggleSubnets },
+    { ic: 'image', label: state.underlay ? ('底图：' + (state.underlay.name || '已导入')) : '机房平面图底图…', act: () => openUnderlayPanel() },
     { sep: true },
     { ic: 'undo', label: state.downLinks.size ? '清除故障标记（' + state.downLinks.size + '）' : '清除故障标记', act: clearDownLinks },
     { ic: 'close', label: '清除路径高亮', active: !!renderer.pathHl, act: clearPathHl }
@@ -4910,6 +6927,7 @@ function wire() {
   $('#btnDropExport').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'csv', label: '导出 CSV 表格', act: exportCSV },
     { ic: 'xlsx', label: '导出 Excel 表格', act: exportXlsx },
+    { ic: 'cloud', label: '导出交互式拓扑 HTML（可点击看详情）', act: exportInteractiveHtml },
     { ic: 'archive', label: '导出资产清单（Excel）', act: exportInventory },
     { ic: 'pdf', label: '导出 PDF', act: exportPdf },
     { ic: 'image', label: '导出图片（PNG / SVG）', act: openImageExport },
@@ -5109,7 +7127,7 @@ function wire() {
         const did = j.deviceId || deviceIdFromMonitorKey(j.key);
         if (!did) continue;
         const ms = { state: null, text: '', perHost: {} };
-        ms.perHost[j.host || ''] = { state: j.state, text: j.statusText || '', since: j.since, probeOk: j.probeOk, alert: j.alert, backup: j.backup };
+        ms.perHost[j.host || ''] = { state: j.state, text: j.text || '', since: j.since, probeOk: j.probeOk, alert: j.alert, backup: j.backup };
         ms.state = aggregateMonitorState(ms.perHost);
         state.monitorStatus[did] = ms;
       }
@@ -5120,6 +7138,179 @@ function wire() {
   if (monOverlayOn()) seedMonOverlay();
   // 供 __topo 顶层导出桥接（函数为 wire 作用域私有，顶层无法直接引用）
   globalThis.__monOverlay = { sync: () => syncMonOverlay(), seed: () => seedMonOverlay() };
+
+  /* ---- 拓扑画布链路流量叠加（监控 ▾ 开关，localStorage 记忆）：连线中点徽标显示实时利用率。
+     数据取各设备 SNMP ifTable 采样速率（monitor:iftraffic 推送），按「设备 + 跨厂家规范化接口名」
+     对齐连线两端（U.buildLinkFlow）：绿 <50% / 橙 <80% / 红 ≥80%，接口 DOWN 灰显，采样过期灰显 ---- */
+  const LINK_FLOW_KEY = 'nettopo.linkFlow';
+  const linkFlowOn = () => { try { return localStorage.getItem(LINK_FLOW_KEY) === '1'; } catch (e) { return false; } };
+  let linkFlowRaf = 0;
+  const FLOW_MBPS = (v) => v == null ? '—' : (v >= 1e6 ? (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + ' Gbps' : v >= 1000 ? (v / 1000).toFixed(1) + ' Mbps' : Math.round(v) + ' Kbps');
+  const flowBadge = (d) => {
+    if (d.oper === 'down') return { cls: 'down', text: 'DOWN' };
+    if (d.stale) return { cls: 'stale', text: d.util != null ? Math.min(999, Math.round(d.util * 100)) + '%' : '—' };
+    if (d.util == null) return { cls: 'none', text: '—' };
+    const p = d.util * 100;
+    return { cls: p >= 80 ? 'crit' : p >= 50 ? 'warn' : 'ok', text: (p >= 100 ? '≥100' : Math.round(p)) + '%' };
+  };
+  /** 连线徽标锚点：直角模式沿折线取弧长中点（与线段重合），直线模式取两端中点（流量/协议徽标共用） */
+  const linkMid = (q) => {
+    if (q.pts) {
+      const segs = []; let total = 0;
+      for (let i = 1; i < q.pts.length; i++) { const L = Math.hypot(q.pts[i][0] - q.pts[i - 1][0], q.pts[i][1] - q.pts[i - 1][1]); segs.push(L); total += L; }
+      let t = total / 2;
+      let mx = q.pts[q.pts.length - 1][0], my = q.pts[q.pts.length - 1][1];
+      for (let i = 1; i < q.pts.length; i++) {
+        if (t <= segs[i - 1]) { const r = segs[i - 1] ? t / segs[i - 1] : 0; mx = q.pts[i - 1][0] + (q.pts[i][0] - q.pts[i - 1][0]) * r; my = q.pts[i - 1][1] + (q.pts[i][1] - q.pts[i - 1][1]) * r; break; }
+        t -= segs[i - 1];
+      }
+      return { mx, my };
+    }
+    return { mx: (q.x1 + q.x2) / 2, my: (q.y1 + q.y2) / 2 };
+  };
+  /* 徽标 title 文本缓存：键为 linkId+采样时间戳——拖拽/缩放期间位置变而采样不变，
+   * toLocaleTimeString 等字符串拼装每帧每链路重算纯浪费；容量超界整体清空（下一采样自然重建） */
+  const flowTitleCache = new Map();
+  const syncLinkFlow = () => {
+    if (linkFlowRaf || !window.topoMonitor) return;
+    linkFlowRaf = requestAnimationFrame(() => {
+      linkFlowRaf = 0;
+      const layer = renderer.linkLayer;
+      if (!layer) return;
+      for (const old of [...layer.querySelectorAll('.flow-badge')]) old.remove();
+      if (!linkFlowOn()) return;
+      const geom = U.linkGeom(state.nodes, state.links, { ortho: !!renderer.orthoLinks });
+      const data = U.buildLinkFlow(state.nodes, state.links, state.linkFlow, { now: Date.now() });
+      const z = 1 / (renderer.zoom || 1);
+      const NS = 'http://www.w3.org/2000/svg';
+      const nameById = new Map(state.nodes.map(n => [n.id, n.name]));
+      for (const l of state.links) {
+        const d = data[l.id], q = geom[l.id];
+        if (!d || !q) continue;
+        // 徽标锚点取走线中点（直角模式沿折线取弧长中点，与线段重合）
+        const { mx, my } = linkMid(q);
+        const bd = flowBadge(d);
+        const g = document.createElementNS(NS, 'g');
+        g.setAttribute('class', 'flow-badge ' + bd.cls);
+        g.setAttribute('transform', 'translate(' + mx + ' ' + my + ') scale(' + z + ')');
+        const rect = document.createElementNS(NS, 'rect');
+        const txt = document.createElementNS(NS, 'text');
+        txt.setAttribute('text-anchor', 'middle');
+        txt.setAttribute('dominant-baseline', 'central');
+        txt.textContent = bd.text;
+        const w = Math.max(30, U.measureText(bd.text, 10) + 12);
+        rect.setAttribute('x', String(-w / 2)); rect.setAttribute('y', '-9');
+        rect.setAttribute('width', String(w)); rect.setAttribute('height', '18'); rect.setAttribute('rx', '9');
+        g.appendChild(rect); g.appendChild(txt);
+        const tk = l.id + '|' + (d.ts || 0) + '|' + (nameById.get(l.a) ?? l.a ?? '') + '|' + (nameById.get(l.b) ?? l.b ?? '');
+        let title = flowTitleCache.get(tk);
+        if (title == null) {
+          if (flowTitleCache.size > state.links.length * 4 + 64) flowTitleCache.clear();
+          const nm = (id) => nameById.has(id) ? nameById.get(id) : (id || '');
+          title = nm(l.a) + (l.aIf ? ' ' + l.aIf : '') + ' ⇄ ' + nm(l.b) + (l.bIf ? ' ' + l.bIf : '')
+            + '\n↓ ' + FLOW_MBPS(d.inBps == null ? null : d.inBps / 1000) + ' · ↑ ' + FLOW_MBPS(d.outBps == null ? null : d.outBps / 1000)
+            + (d.speedBps ? '（基准 ' + FLOW_MBPS(d.speedBps / 1000) + '）' : '')
+            + (d.ts ? '\n采样 ' + new Date(d.ts).toLocaleTimeString() + (d.stale ? '（已过期）' : '') : '');
+          flowTitleCache.set(tk, title);
+        }
+        const tt = document.createElementNS(NS, 'title');
+        tt.textContent = title;
+        g.appendChild(tt);
+        layer.appendChild(g);
+      }
+    });
+  };
+  /** 开启叠加时预填最新采样（等下一轮 ifTable 采集前先有数据）：复用监控中心 ifHistory 数据 */
+  const seedLinkFlow = async () => {
+    if (!window.topoMonitor || !window.topoMonitor.overview || !window.topoMonitor.ifHistory) return;
+    try {
+      const o = await window.topoMonitor.overview();
+      if (!o || !o.ok) return;
+      for (const j of (o.jobs || [])) {
+        const did = j.deviceId || deviceIdFromMonitorKey(j.key);
+        if (!did || state.linkFlow[did]) continue;
+        const r = await window.topoMonitor.ifHistory(j.key);
+        const hist = (r && r.ok && r.hist) || [];
+        const last = hist[hist.length - 1];
+        if (last && last.ifs) state.linkFlow[did] = { ts: last.ts, ifs: last.ifs };
+      }
+      syncLinkFlow();
+    } catch (e) { /* ignore */ }
+  };
+  if (window.topoMonitor && window.topoMonitor.onIfTraffic) {
+    window.topoMonitor.onIfTraffic((info) => {
+      if (!info) return;
+      const did = info.deviceId || deviceIdFromMonitorKey(info.key);
+      if (!did) return;
+      state.linkFlow[did] = { ts: info.ts, ifs: info.ifs || [] };
+      if (linkFlowOn()) syncLinkFlow();
+    });
+  }
+  renderer.onAfterUpdate = () => syncLinkFlow();
+  if (linkFlowOn()) seedLinkFlow();
+  // 供 __topo 顶层导出桥接（e2e/调试用）
+  globalThis.__linkFlow = { sync: () => syncLinkFlow(), seed: () => seedLinkFlow() };
+
+  /* ---- 拓扑画布三层协议视图叠加（监控 ▾ 三层邻居与协议视图）：
+     在已匹配到连线的邻接上画徽标（BGP AS65002 Established / OSPF Full），异常红闪；
+     数据由 openProtoNeighbors 采集后经 __protoView.set 注入，与「路径高亮」共用同一套高亮 ---- */
+  let protoViewData = null;
+  let protoRaf = 0;
+  let protoDrawn = false; // 当前是否已画有徽标：无数据且无徽标时早退，不再每帧空扫 querySelectorAll
+  const syncProtoView = () => {
+    if (protoRaf) return;
+    protoRaf = requestAnimationFrame(() => {
+      protoRaf = 0;
+      const layer = renderer.linkLayer;
+      if (!layer) return;
+      if (!protoViewData || !protoViewData.linkBadges) {
+        if (!protoDrawn) return;
+        protoDrawn = false;
+        for (const old of [...layer.querySelectorAll('.proto-badge')]) old.remove();
+        return;
+      }
+      protoDrawn = true;
+      for (const old of [...layer.querySelectorAll('.proto-badge')]) old.remove(); // 先清旧再画新（位置随拖拽/缩放更新）
+      const geom = U.linkGeom(state.nodes, state.links, { ortho: !!renderer.orthoLinks });
+      const z = 1 / (renderer.zoom || 1);
+      const NS = 'http://www.w3.org/2000/svg';
+      for (const l of state.links) {
+        const b = protoViewData.linkBadges[l.id], q = geom[l.id];
+        if (!b || !q) continue;
+        const { mx, my } = linkMid(q);
+        const label = String(b.label || '').slice(0, 42);
+        const g = document.createElementNS(NS, 'g');
+        // 与流量徽标同处连线中点会重叠：协议视图上移 14px 避让
+        g.setAttribute('class', 'proto-badge ' + (b.stateOk ? 'ok' : 'bad'));
+        g.setAttribute('transform', 'translate(' + mx + ' ' + (my - 14) + ') scale(' + z + ')');
+        const rect = document.createElementNS(NS, 'rect');
+        const txt = document.createElementNS(NS, 'text');
+        txt.setAttribute('text-anchor', 'middle');
+        txt.setAttribute('dominant-baseline', 'central');
+        txt.textContent = label;
+        const w = Math.max(34, U.measureText(label, 10) + 12);
+        rect.setAttribute('x', String(-w / 2)); rect.setAttribute('y', '-9');
+        rect.setAttribute('width', String(w)); rect.setAttribute('height', '18'); rect.setAttribute('rx', '9');
+        g.appendChild(rect); g.appendChild(txt);
+        const tt = document.createElementNS(NS, 'title');
+        tt.textContent = label + (b.stateOk ? '（邻居状态正常）' : '（存在未建立/异常邻居）');
+        g.appendChild(tt);
+        layer.appendChild(g);
+      }
+    });
+  };
+  globalThis.__protoView = {
+    set: (data) => {
+      protoViewData = data || null;
+      if (data) renderer.highlightPath(data.nodeIds || [], data.linkIds || []);
+      else renderer.clearPath();
+      syncProtoView();
+    },
+    clear: () => { protoViewData = null; syncProtoView(); try { renderer.clearPath(); } catch (e) { /* ignore */ } },
+    sync: () => syncProtoView()
+  };
+  const prevAfterUpdate = renderer.onAfterUpdate;
+  renderer.onAfterUpdate = () => { try { if (prevAfterUpdate) prevAfterUpdate(); } catch (e) { /* 流量叠加异常不阻断协议视图 */ } syncProtoView(); };
   // 节点随画布操作重建后自动补挂角标（监听节点层子树变化，rAF 去抖）
   if (renderer.nodeLayer && typeof MutationObserver !== 'undefined') {
     new MutationObserver(() => syncMonOverlay()).observe(renderer.nodeLayer, { childList: true });
@@ -5157,11 +7348,20 @@ function wire() {
       const host = info.host || '';
       const ms = state.monitorStatus[did];
       if (!ms || !ms.perHost || !ms.perHost[host]) return;
-      ms.perHost[host].probeOk = info.ok;
-      ms.perHost[host].probeLatency = info.latencyMs;
-      ms.perHost[host].probeFailSince = info.failSince;
+      const ph = ms.perHost[host];
+      const prev = { state: ms.state, text: ms.text, ok: ph.probeOk };
+      ph.probeOk = info.ok;
+      ph.probeLatency = info.latencyMs;
+      ph.probeFailSince = info.failSince;
       ms.state = aggregateMonitorState(ms.perHost);
       ms.text = aggregateMonitorText(ms.perHost);
+      // probe 事件每周期都发（UptimeStore 在线率按周期采样分桶）：聚合状态与探测结论均未变化时
+      // 不触发面板/覆盖层的全量重建（innerHTML 重挂监听器，N 台×5s 间隔会把渲染层打满）；
+      // 选中卡有「探测时延」展示，选中的正是该设备时单独轻量刷新
+      if (prev.state === ms.state && prev.text === ms.text && prev.ok === info.ok) {
+        if (state.sel && state.sel.kind === 'node' && state.sel.id === did) renderSelCard();
+        return;
+      }
       refreshPanel();
       renderSelCard();
       syncMonOverlay();
@@ -5183,6 +7383,34 @@ function wire() {
       syncMonOverlay();
     });
   }
+  // 分级提示音：主进程已按「声音开关 + 最低发声等级」筛过，这里只负责合成与节流
+  if (window.topoMonitor && window.topoMonitor.onAlertSound) {
+    window.topoMonitor.onAlertSound((info) => {
+      if (!info) return;
+      playAlertSound(info.level, info.volume);
+    });
+  }
+  // 链路连通性监测：逐段结果与状态翻转（主进程已记事件时间线并弹通知，这里只更新界面与画布）
+  if (window.topoLink && window.topoLink.onResult) {
+    window.topoLink.onResult((info) => {
+      if (!info || !info.key) return;
+      if (!state.linkStatus || typeof state.linkStatus !== 'object') state.linkStatus = {};
+      state.linkStatus[info.key] = info;
+      syncLinkMonOverlay();
+      refreshPanel();   // 侧栏链路标记
+      for (const fn of linkViewRefreshers) { try { fn(); } catch (e) { /* 单个视图刷新失败不影响其余 */ } }
+    });
+  }
+  if (window.topoLink && window.topoLink.onState) {
+    window.topoLink.onState((info) => {
+      if (!info || !info.key) return;
+      if (!state.linkStatus || typeof state.linkStatus !== 'object') state.linkStatus = {};
+      state.linkStatus[info.key] = info;
+      syncLinkMonOverlay();
+      refreshPanel();
+      for (const fn of linkViewRefreshers) { try { fn(); } catch (e) { /* ignore */ } }
+    });
+  }
   if (window.topoMonitor && window.topoMonitor.onBackup) {
     window.topoMonitor.onBackup((info) => {
       if (!info || !info.key) return;
@@ -5191,7 +7419,8 @@ function wire() {
       const ms = state.monitorStatus[did];
       if (!ms || !ms.perHost || !ms.perHost[host]) return;
       if (info.ok) {
-        ms.perHost[host].backup = { name: info.name, changed: !!info.changed, first: !!info.first, added: info.added, removed: info.removed, error: null };
+        // fileName 才是备份文件名（info.name 是设备名——两通道命名不同，onStatus 侧叫 info.backup.name）
+        ms.perHost[host].backup = { name: info.fileName || null, changed: !!info.changed, first: !!info.first, added: info.added, removed: info.removed, error: null };
       } else {
         ms.perHost[host].backup = { name: null, changed: false, error: info.error || '备份失败' };
       }
@@ -5199,18 +7428,31 @@ function wire() {
       renderSelCard();
       syncMonOverlay();
     });
-    // SNMP 识别结果自动回填设备「软件版本」（只读，不覆盖手填值——仅当原值为空或与上次识别不同）
+    // SNMP 识别结果自动回填设备「软件版本」：仅当原值为空、或原值仍是上次识别回填的结果
+    // （未被手工修改）时才回填——识别值变化不能覆盖用户手填的版本号
     if (window.topoMonitor.onSysinfo) {
+      const snmpOsverSeen = new Map(); // nodeId -> 上次识别回填的版本（运行期标记，不落盘）
       window.topoMonitor.onSysinfo((info) => {
         if (!info || !info.key) return;
         const did = info.deviceId || deviceIdFromMonitorKey(info.key);
         const n = state.nodes.find(x => x.id === did);
-        if (!n) return;
-        if (info.version && n.osver !== info.version) {
-          n.osver = String(info.version).slice(0, 64); // 钳制：恶意 SNMP 设备可回超长版本串污染图数据/localStorage
-          refreshPanel();
-          saveGraph();
-          toast('已识别「' + n.name + '」软件版本：' + info.version);
+        // 厂商识别（sysObjectID 企业号优先，sysDescr 关键词兜底）：结果只做运行期标记，
+        // 供「监控配置」弹窗按厂商预填 CPU/内存 OID；首次识别提示一次，避免反复弹
+        const vd = U.snmpVendorOf(info.objectId, info.descr);
+        if (vd && n && MON_VENDOR_SEEN.get(did) !== vd) {
+          MON_VENDOR_SEEN.set(did, vd);
+          toast('已识别「' + n.name + '」厂商：' + vd.label + (vd.cpu || vd.mem ? '（监控配置可按此预填 CPU/内存 OID）' : '（OID 需按设备手册填写）'));
+        }
+        if (!n || !info.version) return;
+        const ver = String(info.version).slice(0, 64); // 钳制：恶意 SNMP 设备可回超长版本串污染图数据/localStorage
+        if (!n.osver || n.osver === (snmpOsverSeen.get(did) || '')) {
+          snmpOsverSeen.set(did, ver);
+          if (n.osver !== ver) {
+            n.osver = ver;
+            refreshPanel();
+            saveGraph();
+            toast('已识别「' + n.name + '」软件版本：' + ver);
+          }
         }
       });
     }
@@ -5243,7 +7485,7 @@ function secureBridge() {
   return (window.topoSecure && window.topoSecure.encryptSecret && window.topoSecure.decryptSecret) ? window.topoSecure : null;
 }
 /** 监控配置中的机密字段（密码 / 私钥口令 / 私钥内容），落盘与工程快照统一走 enc: 密文 */
-const MON_SECRET_FIELDS = ['password', 'keyPass', 'privateKey'];
+const MON_SECRET_FIELDS = ['password', 'keyPass', 'privateKey', 'snmpV3AuthPass', 'snmpV3PrivPass'];
 
 /** 单个机密值加密（无桥/失败返回空串） */
 async function encryptSecretValue(sec, val) {
@@ -5319,6 +7561,58 @@ function monitorBridge(silent) {
 /** 监控任务 key：nodeId@host（同一设备多个管理口各一个任务） */
 function monitorKey(nodeId, host) { return String(nodeId) + '@' + String(host); }
 
+/* ================= 告警依赖抑制：向主进程推送拓扑邻接表 =================
+ * 主进程按「设备间连线 + 哪些设备装了在线探测」判定上游失联，从而归并下游的离线通知。
+ * 邻接表键与监控任务一致（deviceId@host）；拓扑/监控配置变化时重推（800ms 防抖 + 内容去重）。
+ * ranks 为「上游度」（设备类型序）：只在同一轮齐掉、失败时刻分不出先后时用于裁决根因。 */
+const ALERT_RANK = { cloud: 4, firewall: 3, router: 3, switch: 2, other: 1, server: 1, pc: 0 };
+function alertRankOf(node) {
+  const k = String((node && node.type) || '');
+  return Object.prototype.hasOwnProperty.call(ALERT_RANK, k) ? ALERT_RANK[k] : 1;
+}
+let alertTopoPushed = '';
+let alertTopoTimer = null;
+function alertTopologySnapshot() {
+  const keysOf = new Map();   // nodeId -> [监控任务 key…]
+  for (const n of state.nodes) {
+    const cfg = state.monitorCfg[n.id];
+    if (!cfg || cfg.enabled === false) continue;
+    const hosts = normalizeMonitorHosts(cfg);
+    if (!hosts.length) continue;
+    keysOf.set(n.id, hosts.map(r => monitorKey(n.id, r.host)));
+  }
+  const names = {}, ranks = {};
+  for (const n of state.nodes) {
+    const ks = keysOf.get(n.id);
+    if (!ks) continue;
+    for (const k of ks) { names[k] = String(n.name || ''); ranks[k] = alertRankOf(n); }
+  }
+  const edges = [];
+  for (const l of (state.links || [])) {
+    const a = keysOf.get(l.a), b = keysOf.get(l.b);
+    if (!a || !b) continue;
+    for (const ka of a) for (const kb of b) edges.push([ka, kb]);
+  }
+  return { edges, names, ranks };
+}
+function pushAlertTopology() {
+  const bridge = window.topoMonitor;
+  if (!bridge || !bridge.setTopology) return;
+  try {
+    const snap = alertTopologySnapshot();
+    const json = JSON.stringify(snap);
+    if (json === alertTopoPushed) return;      // 内容没变不重复过桥（拓扑不变时不产生 IPC 流量）
+    alertTopoPushed = json;
+    const r = bridge.setTopology(snap);
+    if (r && typeof r.catch === 'function') r.catch(() => { alertTopoPushed = ''; });
+  } catch (e) { alertTopoPushed = ''; }
+}
+/** 防抖推送：画布刷新（refreshPanel）频繁调用，这里合并成一次 */
+function scheduleAlertTopology() {
+  if (alertTopoTimer) return;
+  alertTopoTimer = setTimeout(() => { alertTopoTimer = null; pushAlertTopology(); }, 800);
+}
+
 /** 从 hostKey 解析设备 id */
 function deviceIdFromMonitorKey(key) {
   const i = String(key || '').lastIndexOf('@');
@@ -5359,6 +7653,16 @@ function normCmds(v, def) {
   return out.length ? out : (def || []);
 }
 
+/** CPU/内存换算方式 → 面板提示（与 js/monitor.js 的 cpuPctOf/memPctOf 同一套语义）：
+ *  显式 mode 优先；未给时可从「是否填了空闲 OID」推断（与 monitor 的旧配置兼容口径一致） */
+function snmpModeLabel(cpuMode, memMode, freeOid) {
+  const cpuTxt = cpuMode === 'idle100' ? 'CPU：100−空闲占比' : 'CPU：直接百分比';
+  const m = ['percent', 'usedfree', 'totalavail'].indexOf(memMode) >= 0 ? memMode : (freeOid ? 'usedfree' : 'percent');
+  const memTxt = m === 'usedfree' ? '内存：已用/(已用+空闲)'
+    : (m === 'totalavail' ? '内存：(总量−可用)/总量' : '内存：直接百分比');
+  return cpuTxt + ' · ' + memTxt;
+}
+
 /** 管理地址行：host + 各自连接方式（协议/端口/用户名/密码）+ 各自执行命令 + 仅读取开关 */
 function monitorRow(host, saved) {
   saved = saved || {};
@@ -5383,12 +7687,21 @@ function monitorRow(host, saved) {
     complianceEnabled: !!saved.complianceEnabled,
     snmpEnabled: !!saved.snmpEnabled,
     snmpCommunity: typeof saved.snmpCommunity === 'string' ? saved.snmpCommunity : 'public',
+    snmpPort: saved.snmpPort != null ? String(saved.snmpPort) : '',
+    snmpVersion: saved.snmpVersion === 'v3' ? 'v3' : 'v2c',
+    snmpV3User: typeof saved.snmpV3User === 'string' ? saved.snmpV3User : '',
+    snmpV3AuthProto: saved.snmpV3AuthProto === 'md5' ? 'md5' : 'sha',
+    snmpV3AuthPass: typeof saved.snmpV3AuthPass === 'string' ? saved.snmpV3AuthPass : '',
+    snmpV3PrivProto: saved.snmpV3PrivProto === 'des' ? 'des' : 'aes',
+    snmpV3PrivPass: typeof saved.snmpV3PrivPass === 'string' ? saved.snmpV3PrivPass : '',
     snmpIfTable: !!saved.snmpIfTable,
     snmpUpTime: !!saved.snmpUpTime,
     snmpPerf: !!saved.snmpPerf,
     snmpCpuOid: typeof saved.snmpCpuOid === 'string' ? saved.snmpCpuOid : '',
     snmpMemUsedOid: typeof saved.snmpMemUsedOid === 'string' ? saved.snmpMemUsedOid : '',
     snmpMemFreeOid: typeof saved.snmpMemFreeOid === 'string' ? saved.snmpMemFreeOid : '',
+    snmpCpuMode: saved.snmpCpuMode === 'idle100' ? 'idle100' : 'direct',
+    snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(saved.snmpMemMode) >= 0 ? saved.snmpMemMode : '',
     backupCommand: normCmds(saved.backupCommand, ['display current-configuration']),
     backupMode: saved.backupMode === 'own' ? 'own' : 'session',
     backupSkipSame: !!saved.backupSkipSame,
@@ -5440,12 +7753,21 @@ function normalizeMonitorHosts(cfg) {
         complianceEnabled: !!h.complianceEnabled,
         snmpEnabled: !!h.snmpEnabled,
         snmpCommunity: typeof h.snmpCommunity === 'string' ? h.snmpCommunity.slice(0, 64) : 'public',
+        snmpPort: h.snmpPort != null ? String(h.snmpPort).slice(0, 6) : '',
+        snmpVersion: h.snmpVersion === 'v3' ? 'v3' : 'v2c',
+        snmpV3User: typeof h.snmpV3User === 'string' ? h.snmpV3User.trim().slice(0, 32) : '',
+        snmpV3AuthProto: h.snmpV3AuthProto === 'md5' ? 'md5' : 'sha',
+        snmpV3AuthPass: typeof h.snmpV3AuthPass === 'string' ? h.snmpV3AuthPass.slice(0, 128) : '',
+        snmpV3PrivProto: h.snmpV3PrivProto === 'des' ? 'des' : 'aes',
+        snmpV3PrivPass: typeof h.snmpV3PrivPass === 'string' ? h.snmpV3PrivPass.slice(0, 128) : '',
         snmpIfTable: !!h.snmpIfTable,
         snmpUpTime: !!h.snmpUpTime,
         snmpPerf: !!h.snmpPerf,
         snmpCpuOid: typeof h.snmpCpuOid === 'string' ? h.snmpCpuOid.trim().slice(0, 64) : '',
         snmpMemUsedOid: typeof h.snmpMemUsedOid === 'string' ? h.snmpMemUsedOid.trim().slice(0, 64) : '',
         snmpMemFreeOid: typeof h.snmpMemFreeOid === 'string' ? h.snmpMemFreeOid.trim().slice(0, 64) : '',
+        snmpCpuMode: h.snmpCpuMode === 'idle100' ? 'idle100' : 'direct',
+        snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(h.snmpMemMode) >= 0 ? h.snmpMemMode : '',
         backupCommand: normCmds(h.backupCommand, ['display current-configuration']),
         backupMode: h.backupMode === 'own' ? 'own' : 'session',
         backupSkipSame: !!h.backupSkipSame,
@@ -5482,12 +7804,71 @@ function normalizeMonitorHosts(cfg) {
   return [];
 }
 
-/** 监控配置弹窗预填：已保存的 hosts 优先，否则用设备全部管理地址，否则留空一行 */
-function monitorHostsForPrefill(saved, mgmts) {
-  const rows = normalizeMonitorHosts(saved);
-  if (rows.length) return rows;
-  const all = (mgmts || []).map(h => String(h).trim()).filter(Boolean);
-  return all.length ? all.map(h => monitorRow(h, saved)) : [monitorRow('', saved)];
+/** SNMP v3 口令设置子对话框：认证协议/口令 + 加密协议/口令（口令只在内存/DOM，随监控配置统一加密落盘） */
+function openSnmpV3SecretDialog(init, onDone) {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:420px">
+      <h3>SNMP v3 口令设置（USM）</h3>
+      <div class="m-sub">认证与加密口令经系统级加密后随监控配置保存在本机。设备侧 snmp-agent usm-user 需使用同一组协议与口令。</div>
+      <div class="frow"><label>认证协议</label>
+        <select id="sv3ap"><option value="sha"${init.authProto === 'sha' ? ' selected' : ''}>SHA-1</option><option value="md5"${init.authProto === 'md5' ? ' selected' : ''}>MD5</option></select>
+      </div>
+      <div class="frow"><label>认证口令</label><input id="sv3ak" type="password" value="${U.escHtml(init.authPass || '')}" autocomplete="new-password"/></div>
+      <div class="frow"><label>加密协议</label>
+        <select id="sv3pp"><option value="aes"${init.privProto === 'aes' ? ' selected' : ''}>AES-128</option><option value="des"${init.privProto === 'des' ? ' selected' : ''}>DES</option></select>
+      </div>
+      <div class="frow"><label>加密口令</label><input id="sv3pk" type="password" value="${U.escHtml(init.privPass || '')}" autocomplete="new-password"/></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="ok">确定</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=ok]').onclick = () => {
+    onDone({
+      authProto: ov.querySelector('#sv3ap').value,
+      authPass: ov.querySelector('#sv3ak').value,
+      privProto: ov.querySelector('#sv3pp').value,
+      privPass: ov.querySelector('#sv3pk').value
+    });
+    close();
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#sv3ak').focus(); }, 250);
+}
+
+/* SNMP 识别到的厂商（运行期标记，不落盘）：nodeId -> U.SNMP_VENDORS 条目。
+ * 用途见 monitorHostsForPrefill：打开监控配置时按识别结果预填 CPU/内存 OID 与换算方式。 */
+const MON_VENDOR_SEEN = new Map();
+
+/** 监控配置弹窗预填：已保存的 hosts 优先，否则用设备全部管理地址，否则留空一行。
+ *  nodeId 已知且该设备识别出厂商时，对**仍为空**的 CPU/内存 OID 按厂商预设预填（含换算方式）——
+ *  识别→采集不必手抄 OID；已有值一律不动（用户手填优先）。 */
+function monitorHostsForPrefill(saved, mgmts, nodeId) {
+  const vd = nodeId ? MON_VENDOR_SEEN.get(nodeId) : null;
+  const fillByVendor = (r) => {
+    if (!vd) return r;
+    if (vd.cpu && !r.snmpCpuOid) { r.snmpCpuOid = vd.cpu.oid || ''; r.snmpCpuMode = vd.cpu.mode || 'direct'; }
+    if (vd.mem && !r.snmpMemUsedOid) {
+      r.snmpMemUsedOid = vd.mem.oid || '';
+      r.snmpMemFreeOid = vd.mem.freeOid || '';
+      r.snmpMemMode = vd.mem.mode || 'percent';
+    }
+    return r;
+  };
+  let rows = normalizeMonitorHosts(saved);
+  if (!rows.length) {
+    const all = (mgmts || []).map(h => String(h).trim()).filter(Boolean);
+    rows = all.length ? all.map(h => monitorRow(h, saved)) : [monitorRow('', saved)];
+  }
+  return rows.map(fillByVendor);
 }
 
 function monitorBadgeHtml(nodeId) {
@@ -5520,6 +7901,9 @@ async function applyMonitor(id, cfg, enabled) {
       };
       state.monitorCfg[id] = Object.assign({}, cleanCfg, { enabled: true });
       saveMonitorCfg().catch(() => {});
+      // 立即推送邻接表（不走 800ms 防抖）：探针首次失败可能就在几十毫秒后，
+      // 主进程要据此判定上游失联，晚一步就会把下游离线通知照常发出去（归并失效）
+      pushAlertTopology();
       const perHost = {};
       for (const r of hosts) perHost[r.host] = { state: 'connecting', text: '启动监控…', since: Date.now() };
       state.monitorStatus[id] = { state: 'connecting', text: aggregateMonitorText(perHost), perHost };
@@ -5527,11 +7911,7 @@ async function applyMonitor(id, cfg, enabled) {
       let allOk = true;
       for (const r of hosts) {
         // 复用 Web Shell 已信任的指纹（若此前通过 Web Shell 信任过该主机，则直接严格校验）
-        let expectFp = '';
-        try {
-          const fp = localStorage.getItem('topoShellFp:' + r.host);
-          if (fp && fp.indexOf('SHA256:') === 0) expectFp = fp;
-        } catch (e) { expectFp = ''; }
+        const expectFp = trustedFpOf(r.host, r.port);
         const res = await bridge.start(Object.assign(
           { key: monitorKey(id, r.host), deviceId: id, name: node ? node.name : '', expectFp, host: r.host },
           { protocol: r.protocol, port: r.port, username: r.username, password: r.password, privateKey: r.privateKey || '', keyPassphrase: r.keyPass || '', jump: r.jump || null },
@@ -5539,7 +7919,7 @@ async function applyMonitor(id, cfg, enabled) {
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
           { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!r.snmpEnabled, community: r.snmpCommunity || 'public', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '' } } },
+        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', snmpPort: r.snmpPort || '', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '', cpuMode: r.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: r.snmpMemMode || '' } } },
         { metrics: { enabled: !!r.metricsEnabled, command: r.metricsCommands, intervalSec: r.metricsIntervalSec, diskWarn: r.metricsDiskWarn, diskCrit: r.metricsDiskCrit, memWarn: r.metricsMemWarn, memCrit: r.metricsMemCrit } },
         { httpProbe: { enabled: !!r.httpEnabled, url: r.httpUrl, intervalSec: r.httpIntervalSec, alertDays: r.httpAlertDays, keyword: r.httpKeyword } }
         ));
@@ -5592,12 +7972,781 @@ async function muteAlertsFor(id) {
   } catch (e) { toast('静默失败：' + String((e && e.message) || e)); }
 }
 
+/* ================= 告警等级与分级提示音 =================
+ * 等级定义、事件默认等级、音型规格都在 js/alert-level.js（与主进程同一份，避免两处口径漂移）；
+ * 这里负责三件事：① 用 WebAudio 现场合成各等级音型（无音频文件、无外链，CSP 下可用）；
+ * ② 「告警等级与提示音…」设置界面；③ 事件时间线上的等级徽标。 */
+const ALV = globalThis.TopoAlertLevel || null;
+const ALERT_LEVEL_FALLBACK = ['info', 'warning', 'critical', 'emergency'];
+const ALERT_LEVEL_CN = { info: '提示', warning: '警告', critical: '严重', emergency: '紧急' };
+/** 事件等级取值数组（alert-level.js 缺失时的兜底，保证界面不至于整块空白） */
+function alertLevelList() { return (ALV && ALV.LEVELS) || ALERT_LEVEL_FALLBACK; }
+function alertLevelName(lv) { return (ALV && ALV.levelName(lv)) || ALERT_LEVEL_CN[lv] || String(lv == null ? '' : lv); }
+function alertLevelRank(lv) { return ALV ? ALV.rankOf(lv) : alertLevelList().indexOf(lv); }
+/** 事件默认等级（渲染层只用于界面提示，权威判定在主进程） */
+function alertLevelOf(type) { return ALV ? ALV.levelFor(type, null) : 'warning'; }
+
+/* ---- 发声：WebAudio 合成。多台设备同时掉线时按最高等级合并 + 固定间隔，避免糊成一片长鸣 ---- */
+const alertAudio = { ctx: null, pending: null, timer: null, busyUntil: 0, volume: 0.6 };
+function alertAudioCtx() {
+  if (alertAudio.ctx) return alertAudio.ctx;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  try { alertAudio.ctx = new Ctx(); } catch (e) { alertAudio.ctx = null; }
+  return alertAudio.ctx;
+}
+/** 播放一个等级的音型：返回是否真的发声（无 WebAudio 环境返回 false） */
+function playAlertTone(level, volume) {
+  const spec = ALV && ALV.soundSpec ? ALV.soundSpec(level) : null;
+  const ac = alertAudioCtx();
+  if (!spec || !ac) return false;
+  // 自动播放策略：首个用户手势前 AudioContext 可能处于 suspended；这里顺手 resume，
+  // 恢复不了就这一次静默（值班场景下用户总有交互，不会一直哑）
+  if (ac.state === 'suspended') { try { ac.resume(); } catch (e) { /* ignore */ } }
+  const v = Math.max(0, Math.min(1, Number(volume))) * (Number(spec.gain) || 0.7) * 0.3;
+  let at = ac.currentTime + 0.02;
+  try {
+    for (const w of (spec.waves || [])) {
+      const dur = Number(w.d) || 0.1;
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.type = w.type || 'sine';
+      osc.frequency.value = Number(w.f) || 800;
+      // 梯形包络（起落各 8ms）：直接开关增益会有咔哒爆音
+      g.gain.setValueAtTime(0, at);
+      g.gain.linearRampToValueAtTime(v, at + 0.008);
+      g.gain.setValueAtTime(v, at + Math.max(0.008, dur - 0.008));
+      g.gain.linearRampToValueAtTime(0, at + dur);
+      osc.connect(g); g.connect(ac.destination);
+      osc.start(at); osc.stop(at + dur + 0.01);
+      at += dur + (Number(w.after) || 0);
+    }
+  } catch (e) { return false; }
+  return true;
+}
+/** 主进程告警音入口：冷却期内的多次告警只保留最高等级（一条紧急不会淹没在十条提示里） */
+function playAlertSound(level, volume) {
+  if (!ALV || !ALV.isLevel(level)) return;
+  if (Number.isFinite(Number(volume))) alertAudio.volume = Math.max(0, Math.min(1, Number(volume)));
+  if (!alertAudio.pending || alertLevelRank(level) > alertLevelRank(alertAudio.pending)) alertAudio.pending = level;
+  pumpAlertSound();
+}
+function pumpAlertSound() {
+  if (alertAudio.timer) return;
+  const now = Date.now();
+  if (now < alertAudio.busyUntil) {
+    alertAudio.timer = setTimeout(() => { alertAudio.timer = null; pumpAlertSound(); }, alertAudio.busyUntil - now);
+    return;
+  }
+  const lv = alertAudio.pending;
+  if (!lv) return;
+  alertAudio.pending = null;
+  const dur = (ALV && ALV.soundDurationMs) ? ALV.soundDurationMs(lv) : 600;
+  alertAudio.busyUntil = Date.now() + dur + ((ALV && ALV.MIN_GAP_MS) || 900);
+  playAlertTone(lv, alertAudio.volume);
+}
+/** 试听：无视冷却与最低等级门槛（用户显式点的），但会占用冷却窗口避免与真实告警叠音 */
+function previewAlertSound(level, volume) {
+  if (Number.isFinite(Number(volume))) alertAudio.volume = Math.max(0, Math.min(1, Number(volume)));
+  const dur = (ALV && ALV.soundDurationMs) ? ALV.soundDurationMs(level) : 600;
+  alertAudio.pending = null;
+  if (alertAudio.timer) { clearTimeout(alertAudio.timer); alertAudio.timer = null; }
+  alertAudio.busyUntil = Date.now() + dur + 300;
+  if (!playAlertTone(level, alertAudio.volume)) toast('当前环境不支持提示音（需桌面版 / 支持 WebAudio 的浏览器）');
+}
+/** 音型摘要（设置界面展示：几声、最高频率），让「等级不同声音不同」看得见 */
+function alertToneText(level) {
+  const spec = ALV && ALV.soundSpec ? ALV.soundSpec(level) : null;
+  if (!spec || !spec.waves || !spec.waves.length) return '';
+  const freqs = spec.waves.map(w => Number(w.f) || 0);
+  return spec.waves.length + ' 声 · ' + Math.min.apply(null, freqs) + '~' + Math.max.apply(null, freqs) + ' Hz';
+}
+
+/** 「告警等级与提示音…」：声音开关 / 最低发声等级 / 音量 / 逐事件等级改写（存主进程 settings.json） */
+function openAlertSoundConfig() {
+  const bridge = monitorBridge();
+  if (!bridge || !bridge.getSettings) { toast('告警等级与提示音需要桌面版（Electron）环境'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const levels = alertLevelList();
+  const lvOptions = (cur) => levels.map(lv => '<option value="' + U.escHtml(lv) + '"' + (lv === cur ? ' selected' : '') + '>' + U.escHtml(alertLevelName(lv)) + '</option>').join('');
+  const evTypes = (ALV && ALV.EVENT_TYPES) || [];
+  const evRows = evTypes.map(e => {
+    const dft = alertLevelOf(e.type);
+    return '<div class="as-ev" data-type="' + U.escHtml(e.type) + '"><span class="as-ev-nm">' + U.escHtml(e.label)
+      + ' <span class="as-ev-dft" title="默认等级（本项已被改写）" hidden>默认 ' + U.escHtml(alertLevelName(dft)) + '</span></span>'
+      + '<select class="as-ev-sel" title="该事件的告警等级">' + lvOptions(dft) + '</select></div>';
+  }).join('');
+  ov.innerHTML = `
+    <div class="modal ws-dialog as-dialog" role="dialog" style="width:660px">
+      <h3>告警等级与提示音</h3>
+      <div class="m-sub">告警按 <b>提示 &lt; 警告 &lt; 严重 &lt; 紧急</b> 四级提醒，不同等级发出不同音型（现场合成，不依赖音频文件）。等级决定两件事：<b>是否发声</b>（低于「最低发声等级」的告警只记事件、不出声）与<b>怎么响</b>。事件时间线同样按等级标注，便于值班时快速分辨轻重缓急。</div>
+      <div class="frow" style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
+        <label class="as-ck" title="关闭后所有告警都不再发声，系统通知也一并静音（事件时间线照常记录）"><input id="asEnabled" type="checkbox" checked/>告警时按等级发出提示音</label>
+        <label class="as-ck">最低发声等级 <select id="asMin">${lvOptions('warning')}</select></label>
+        <label class="as-ck">音量 <input id="asVol" type="range" min="0" max="100" step="1" value="60" style="width:110px"/>
+          <span id="asVolTxt" class="as-vol">60%</span></label>
+        <button type="button" class="tb as-tryall" id="asTryAll" title="依次试听四个等级的音型">依次试听</button>
+      </div>
+      <div class="as-sect">各等级音型</div>
+      <div class="as-tone-list">${levels.map(lv => '<div class="as-tone"><span class="as-lv lvl-' + U.escHtml(lv) + '">' + U.escHtml(alertLevelName(lv)) + '</span><span class="as-tone-t">' + U.escHtml(alertToneText(lv)) + '</span><button type="button" class="tb as-try" data-lv="' + U.escHtml(lv) + '">试听</button></div>').join('')}</div>
+      <div class="as-sect">事件等级（逐项可改；「设备离线」等已有合理默认）</div>
+      <div class="as-ev-list">${evRows || '<div class="m-sub">等级表不可用</div>'}</div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="reset" title="恢复全部默认等级与提示音设置">恢复默认</button>
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const volEl = ov.querySelector('#asVol');
+  const volTxt = ov.querySelector('#asVolTxt');
+  const curVolume = () => Math.max(0, Math.min(100, parseInt(volEl.value, 10) || 0)) / 100;
+  // 「默认 X」小标只在等级被改写后出现：与下拉同值时是冗余信息，一堆重复标签只会让人看不清哪几项被改过
+  const syncDftChip = (row) => {
+    const dft = alertLevelOf(row.dataset.type);
+    const chip = row.querySelector('.as-ev-dft');
+    if (!chip) return;
+    chip.hidden = (row.querySelector('.as-ev-sel').value === dft);
+    chip.textContent = '默认 ' + alertLevelName(dft);
+  };
+  ov.querySelectorAll('.as-ev').forEach(row => {
+    row.querySelector('.as-ev-sel').onchange = () => syncDftChip(row);
+    syncDftChip(row);
+  });
+  volEl.oninput = () => { volTxt.textContent = volEl.value + '%'; };
+  // 音量滑条即点即听：拖动时能直接听出音量大小（不试听就不知道该设多少）
+  volEl.onchange = () => previewAlertSound('warning', curVolume());
+  ov.querySelectorAll('.as-try').forEach(btn => { btn.onclick = () => previewAlertSound(btn.dataset.lv, curVolume()); });
+  ov.querySelector('#asTryAll').onclick = () => {
+    // 依次试听：靠合成器排程错开，不阻塞界面（点一次听全，不用逐个点）
+    let i = 0;
+    const next = () => {
+      if (!document.body.contains(ov) || i >= levels.length) return;
+      previewAlertSound(levels[i], curVolume());
+      const ms = ((ALV && ALV.soundDurationMs) ? ALV.soundDurationMs(levels[i]) : 600) + 250;
+      i++;
+      setTimeout(next, ms);
+    };
+    next();
+  };
+  // 读当前设置（含用户已改写的等级表）
+  bridge.getSettings().then((r) => {
+    if (!r || !r.ok || !document.body.contains(ov)) return;
+    const snd = r.sound || {};
+    ov.querySelector('#asEnabled').checked = snd.enabled !== false;
+    ov.querySelector('#asMin').value = snd.minLevel || 'warning';
+    const pct = Math.round((snd.volume != null ? snd.volume : 0.6) * 100);
+    volEl.value = String(pct);
+    volTxt.textContent = pct + '%';
+    const lvMap = r.levels || {};
+    ov.querySelectorAll('.as-ev').forEach(row => {
+      const v = lvMap[row.dataset.type];
+      if (v) row.querySelector('.as-ev-sel').value = v;
+      syncDftChip(row);
+    });
+  }).catch(() => { /* 读取失败按默认展示，保存时会覆盖 */ });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=reset]').onclick = () => {
+    ov.querySelector('#asEnabled').checked = true;
+    ov.querySelector('#asMin').value = (ALV && ALV.DEFAULT_MIN_LEVEL) || 'warning';
+    volEl.value = String(Math.round(((ALV && ALV.DEFAULT_VOLUME) || 0.6) * 100));
+    volTxt.textContent = volEl.value + '%';
+    ov.querySelectorAll('.as-ev').forEach(row => { row.querySelector('.as-ev-sel').value = alertLevelOf(row.dataset.type); syncDftChip(row); });
+    toast('已恢复默认等级与提示音设置，点「保存」生效');
+  };
+  ov.querySelector('[data-act=save]').onclick = async () => {
+    const levels2 = {};
+    ov.querySelectorAll('.as-ev').forEach(row => {
+      const v = row.querySelector('.as-ev-sel').value;
+      // 只提交与默认不同的项：默认表升级后未被用户改写的类型自动跟随新默认
+      if (v && v !== alertLevelOf(row.dataset.type)) levels2[row.dataset.type] = v;
+    });
+    const sound = { enabled: ov.querySelector('#asEnabled').checked, minLevel: ov.querySelector('#asMin').value, volume: curVolume() };
+    alertAudio.volume = sound.volume;
+    try {
+      if (bridge.setSound) await bridge.setSound(sound);
+      if (bridge.setAlertLevels) await bridge.setAlertLevels(levels2);
+    } catch (e) { toast('保存失败：' + String((e && e.message) || e)); return; }
+    close();
+    toast(sound.enabled
+      ? '已保存：' + alertLevelName(sound.minLevel) + '及以上告警发声，音量 ' + Math.round(sound.volume * 100) + '%'
+      : '已保存：告警提示音已关闭（事件与系统通知照常，通知本身也静音）');
+  };
+}
+
+/* ================= 端到端链路连通性监测（监控 ▾ 链路连通性监测…） =================
+ * 拓扑 → 任务（逐段与目标地址）由 js/link-path.js 的公用逻辑算好，下发主进程后按间隔探测
+ * （本机 ICMP/TCP，或从段起点设备执行 ping），结果经 link:result / link:state 回推，
+ * 逐段明细与状态翻转事件都在面板与监控中心「链路」页签里呈现。
+ * 持久化只存「拓扑与策略」：探测凭据要么是统一凭据库的 credId，要么在**发送前**从该设备的
+ * 监控配置现取——明文只经 IPC 进主进程内存，不落 localStorage（与监控任务同一条安全口径）。 */
+const LP = globalThis.TopoLinkPath || null;
+const LINK_TASKS_KEY = 'nettopo.linkTasks';
+const LINK_OVERLAY_KEY = 'nettopo.linkOverlay';
+const LINK_STATE_CN = { up: '连通', down: '中断', unknown: '未知' };
+const LINK_MODE_CN = { local: '本机', device: '设备侧' };
+/** 视图刷新回调（面板与监控中心「链路」页签各自注册，探测结果到达时统一刷新） */
+const linkViewRefreshers = new Set();
+
+function linkBridge(silent) {
+  if (window.topoLink && window.topoLink.start) return window.topoLink;
+  if (!silent) toast('链路连通性监测需要桌面版（Electron）环境');
+  return null;
+}
+function linkTasks() { if (!Array.isArray(state.linkTasks)) state.linkTasks = []; return state.linkTasks; }
+function linkTaskOf(key) { return linkTasks().find(t => t && t.id === key) || null; }
+function linkStatusOf(key) { return (state.linkStatus && state.linkStatus[key]) || null; }
+/** 链路任务 → 可持久化形态（剥离凭据：只留 credId / 跟随监控配置的标记） */
+function stripLinkTask(t) {
+  if (!t || !t.id) return null;
+  return {
+    id: String(t.id), kind: t.kind === 'path' ? 'path' : 'link', name: String(t.name || ''),
+    enabled: t.enabled !== false, mode: t.mode === 'device' ? 'device' : 'local',
+    protocol: t.protocol === 'tcp' ? 'tcp' : 'icmp', port: parseInt(t.port, 10) || 80,
+    intervalSec: parseInt(t.intervalSec, 10) || 60, timeoutMs: parseInt(t.timeoutMs, 10) || 3000,
+    vendor: String(t.vendor || 'generic'), failThreshold: parseInt(t.failThreshold, 10) || 2,
+    okThreshold: parseInt(t.okThreshold, 10) || 1, baselineFirst: t.baselineFirst !== false,
+    credMode: t.credMode === 'cred' ? 'cred' : 'monitor', credId: String(t.credId || ''),
+    linkIds: (Array.isArray(t.linkIds) ? t.linkIds : []).map(String).slice(0, 24),
+    nodeIds: (Array.isArray(t.nodeIds) ? t.nodeIds : []).map(String).slice(0, 13),
+    segments: (Array.isArray(t.segments) ? t.segments : []).slice(0, 12).map(s => ({
+      index: s.index, linkId: String(s.linkId || ''), aId: String(s.aId || ''), bId: String(s.bId || ''),
+      aName: String(s.aName || ''), bName: String(s.bName || ''), target: String(s.target || ''),
+      targetKind: s.targetKind === 'mgmt' ? 'mgmt' : 'ifip', aIf: String(s.aIf || ''), bIf: String(s.bIf || ''),
+      from: { deviceId: String((s.from && s.from.deviceId) || ''), name: String((s.from && s.from.name) || ''), host: String((s.from && s.from.host) || '') }
+    }))
+  };
+}
+function saveLinkTasks() {
+  try { localStorage.setItem(LINK_TASKS_KEY, JSON.stringify(linkTasks().map(stripLinkTask).filter(Boolean))); } catch (e) { /* 存储超限忽略 */ }
+}
+function loadLinkTasks() {
+  try {
+    const raw = localStorage.getItem(LINK_TASKS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.map(stripLinkTask).filter(Boolean) : [];
+  } catch (e) { return []; }
+}
+/** 发送给主进程的载荷：补上探测凭据（设备模式）。凭据只在这一次 IPC 里出现，不写 state、不落盘 */
+function linkPayloadOf(t) {
+  const out = stripLinkTask(t);
+  if (!out || out.mode !== 'device') return out;
+  for (const s of out.segments) {
+    const f = s.from;
+    if (out.credMode === 'cred' && out.credId) { f.credId = out.credId; continue; }
+    // 跟随该设备「设备监控」配置的凭据：优先匹配同一个管理地址，其次该设备的第一行
+    const rows = normalizeMonitorHosts(state.monitorCfg[f.deviceId]);
+    const row = rows.find(r => String(r.host) === String(f.host)) || rows[0];
+    if (!row) continue;                       // 无凭据：主进程会以「缺少管理地址」如实拒绝启动
+    f.host = f.host || String(row.host || '');
+    f.port = row.port || ''; f.protocol = row.protocol || 'ssh';
+    f.username = row.username || ''; f.password = row.password || '';
+    f.privateKey = row.privateKey || ''; f.keyPassphrase = row.keyPass || '';
+    f.expectFp = f.expectFp || trustedFpOf(f.host, row.port);
+  }
+  return out;
+}
+/** 配置签名：内容变了才重启任务（主进程不比对配置，重下发即生效） */
+function linkTaskSignature(t) {
+  const c = stripLinkTask(t);
+  if (!c) return '';
+  return JSON.stringify(c);
+}
+function nextLinkTaskId(prefix) {
+  const used = new Set(linkTasks().map(t => t.id));
+  for (let i = 1; i < 9999; i++) { const id = (prefix || 'lk') + i; if (!used.has(id)) return id; }
+  return (prefix || 'lk') + Date.now();
+}
+/** 链路状态叠加开关（默认开）：连线按监测结论着色 */
+function linkOverlayOn() { try { return localStorage.getItem(LINK_OVERLAY_KEY) !== '0'; } catch (e) { return true; } }
+/** 取最坏状态：中断 > 未知 > 连通（一条连线被多个任务覆盖时以最差者告警） */
+function worstLinkState(a, b) {
+  const rank = { '': 0, up: 1, unknown: 2, down: 3 };
+  return (rank[b] || 0) > (rank[a] || 0) ? b : a;
+}
+/** 把监测结论画到连线上（结果按间隔高频到达，渲染层内部做状态比较，未变不重绘） */
+function syncLinkMonOverlay() {
+  const map = new Map();
+  if (linkOverlayOn()) {
+    for (const t of linkTasks()) {
+      const st = linkStatusOf(t.id);
+      if (!st || !st.baselined || !st.state) continue;
+      for (const lid of (t.linkIds || [])) map.set(lid, worstLinkState(map.get(lid), st.state));
+    }
+  }
+  renderer.setLinkStates(map);
+}
+/** 侧栏设备的链路监测标记（方形小点，与圆形「监控」标记区分）：有中断标红，全部连通标绿 */
+function linkBadgeHtml(nodeId) {
+  let total = 0, down = 0;
+  for (const t of linkTasks()) {
+    if (!t.enabled) continue;
+    const hit = (t.nodeIds || []).indexOf(nodeId) >= 0
+      || (t.segments || []).some(s => s.aId === nodeId || s.bId === nodeId || (s.from && s.from.deviceId === nodeId));
+    if (!hit) continue;
+    total++;
+    const st = linkStatusOf(t.id);
+    if (st && st.state === 'down') down++;
+  }
+  if (!total) return '';
+  return down
+    ? '<span class="lk-badge down" title="端到端链路监测：' + down + '/' + total + ' 条中断（监控 ▾ 链路连通性监测…）"></span>'
+    : '<span class="lk-badge ok" title="端到端链路监测：' + total + ' 条全部连通"></span>';
+}
+/** 拉取主进程运行态并刷新画布着色 / 面板 / 监控中心 */
+async function syncLinkStatus() {
+  const bridge = linkBridge(true);
+  if (!bridge || !bridge.status) return;
+  try {
+    const r = await bridge.status();
+    const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+    const map = {};
+    for (const it of items) map[it.key] = it;
+    state.linkStatus = map;
+  } catch (e) { /* 拉取失败保留上次状态 */ }
+  syncLinkMonOverlay();
+  for (const fn of linkViewRefreshers) { try { fn(); } catch (e) { /* 单个视图刷新失败不影响其余 */ } }
+}
+/** 与主进程运行态对齐：停掉多余任务、启动缺失或配置已变的任务（与 reconcileMonitors 同口径的置脏重跑） */
+async function reconcileLinkMon() {
+  const bridge = linkBridge(true);
+  if (!bridge) return;
+  if (reconcileLinkMon._busy) { reconcileLinkMon._dirty = true; return; }
+  reconcileLinkMon._busy = true;
+  try {
+    let items = [];
+    try { const r = await bridge.status(); items = (r && r.ok && Array.isArray(r.items)) ? r.items : []; } catch (e) { /* 视为无运行任务 */ }
+    const running = new Map(items.map(i => [i.key, i]));
+    const sent = (state.linkSentSig && typeof state.linkSentSig === 'object') ? state.linkSentSig : (state.linkSentSig = {});
+    const desired = new Map();
+    for (const t of linkTasks()) if (t.enabled) desired.set(t.id, t);
+    for (const key of running.keys()) {
+      if (!desired.has(key)) { try { await bridge.stop(key); } catch (e) { /* ignore */ } delete sent[key]; }
+    }
+    for (const [key, t] of desired) {
+      const sig = linkTaskSignature(t);
+      if (running.has(key) && sent[key] === sig) continue;   // 在跑且配置没变：不动它
+      if (running.has(key)) { try { await bridge.stop(key); } catch (e) { /* ignore */ } }
+      const res = await bridge.start(linkPayloadOf(t));
+      if (res && res.ok) sent[key] = sig;
+      else { delete sent[key]; toast('链路监测「' + t.name + '」启动失败：' + ((res && res.error) || '未知错误')); }
+    }
+    await syncLinkStatus();
+  } finally {
+    reconcileLinkMon._busy = false;
+    if (reconcileLinkMon._dirty) { reconcileLinkMon._dirty = false; reconcileLinkMon(); }
+  }
+}
+/** 任务增删改的统一出口：落盘 + 与主进程对齐 */
+function commitLinkTasks(msg) {
+  saveLinkTasks();
+  reconcileLinkMon();
+  for (const fn of linkViewRefreshers) { try { fn(); } catch (e) { /* ignore */ } }
+  if (msg) toast(msg);
+}
+function removeLinkTask(key) {
+  const arr = linkTasks();
+  const i = arr.findIndex(t => t.id === key);
+  if (i < 0) return;
+  arr.splice(i, 1);
+  if (state.linkStatus) delete state.linkStatus[key];
+  const bridge = linkBridge(true);
+  if (bridge && bridge.stop) { try { bridge.stop(key); } catch (e) { /* ignore */ } }
+  if (state.linkSentSig) delete state.linkSentSig[key];
+  commitLinkTasks('已删除链路监测任务');
+}
+/** 为当前图纸的全部连线生成监测任务（已有任务覆盖的连线跳过；无可用地址的连线如实计数） */
+function addLinkTasksForAllLinks() {
+  if (!LP) { toast('链路监测逻辑未加载'); return; }
+  if (!state.links.length) { toast('当前图纸没有连线'); return; }
+  const covered = new Set();
+  for (const t of linkTasks()) for (const lid of (t.linkIds || [])) covered.add(lid);
+  const todo = state.links.filter(l => !covered.has(l.id));
+  if (!todo.length) { toast('当前图纸的连线都已建立监测任务'); return; }
+  const built = LP.buildLinkTasks({ nodes: state.nodes, links: todo });
+  if (!built.tasks.length) {
+    toast('没有可监测的连线：' + (built.skipped[0] ? built.skipped[0].reason : '缺少地址'));
+    return;
+  }
+  for (const t of built.tasks) {
+    t.id = nextLinkTaskId('lk');
+    t.mode = 'local';
+    linkTasks().push(stripLinkTask(t));
+  }
+  commitLinkTasks('已为 ' + built.tasks.length + ' 条连线建立监测'
+    + (built.skipped.length ? '；' + built.skipped.length + ' 条跳过（' + built.skipped[0].reason + '）' : ''));
+}
+/** 新建端到端路径监测：选起点/终点 + 探测方式（本机逐跳 / 从源设备侧） */
+function openLinkPathDialog() {
+  if (!LP) { toast('链路监测逻辑未加载'); return; }
+  if (state.nodes.length < 2) { toast('至少需要两台设备才能建立端到端路径监测'); return; }
+  const nodeOpts = (selId) => state.nodes.map(n => '<option value="' + U.escHtml(n.id) + '"' + (n.id === selId ? ' selected' : '') + '>' + U.escHtml(n.name) + '</option>').join('');
+  const optsFrom = nodeOpts(state.nodes[0].id);
+  const optsTo = nodeOpts((state.nodes[1] || state.nodes[0]).id);   // 终点默认第二台：默认两端同一台会让「建立监测」直接被拒
+  const byId = new Map(state.nodes.map(n => [n.id, n]));
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ws-dialog" role="dialog" style="width:560px">
+      <h3>新建端到端路径监测</h3>
+      <div class="m-sub">沿拓扑自动选路（最宽路径），逐段探测并定位断点。<b>本机</b>模式从本机逐跳探测目标接口 IP（零配置，要求本机能到达这些地址）；<b>设备侧</b>模式从每段起点设备执行 ping（设备视角最准，需该设备有可用凭据）。</div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>起点设备</label><select id="lkFrom">${optsFrom}</select></div>
+        <div class="frow"><label>终点设备</label><select id="lkTo">${optsTo}</select></div>
+      </div></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>探测方式</label><select id="lkMode">
+          <option value="local">本机逐跳探测</option>
+          <option value="device">从段起点设备探测</option>
+        </select></div>
+        <div class="frow"><label>协议</label><select id="lkProto"><option value="icmp">ICMP（ping）</option><option value="tcp">TCP 端口</option></select></div>
+        <div class="frow" id="lkPortRow" hidden><label>TCP 端口</label><input id="lkPort" type="number" min="1" max="65535" value="80"/></div>
+      </div></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>探测间隔（秒）</label><input id="lkInterval" type="number" min="10" max="3600" value="60"/></div>
+        <div class="frow"><label>连续失败判中断</label><input id="lkFail" type="number" min="1" max="5" value="2"/></div>
+        <div class="frow"><label>超时（毫秒）</label><input id="lkTimeout" type="number" min="500" max="30000" step="500" value="3000"/></div>
+      </div></div>
+      <div class="frow" id="lkDevRow" hidden><label>设备厂家（设备侧模式的 ping 语法）</label><select id="lkVendor">
+        <option value="generic">通用 / Linux（ping -c N -W S）</option>
+        <option value="huawei">华为（ping -c N，经典 VRP / 云路由通用）</option>
+        <option value="h3c">H3C Comware（ping -c N）</option>
+        <option value="cisco">思科 IOS（ping ip repeat N timeout S）</option>
+        <option value="ruijie">锐捷（ping -c N）</option>
+      </select></div>
+      <div class="frow" id="lkCredRow" hidden><label>探测凭据</label>
+        <select id="lkCred">
+          <option value="monitor">跟随各段起点设备的「设备监控」凭据</option>
+          <option value="cred">统一凭据库条目</option>
+        </select>
+        <select id="lkCredId" hidden title="统一凭据库条目"></select>
+      </div>
+      <div class="frow"><label class="ck-field"><input id="lkBaseline" type="checkbox" checked/><span>首轮探测只建立基线（不报警），此后仅状态翻转时告警——避免「本机天生到不了该地址」刷屏</span></label></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="ok">建立监测</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const syncRows = () => {
+    const dev = ov.querySelector('#lkMode').value === 'device';
+    ov.querySelector('#lkDevRow').hidden = !dev;
+    ov.querySelector('#lkCredRow').hidden = !dev;
+    ov.querySelector('#lkPortRow').hidden = ov.querySelector('#lkProto').value !== 'tcp';
+    const byCred = ov.querySelector('#lkCred').value === 'cred';
+    ov.querySelector('#lkCredId').hidden = !dev || !byCred;
+    if (dev && byCred) loadCredOptions();
+  };
+  ov.querySelector('#lkMode').onchange = syncRows;
+  ov.querySelector('#lkProto').onchange = syncRows;
+  ov.querySelector('#lkCred').onchange = syncRows;
+  /** 统一凭据库条目按需拉取（只回 id 与展示名，不含口令） */
+  const loadCredOptions = async () => {
+    const sel = ov.querySelector('#lkCredId');
+    if (sel.dataset.loaded === '1') return;
+    sel.dataset.loaded = '1';
+    try {
+      const r = await window.topoCred.list();
+      const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+      sel.innerHTML = items.length
+        ? items.map(c => '<option value="' + U.escHtml(c.id) + '">' + U.escHtml(c.name || c.username || c.id) + '</option>').join('')
+        : '<option value="">（凭据库为空）</option>';
+    } catch (e) { sel.innerHTML = '<option value="">（读取失败）</option>'; }
+  };
+  syncRows();
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=ok]').onclick = () => {
+    const from = ov.querySelector('#lkFrom').value, to = ov.querySelector('#lkTo').value;
+    if (from === to) { toast('起点与终点不能相同'); return; }
+    const id = nextLinkTaskId('p');
+    // 渲染层传 U.bestPath：选路语义（聚合组求和、最宽路径）与「路径分析」完全一致
+    const r = LP.buildPathTask({ nodes: state.nodes, links: state.links }, from, to, {
+      id: id, bestPath: U.bestPath,
+      mode: ov.querySelector('#lkMode').value,
+      protocol: ov.querySelector('#lkProto').value,
+      port: parseInt(ov.querySelector('#lkPort').value, 10) || 80,
+      intervalSec: parseInt(ov.querySelector('#lkInterval').value, 10) || 60,
+      timeoutMs: parseInt(ov.querySelector('#lkTimeout').value, 10) || 3000,
+      failThreshold: parseInt(ov.querySelector('#lkFail').value, 10) || 2,
+      vendor: ov.querySelector('#lkVendor').value,
+      baselineFirst: ov.querySelector('#lkBaseline').checked,
+      fromExtra: (deviceId) => {
+        const n = byId.get(deviceId);
+        const row = normalizeMonitorHosts(state.monitorCfg[deviceId])[0];
+        return {
+          deviceId: deviceId, name: String((n && n.name) || ''),
+          host: (row && row.host) || U.nodeMgmts(n)[0] || '',
+          port: row ? row.port : '', protocol: row ? row.protocol : '',
+          expectFp: trustedFpOf((row && row.host) || U.nodeMgmts(n)[0] || '', row && row.port)
+        };
+      }
+    });
+    if (!r.ok) { toast(r.error); return; }
+    const t = stripLinkTask(r.task);
+    t.credMode = ov.querySelector('#lkCred') && ov.querySelector('#lkCred').value === 'cred' ? 'cred' : 'monitor';
+    if (t.mode === 'device' && t.credMode === 'cred') {
+      const cid = String(ov.querySelector('#lkCredId').value || '');
+      if (!cid) { toast('请先选择统一凭据库条目（或在「监控 ▾ 凭据库…」中新增）'); return; }
+      t.credId = cid;
+    }
+    linkTasks().push(t);
+    close();
+    commitLinkTasks('已建立' + t.name + '（' + (t.mode === 'device' ? '设备侧' : '本机') + '探测）'
+      + (r.skipped && r.skipped.length ? '；' + r.skipped.length + ' 段跳过' : ''));
+  };
+}
+/** 编辑任务：间隔 / 阈值 / 探测方式 / 启停（不改段结构——段由拓扑决定，拓扑变了请重建） */
+function openLinkTaskEdit(key) {
+  const t = linkTaskOf(key);
+  if (!t) { toast('任务不存在'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ws-dialog" role="dialog" style="width:520px">
+      <h3>链路监测设置</h3>
+      <div class="m-sub">${U.escHtml(t.name)}<br/>共 ${t.segments.length} 段：${U.escHtml(t.segments.map(s => s.from.name + ' → ' + s.target).join('；'))}</div>
+      <div class="frow"><label>任务名称</label><input id="leName" type="text" maxlength="120" value="${U.escHtml(t.name)}"/></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>探测方式</label><select id="leMode">
+          <option value="local"${t.mode !== 'device' ? ' selected' : ''}>本机逐跳探测</option>
+          <option value="device"${t.mode === 'device' ? ' selected' : ''}>从段起点设备探测</option>
+        </select></div>
+        <div class="frow"><label>协议</label><select id="leProto">
+          <option value="icmp"${t.protocol !== 'tcp' ? ' selected' : ''}>ICMP（ping）</option>
+          <option value="tcp"${t.protocol === 'tcp' ? ' selected' : ''}>TCP 端口</option>
+        </select></div>
+        <div class="frow"><label>TCP 端口</label><input id="lePort" type="number" min="1" max="65535" value="${U.escHtml(t.port)}"/></div>
+      </div></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>探测间隔（秒）</label><input id="leInterval" type="number" min="10" max="3600" value="${U.escHtml(t.intervalSec)}"/></div>
+        <div class="frow"><label>连续失败判中断</label><input id="leFail" type="number" min="1" max="5" value="${U.escHtml(t.failThreshold)}"/></div>
+        <div class="frow"><label>连续成功判恢复</label><input id="leOk" type="number" min="1" max="5" value="${U.escHtml(t.okThreshold)}"/></div>
+      </div></div>
+      <div class="frow"><div class="frow-inline">
+        <div class="frow"><label>厂家（设备侧 ping 语法）</label><select id="leVendor">
+          <option value="generic"${t.vendor === 'generic' ? ' selected' : ''}>通用 / Linux</option>
+          <option value="huawei"${t.vendor === 'huawei' ? ' selected' : ''}>华为 VRP</option>
+          <option value="h3c"${t.vendor === 'h3c' ? ' selected' : ''}>H3C Comware</option>
+          <option value="cisco"${t.vendor === 'cisco' ? ' selected' : ''}>思科 IOS</option>
+          <option value="ruijie"${t.vendor === 'ruijie' ? ' selected' : ''}>锐捷</option>
+        </select></div>
+        <div class="frow"><label>凭据来源</label><select id="leCred">
+          <option value="monitor"${t.credMode !== 'cred' ? ' selected' : ''}>跟随设备监控配置</option>
+          <option value="cred"${t.credMode === 'cred' ? ' selected' : ''}>统一凭据库</option>
+        </select></div>
+      </div></div>
+      <div class="frow"><label class="ck-field"><input id="leBaseline" type="checkbox"${t.baselineFirst !== false ? ' checked' : ''}/><span>首轮探测只建立基线（不报警）</span></label></div>
+      <div class="frow"><label class="ck-field"><input id="leEnabled" type="checkbox"${t.enabled !== false ? ' checked' : ''}/><span>启用该监测任务</span></label></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="del">删除</button>
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=del]').onclick = () => { close(); removeLinkTask(key); };
+  ov.querySelector('[data-act=save]').onclick = () => {
+    t.name = ov.querySelector('#leName').value.trim().slice(0, 120) || t.name;
+    t.mode = ov.querySelector('#leMode').value === 'device' ? 'device' : 'local';
+    t.protocol = ov.querySelector('#leProto').value === 'tcp' ? 'tcp' : 'icmp';
+    t.port = parseInt(ov.querySelector('#lePort').value, 10) || 80;
+    t.intervalSec = Math.max(10, Math.min(3600, parseInt(ov.querySelector('#leInterval').value, 10) || 60));
+    t.timeoutMs = t.timeoutMs || 3000;
+    t.failThreshold = Math.max(1, Math.min(5, parseInt(ov.querySelector('#leFail').value, 10) || 2));
+    t.okThreshold = Math.max(1, Math.min(5, parseInt(ov.querySelector('#leOk').value, 10) || 1));
+    t.vendor = ov.querySelector('#leVendor').value;
+    t.credMode = ov.querySelector('#leCred').value === 'cred' ? 'cred' : 'monitor';
+    t.baselineFirst = ov.querySelector('#leBaseline').checked;
+    t.enabled = ov.querySelector('#leEnabled').checked;
+    close();
+    commitLinkTasks('已保存链路监测设置');
+  };
+}
+/** 段明细 HTML（面板与监控中心共用）：逐段给出目标地址与结论，断点高亮——「定位断在哪一段」的证据面 */
+function linkSegsHtml(t, st) {
+  const rows = (t.segments || []).map((s, i) => {
+    const r = st && st.segments ? st.segments.find(x => x.index === i) : null;
+    const cls = r ? (r.ok === true ? 'ok' : r.ok === false ? 'bad' : 'unk') : 'none';
+    const txt = r ? (r.ok === true ? '通' : r.ok === false ? '不通' : '无法判定') : '未探测';
+    const isBroken = !!(st && st.brokenAt === i);
+    return '<div class="lm-seg' + (isBroken ? ' broken' : '') + '">'
+      + '<span class="lm-seg-i">' + (i + 1) + '</span>'
+      + '<span class="lm-seg-from">' + U.escHtml((s.from && s.from.name) || '') + '</span>'
+      + '<span class="lm-seg-arrow">→</span>'
+      + '<span class="lm-seg-t">' + U.escHtml(s.target) + (s.targetKind === 'mgmt' ? '（管理地址）' : '') + '</span>'
+      + '<span class="lm-seg-v ' + cls + '">' + txt + (r && Number.isFinite(r.latencyMs) ? ' · ' + r.latencyMs + 'ms' : '') + '</span>'
+      + (r && r.error ? '<span class="lm-seg-e">' + U.escHtml(r.error) + '</span>' : '')
+      + '</div>';
+  }).join('');
+  return '<div class="lm-segs">' + (rows || '<div class="lm-empty">无探测段</div>') + '</div>';
+}
+/** 任务行的状态文案（面板与监控中心共用口径） */
+function linkStateText(t, s) {
+  if (t.enabled === false) return '未启用';
+  if (!s || !s.baselined) return '等待首轮探测';
+  if (s.state === 'down') {
+    const seg = (s.brokenAt != null && s.segments && s.segments[s.brokenAt]) ? s.segments[s.brokenAt] : null;
+    return '中断' + (seg ? '（第 ' + (s.brokenAt + 1) + ' 段 ' + U.escHtml((seg.fromName || '') + ' → ' + seg.target) + '）' : '');
+  }
+  return s.state === 'up' ? '连通' : '未知';
+}
+
+/** 链路连通性监测面板：任务列表 + 逐段明细 + 一键生成/启停/探测 */
+function openLinkMonitor() {
+  const bridge = linkBridge();
+  if (!bridge) return;
+  if (!LP) { toast('链路监测逻辑未加载'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ws-dialog lm-dialog" role="dialog" style="width:900px">
+      <h3>链路连通性监测</h3>
+      <div class="m-sub">把<b>链路本身</b>当作监测对象：连线级任务两端接口 IP 互探；端到端路径任务沿拓扑选路后<b>逐段探测</b>，断在哪一段是测出来的。<b>本机</b>探测零配置（要求本机能到达目标接口 IP）；<b>设备侧</b>从每段起点设备执行 ping（设备视角最准，需凭据）。解析不出结论时保持原状态不误报；「首轮只建基线」可避免本机天生不可达地址刷屏。</div>
+      <div class="lm-stats" id="lmStats"></div>
+      <div class="lm-actions">
+        <button type="button" class="tb" data-act="addPath">＋ 端到端路径监测…</button>
+        <button type="button" class="tb" data-act="addLinks" title="为当前图纸的每条连线建立「两端接口 IP 互探」任务">为全部连线生成</button>
+        <button type="button" class="tb" data-act="probeAll">立即探测全部</button>
+        <button type="button" class="tb" data-act="startAll">全部启动</button>
+        <button type="button" class="tb" data-act="stopAll">全部停止</button>
+        <span class="lm-hint" id="lmHint"></span>
+      </div>
+      <div class="lm-list" id="lmList"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => { linkViewRefreshers.delete(render); ov.remove(); };
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const listEl = ov.querySelector('#lmList');
+
+  /** 段明细 / 状态文案统一走公用实现（与监控中心「链路」页签同口径） */
+  const segsHtml = (t, st) => linkSegsHtml(t, st);
+  const render = () => {
+    const tasks = linkTasks();
+    const st = { up: 0, down: 0, unknown: 0, off: 0 };
+    for (const t of tasks) {
+      if (!t.enabled) { st.off++; continue; }
+      const s = linkStatusOf(t.id);
+      if (!s || !s.baselined) { st.unknown++; continue; }
+      if (s.state === 'down') st.down++;
+      else if (s.state === 'up') st.up++;
+      else st.unknown++;
+    }
+    ov.querySelector('#lmStats').innerHTML =
+      '<span class="lm-st">任务 <b>' + tasks.length + '</b></span>'
+      + '<span class="lm-st ok">连通 <b>' + st.up + '</b></span>'
+      + '<span class="lm-st bad">中断 <b>' + st.down + '</b></span>'
+      + '<span class="lm-st unk">未知/未探测 <b>' + st.unknown + '</b></span>'
+      + '<span class="lm-st off">未启用 <b>' + st.off + '</b></span>';
+    ov.querySelector('#lmHint').textContent = linkOverlayOn() ? '画布连线已按监测结论着色' : '（画布着色已关闭：监控 ▾ 链路状态叠加）';
+    if (!tasks.length) {
+      listEl.innerHTML = '<div class="lm-empty">暂无链路监测任务：点「为全部连线生成」批量建立，或用「＋ 端到端路径监测」指定起止设备。</div>';
+      return;
+    }
+    listEl.innerHTML = tasks.map(t => {
+      const s = linkStatusOf(t.id);
+      const state = !t.enabled ? 'off' : (s && s.baselined ? s.state : 'unknown');
+      const stateTxt = linkStateText(t, s);
+      const latency = (s && Number.isFinite(s.latencyMs)) ? s.latencyMs + 'ms' : '—';
+      const lastAt = (s && s.lastProbeAt) ? U.fmtDateTime(new Date(s.lastProbeAt)).slice(11) : '—';
+      const probeTxt = !s ? ''
+        : (s.probeState === s.state ? '' : '（本轮探测：' + (LINK_STATE_CN[s.probeState] || s.probeState || '—') + '）');
+      const err = (s && s.lastError) ? '<span class="lm-err" title="' + U.escHtml(s.lastError) + '">!</span>' : '';
+      return '<div class="lm-row" data-key="' + U.escHtml(t.id) + '">'
+        + '<span class="lm-dot ' + U.escHtml(state) + '" title="' + U.escHtml(LINK_STATE_CN[state] || state) + '"></span>'
+        + '<span class="lm-name" title="' + U.escHtml(t.name) + '">' + U.escHtml(t.name)
+          + '<span class="lm-kind">' + (t.kind === 'path' ? '端到端 ' + t.segments.length + ' 跳' : '连线') + '</span>'
+          + '<span class="lm-kind">' + (LINK_MODE_CN[t.mode] || t.mode) + '·' + (t.protocol === 'tcp' ? 'TCP ' + t.port : 'ICMP') + '·' + t.intervalSec + 's</span></span>'
+        + '<span class="lm-state ' + U.escHtml(state) + '">' + stateTxt + probeTxt + err + '</span>'
+        + '<span class="lm-lat">' + latency + '</span>'
+        + '<span class="lm-time">' + U.escHtml(lastAt) + '</span>'
+        + '<span class="lm-ops">'
+          + '<button type="button" class="tb icon" data-op="probe" title="立即探测一轮">⟳</button>'
+          + '<button type="button" class="tb icon" data-op="toggle" title="' + (t.enabled ? '停用' : '启用') + '">' + (t.enabled ? '⏸' : '▶') + '</button>'
+          + '<button type="button" class="tb icon" data-op="edit" title="设置">⚙</button>'
+          + '<button type="button" class="tb icon" data-op="del" title="删除">✕</button>'
+        + '</span>'
+        + '</div>'
+        + '<div class="lm-detail" hidden>' + segsHtml(t, s) + '</div>';
+    }).join('');
+    listEl.querySelectorAll('.lm-row').forEach(row => {
+      const key = row.dataset.key;
+      const t = linkTaskOf(key);
+      row.querySelector('.lm-name').onclick = () => {
+        const detail = row.nextElementSibling;
+        if (!detail) return;
+        detail.hidden = !detail.hidden;
+        if (!detail.hidden) { try { renderer.highlightPath(t.nodeIds || [], t.linkIds || []); } catch (e) { /* 无路径高亮能力时忽略 */ } }
+      };
+      row.querySelector('[data-op=probe]').onclick = async (e) => {
+        e.stopPropagation();
+        const r = await bridge.probeNow(key);
+        if (!r || !r.ok) toast('探测失败：' + ((r && r.error) || '未知错误'));
+        await syncLinkStatus();
+      };
+      row.querySelector('[data-op=toggle]').onclick = (e) => {
+        e.stopPropagation();
+        t.enabled = !t.enabled;
+        commitLinkTasks(t.enabled ? '已启用该链路监测' : '已停用该链路监测');
+        render();
+      };
+      row.querySelector('[data-op=edit]').onclick = (e) => { e.stopPropagation(); openLinkTaskEdit(key); };
+      row.querySelector('[data-op=del]').onclick = (e) => {
+        e.stopPropagation();
+        confirmBox('删除链路监测任务「' + t.name + '」？').then((yes) => { if (yes) removeLinkTask(key); });
+      };
+    });
+  };
+  ov.querySelector('[data-act=addPath]').onclick = () => { openLinkPathDialog(); };
+  ov.querySelector('[data-act=addLinks]').onclick = () => { addLinkTasksForAllLinks(); render(); };
+  ov.querySelector('[data-act=probeAll]').onclick = async () => { await bridge.probeAll(); await syncLinkStatus(); };
+  ov.querySelector('[data-act=startAll]').onclick = () => {
+    for (const t of linkTasks()) t.enabled = true;
+    commitLinkTasks('已启动全部链路监测');
+    render();
+  };
+  ov.querySelector('[data-act=stopAll]').onclick = () => {
+    for (const t of linkTasks()) t.enabled = false;
+    commitLinkTasks('已停止全部链路监测');
+    render();
+  };
+  linkViewRefreshers.add(render);
+  render();
+  syncLinkStatus();
+  reconcileLinkMon();
+}
+
 /** 让启用了监控的设备与主进程运行状态对齐：期望集合 = deviceId@host，停止多余任务、启动缺失任务 */
 async function reconcileMonitors() {
   const bridge = monitorBridge(true); // 后台对齐：浏览器版静默
   if (!bridge) return;
-  // 简单互斥：fire-and-forget 的多处调用（loadGraph/loadProject/restoreGraph）并发时防止重复 start
-  if (reconcileMonitors._busy) return;
+  // 简单互斥 + 置脏重跑：fire-and-forget 的多处调用（loadGraph/loadProject/restoreGraph/拓扑变更）
+  // 并发时防止重复 start；忙窗口内的调用置脏而非丢弃——否则删设备等期望集合变更被静默吞掉，
+  // 已删设备的后台监控继续运行直到下一次任意触发
+  if (reconcileMonitors._busy) { reconcileMonitors._dirty = true; return; }
   reconcileMonitors._busy = true;
   try {
   const validIds = new Set(allSheetNodes().map(n => n.id));
@@ -5633,8 +8782,7 @@ async function reconcileMonitors() {
     }
     perDev[node.id][row.host] = { state: 'connecting', text: '启动监控…', since: Date.now() };
     try {
-      let expectFp = '';
-      try { const fp = localStorage.getItem('topoShellFp:' + row.host); if (fp && fp.indexOf('SHA256:') === 0) expectFp = fp; } catch (e) {}
+      const expectFp = trustedFpOf(row.host, row.port);
       const res = await bridge.start(Object.assign(
         { key: hk, deviceId: node.id, name: node.name, expectFp, host: row.host },
         { protocol: row.protocol, port: row.port, username: row.username, password: row.password, privateKey: row.privateKey || '', keyPassphrase: row.keyPass || '', jump: row.jump || null },
@@ -5644,7 +8792,7 @@ async function reconcileMonitors() {
         { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
         // 与 applyMonitor 的完整载荷同口径：缺 sysUpTime/perf 会让重启检测与 CPU/内存采集
         // 在软件重启/恢复工程后静默失效（monitor 侧按缺省 false 处理）
-        { sysinfo: { enabled: !!row.snmpEnabled, community: row.snmpCommunity || 'public', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '' } } },
+        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', snmpPort: row.snmpPort || '', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '', cpuMode: row.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: row.snmpMemMode || '' } } },
         { metrics: { enabled: !!row.metricsEnabled, command: row.metricsCommands, intervalSec: row.metricsIntervalSec, diskWarn: row.metricsDiskWarn, diskCrit: row.metricsDiskCrit, memWarn: row.metricsMemWarn, memCrit: row.metricsMemCrit } },
         { httpProbe: { enabled: !!row.httpEnabled, url: row.httpUrl, intervalSec: row.httpIntervalSec, alertDays: row.httpAlertDays, keyword: row.httpKeyword } }
       ));
@@ -5661,6 +8809,7 @@ async function reconcileMonitors() {
   refreshPanel();
   } finally {
     reconcileMonitors._busy = false;
+    if (reconcileMonitors._dirty) { reconcileMonitors._dirty = false; reconcileMonitors(); }
   }
 }
 
@@ -5740,7 +8889,7 @@ function openMonitorConfig(id) {
   const listEl = ov.querySelector('#monHostList');
   const protoOpts = '<option value="ssh">SSH</option><option value="telnet">Telnet</option>';
   const rowHtml = (r) => `
-    <div class="mon-host-row">
+    <div class="mon-host-row" data-cpu-mode="${r.snmpCpuMode === 'idle100' ? 'idle100' : 'direct'}" data-mem-mode="${U.escHtml(r.snmpMemMode || '')}" data-v3-auth-proto="${U.escHtml(r.snmpV3AuthProto || 'sha')}" data-v3-auth-pass="${U.escHtml(r.snmpV3AuthPass || '')}" data-v3-priv-proto="${U.escHtml(r.snmpV3PrivProto || 'aes')}" data-v3-priv-pass="${U.escHtml(r.snmpV3PrivPass || '')}">
       <input class="mh-host" type="text" placeholder="管理地址" value="${U.escHtml(r.host)}" autocomplete="off"/>
       <select class="mh-proto">${protoOpts.replace('value="ssh"', 'value="ssh"' + (r.protocol === 'ssh' ? ' selected' : '')).replace('value="telnet"', 'value="telnet"' + (r.protocol === 'telnet' ? ' selected' : ''))}</select>
       <input class="mh-port" type="number" min="1" max="65535" placeholder="端口" value="${U.escHtml(r.port)}"/>
@@ -5796,16 +8945,23 @@ function openMonitorConfig(id) {
         <label class="mh-si" title="按间隔经 SNMP v2c 采集接口状态与收发流量（ifTable，独立于连接的 UDP 轮询）：监控中心「接口流量」页查看趋势，接口 DOWN 记入事件时间线并弹通知"><input type="checkbox" class="mh-sift-cb"${r.snmpIfTable ? ' checked' : ''}/>接口流量</label>
         <label class="mh-si" title="按间隔 GET sysUpTime（TimeTicks），数值骤减判定为设备重启：记入事件时间线并弹通知（独立于 SSH/Telnet 连接）"><input type="checkbox" class="mh-si-up-cb"${r.snmpUpTime ? ' checked' : ''}/>重启检测</label>
         <label class="mh-si" title="按间隔 GET CPU/内存 OID（百分比型或字节型均可），监控中心「性能」页查看趋势"><input type="checkbox" class="mh-si-pf-cb"${r.snmpPerf ? ' checked' : ''}/>CPU/内存</label>
+        <select class="mh-si-sec" title="SNMP 安全模式：v2c 团体字，或 v3 用户名（USM 认证/加密，口令在「v3 口令设置」中配置）">
+          <option value="v2c"${r.snmpVersion === 'v3' ? '' : ' selected'}>v2c</option>
+          <option value="v3"${r.snmpVersion === 'v3' ? ' selected' : ''}>v3</option>
+        </select>
         <input class="mh-si-comm" type="text" title="SNMP v2c 团体字（SNMP 识别 / 接口流量 / 重启检测 / CPU·内存共用）" placeholder="团体字(public)" value="${U.escHtml(r.snmpCommunity || '')}" autocomplete="off"/>
+        <input class="mh-si-sp" type="number" min="1" max="65535" title="SNMP UDP 端口（默认 161；设备端口映射/非标端口填此，如对接公网网管 1161）" placeholder="端口(161)" value="${U.escHtml(r.snmpPort || '')}" autocomplete="off" style="width:72px"/>
+        <input class="mh-si-v3user" type="text" style="display:none" title="SNMP v3 用户名（USM）" placeholder="v3 用户名" value="${U.escHtml(r.snmpV3User || '')}" autocomplete="off" spellcheck="false"/>
+        <button type="button" class="tb mh-si-v3btn" style="display:none;padding:2px 8px;font-size:11px">v3 口令…</button>
         <div class="mh-perf-wrap" hidden>
-          <select class="mh-si-preset" title="按厂家预填常用 OID（可手动修改；不同型号可能不同，建议先用 snmpwalk 验证）">
+          <select class="mh-si-preset" title="按厂家预填 CPU/内存 OID 与换算方式（可手动修改；同厂商不同型号/固件可能不同，建议先用 snmpwalk 核对）">
             <option value="">OID 预设（选厂家自动填充）…</option>
-            <option value="hw">华为/华三（百分比型）</option>
-            <option value="cisco">思科（字节型 used/free）</option>
+            ${U.SNMP_VENDORS.map(v => '<option value="' + U.escHtml(v.key) + '">' + U.escHtml(v.label) + (v.verified === 'lab' ? '（已实测）' : '') + '</option>').join('')}
           </select>
-          <input class="mh-si-cpu" type="text" placeholder="CPU 利用率 OID" title="GET 失败自动 GETNEXT 取该子树首个实例，表型 OID 填基础前缀即可" value="${U.escHtml(r.snmpCpuOid || '')}" autocomplete="off" spellcheck="false"/>
-          <input class="mh-si-mused" type="text" placeholder="内存占用 OID（% 或已用字节）" title="内存占用：若下方「内存空闲 OID」留空，此处值直接视为百分比（华为/华三 entity-ext）；填写空闲 OID 则按 已用/(已用+空闲) 换算（思科字节型）" value="${U.escHtml(r.snmpMemUsedOid || '')}" autocomplete="off" spellcheck="false"/>
-          <input class="mh-si-mfree" type="text" placeholder="内存空闲 OID（可选，思科字节型填此）" value="${U.escHtml(r.snmpMemFreeOid || '')}" autocomplete="off" spellcheck="false"/>
+          <input class="mh-si-cpu" type="text" placeholder="CPU 利用率 OID" title="表型 OID 填基础前缀即可：GET 未命中会自动 GETNEXT 取该子树首个实例" value="${U.escHtml(r.snmpCpuOid || '')}" autocomplete="off" spellcheck="false"/>
+          <input class="mh-si-mused" type="text" placeholder="内存 OID（量纲见右侧提示）" title="量纲由右侧「换算」提示决定：直接百分比 / 已用+空闲 / 总量+可用" value="${U.escHtml(r.snmpMemUsedOid || '')}" autocomplete="off" spellcheck="false"/>
+          <input class="mh-si-mfree" type="text" placeholder="空闲/可用 OID（可选）" title="思科字节型填 Free、Linux UCD 填 memAvailReal；华为/华三百分比型留空" value="${U.escHtml(r.snmpMemFreeOid || '')}" autocomplete="off" spellcheck="false"/>
+          <span class="mh-si-mode" title="CPU/内存换算方式（选厂家预设会自动带上；手动改 OID 时请确认量纲一致）">${U.escHtml(snmpModeLabel(r.snmpCpuMode, r.snmpMemMode, r.snmpMemFreeOid))}</span>
         </div>
         <div class="mh-sep">服务器指标采集（SSH）</div>
         <label class="mh-si" title="复用监控会话按间隔执行 df/free 等命令并解析数值：磁盘/内存超阈值时记入事件时间线并弹通知（仅读取模式下不执行）"><input type="checkbox" class="mh-mt-cb"${r.metricsEnabled ? ' checked' : ''}/>磁盘/内存</label>
@@ -5815,7 +8971,7 @@ function openMonitorConfig(id) {
             <option value="">命令预设（选后自动填充）…</option>
             <option value="linux">Linux 服务器（df / free / loadavg）</option>
           </select>
-          <textarea class="mh-mt-ta" rows="3" placeholder="指标采集命令（每行一条）：&#10;df -P&#10;free -m&#10;cat /proc/loadavg">${U.escHtml(Array.isArray(r.metricsCommands) ? r.metricsCommands.join('\n') : '')}</textarea>
+          <textarea class="mh-mt-ta" rows="3" placeholder="指标采集命令（每行一条）：&#10;LC_ALL=C df -P&#10;LC_ALL=C free -m&#10;cat /proc/loadavg">${U.escHtml(Array.isArray(r.metricsCommands) ? r.metricsCommands.join('\n') : '')}</textarea>
           <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:4px">
             <span class="mh-unit">磁盘</span><input class="mh-mt-dw" type="number" min="1" max="100" style="width:52px" title="磁盘告警阈值（%）" value="${U.escHtml(r.metricsDiskWarn != null ? r.metricsDiskWarn : 80)}"/><span class="mh-unit">% / 严重</span><input class="mh-mt-dc" type="number" min="1" max="100" style="width:52px" title="磁盘严重阈值（%）" value="${U.escHtml(r.metricsDiskCrit != null ? r.metricsDiskCrit : 90)}"/><span class="mh-unit">%</span>
             <span class="mh-unit">内存</span><input class="mh-mt-mw" type="number" min="1" max="100" style="width:52px" title="内存告警阈值（%）" value="${U.escHtml(r.metricsMemWarn != null ? r.metricsMemWarn : 80)}"/><span class="mh-unit">% / 严重</span><input class="mh-mt-mc" type="number" min="1" max="100" style="width:52px" title="内存严重阈值（%）" value="${U.escHtml(r.metricsMemCrit != null ? r.metricsMemCrit : 90)}"/><span class="mh-unit">%</span>
@@ -5840,6 +8996,34 @@ function openMonitorConfig(id) {
       const otherDefault = autoPort(protoEl2.value) === '23' ? '22' : '23';
       if (!cur || cur === otherDefault) portEl2.value = autoPort(protoEl2.value);
     });
+    // SNMP 安全模式切换：v2c 显示团体字；v3 显示用户名 + 口令设置按钮
+    const secSel = rowEl.querySelector('.mh-si-sec');
+    const commEl = rowEl.querySelector('.mh-si-comm');
+    const v3UserEl = rowEl.querySelector('.mh-si-v3user');
+    const v3Btn = rowEl.querySelector('.mh-si-v3btn');
+    const applySec = () => {
+      const isV3 = secSel.value === 'v3';
+      commEl.style.display = isV3 ? 'none' : '';
+      v3UserEl.style.display = isV3 ? '' : 'none';
+      v3Btn.style.display = isV3 ? '' : 'none';
+    };
+    secSel.addEventListener('change', applySec);
+    applySec();
+    v3Btn.onclick = () => {
+      openSnmpV3SecretDialog({
+        authProto: rowEl.dataset.v3AuthProto === 'md5' ? 'md5' : 'sha',
+        authPass: rowEl.dataset.v3AuthPass || '',
+        privProto: rowEl.dataset.v3PrivProto === 'des' ? 'des' : 'aes',
+        privPass: rowEl.dataset.v3PrivPass || ''
+      }, (v) => {
+        rowEl.dataset.v3AuthProto = v.authProto;
+        rowEl.dataset.v3AuthPass = v.authPass;
+        rowEl.dataset.v3PrivProto = v.privProto;
+        rowEl.dataset.v3PrivPass = v.privPass;
+        v3Btn.textContent = (v.authPass ? 'v3 口令已设' : 'v3 口令…');
+        toast('SNMP v3 口令已更新（保存弹窗后生效）');
+      });
+    };
     const cmdBtn = rowEl.querySelector('.mh-cmd-btn');
     const cmdsWrap = rowEl.querySelector('.mh-cmds-wrap');
     cmdBtn.onclick = () => {
@@ -5901,17 +9085,30 @@ function openMonitorConfig(id) {
     const applyPfUi = () => { pfWrap.hidden = !pfCb.checked; };
     pfCb.addEventListener('change', applyPfUi);
     applyPfUi();
-    const OID_PRESETS = {
-      hw:   { cpu: '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5', used: '1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7', free: '' },
-      cisco:{ cpu: '1.3.6.1.4.1.9.2.1.58.0', used: '1.3.6.1.4.1.9.9.48.1.1.1.5.1', free: '1.3.6.1.4.1.9.9.48.1.1.1.6.1' }
+    // 厂家预设直接来自 U.SNMP_VENDORS（js/util.js）：加厂商/改 OID 只动数据表，不动这里
+    const vm = (k) => U.snmpVendorByKey(k);
+    const syncModeHint = () => {
+      const el = rowEl.querySelector('.mh-si-mode');
+      if (el) el.textContent = snmpModeLabel(rowEl.dataset.cpuMode, rowEl.dataset.memMode, rowEl.querySelector('.mh-si-mfree').value.trim());
     };
     rowEl.querySelector('.mh-si-preset').addEventListener('change', (e) => {
-      const p = OID_PRESETS[e.target.value];
-      if (!p) return;
-      rowEl.querySelector('.mh-si-cpu').value = p.cpu;
-      rowEl.querySelector('.mh-si-mused').value = p.used;
-      rowEl.querySelector('.mh-si-mfree').value = p.free;
+      const p = vm(e.target.value);
+      if (!p || (!p.cpu && !p.mem)) return;
+      if (p.cpu) {
+        rowEl.querySelector('.mh-si-cpu').value = p.cpu.oid || '';
+        rowEl.dataset.cpuMode = p.cpu.mode || 'direct';
+      }
+      if (p.mem) {
+        rowEl.querySelector('.mh-si-mused').value = p.mem.oid || '';
+        rowEl.querySelector('.mh-si-mfree').value = p.mem.freeOid || '';
+        rowEl.dataset.memMode = p.mem.mode || 'percent';
+      }
+      syncModeHint();
+      // 未实测过的厂商预设只是按 MIB 文档填的值：明确提示先核对，避免「填了就信」
+      if (p.verified !== 'lab') toast('「' + p.label + '」OID 按厂商 MIB 预填，建议先用 snmpwalk 核对再启用');
     });
+    // 空闲 OID 会改变换算语义（有 free 才谈得上 used+free / 总量−可用），输入即刷新提示
+    rowEl.querySelector('.mh-si-mfree').addEventListener('input', syncModeHint);
     // 服务器指标采集折叠区：勾选展开；Linux 预设一键填充
     const mtCb = rowEl.querySelector('.mh-mt-cb');
     const mtWrap = rowEl.querySelector('.mh-mt-wrap');
@@ -5919,7 +9116,7 @@ function openMonitorConfig(id) {
     mtCb.addEventListener('change', applyMtUi);
     applyMtUi();
     rowEl.querySelector('.mh-mt-preset').addEventListener('change', (e) => {
-      if (e.target.value === 'linux') rowEl.querySelector('.mh-mt-ta').value = 'df -P\nfree -m\ncat /proc/loadavg';
+      if (e.target.value === 'linux') rowEl.querySelector('.mh-mt-ta').value = 'LC_ALL=C df -P\nLC_ALL=C free -m\ncat /proc/loadavg'; // 固定 locale：设备本地化表头会让解析恒为空值
     });
     // HTTP 探测折叠区：勾选展开
     const hpCb = rowEl.querySelector('.mh-hp-cb');
@@ -5939,7 +9136,7 @@ function openMonitorConfig(id) {
     wireRow(rowEl);
     return rowEl;
   };
-  const prefillRows = monitorHostsForPrefill(saved, mgmts);
+  const prefillRows = monitorHostsForPrefill(saved, mgmts, id); // id：按 SNMP 识别到的厂商预填 OID
   if (!prefillRows.length) prefillRows.push(monitorRow('', saved));
   for (const r of prefillRows) addRow(r);
   const addBtn = ov.querySelector('[data-act=addHost]');
@@ -6004,7 +9201,16 @@ function openMonitorConfig(id) {
         snmpCpuOid: rowEl.querySelector('.mh-si-cpu').value.trim().slice(0, 64),
         snmpMemUsedOid: rowEl.querySelector('.mh-si-mused').value.trim().slice(0, 64),
         snmpMemFreeOid: rowEl.querySelector('.mh-si-mfree').value.trim().slice(0, 64),
+        snmpCpuMode: rowEl.dataset.cpuMode === 'idle100' ? 'idle100' : 'direct',
+        snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(rowEl.dataset.memMode) >= 0 ? rowEl.dataset.memMode : '',
         snmpCommunity: rowEl.querySelector('.mh-si-comm').value.trim().slice(0, 64),
+        snmpPort: (() => { const v = parseInt(rowEl.querySelector('.mh-si-sp').value, 10); return (v > 0 && v <= 65535) ? String(v) : ''; })(),
+        snmpVersion: rowEl.querySelector('.mh-si-sec').value === 'v3' ? 'v3' : 'v2c',
+        snmpV3User: rowEl.querySelector('.mh-si-v3user').value.trim().slice(0, 32),
+        snmpV3AuthProto: rowEl.dataset.v3AuthProto === 'md5' ? 'md5' : 'sha',
+        snmpV3AuthPass: rowEl.dataset.v3AuthPass || '',
+        snmpV3PrivProto: rowEl.dataset.v3PrivProto === 'des' ? 'des' : 'aes',
+        snmpV3PrivPass: rowEl.dataset.v3PrivPass || '',
         backupCommand: (() => { const v = rowEl.querySelector('.mh-bk-ta').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); return v.length ? v : ['display current-configuration']; })(),
         backupMode: rowEl.querySelector('.mh-bk-mode').value,
         backupSkipSame: rowEl.querySelector('.mh-bk-skip-cb').checked,
@@ -6073,6 +9279,607 @@ function openMonitorConfig(id) {
   setTimeout(() => { if (document.body.contains(ov)) { const f = listEl.querySelector('.mh-host'); if (f) f.focus(); } }, 250);
 }
 
+/* ================= 二层拓扑推断（SNMP BRIDGE-MIB） =================
+ * 覆盖不开 LLDP/CDP 的设备：读各交换机的网桥转发表（dot1dTpFdbTable + dot1dBasePortIfIndex），
+ * 按「同一批 MAC 只出在这一对端口上」反推链路；桥地址命中给最强证据。推断判据与解析都在
+ * js/l2-topo.js 的纯函数里（单测覆盖）；采集走 diag:snmp-walk（v2c/v3 都支持）。
+ * 推断链路合并进拓扑时带 inferred 标记：画布上虚线显示并与实测链路区分（不会冒充实测结果）。 */
+const L2 = globalThis.TopoL2;   // 二层推断纯逻辑（js/l2-topo.js，双形态导出）
+
+/* ================= 机房平面图底图 =================
+ * 把机房/楼层的平面图垫在画布最底层当参照，设备按真实位置摆放。每张图纸一张底图，
+ * 图片以 dataURL 存进工程文件（所以体积有 6MB 硬上限——否则一张扫描图会让每次自动备份都变成几十 MB）。
+ * 「调整底图」模式下可直接拖动移动、右下角手柄缩放；锁定后不再响应拖动（防误移动）。 */
+let underlaySaveTimer = null;
+/** 内容包围盒（设备 + 文字）：底图初始尺寸与「对齐内容」用 */
+function contentBox() {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of state.nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h); }
+  for (const t of state.texts) { minX = Math.min(minX, t.x); minY = Math.min(minY, t.y); maxX = Math.max(maxX, t.x + (t.w || 160)); maxY = Math.max(maxY, t.y + (t.h || 40)); }
+  if (!isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+/** 把当前底图交给渲染层（拖动/缩放改动回写 state；落盘 600ms 防抖——拖动中不断序列化几 MB 图片会卡） */
+function applyUnderlay() {
+  if (!renderer || typeof renderer.setUnderlay !== 'function') return;
+  renderer.setUnderlay(state.underlay, (patch) => {
+    if (!state.underlay) return;
+    for (const [k, v] of Object.entries(patch || {})) if (Number.isFinite(v)) state.underlay[k] = v;
+    if (state.sheets[state.sheetIdx]) state.sheets[state.sheetIdx].underlay = state.underlay;
+    renderer.setUnderlay(state.underlay);   // 立即重绘（拖动要跟手）
+    renderer.update();                      // 拖动路径必须显式重绘：setUnderlay 只清重建标记，不触发帧
+    if (underlaySaveTimer) clearTimeout(underlaySaveTimer);
+    underlaySaveTimer = setTimeout(() => { underlaySaveTimer = null; try { saveGraph(); } catch (e) { /* ignore */ } }, 600);
+  });
+}
+function openUnderlayPanel() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const u = state.underlay;
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:740px;max-height:84vh;display:flex;flex-direction:column">
+      <h3>机房平面图底图</h3>
+      <div class="m-sub">导入机房/楼层平面图作为画布底图（<b>每张图纸一张</b>，随工程保存）。勾选「调整底图」后可直接在画布上<b>拖动移动</b>、<b>右下角手柄缩放</b>；锁定后不再响应拖动。导出 PDF / 图片 / SVG <b>会带上底图</b>（与屏幕所见一致），Visio 导出不含底图。</div>
+      <div class="frow"><label>图片（PNG / JPG / GIF / WebP / SVG，建议 2MB 以内）</label>
+        <input id="ulFile" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"/></div>
+      <div id="ulInfo" class="m-sub" style="margin:2px 0 8px"></div>
+      <div class="frow" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input id="ulVisible" type="checkbox"/> 显示底图</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input id="ulAdjust" type="checkbox"/> 调整底图（拖动/缩放）</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input id="ulLocked" type="checkbox"/> 锁定位置</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0">不透明度 <input id="ulOpacity" type="range" min="5" max="100" step="5" style="width:110px"/><span id="ulOpacityVal" style="width:40px;text-align:right"></span></label>
+      </div>
+      <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>X</label><input id="ulX" type="number" style="width:88px"/></div>
+        <div class="frow" style="margin:0"><label>Y</label><input id="ulY" type="number" style="width:88px"/></div>
+        <div class="frow" style="margin:0"><label>宽</label><input id="ulW" type="number" style="width:88px"/></div>
+        <div class="frow" style="margin:0"><label>高</label><input id="ulH" type="number" style="width:88px"/></div>
+        <button type="button" class="tb" id="ulFit">对齐内容（设备范围）</button>
+        <button type="button" class="tb" id="ulReset">按原始比例</button>
+      </div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="ulRemove"${u ? '' : ' disabled'}>移除底图</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const infoEl = ov.querySelector('#ulInfo');
+  const ids = ['#ulVisible', '#ulAdjust', '#ulLocked', '#ulOpacity', '#ulX', '#ulY', '#ulW', '#ulH', '#ulFit', '#ulReset'];
+  const sync = () => {
+    const c = state.underlay;
+    ov.querySelector('#ulVisible').checked = !!(c && c.visible !== false);
+    ov.querySelector('#ulAdjust').checked = !!(c && c.adjust);
+    ov.querySelector('#ulLocked').checked = !!(c && c.locked);
+    const op = c ? Math.round((c.opacity == null ? 0.85 : c.opacity) * 100) : 85;
+    ov.querySelector('#ulOpacity').value = String(op);
+    ov.querySelector('#ulOpacityVal').textContent = op + '%';
+    ov.querySelector('#ulX').value = c ? Math.round(c.x) : '';
+    ov.querySelector('#ulY').value = c ? Math.round(c.y) : '';
+    ov.querySelector('#ulW').value = c ? Math.round(c.w) : '';
+    ov.querySelector('#ulH').value = c ? Math.round(c.h) : '';
+    ov.querySelector('#ulRemove').disabled = !c;
+    for (const id of ids) ov.querySelector(id).disabled = !c;
+    infoEl.innerHTML = c
+      ? ('当前：<b>' + U.escHtml(c.name || '未命名') + '</b>　' + Math.round(c.w) + '×' + Math.round(c.h) + ' @ (' + Math.round(c.x) + ', ' + Math.round(c.y) + ')'
+        + '　图片约 <b>' + (c.dataUrl.length / 1024 / 1024).toFixed(2) + ' MB</b>（base64，随工程保存）'
+        + (c.dataUrl.length > 2 * 1024 * 1024 ? ' <span style="color:#f59e0b">偏大：会明显增加工程与自动备份体积</span>' : ''))
+      : '尚未导入底图。';
+    if (typeof renderer.syncUnderlayMode === 'function') renderer.syncUnderlayMode(!!(c && c.adjust && !c.locked));
+  };
+  const commit = (patch) => {
+    if (!state.underlay) return;
+    Object.assign(state.underlay, patch);
+    state.underlay = U.sanitizeUnderlay(state.underlay);
+    if (state.sheets[state.sheetIdx]) state.sheets[state.sheetIdx].underlay = state.underlay;
+    applyUnderlay(); renderer.update(); sync();
+    if (underlaySaveTimer) clearTimeout(underlaySaveTimer);
+    underlaySaveTimer = setTimeout(() => { underlaySaveTimer = null; try { saveGraph(); } catch (e) { /* ignore */ } }, 600);
+  };
+  ov.querySelector('#ulFile').onchange = async (e) => {
+    const f = (e.target.files || [])[0];
+    if (!f) return;
+    if (f.size > 4.5 * 1024 * 1024) { toast('图片过大（' + (f.size / 1024 / 1024).toFixed(1) + ' MB）：请压到 4MB 以内再导入（base64 后受 6MB 上限约束）'); e.target.value = ''; return; }
+    const dataUrl = await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result || '')); fr.onerror = () => res(''); fr.readAsDataURL(f); });
+    if (!U.sanitizeUnderlay({ dataUrl })) { toast('图片格式不受支持（PNG / JPG / GIF / WebP / SVG）或体积超限'); e.target.value = ''; return; }
+    const size = await new Promise((res) => {
+      const im = new Image();
+      im.onload = () => res({ w: im.naturalWidth || 1200, h: im.naturalHeight || 800 });
+      im.onerror = () => res({ w: 1200, h: 800 });
+      im.src = dataUrl;
+    });
+    const box = contentBox();
+    const targetW = Math.max(400, Math.min(4000, box.w || 1200));
+    const scale = targetW / (size.w || 1200);
+    state.underlay = U.sanitizeUnderlay({
+      dataUrl, name: f.name, x: Math.round(box.x || 0), y: Math.round(box.y || 0),
+      w: Math.round(size.w * scale), h: Math.round(size.h * scale), opacity: 0.85, visible: true, locked: false, adjust: true
+    });
+    if (state.sheets[state.sheetIdx]) state.sheets[state.sheetIdx].underlay = state.underlay;
+    applyUnderlay(); renderer.update(); sync(); saveGraph();
+    toast('已导入底图：' + f.name + '（' + Math.round(size.w * scale) + '×' + Math.round(size.h * scale) + '；勾选「调整底图」后可拖动摆放）');
+    e.target.value = '';
+  };
+  ov.querySelector('#ulVisible').onchange = (e) => commit({ visible: e.target.checked });
+  ov.querySelector('#ulAdjust').onchange = (e) => commit({ adjust: e.target.checked });
+  ov.querySelector('#ulLocked').onchange = (e) => commit({ locked: e.target.checked });
+  ov.querySelector('#ulOpacity').oninput = (e) => commit({ opacity: Number(e.target.value) / 100 });
+  for (const [id, key] of [['#ulX', 'x'], ['#ulY', 'y'], ['#ulW', 'w'], ['#ulH', 'h']]) {
+    ov.querySelector(id).onchange = (e) => { const v = Number(e.target.value); if (Number.isFinite(v)) commit({ [key]: v }); };
+  }
+  ov.querySelector('#ulFit').onclick = () => {
+    const box = contentBox();
+    if (!box.w || !box.h) { toast('画布暂无内容（设备/文字），无法对齐'); return; }
+    const ratio = (state.underlay && state.underlay.w) ? state.underlay.h / state.underlay.w : 0.75;
+    commit({ x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.w), h: Math.round(box.w * ratio) });
+    toast('底图已对齐到设备范围（' + Math.round(box.w) + '×' + Math.round(box.w * ratio) + '）');
+  };
+  ov.querySelector('#ulReset').onclick = () => {
+    if (!state.underlay) return;
+    const box = contentBox();
+    const targetW = Math.max(400, Math.min(4000, box.w || 1200));
+    const ratio = state.underlay.h / state.underlay.w;
+    commit({ w: Math.round(targetW), h: Math.round(targetW * ratio) });
+    toast('已按原始宽高比重新设定尺寸');
+  };
+  ov.querySelector('#ulRemove').onclick = async () => {
+    if (!state.underlay) return;
+    if (!(await confirmBox('移除当前图纸的底图？（设备位置不受影响）'))) return;
+    state.underlay = null;
+    if (state.sheets[state.sheetIdx]) state.sheets[state.sheetIdx].underlay = null;
+    applyUnderlay(); renderer.update(); sync(); saveGraph();
+    toast('已移除底图');
+  };
+  sync();
+}
+
+function openL2Infer() {
+  if (!(window.topoDiag && window.topoDiag.snmpWalk)) { toast('二层拓扑推断需要桌面版（Electron）环境'); return; }
+  const cands = state.nodes
+    .map(n => {
+      const mc = normalizeMonitorHosts(state.monitorCfg[n.id]) || [];
+      const row = mc.find(r => r && r.host && r.snmpEnabled) || mc.find(r => r && r.host) || null;
+      const host = row ? row.host : (U.nodeMgmts(n)[0] || '');
+      return { node: n, host, snmp: row && row.snmpEnabled ? row : null };
+    })
+    .filter(c => c.host);
+  if (!cands.length) { toast('当前没有带管理地址的设备：先为设备填写管理地址'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1080px;height:86vh;display:flex;flex-direction:column">
+      <h3>二层拓扑推断（SNMP 转发表）</h3>
+      <div class="m-sub">读各交换机的网桥转发表（<code>dot1dTpFdbTable</code> + <code>dot1dBasePortIfIndex</code>），按「<b>同一批 MAC 只出现在这一对端口上</b>」反推交换机之间的链路——适用于<b>不开 LLDP/CDP 的老设备</b>。判据从强到弱：① 双方各自在唯一端口上看到<b>对方的桥 MAC</b>（最强）；② 转发表在两端都独占的交集。交集里的 MAC 在任一方<b>其他端口</b>也出现时不判链路（那多半是共享网段/环路）；双方认定的端口不一致时只报「疑似」。<b>推断结果与实测（LLDP/CDP）是两回事</b>，合并进拓扑后画布用虚线与图例区分。凭据取各设备「设备监控」里的 SNMP 配置（v2c 团体字 / v3 用户）。</div>
+      <div class="frow" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>团体字（未配 SNMP 的设备用这个）</label><input id="l2Comm" type="text" value="public" style="width:110px" spellcheck="false"/></div>
+        <div class="frow" style="margin:0"><label>单表行数上限</label><select id="l2Max"><option value="512">512</option><option value="2048" selected>2048</option><option value="8192">8192（大表）</option></select></div>
+        <div class="frow" style="margin:0"><label>并发</label><select id="l2Conc"><option value="1">1 台</option><option value="2" selected>2 台</option><option value="4">4 台</option></select></div>
+        <label style="display:flex;align-items:center;gap:4px;margin:0 0 4px"><input id="l2All" type="checkbox" checked/>全选设备</label>
+        <span id="l2Hint" class="m-sub" style="margin:0;flex:1"></span>
+      </div>
+      <div id="l2Devs" style="max-height:120px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
+      <div id="l2Res" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:140px;margin-top:8px"><div class="bk-empty">点「采集并推断」后结果汇总在这里。</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="l2Csv" disabled>导出推断结果 CSV</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" id="l2Stop" disabled>停止</button>
+        <button type="button" class="tb primary" id="l2Go"><i class="ic" data-ic="search"></i>采集并推断</button>
+        <button type="button" class="tb" id="l2Merge" disabled>合并进拓扑（标注推断）</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const devsEl = ov.querySelector('#l2Devs'), resEl = ov.querySelector('#l2Res'), hintEl = ov.querySelector('#l2Hint');
+  const goBtn = ov.querySelector('#l2Go'), stopBtn = ov.querySelector('#l2Stop'), csvBtn = ov.querySelector('#l2Csv'), mergeBtn = ov.querySelector('#l2Merge');
+  devsEl.innerHTML = cands.map((c, i) => `<label style="display:flex;align-items:center;gap:4px" title="${c.snmp ? '使用设备监控里的 SNMP 配置' : '用上方团体字'}"><input type="checkbox" data-idx="${i}" checked/> ${c.snmp ? '<span style="color:var(--ok,#22c55e)">●</span>' : '<span style="color:#f59e0b">●</span>'} ${U.escHtml(c.node.name)}<span style="opacity:.6">（${U.escHtml(c.host)}）</span></label>`).join('');
+  ov.querySelector('#l2All').addEventListener('change', (e) => {
+    devsEl.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = e.target.checked; });
+  });
+  let result = null, stopFlag = false;
+
+  /** 采集一台交换机：桥地址 / 端口→ifIndex / 转发表三张 + 接口名 */
+  const collectOne = async (c) => {
+    const base = { host: c.host, port: 161, timeoutMs: 2500, max: parseInt(ov.querySelector('#l2Max').value, 10) || 2048 };
+    if (c.snmp) {
+      const v3 = String(c.snmp.snmpVersion || 'v2c') === 'v3';
+      Object.assign(base, {
+        version: v3 ? 'v3' : 'v2c',
+        community: c.snmp.snmpCommunity || 'public',
+        v3User: c.snmp.snmpV3User || '', v3AuthProto: c.snmp.snmpV3AuthProto || 'sha', v3AuthPass: c.snmp.snmpV3AuthPass || '',
+        v3PrivProto: c.snmp.snmpV3PrivProto || 'aes', v3PrivPass: c.snmp.snmpV3PrivPass || ''
+      });
+      if (c.snmp.snmpPort) base.port = parseInt(c.snmp.snmpPort, 10) || 161;
+    } else {
+      base.community = ov.querySelector('#l2Comm').value.trim() || 'public';
+    }
+    const walk = (oid) => window.topoDiag.snmpWalk(Object.assign({}, base, { oid }));
+    const addr = await walk(L2.OIDS.bridgeAddr);
+    const p2i = await walk(L2.OIDS.portIfIndex);
+    const fdbAddr = await walk(L2.OIDS.fdbAddress);
+    const fdbPort = await walk(L2.OIDS.fdbPort);
+    const fdbStat = await walk(L2.OIDS.fdbStatus);
+    const ifName = await walk(L2.OIDS.ifName);
+    let ifDesc = { varbinds: [] };
+    if (!(ifName.varbinds || []).length) ifDesc = await walk(L2.OIDS.ifDescr);
+    const maxRows = base.max;
+    const truncated = [fdbAddr, fdbPort, fdbStat].some(r => (r.varbinds || []).length >= maxRows);
+    const err = [addr, p2i, fdbAddr, fdbPort].map(r => r && r.error).filter(Boolean)[0] || '';
+    const fdb = L2.parseFdb(fdbAddr.varbinds, fdbPort.varbinds, fdbStat.varbinds);
+    return {
+      id: c.node.id, name: c.node.name, host: c.host,
+      bridgeAddr: L2.parseBridgeAddr(addr.varbinds),
+      portIfIndex: L2.parsePortIfIndex(p2i.varbinds),
+      ifNames: Object.assign({}, L2.parseIfNames(ifDesc.varbinds), L2.parseIfNames(ifName.varbinds)),
+      fdb, truncated, error: fdb.length ? '' : (err || '未读到转发表（设备可能不是交换机 / 未启用 BRIDGE-MIB / 团体字无权限）')
+    };
+  };
+
+  const run = async () => {
+    const chosen = [...devsEl.querySelectorAll('input[type=checkbox]')].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
+    if (chosen.length < 2) { toast('至少勾选两台交换机（链路是两台之间的事）'); return; }
+    result = null; mergeBtn.disabled = true; csvBtn.disabled = true;
+    goBtn.disabled = true; stopBtn.disabled = false; stopFlag = false;
+    const tables = [], fails = [];
+    const CONC = parseInt(ov.querySelector('#l2Conc').value, 10) || 2;
+    const t0 = Date.now();
+    for (let i = 0; i < chosen.length; i += CONC) {
+      if (stopFlag) break;
+      await Promise.all(chosen.slice(i, i + CONC).map(async (c) => {
+        hintEl.textContent = '采集中：' + c.node.name + '（' + c.host + '）…';
+        try {
+          const t = await collectOne(c);
+          tables.push(t);
+          if (!t.fdb.length) fails.push(c.node.name + '（' + (t.error || '无转发表') + '）');
+        } catch (e) { fails.push(c.node.name + '（' + String((e && e.message) || e) + '）'); }
+      }));
+    }
+    hintEl.textContent = '';
+    goBtn.disabled = false; stopBtn.disabled = true;
+    if (!tables.filter(t => t.fdb.length).length) {
+      resEl.innerHTML = '<div class="ipam-conflict">没有采到任何转发表：' + U.escHtml(fails.join('、') || '请核对 SNMP 配置') + '</div>';
+      return;
+    }
+    result = L2.inferLinks(tables);
+    result.tables = tables;
+    result.fails = fails;
+    result.ms = Date.now() - t0;
+    renderResult();
+  };
+
+  const renderResult = () => {
+    if (!result) return;
+    const st = result.stats;
+    const conf = { high: '<b style="color:#22c55e">强</b>（桥地址命中）', medium: '<b style="color:#0ea5e9">中</b>（独占交集）', low: '<span style="color:#f59e0b">弱</span>（仅 1 个独占 MAC）' };
+    const rows = result.links.map(l => `<tr>
+      <td>${U.escHtml(l.aName)}</td><td><code style="font-size:12px">${U.escHtml(l.aIf)}</code></td>
+      <td>${U.escHtml(l.bName)}</td><td><code style="font-size:12px">${U.escHtml(l.bIf)}</code></td>
+      <td style="text-align:right">${l.unique}</td><td style="text-align:right">${l.shared}</td>
+      <td>${conf[l.confidence] || l.confidence}${l.truncated ? ' <span style="color:#f59e0b" title="采集被上限截断，置信度已下调">截断</span>' : ''}</td>
+      <td style="font-size:12px;opacity:.8">${U.escHtml((l.evidence || []).join('、'))}</td></tr>`).join('');
+    const amb = (result.ambiguous || []).map(a => `<tr><td>${U.escHtml(a.aName)}</td><td><code style="font-size:12px">${U.escHtml(a.aIf)}</code></td>
+      <td>${U.escHtml(a.bName)}</td><td><code style="font-size:12px">${U.escHtml(a.bIf)}</code></td><td colspan="4" style="color:#f59e0b">${U.escHtml(a.reason)}（共有 MAC ${a.shared}，不判链路）</td></tr>`).join('');
+    const tbl = result.tables.map(t => `<tr><td>${U.escHtml(t.name)}</td><td>${U.escHtml(t.host)}</td>
+      <td style="text-align:right">${t.fdb.length}</td><td style="font-size:12px">${t.bridgeAddr ? U.escHtml(t.bridgeAddr.replace(/(..)(?=.)/g, '$1:')) : '—'}</td>
+      <td style="text-align:right">${Object.keys(t.portIfIndex).length}</td>
+      <td style="font-size:12px">${t.fdb.length ? (t.error ? '' : '正常') : '<span style="color:var(--danger)">' + U.escHtml(t.error || '无数据') + '</span>'}${t.truncated ? ' <span style="color:#f59e0b">（表已截断）</span>' : ''}</td></tr>`).join('');
+    resEl.innerHTML = `
+      <div class="comp-total">采集 ${result.tables.filter(t => t.fdb.length).length} 台（转发表合计 <b>${st.macs}</b> 条 MAC）· 比较 <b>${st.pairs}</b> 对设备 · 推断出 <b>${result.links.length}</b> 条链路 · 疑似（不判）<b>${result.ambiguous.length}</b> 条 · 耗时 ${result.ms} ms${failsText(result)}</div>
+      ${result.links.length ? `<table class="nb-table"><tr><th>设备 A</th><th>端口 A</th><th>设备 B</th><th>端口 B</th><th>独占 MAC</th><th>共有 MAC</th><th>置信度</th><th>证据</th></tr>${rows}</table>` : '<div class="bk-empty">没有推断出链路：两台设备之间没有转发表交集，或交集 MAC 在双方的其他端口上也出现（共享网段不判链路）。</div>'}
+      ${result.ambiguous.length ? `<div class="m-sub" style="margin:8px 0 2px">疑似但<b>不判</b>（歧义：多个端口并列最优或双方认定不一致，通常是共享网段/环路）</div>
+        <table class="nb-table"><tr><th>设备 A</th><th>端口 A</th><th>设备 B</th><th>端口 B</th><th colspan="4">原因</th></tr>${amb}</table>` : ''}
+      <div class="m-sub" style="margin-top:8px">采集明细</div>
+      <table class="nb-table"><tr><th>设备</th><th>管理地址</th><th>转发表条数</th><th>桥 MAC</th><th>端口映射</th><th>状态</th></tr>${tbl}</table>
+      <div class="m-sub" style="margin-top:8px">判据：独占交集 = 该批 MAC 在这两台设备上都只挂这一对端口；桥地址命中 = 双方各自在唯一端口上看到对方的桥 MAC（最强证据）。转发表是<b>学到的</b>，会随流量变化；合并进拓扑后以虚线与实测链路区分，建议核对后再据此施工。</div>`;
+    csvBtn.disabled = !result.links.length;
+    mergeBtn.disabled = !result.links.length;
+  };
+  const failsText = (r) => (r.fails && r.fails.length) ? ` · <span style="color:#f59e0b">失败 ${r.fails.length} 台：${U.escHtml(r.fails.join('、'))}</span>` : '';
+
+  csvBtn.onclick = () => {
+    if (!result) return;
+    const rows = [['设备A', '端口A', '设备B', '端口B', '独占MAC', '共有MAC', '置信度', '证据', '备注']];
+    for (const l of result.links) rows.push([l.aName, l.aIf, l.bName, l.bIf, String(l.unique), String(l.shared), l.confidence, (l.evidence || []).join('、'), l.note || '']);
+    for (const a of (result.ambiguous || [])) rows.push([a.aName, a.aIf, a.bName, a.bIf, '', String(a.shared), '疑似（不判）', a.reason, '']);
+    U.download('二层拓扑推断_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+    toast('已导出推断结果 CSV（' + result.links.length + ' 条链路，' + (result.ambiguous || []).length + ' 条疑似）');
+  };
+  mergeBtn.onclick = () => {
+    if (!result || !result.links.length) return;
+    const exist = new Set(state.links.map(l => [l.a, l.b].sort().join('|')));
+    const add = [];
+    for (const l of result.links) {
+      const k = [l.aId, l.bId].sort().join('|');
+      if (exist.has(k)) continue;      // 已有这条链路（无论实测还是先前推断）：不重复添加
+      exist.add(k);
+      add.push(l);
+    }
+    if (!add.length) { toast('推断出的链路在拓扑里都已存在，无需合并'); return; }
+    pushUndo();
+    for (const l of L2.toGraphLinks(add, { uid: () => U.uid('l') })) state.links.push(l);
+    renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    refreshAll();
+    saveGraph();
+    toast('已合并 ' + add.length + ' 条链路（标注为 SNMP 推断，画布上以虚线显示）' + (add.some(l => l.confidence === 'low') ? '；其中含低置信项，建议核对' : ''));
+  };
+  stopBtn.onclick = () => { stopFlag = true; toast('已请求停止：正在进行的采集完成后结束'); };
+  goBtn.onclick = run;
+  // 测试挂具：注入采集结果，直接验证推断与界面渲染（不依赖真实 SNMP 设备）
+  ov.__l2inject = (tables) => { result = L2.inferLinks(tables); result.tables = tables; result.fails = []; result.ms = 0; renderResult(); return result; };
+  globalThis.__l2Panel = ov;
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#l2Go').focus(); }, 250);
+}
+
+/* ================= 可用性报表（SLA） =================
+ * 把监控在线探测的采样按区间汇总成可交付的可用率报表：可用率 / 中断次数 / 累计中断 / MTTR /
+ * 最长单次中断。10 分钟明细桶保留 7 天（中断明细靠它切分），按天汇总保留 400 天（长期可用率口径），
+ * 区间超出明细覆盖时如实降级并在界面上标注——验收材料里最忌讳看起来精确的假数字。 */
+function slaFmtPct(v) { return (v == null || !isFinite(v)) ? '—' : ((v >= 99.995 ? '100' : v.toFixed(v >= 99 ? 2 : 1)) + '%'); }
+function slaFmtDur(ms) {
+  if (ms == null || !isFinite(ms)) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' 秒';
+  const m = Math.floor(s / 60), rs = s % 60;
+  if (m < 60) return m + ' 分' + (rs ? ' ' + rs + ' 秒' : '');
+  const h = Math.floor(m / 60), rm = m % 60;
+  if (h < 24) return h + ' 时' + (rm ? ' ' + rm + ' 分' : '');
+  return Math.floor(h / 24) + ' 天' + (h % 24 ? ' ' + (h % 24) + ' 时' : '');
+}
+function slaRowsForExport(rep) {
+  const head = ['设备', '管理地址', '可用率(%)', '在线采样', '离线采样', '中断次数', '累计中断', '平均恢复(MTTR)', '最长单次中断', '采样覆盖(%)', '数据来源'];
+  const src = { detail: '10 分钟明细', 'detail-partial': '明细分段（未覆盖全区间）', daily: '按天汇总', none: '无采样' };
+  const rows = [head];
+  for (const r of rep.rows) {
+    rows.push([
+      r.name, r.host,
+      r.uptimePct == null ? '' : Number(r.uptimePct.toFixed(3)),
+      r.up, r.down,
+      r.outages == null ? '（无明细）' : (r.outagePartial ? r.outages + '（仅部分区间）' : r.outages),
+      r.downtimeMs == null ? '（无明细）' : slaFmtDur(r.downtimeMs),
+      r.mttrMs == null ? '—' : slaFmtDur(r.mttrMs),
+      r.longestMs == null ? '—' : slaFmtDur(r.longestMs),
+      Number((r.coveragePct || 0).toFixed(1)),
+      (src[r.source] || r.source) + (r.outagePartial && r.source === 'daily' ? ' + 中断明细分段' : '')
+    ]);
+  }
+  rows.push(['合计', rep.summary.devices + ' 台', rep.summary.uptimePct == null ? '' : Number(rep.summary.uptimePct.toFixed(3)),
+    rep.summary.up, rep.summary.down, rep.summary.outages, slaFmtDur(rep.summary.downtimeMs), '', '', '', '']);
+  return rows;
+}
+/** 自包含、可直接打印为 PDF 的 HTML 报表（不引外网资源，符合项目 CSP 口径） */
+function buildSlaHtml(rep, meta) {
+  const esc = U.escHtml;
+  const body = rep.rows.map(r => `<tr${r.meetsSla === false ? ' class="bad"' : ''}>
+    <td>${esc(r.name)}</td><td>${esc(r.host)}</td>
+    <td class="num"><b>${slaFmtPct(r.uptimePct)}</b></td>
+    <td class="num">${r.up}</td><td class="num">${r.down}</td>
+    <td class="num">${r.outages == null ? '（无明细）' : (r.outagePartial ? r.outages + ' *' : r.outages)}</td>
+    <td class="num">${r.downtimeMs == null ? '（无明细）' : slaFmtDur(r.downtimeMs)}</td>
+    <td class="num">${r.mttrMs == null ? '—' : slaFmtDur(r.mttrMs)}</td>
+    <td class="num">${r.longestMs == null ? '—' : slaFmtDur(r.longestMs)}</td>
+    <td class="num">${(r.coveragePct || 0).toFixed(1)}%</td></tr>`).join('');
+  return `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"/><title>可用性（SLA）报表 ${esc(meta.rangeText)}</title>
+<style>
+ body{font:13px/1.6 "Microsoft YaHei",system-ui,sans-serif;color:#111;margin:28px}
+ h1{font-size:19px;margin:0 0 4px} .meta{color:#555;font-size:12px;margin-bottom:14px}
+ table{border-collapse:collapse;width:100%;font-size:12px}
+ th,td{border:1px solid #bbb;padding:5px 7px;text-align:left} th{background:#f2f4f7}
+ td.num{text-align:right;font-variant-numeric:tabular-nums}
+ tr.bad td{background:#fff3f3} tr.bad td:nth-child(3){color:#c00;font-weight:600}
+ tfoot td{background:#fafafa;font-weight:600}
+ .note{color:#666;font-size:11.5px;margin-top:12px;line-height:1.7}
+</style></head><body>
+<h1>网络可用性（SLA）报表</h1>
+<div class="meta">统计区间：${esc(meta.rangeText)}（${esc(meta.fromText)} ~ ${esc(meta.toText)}）　目标线：${meta.minUptime}%　生成时间：${esc(meta.genText)}　工具：${esc(meta.appVersion)}</div>
+<table><thead><tr><th>设备</th><th>管理地址</th><th>可用率</th><th>在线采样</th><th>离线采样</th><th>中断次数</th><th>累计中断</th><th>平均恢复</th><th>最长中断</th><th>采样覆盖</th></tr></thead>
+<tbody>${body || '<tr><td colspan="10">区间内没有采样数据</td></tr>'}</tbody>
+<tfoot><tr><td>合计</td><td>${rep.summary.devices} 台（有采样 ${rep.summary.sampled} 台）</td><td class="num">${slaFmtPct(rep.summary.uptimePct)}</td><td class="num">${rep.summary.up}</td><td class="num">${rep.summary.down}</td><td class="num">${rep.summary.outages}</td><td class="num">${slaFmtDur(rep.summary.downtimeMs)}</td><td colspan="3"></td></tr></tfoot></table>
+<div class="note">口径说明：可用率 = 在线采样桶 ÷ 有效采样桶（按 10 分钟桶计数，非秒级探针统计）；中断时长 = 连续离线桶数 × 桶宽，最后一次中断按「至今」截断；同一桶内先失败后恢复只记该桶最后一次结果（桶内闪断不可见，这是探针采样粒度的固有限制）。${rep.summary.detailLimited ? '<br><b>注意：</b>本区间超出 10 分钟明细保留范围，可用率来自按天汇总。' : ''}${rep.summary.outageLimited ? '<br><b>注意：</b>标 * 的中断明细仅覆盖 10 分钟明细保留期内的部分（约近 ' + rep.detailKeepDays + ' 天），不等同于整段区间。' : ''}</div>
+</body></html>`;
+}
+async function openSlaReport() {
+  if (!(window.topoMonitor && window.topoMonitor.sla)) { toast('可用性报表需要桌面版（Electron）环境'); return; }
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1080px;height:84vh;display:flex;flex-direction:column">
+      <h3>可用性报表（SLA）</h3>
+      <div class="m-sub">监控在线探测每次结果都按 10 分钟落桶（明细保留 7 天，按天汇总保留 400 天）。这里按区间汇总成可交付的可用率报表：可用率 / 中断次数 / 累计中断 / 平均恢复（MTTR）/ 最长单次中断。</div>
+      <div class="frow" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div class="frow" style="margin:0"><label>统计区间</label>
+          <select id="slaRange">
+            <option value="last7" selected>近 7 天</option>
+            <option value="last30">近 30 天</option>
+            <option value="thisMonth">本月（至今）</option>
+            <option value="lastMonth">上月</option>
+            <option value="custom">自定义…</option>
+          </select>
+        </div>
+        <div class="frow" style="margin:0" id="slaFromWrap" hidden><label>起（含）</label><input id="slaFrom" type="date"/></div>
+        <div class="frow" style="margin:0" id="slaToWrap" hidden><label>止（含）</label><input id="slaTo" type="date"/></div>
+        <div class="frow" style="margin:0"><label>目标线 %</label><input id="slaMin" type="number" step="0.01" min="0" max="100" value="99.9" style="width:90px"/></div>
+        <button type="button" class="tb primary" id="slaGo"><i class="ic" data-ic="pulse"></i>统计</button>
+        <span id="slaHint" class="m-sub" style="margin:0;flex:1"></span>
+      </div>
+      <div id="slaBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px"><div class="bk-empty">选好区间后点「统计」。</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="slaCsv" disabled>导出 CSV</button>
+        <button type="button" class="tb" id="slaXlsx" disabled>导出 Excel</button>
+        <button type="button" class="tb" id="slaHtml" disabled title="自包含、可直接打印为 PDF 的 HTML 报表（发给同事/附在验收材料里）">导出报表 HTML</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb primary" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const bodyEl = ov.querySelector('#slaBody'), hintEl = ov.querySelector('#slaHint');
+  const rangeEl = ov.querySelector('#slaRange'), minEl = ov.querySelector('#slaMin');
+  const fromWrap = ov.querySelector('#slaFromWrap'), toWrap = ov.querySelector('#slaToWrap');
+  const csvBtn = ov.querySelector('#slaCsv'), xlsxBtn = ov.querySelector('#slaXlsx'), htmlBtn = ov.querySelector('#slaHtml');
+  let last = null;
+  const setDisabled = (v) => { csvBtn.disabled = v; xlsxBtn.disabled = v; htmlBtn.disabled = v; };
+  rangeEl.onchange = () => {
+    const custom = rangeEl.value === 'custom';
+    fromWrap.hidden = !custom; toWrap.hidden = !custom;
+    if (custom) {
+      const t = new Date();
+      const iso = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      if (!ov.querySelector('#slaTo').value) ov.querySelector('#slaTo').value = iso(t);
+      if (!ov.querySelector('#slaFrom').value) ov.querySelector('#slaFrom').value = iso(new Date(t.getTime() - 6 * 86400000));
+    }
+  };
+  const dayStart = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '')); return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() : NaN; };
+  const load = async () => {
+    const p = { range: rangeEl.value, minUptime: Number(minEl.value) || 99.9 };
+    if (rangeEl.value === 'custom') {
+      const f = dayStart(ov.querySelector('#slaFrom').value), t = dayStart(ov.querySelector('#slaTo').value);
+      if (!isFinite(f) || !isFinite(t)) { toast('请填写自定义区间的起止日期'); return; }
+      p.from = f; p.to = t + 86400000;   // 「止」当天含在内
+    }
+    setDisabled(true);
+    bodyEl.innerHTML = '<div class="bk-empty">统计中…</div>';
+    let rep = null;
+    try { rep = await window.topoMonitor.sla(p); } catch (e) { rep = null; }
+    if (!rep || !rep.ok) { bodyEl.innerHTML = '<div class="ipam-conflict">统计失败：' + U.escHtml((rep && rep.error) || '未知错误') + '</div>'; return; }
+    last = rep;
+    if (!rep.rows.length || !rep.summary.total) {
+      bodyEl.innerHTML = '<div class="bk-empty">该区间没有在线探测采样：设备需开启「在线探测」并运行一段时间后才有数据。</div>';
+      hintEl.textContent = rep.label + '：无采样';
+      return;
+    }
+    const fdate = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+    const rows = rep.rows.map(r => `<tr${r.meetsSla === false ? ' style="background:rgba(220,38,38,.08)"' : ''}>
+      <td>${U.escHtml(r.name)}</td><td>${U.escHtml(r.host || '—')}</td>
+      <td><b${r.meetsSla === false ? ' style="color:var(--danger)"' : ''}>${slaFmtPct(r.uptimePct)}</b></td>
+      <td style="text-align:right">${r.up}</td><td style="text-align:right">${r.down}</td>
+      <td style="text-align:right">${r.outages == null ? '<span style="opacity:.6">无明细</span>' : (r.outagePartial ? r.outages + ' <span style="opacity:.6" title="中断明细仅覆盖 10 分钟明细保留期内的部分">*</span>' : r.outages)}</td>
+      <td style="text-align:right">${r.downtimeMs == null ? '<span style="opacity:.6">无明细</span>' : slaFmtDur(r.downtimeMs)}</td>
+      <td style="text-align:right">${r.mttrMs == null ? '—' : slaFmtDur(r.mttrMs)}</td>
+      <td style="text-align:right">${r.longestMs == null ? '—' : slaFmtDur(r.longestMs)}</td>
+      <td style="text-align:right">${(r.coveragePct || 0).toFixed(1)}%</td></tr>`).join('');
+    bodyEl.innerHTML = `<table class="nb-table"><tr><th>设备</th><th>管理地址</th><th>可用率</th><th>在线采样</th><th>离线采样</th><th>中断次数</th><th>累计中断</th><th>平均恢复</th><th>最长中断</th><th>采样覆盖</th></tr>${rows}
+      <tr style="font-weight:600"><td>合计</td><td>${rep.summary.devices} 台（有采样 ${rep.summary.sampled} 台）</td><td>${slaFmtPct(rep.summary.uptimePct)}</td>
+      <td style="text-align:right">${rep.summary.up}</td><td style="text-align:right">${rep.summary.down}</td><td style="text-align:right">${rep.summary.outages}</td>
+      <td style="text-align:right">${slaFmtDur(rep.summary.downtimeMs)}</td><td colspan="3"></td></tr></table>
+      <div class="m-sub" style="margin-top:8px">区间 ${U.escHtml(fdate(rep.range.from))} ~ ${U.escHtml(fdate(rep.range.to))}；低于目标线 ${rep.summary.minUptime}% 的共 <b>${rep.summary.below}</b> 台。
+      ${rep.summary.detailLimited ? '<br><b style="color:#f59e0b">本区间超出 10 分钟明细保留范围（' + rep.detailKeepDays + ' 天）：可用率取自按天汇总（保留 ' + rep.dailyKeepDays + ' 天）。</b>' : ''}
+      ${rep.summary.outageLimited && !rep.summary.detailLimited ? '<br>标 <b>*</b> 的中断明细仅覆盖 10 分钟明细保留期（近 ' + rep.detailKeepDays + ' 天）内的部分，不等同于整段区间。' : ''}
+      ${rep.summary.detailLimited && rep.summary.outageLimited ? '<br>中断次数 / MTTR / 最长中断只覆盖 10 分钟明细保留期（近 ' + rep.detailKeepDays + ' 天）内的部分，标 <b>*</b> 者尤其注意。' : ''}
+      <br>口径：按 ' + Math.round(rep.bucketMs / 60000) + ' 分钟采样桶计（非秒级探针统计）；中断时长 = 连续离线桶数 × 桶宽，最后一次按「至今」截断；桶内闪断不可见。</div>`;
+    hintEl.textContent = rep.label + '：' + rep.summaryText + '（' + rep.summary.sampled + ' 台有采样）';
+    setDisabled(false);
+  };
+  ov.querySelector('#slaGo').onclick = load;
+  const metaOf = () => {
+    const d = new Date(last.range.from), t2 = new Date(last.range.to - 1);
+    const f = (x) => x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0');
+    return { rangeText: last.label, fromText: f(d), toText: f(t2), genText: U.fmtDateTime(new Date()), appVersion: U.APP_VERSION, minUptime: last.summary.minUptime };
+  };
+  csvBtn.onclick = () => { if (!last) return; U.download('可用性报表_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(slaRowsForExport(last))], { type: 'text/csv;charset=utf-8' })); toast('已导出可用性报表 CSV'); };
+  xlsxBtn.onclick = () => {
+    if (!last) return;
+    const rows = slaRowsForExport(last);
+    if (!window.XLSX) { U.download('可用性报表_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' })); toast('本机无 Excel 库，已回退导出 CSV'); return; }
+    const ws = window.XLSX.utils.aoa_to_sheet(rows.map(r => r.map(U.sanitizeCell)));
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, '可用性报表');
+    const buf = window.XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    U.download('可用性报表_' + U.fmtDate() + '.xlsx', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    toast('已导出可用性报表 Excel');
+  };
+  htmlBtn.onclick = () => {
+    if (!last) return;
+    U.download('可用性报表_' + U.fmtDate() + '.html', new Blob([buildSlaHtml(last, metaOf())], { type: 'text/html;charset=utf-8' }));
+    toast('已导出报表 HTML（浏览器打开后可直接打印为 PDF）');
+  };
+  rangeEl.dispatchEvent(new Event('change'));
+  load();
+}
+
+/* ================= 团队基线包（合规规则集 + 自定义模板 的导入导出） =================
+ * 规则集与模板此前只活在本机：三个人的网络组各配一套基线，改一条要挨个通知，最后没人维护。
+ * 基线包是一个 JSON 文件（含格式版本号），导出即发同事；导入前逐项白名单清洗：
+ * 正则逐条编译（写坏的那条丢弃并计数），配置模板键走原型污染白名单。 */
+function openTeamPackImport() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:760px;height:76vh;display:flex;flex-direction:column">
+      <h3>导入团队基线包</h3>
+      <div class="m-sub">粘贴同事发来的基线包 JSON（「配置合规检查 ▾ 导出基线包…」生成）。导入前会逐项清洗：<b>写坏的正则会被丢弃并如实计数</b>，配置模板键走安全白名单，不会污染本机数据。</div>
+      <div class="frow" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <label>基线包 JSON</label>
+        <textarea id="tpText" spellcheck="false" style="flex:1;min-height:140px;font-family:ui-monospace,Consolas,monospace;font-size:12px" placeholder='{"format":"nettopo-team-pack","formatVersion":1,…}'></textarea>
+      </div>
+      <div class="frow" style="display:flex;gap:14px;align-items:center;margin:6px 0">
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input type="radio" name="tpMode" value="merge" checked/> 合并（同名覆盖，其余保留）</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0"><input type="radio" name="tpMode" value="replace"/> 整体替换本机规则集与模板</label>
+      </div>
+      <div id="tpPrev" class="m-sub" style="min-height:38px;margin:2px 0"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="tpCheck">解析预览</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="close">关闭</button>
+        <button type="button" class="tb primary" id="tpApply" disabled>导入</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const ta = ov.querySelector('#tpText'), prevEl = ov.querySelector('#tpPrev'), applyBtn = ov.querySelector('#tpApply');
+  let parsed = null;
+  const doParse = () => {
+    const r = U.parseTeamPack(ta.value);
+    parsed = r.ok ? r : null;
+    applyBtn.disabled = !r.ok;
+    if (!r.ok) { prevEl.innerHTML = '<span style="color:var(--danger)">' + U.escHtml(r.error) + '</span>'; return; }
+    const st = r.stats, pk = r.pack;
+    const drops = [];
+    if (st.rulesDropped) drops.push('规则丢弃 ' + st.rulesDropped);
+    if (st.templatesDropped) drops.push('模板丢弃 ' + st.templatesDropped);
+    if (st.cfgTemplatesDropped) drops.push('配置模板丢弃 ' + st.cfgTemplatesDropped);
+    prevEl.innerHTML = '格式版本 v' + pk.formatVersion + (pk.appVersion ? '（导出自 ' + U.escHtml(pk.appVersion) + '）' : '') + '：合规规则 <b>' + st.rules + '</b> 条'
+      + '、自定义合规模板 <b>' + st.templates + '</b> 套' + (pk.compliance.templates.length ? '（' + U.escHtml(pk.compliance.templates.map(t => t.name).join('、')) + '）' : '')
+      + '、自定义配置模板 <b>' + st.cfgTemplates + '</b> 个'
+      + (drops.length ? '<br><span style="color:#f59e0b">清洗丢弃：' + U.escHtml(drops.join('，')) + '（格式不合法或正则无法编译）</span>' : '');
+  };
+  ov.querySelector('#tpCheck').onclick = doParse;
+  ta.addEventListener('paste', () => setTimeout(doParse, 0));
+  applyBtn.onclick = () => {
+    if (!parsed) return;
+    const mode = (ov.querySelector('input[name=tpMode]:checked') || {}).value || 'merge';
+    if (mode === 'replace' && !confirm('整体替换会清空本机现有的合规规则与自定义模板（建议先「导出基线包」备份）。继续？')) return;
+    const r = U.applyTeamPack(parsed.pack, mode);
+    if (!r || !r.ok) { toast('导入失败：' + ((r && r.error) || '未知错误')); return; }
+    toast('已导入：规则 ' + r.applied.rules + ' 条、合规模板 ' + r.applied.templates + ' 套、配置模板 ' + r.applied.cfgTemplates + ' 个（'
+      + (r.mode === 'replace' ? '整体替换' : '合并') + '）');
+    close();
+    try { openComplianceCheck(); } catch (e) { /* 打开失败不影响导入结果 */ }
+  };
+  setTimeout(() => { if (document.body.contains(ov)) ta.focus(); }, 200);
+}
+
 /* ================= 配置合规基线检查（本地规则扫描备份库） ================= */
 function openComplianceCheck() {
   if (!window.topoConfigBackup) { toast('配置合规检查需要桌面版（Electron）环境'); return; }
@@ -6090,6 +9897,9 @@ function openComplianceCheck() {
         <button type="button" class="tb" data-act="tplload" title="把选中模板加载到下方规则编辑器（并设为当前规则集）">加载</button>
         <button type="button" class="tb" data-act="tplsave" title="把下方当前规则保存为一套自定义模板（可保存多套，同名覆盖）">另存为模板…</button>
         <button type="button" class="tb" data-act="tpldel" title="删除选中的自定义模板（内置模板不可删）">删除模板</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="packexport" title="把当前规则集 + 自定义合规模板 + 自定义配置模板打包成 JSON 基线包，发给同事导入即可对齐">导出基线包…</button>
+        <button type="button" class="tb" data-act="packimport" title="导入同事发来的基线包 JSON（导入前逐项清洗：坏正则丢弃并计数）">导入基线包…</button>
       </div>
       <div class="comp-rules" id="compRules"></div>
       <div class="m-actions" style="justify-content:flex-start;margin:8px 0">
@@ -6181,6 +9991,13 @@ function openComplianceCheck() {
     renderRules();
     toast('已加载模板「' + label + '」（' + U.complianceRules.length + ' 条规则），点「保存规则并扫描备份库」开始检查');
   };
+  // 团队基线包：导出当前规则集 + 自定义模板；导入见 openTeamPackImport
+  ov.querySelector('[data-act=packexport]').onclick = () => {
+    const pack = U.buildTeamPack({ rules: collectRules() });   // 用编辑器里的当前规则（含未保存的改动）
+    U.download('NetTopo基线包_' + U.fmtDate() + '.json', new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' }));
+    toast('已导出基线包：规则 ' + pack.compliance.rules.length + ' 条、合规模板 ' + pack.compliance.templates.length + ' 套、配置模板 ' + Object.keys(pack.cfgTemplates).length + ' 个');
+  };
+  ov.querySelector('[data-act=packimport]').onclick = () => openTeamPackImport();
   ov.querySelector('[data-act=tplsave]').onclick = () => {
     const cur = collectRules();
     if (!cur.length) { toast('当前规则为空，无法保存为模板'); return; }
@@ -6324,7 +10141,13 @@ function openDiagTools(prefillHost) {
         <div class="frow" id="dgPortsRow" style="display:none"><label>端口</label><input id="dgPorts" type="text" value="22,80,443,3389,8080" style="width:230px" title="逗号分隔，支持区间 8000-8002，最多 256 个" spellcheck="false"/></div>
         <div class="frow" id="dgTargetsRow" style="display:none"><label>网段</label><input id="dgTargets" type="text" value="192.168.1.0/24" style="width:190px" title="支持 CIDR（192.168.1.0/24）、区间（192.168.1.10-20）、单 IP，逗号分隔混合；总量封顶 4096" spellcheck="false"/></div>
         <label id="dgPtrRow" style="display:none;align-items:center;gap:4px;margin-bottom:4px"><input id="dgPtr" type="checkbox"/>PTR 反查</label>
-        <div class="frow" id="dgCommRow" style="display:none"><label>团体名</label><input id="dgComm" type="text" value="public" style="width:90px" spellcheck="false"/></div>
+        <div class="frow" id="dgCommRow" style="display:none;gap:6px;align-items:flex-end;flex-wrap:wrap"><label>SNMP</label>
+          <select id="dgSnmpSec" style="width:76px"><option value="v2c">v2c</option><option value="v3">v3</option></select>
+          <input id="dgComm" type="text" value="public" style="width:90px" spellcheck="false" title="v2c 团体名"/>
+          <input id="dgSnmpPort" type="number" min="1" max="65535" value="161" style="width:72px" spellcheck="false" title="SNMP UDP 端口（默认 161；设备端口映射/非标端口填此）"/>
+          <input id="dgV3User" type="text" placeholder="v3 用户名" style="width:110px;display:none" spellcheck="false" autocomplete="off"/>
+          <button type="button" class="tb" id="dgV3Btn" style="display:none;padding:3px 10px;font-size:11.5px">v3 口令…</button>
+        </div>
         <div class="frow" id="dgOidRow" style="display:none"><label>OID 前缀</label><input id="dgOid" type="text" value="1.3.6.1.2.1.1" style="width:150px" spellcheck="false"/></div>
         <div class="frow" id="dgOidPresetRow" style="display:none"><label>常用</label>
           <select id="dgOidPreset">
@@ -6366,6 +10189,20 @@ function openDiagTools(prefillHost) {
   ov.querySelector('#dgOidPreset').addEventListener('change', (e) => {
     ov.querySelector('#dgOid').value = e.target.value;
   });
+  // SNMP 安全模式：v2c 团体名 / v3 用户名 + 口令对话框（口令仅本次会话内存，不落 localStorage）
+  const dgV3 = { authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' };
+  const dgSecEl = ov.querySelector('#dgSnmpSec');
+  const dgApplySec = () => {
+    const isV3 = dgSecEl.value === 'v3';
+    ov.querySelector('#dgComm').style.display = isV3 ? 'none' : '';
+    ov.querySelector('#dgV3User').style.display = isV3 ? '' : 'none';
+    ov.querySelector('#dgV3Btn').style.display = isV3 ? '' : 'none';
+  };
+  dgSecEl.addEventListener('change', dgApplySec);
+  dgApplySec();
+  ov.querySelector('#dgV3Btn').onclick = () => {
+    openSnmpV3SecretDialog(dgV3, (v) => { Object.assign(dgV3, v); ov.querySelector('#dgV3Btn').textContent = v.authPass ? 'v3 口令已设' : 'v3 口令…'; });
+  };
   const out = ov.querySelector('#dgOut');
   const hint = ov.querySelector('#dgHint');
   const runBtn = ov.querySelector('#dgRun');
@@ -6421,11 +10258,15 @@ function openDiagTools(prefillHost) {
           append('—— 存活 ' + r.alive.length + '，无响应 ' + r.dead + '（ICMP 被禁ping的主机不会出现）');
         }
       } else if (tool === 'snmp') {
-        const r = await window.topoDiag.snmpWalk({
-          host,
-          community: ov.querySelector('#dgComm').value.trim() || 'public',
-          oid: ov.querySelector('#dgOid').value.trim()
-        });
+        const walkReq = { host, oid: ov.querySelector('#dgOid').value.trim(), port: (() => { const v = parseInt(ov.querySelector('#dgSnmpPort').value, 10); return (v > 0 && v <= 65535) ? v : 161; })() };
+        if (dgSecEl.value === 'v3') {
+          walkReq.version = 'v3';
+          walkReq.v3User = ov.querySelector('#dgV3User').value.trim();
+          Object.assign(walkReq, { v3AuthProto: dgV3.authProto, v3AuthPass: dgV3.authPass, v3PrivProto: dgV3.privProto, v3PrivPass: dgV3.privPass });
+        } else {
+          walkReq.community = ov.querySelector('#dgComm').value.trim() || 'public';
+        }
+        const r = await window.topoDiag.snmpWalk(walkReq);
         if (!r.ok && !(r.varbinds || []).length) append('—— 失败：' + (r.error || '未知') + '（请核对设备已启用 SNMP 且团体名正确）');
         for (const vb of (r.varbinds || [])) append('  ' + vb.oid + ' = ' + String(vb.value));
         append('—— 共 ' + (r.varbinds || []).length + ' 个绑定' + ((r.varbinds || []).length >= 512 ? '（已达单次上限）' : ''));
@@ -6463,10 +10304,11 @@ function openMonitorCenter() {
         </div>
         <div class="mc-col">
           <div class="mc-tabs">
-            <button type="button" class="mc-tab on" data-pane="events">事件时间线</button>
+            <button type="button" class="mc-tab on" data-pane="events">事件时间线<span id="mcUnack" class="mc-badge" hidden></span></button>
             <button type="button" class="mc-tab" data-pane="baks">配置备份</button>
             <button type="button" class="mc-tab" data-pane="ifaces">接口流量</button>
             <button type="button" class="mc-tab" data-pane="perf">性能</button>
+            <button type="button" class="mc-tab" data-pane="links">链路<span id="mcLinkBad" class="mc-badge" hidden></span></button>
             <span id="mcFilter" class="mc-filt" hidden></span>
           </div>
           <div class="mc-pane" data-pane="events">
@@ -6481,6 +10323,9 @@ function openMonitorCenter() {
           <div class="mc-pane" data-pane="perf" hidden>
             <div class="mc-perfs" id="mcPerfs"></div>
           </div>
+          <div class="mc-pane" data-pane="links" hidden>
+            <div class="mc-links" id="mcLinks"></div>
+          </div>
         </div>
       </div>
       <div class="m-actions">
@@ -6494,7 +10339,7 @@ function openMonitorCenter() {
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
   const mcSubs = []; // ipc 订阅退订函数：关闭弹窗时全部注销（onX 每次调用都新增监听器，反复打开会累积）
-  const close = () => { while (mcSubs.length) { try { mcSubs.pop()(); } catch (e) { /* ignore */ } } ov.remove(); };
+  const close = () => { linkViewRefreshers.delete(linkCenterRefresh); while (mcSubs.length) { try { mcSubs.pop()(); } catch (e) { /* ignore */ } } ov.remove(); };
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
@@ -6537,7 +10382,7 @@ function openMonitorCenter() {
     const alerting = jobs.filter(j => !!j.alert);
     lines.push('【概览】巡检时间：' + U.fmtDateTime(new Date()));
     lines.push('监控任务 ' + jobs.length + ' 台：在线 ' + statOk + '，离线 ' + off.length + '，告警中 ' + alerting.length
-      + '，配置备份覆盖 ' + jobs.filter(j => j.backupEnabled).length + ' 台，启用自动合规 ' + jobs.filter(j => j.complianceLast).length + ' 台。');
+      + '，配置备份覆盖 ' + jobs.filter(j => j.backupEnabled).length + ' 台，启用自动合规 ' + jobs.filter(j => j.compliance).length + ' 台。');
     lines.push('');
     lines.push('【设备明细】');
     if (!jobs.length) lines.push('（无监控任务）');
@@ -6547,10 +10392,10 @@ function openMonitorCenter() {
       if (j.probeLatency != null) bits.push('探测时延 ' + j.probeLatency + 'ms');
       if (j.alert) bits.push('命中告警关键字「' + j.alert + '」');
       if (j.backupEnabled) {
-        bits.push('最近备份 ' + (j.backupLast && j.backupLast.at ? U.fmtDateTime(new Date(j.backupLast.at)) : '无')
-          + (j.backupLast && j.backupLast.error ? '（失败：' + j.backupLast.error + '）' : (j.backupLast && j.backupLast.changed ? '（有变化）' : '')));
+        bits.push('最近备份 ' + (j.backup && j.backup.at ? U.fmtDateTime(new Date(j.backup.at)) : '无')
+          + (j.backup && j.backup.error ? '（失败：' + j.backup.error + '）' : (j.backup && j.backup.changed ? '（有变化）' : '')));
       } else bits.push('未启用自动备份');
-      if (j.complianceLast) bits.push('合规 ' + (j.complianceLast.total - j.complianceLast.failed) + '/' + j.complianceLast.total + ' 项通过');
+      if (j.compliance) bits.push('合规 ' + (j.compliance.total - j.compliance.failed) + '/' + j.compliance.total + ' 项通过');
       if (j.lastPerf && (j.lastPerf.cpu != null || j.lastPerf.mem != null)) {
         bits.push('CPU ' + (j.lastPerf.cpu == null ? '—' : j.lastPerf.cpu + '%') + ' / 内存 ' + (j.lastPerf.mem == null ? '—' : j.lastPerf.mem + '%'));
       }
@@ -6633,9 +10478,13 @@ function openMonitorCenter() {
             btn.disabled = true;
             try {
               await bridge.trustRevoke(host);
+              // 主进程信任库与渲染层指纹记忆是两份存储：撤销时必须一并清掉渲染层那份，
+              // 否则旧指纹仍会作为 expectFp 把连接挡在客户端（用户会觉得「撤销没用」）
+              let purged = 0;
+              try { purged = U.purgeFingerprintKeys(host, localStorage).length; } catch (e) { purged = 0; }
               btn.closest('.lb-file').remove();
               if (!listEl.querySelector('.lb-file')) listEl.innerHTML = '<div class="lb-empty">暂无已信任的主机</div>';
-              toast('已撤销 ' + host + ' 的信任，下次连接将重新确认指纹');
+              toast('已撤销 ' + host + ' 的信任，下次连接将重新确认指纹' + (purged ? '（同时清理 ' + purged + ' 条本机指纹记忆）' : ''));
             } catch (e) { toast('撤销失败'); btn.disabled = false; }
           };
         });
@@ -6665,13 +10514,17 @@ function openMonitorCenter() {
     offline: '🔴', recovery: '🟢', alert: '🟠', 'alert-clear': '⚪',
     backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️',
     'if-down': '🔻', 'if-up': '🔺', reboot: '🔄',
-    metric: '📈', 'metric-clear': '📉', 'http-fail': '🌐', 'http-ok': '🌐', cert: '🔐', 'cert-clear': '🔓'
+    metric: '📈', 'metric-clear': '📉', 'http-fail': '🌐', 'http-ok': '🌐', cert: '🔐', 'cert-clear': '🔓',
+    trap: '📨', 'syslog-alert': '📋', deploy: '🚀', 'deploy-error': '💥', proto: '🔗',
+    'link-down': '🔌', 'link-up': '🔗'
   }[t] || '•');
   const evTypeLabel = {
     offline: '离线', recovery: '恢复', alert: '告警', 'alert-clear': '解除',
     backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规',
     'if-down': '接口离线', 'if-up': '接口恢复', reboot: '设备重启',
-    metric: '指标告警', 'metric-clear': '指标恢复', 'http-fail': 'HTTP 失败', 'http-ok': 'HTTP 恢复', cert: '证书告警', 'cert-clear': '证书恢复'
+    metric: '指标告警', 'metric-clear': '指标恢复', 'http-fail': 'HTTP 失败', 'http-ok': 'HTTP 恢复', cert: '证书告警', 'cert-clear': '证书恢复',
+    trap: 'SNMP Trap', 'syslog-alert': 'Syslog 告警', deploy: '配置下发', 'deploy-error': '下发失败', proto: '三层邻居',
+    'link-down': '链路中断', 'link-up': '链路恢复'
   };
   // 事件时间线筛选：null = 全部；curDev = 设备；curHost = 具体管理地址
   let curDev = null, curHost = null, curDevName = '';
@@ -6733,20 +10586,9 @@ function openMonitorCenter() {
   /* ---------- 接口流量页（SNMP ifTable 采集：最新采样表 + 采样历史趋势线） ---------- */
   let curIfDev = null;                       // 当前查看的任务 key（deviceId@host）
   const ifCache = new Map();                 // key -> 采样历史数组
-  const fmtBps = (v) => {
-    if (v == null) return '—';
-    if (v >= 1e9) return (v / 1e9).toFixed(2) + ' Gbps';
-    if (v >= 1e6) return (v / 1e6).toFixed(1) + ' Mbps';
-    if (v >= 1e3) return (v / 1e3).toFixed(1) + ' Kbps';
-    return Math.round(v) + ' bps';
-  };
-  const fmtSpeed = (bps) => {
-    if (!bps) return '—';
-    if (bps >= 1e9) return (bps / 1e9) + ' G';
-    if (bps >= 1e6) return (bps / 1e6) + ' M';
-    if (bps >= 1e3) return (bps / 1e3) + ' K';
-    return String(bps);
-  };
+  // 直接复用 U.fmtBps / U.fmtSpeed（js/util.js，纯函数已单测）：旧实现在此处直除，
+  // 标称 4.29Gbps 的哨兵值会显示成「4.294967295 G」
+  const fmtBps = U.fmtBps, fmtSpeed = U.fmtSpeed;
   const spark = (vals, color) => {
     const w = 108, h = 20;
     const max = Math.max(1, ...vals.filter(v => v != null));
@@ -6780,6 +10622,8 @@ function openMonitorCenter() {
     if (!last || !last.ifs || !last.ifs.length) {
       rowsHtml = '<div class="mc-empty">正在等待第一次采样（SNMP 轮询约每 60 秒一次）…</div>';
     } else {
+      // 只有 ≥2 次采样才有趋势可看：否则趋势列会白占最宽的 flex 并把接口名挤成「e...」
+      const showSpark = hist.length >= 2;
       // 排序：down 接口置顶，其余按当前收发流量降序
       const rows = last.ifs.map(s => {
         const series = hist.map(sm => {
@@ -6798,19 +10642,24 @@ function openMonitorCenter() {
           ? '<b class="t-ok">UP</b>'
           : (s.oper === 'down' ? '<b class="t-off">DOWN</b>' : '<span class="t-mut">其他</span>');
         const util = s.speed && s.out != null ? ' (' + Math.min(100, Math.round(s.out / s.speed * 100)) + '%)' : '';
+        // 速率缺失（首采样尚无计数器差值）用弱化样式 + 悬停说明，别只丢一个「↓ —」让人猜
+        const rate = (arrow, v) => '<span class="mc-if-rate' + (v == null ? ' mc-none' : '') + '"'
+          + (v == null ? ' title="首次采样只建立计数器基线，收发速率需第二次采样后才有值"' : '') + '>'
+          + arrow + ' ' + fmtBps(v) + '</span>';
         return '<div class="mc-if-row">'
           + '<span class="mc-if-nm" title="' + U.escHtml(s.n) + '">' + U.escHtml(s.n) + '</span>'
           + '<span class="mc-if-op">' + oper + '</span>'
-          + '<span class="mc-if-rate">↓ ' + fmtBps(s.in) + '</span>'
-          + '<span class="mc-if-rate">↑ ' + fmtBps(s.out) + '</span>'
-          + '<span class="mc-if-spd">' + fmtSpeed(s.speed) + util + '</span>'
-          + '<span class="mc-if-spark">' + spark(series.map(f => f && f.in), '#0ea5e9') + spark(series.map(f => f && f.out), '#f59e0b') + '</span>'
+          + rate('↓', s.in) + rate('↑', s.out)
+          + '<span class="mc-if-spd" title="标称带宽（ifSpeed；≥4.29Gbps 链路按 ifHighSpeed 换算）">' + fmtSpeed(s.speed) + util + '</span>'
+          + (showSpark ? '<span class="mc-if-spark">' + spark(series.map(f => f && f.in), '#0ea5e9') + spark(series.map(f => f && f.out), '#f59e0b') + '</span>' : '')
           + '</div>';
       }).join('');
-      rowsHtml = '<div class="mc-if-head"><span>接口</span><span>状态</span><span>入流量</span><span>出流量</span><span>带宽</span><span>近 ' + hist.length + ' 次采样</span></div>' + rowsHtml;
+      rowsHtml = '<div class="mc-if-head"><span>接口</span><span>状态</span><span>入流量</span><span>出流量</span><span>带宽</span>'
+        + (showSpark ? '<span>近 ' + hist.length + ' 次采样</span>' : '') + '</div>' + rowsHtml;
     }
     el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
-      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · 采样间隔约 60 秒 · ↓入 ↑出（设备视角），接口 DOWN 记入事件时间线</div>'
+      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · 采样间隔约 60 秒 · ↓入 ↑出（设备视角），接口 DOWN 记入事件时间线'
+      + (hist.length < 2 ? ' · 首次采样已就绪：收发速率与趋势线需第二次采样后显示' : '') + '</div>'
       + '<div class="mc-if-body">' + rowsHtml + '</div>';
     el.querySelectorAll('.mc-ifdev').forEach(ch => {
       ch.onclick = () => { curIfDev = ch.dataset.key; ifCache.delete(curIfDev); load(); };
@@ -6833,6 +10682,59 @@ function openMonitorCenter() {
     }
     if (document.body.contains(ov)) renderIfaces(lastJobs);
   }
+
+  /* ---------- 链路页（端到端链路连通性监测：任务状态 + 断点 + 逐段明细） ---------- */
+  const linksEl = ov.querySelector('#mcLinks');
+  /** 渲染链路页：数据取渲染层的任务表 + 主进程回推的实时状态（比 overview 快照更新） */
+  function renderLinks() {
+    if (!linksEl || !document.body.contains(ov)) return;
+    const tasks = linkTasks();
+    let up = 0, down = 0, unknown = 0, off = 0;
+    for (const t of tasks) {
+      if (t.enabled === false) { off++; continue; }
+      const s = linkStatusOf(t.id);
+      if (!s || !s.baselined) { unknown++; continue; }
+      if (s.state === 'down') down++;
+      else if (s.state === 'up') up++;
+      else unknown++;
+    }
+    const badge = ov.querySelector('#mcLinkBad');
+    if (badge) { badge.hidden = !down; badge.textContent = down ? String(down) : ''; }
+    if (!tasks.length) {
+      linksEl.innerHTML = '<div class="mc-empty">暂无链路监测任务：在「监控 ▾ 链路连通性监测…」里为全部连线批量生成，或建立端到端路径监测</div>';
+      return;
+    }
+    linksEl.innerHTML = '<div class="mc-lk-sum">任务 <b>' + tasks.length + '</b> · 连通 <b class="t-ok">' + up
+      + '</b> · 中断 <b class="t-off">' + down + '</b> · 未知 <b>' + unknown + '</b> · 未启用 <b>' + off + '</b></div>'
+      + tasks.map(t => {
+        const s = linkStatusOf(t.id);
+        const state = t.enabled === false ? 'off' : (s && s.baselined ? s.state : 'unknown');
+        const lat = (s && Number.isFinite(s.latencyMs)) ? s.latencyMs + 'ms' : '—';
+        const at = (s && s.lastProbeAt) ? U.fmtDateTime(new Date(s.lastProbeAt)).slice(5, 16) : '—';
+        return '<div class="lm-row mc-lk-row" data-key="' + U.escHtml(t.id) + '">'
+          + '<span class="lm-dot ' + U.escHtml(state) + '"></span>'
+          + '<span class="lm-name" title="' + U.escHtml(t.name) + '">' + U.escHtml(t.name)
+            + '<span class="lm-kind">' + (t.kind === 'path' ? '端到端 ' + t.segments.length + ' 跳' : '连线')
+            + '</span><span class="lm-kind">' + (LINK_MODE_CN[t.mode] || t.mode) + '·' + (t.protocol === 'tcp' ? 'TCP ' + t.port : 'ICMP') + '</span></span>'
+          + '<span class="lm-state ' + U.escHtml(state) + '">' + linkStateText(t, s) + '</span>'
+          + '<span class="lm-lat">' + lat + '</span>'
+          + '<span class="lm-time">' + U.escHtml(at) + '</span>'
+          + '</div>'
+          + '<div class="lm-detail" hidden>' + linkSegsHtml(t, s) + '</div>';
+      }).join('');
+    linksEl.querySelectorAll('.mc-lk-row .lm-name').forEach(el => {
+      el.onclick = () => {
+        const row = el.parentElement;
+        const t = linkTaskOf(row.dataset.key);
+        const detail = row.nextElementSibling;
+        if (!detail) return;
+        detail.hidden = !detail.hidden;
+        if (!detail.hidden && t) { try { renderer.highlightPath(t.nodeIds || [], t.linkIds || []); } catch (e) { /* ignore */ } }
+      };
+    });
+  }
+  const linkCenterRefresh = () => { try { renderLinks(); } catch (e) { /* ignore */ } };
+  linkViewRefreshers.add(linkCenterRefresh);
 
   /* ---------- 性能页（SNMP CPU/内存/sysUpTime + SSH 磁盘/内存/负载 + HTTP 探测/证书：当前值 + 采样趋势线） ---------- */
   let curPerfDev = null;
@@ -6883,10 +10785,13 @@ function openMonitorCenter() {
     const lastJob = (jobs || []).find(j => j.key === cur.key) || {};
     const last = hist[hist.length - 1] || (lastJob.lastPerf ? { cpu: lastJob.lastPerf.cpu, mem: lastJob.lastPerf.mem, up: lastJob.lastPerf.up } : null);
     const mlast = mhist.length ? mhist[mhist.length - 1] : null;
+    // 趋势列只在真有 ≥2 次采样时渲染：否则它白占最宽的 flex，行里也只剩一个空格子
+    const maxSamples = Math.max(hist.length, mhist.length, (hrec && hrec.hist || []).length);
+    const showSpark = maxSamples >= 2;
     const perfRow = (name, value, sparkHtml) => '<div class="mc-if-row">'
       + '<span class="mc-if-nm">' + name + '</span>'
       + '<span class="mc-if-rate">' + value + '</span>'
-      + '<span class="mc-if-spark">' + (sparkHtml || '') + '</span>'
+      + (showSpark ? '<span class="mc-if-spark">' + (sparkHtml || '') + '</span>' : '')
       + '</div>';
     let rowsHtml = '';
     if (!hist.length && !last && !mlast && !(hrec && hrec.hist && hrec.hist.length)) {
@@ -6899,7 +10804,8 @@ function openMonitorCenter() {
         rowsHtml += perfRow('内存占用', gauge(last ? last.mem : null), spark(hist.map(s => s.mem), '#0ea5e9'));
       }
       if (showUp) {
-        rowsHtml += perfRow('本次开机时长', '<b class="t-ok">' + U.escHtml(fmtUpTicks(last ? last.up : null)) + '</b>', '');
+        // 开机时长也给趋势：单调上升，重启会归零——一眼能看出「最近有没有重启过」
+        rowsHtml += perfRow('本次开机时长', '<b class="t-ok">' + U.escHtml(fmtUpTicks(last ? last.up : null)) + '</b>', spark(hist.map(s => s.up), '#22c55e'));
       }
       if (lastJob.metrics || mlast) {
         if (mlast && Array.isArray(mlast.disks) && mlast.disks.length) {
@@ -6926,10 +10832,12 @@ function openMonitorCenter() {
           stBits + (hLast && hLast.certDays != null ? ' · 证书 ' + certGauge(hLast.certDays, hrec.alertDays || 14) : ''),
           spark(h.map(s => s.ok === false ? 0 : 1), hLast && hLast.ok === false ? '#ef4444' : '#22c55e'));
       }
-      rowsHtml = '<div class="mc-if-head"><span>指标</span><span>当前值</span><span>近 ' + Math.max(hist.length, mhist.length, (hrec && hrec.hist || []).length) + ' 次采样</span></div>' + rowsHtml;
+      rowsHtml = '<div class="mc-if-head"><span>指标</span><span>当前值</span>'
+        + (showSpark ? '<span>近 ' + maxSamples + ' 次采样</span>' : '') + '</div>' + rowsHtml;
     }
     el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
-      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · CPU/内存为设备视角（≥75% 橙 / ≥90% 红），sysUpTime 骤减判定为设备重启并记入事件时间线；SSH 指标与 HTTP 探测来自「设备监控」勾选项，证书剩余天数低于阈值时告警</div>'
+      + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · CPU/内存为设备视角（≥75% 橙 / ≥90% 红），sysUpTime 骤减判定为设备重启并记入事件时间线；SSH 指标与 HTTP 探测来自「设备监控」勾选项，证书剩余天数低于阈值时告警'
+      + (lastJob.perf || (last && (last.cpu != null || last.mem != null)) ? '' : ' · <b>该设备未启用 CPU/内存采集</b>：在「监控 ▾ 设备监控（静默采集）」里勾选「CPU/内存」并填 OID（可选厂家预设）') + '</div>'
       + '<div class="mc-if-body">' + rowsHtml + '</div>';
     el.querySelectorAll('.mc-ifdev').forEach(ch => {
       ch.onclick = () => { curPerfDev = ch.dataset.pkey; perfCache.delete(curPerfDev); metricCache.delete(curPerfDev); httpCache.delete(curPerfDev); load(); };
@@ -6965,6 +10873,7 @@ function openMonitorCenter() {
       const jobs = r.jobs || [];
       renderIfacesAsync(jobs); // 接口流量页（异步，不阻塞主视图）
       renderPerfAsync(jobs);   // 性能页（异步，不阻塞主视图）
+      renderLinks();           // 链路页（端到端连通性监测）
       const byDev = new Map();
       for (const j of jobs) {
         if (!byDev.has(j.deviceId)) byDev.set(j.deviceId, []);
@@ -7014,13 +10923,57 @@ function openMonitorCenter() {
         }
         const devTag = '<span class="mc-tag dev" data-dev="' + U.escHtml(e.deviceId || '') + '" data-name="' + U.escHtml(e.name || e.deviceId || '') + '"' + (e.host ? ' data-host="' + U.escHtml(e.host) + '"' : '') + ' title="点击筛选该设备的事件">' + U.escHtml(e.name || e.deviceId || '?') + '</span>';
         const typeTag = '<span class="mc-tag ' + U.escHtml(e.type || '') + '">' + U.escHtml(evTypeLabel[e.type] || e.type || '事件') + '</span>';
-        evRows.push('<div class="mc-ev"><span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span>' + devTag + typeTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + '</span></div>');
+        // 告警等级徽标（提示级不标：时间线里绝大多数是提示，标出来只剩噪声）
+        const evLv = (e.level && alertLevelRank(e.level) >= 1) ? e.level : '';
+        const lvTag = evLv
+          ? '<span class="mc-tag as-lv lvl-' + U.escHtml(evLv) + '" title="告警等级：' + U.escHtml(alertLevelName(evLv)) + '（可在「监控 ▾ 告警等级与提示音…」中逐项调整）">' + U.escHtml(alertLevelName(evLv)) + '</span>'
+          : '';
+        // 确认状态：未确认的条目左侧加竖条提示，已确认显示确认时刻 + 备注（值班交接一眼看出谁看过）
+        const acked = !!e.ackAt;
+        const ackHtml = acked
+          ? '<span class="mc-ack" title="已在 ' + U.escHtml(U.fmtDateTime(new Date(e.ackAt))) + ' 确认">✔ ' + U.escHtml(U.fmtDateTime(new Date(e.ackAt)).slice(5, 16)) + (e.ackNote ? '　' + U.escHtml(e.ackNote) : '') + '</span>'
+          : '';
+        evRows.push('<div class="mc-ev' + (acked ? ' acked' : ' unacked') + '" data-ev="' + Number(e.ts) + '">'
+          + '<span class="mc-ev-ic">' + evIcon(e.type) + '</span><span class="mc-ev-t">' + U.escHtml(U.fmtDateTime(new Date(e.ts)).slice(11)) + '</span>'
+          + devTag + typeTag + lvTag + '<span class="mc-ev-d">' + U.escHtml(e.detail || '') + ackHtml + '</span>'
+          + '<button type="button" class="tb mc-ackbtn" data-ack="' + Number(e.ts) + '" title="' + (acked ? '撤销确认' : '确认该事件（可留备注，便于交接）') + '">' + (acked ? '撤销' : '确认') + '</button>'
+          + '</div>');
       }
       evsEl.innerHTML = evs.length
         ? evRows.join('')
         : '<div class="mc-empty">' + (curDev ? '该设备暂无事件' : '暂无事件') + '</div>';
       evsEl.querySelectorAll('.mc-tag.dev').forEach(el => {
         el.onclick = () => setFilter(el.dataset.dev, el.dataset.host || null, el.dataset.name || '');
+      });
+      // 确认 / 撤销确认：确认时可选填备注（写进事件的 ackNote，随事件一起滚动淘汰）
+      evsEl.querySelectorAll('.mc-ackbtn').forEach(btn => {
+        btn.onclick = () => {
+          const ts = Number(btn.dataset.ack);
+          const ev = evs.find(x => Number(x.ts) === ts);
+          if (!ev) { toast('事件已滚动淘汰'); return; }
+          if (ev.ackAt) {
+            confirmBox('撤销该事件的确认？（' + (ev.detail || '').slice(0, 60) + '）').then(async (yes) => {
+              if (!yes) return;
+              const r = await window.topoMonitor.eventUnack({ ts });
+              if (!r || !r.ok) { toast('撤销失败：' + ((r && r.error) || '未知错误')); return; }
+              toast('已撤销确认（未确认 ' + r.unacked + ' 条）');
+              load();
+            });
+            return;
+          }
+          openModal({
+            title: '确认事件',
+            sub: (ev.name || ev.deviceId || '') + '　' + (ev.detail || '').slice(0, 120),
+            fields: [{ name: 'note', label: '备注（可留空，便于值班交接）', value: '', ph: '如：已联系机房现场确认，等待备件' }],
+            submit: '确认',
+            onSubmit: async (v) => {
+              const r = await window.topoMonitor.eventAck({ ts, note: v.note || '' });
+              if (!r || !r.ok) { toast('确认失败：' + ((r && r.error) || '未知错误')); return; }
+              toast('已确认' + (v.note ? '（备注：' + v.note + '）' : '') + '　剩余未确认 ' + r.unacked + ' 条');
+              load();
+            }
+          });
+        };
       });
       // 备份
       const baks = r.backups || [];
@@ -7031,6 +10984,8 @@ function openMonitorCenter() {
       const statOk = jobs.filter(j => !j.alert && j.probeOk !== false && j.state === 'monitoring').length;
       const statOff = jobs.filter(j => j.probeOk === false).length;
       const statAlert = jobs.filter(j => !!j.alert).length;
+      const unackEl = ov.querySelector('#mcUnack');
+      if (unackEl) { const n = Number(r.unacked || 0); unackEl.hidden = !n; unackEl.textContent = n ? String(n) : ''; unackEl.title = n ? (n + ' 条事件未确认（值班交接用：点事件右侧「确认」留痕）') : ''; }
       ov.querySelector('#mcSTotal').textContent = jobs.length;
       ov.querySelector('#mcSOk').textContent = statOk;
       ov.querySelector('#mcSOff').textContent = statOff;
@@ -7075,6 +11030,7 @@ function openMonitorCenter() {
     }
   }
   load();
+  syncLinkStatus();   // 链路页首屏：拉一次主进程运行态（link 事件只推变化，历史状态要靠这次拉取）
 }
 
 /* ================= 监控日志浏览器（按设备/日期浏览、搜索） ================= */
@@ -7334,6 +11290,7 @@ function openConfigBackups(devicePreset) {
             <button type="button" class="tb" id="bkDelete" disabled>删除选中</button>
             <button type="button" class="tb" id="bkComp">合规检查…</button>
             <button type="button" class="tb" id="bkAi">AI 解析…</button>
+            <button type="button" class="tb" id="bkIgnores" title="配置里时钟/运行时长/时间戳这类天天变却不代表有人改配置的行，在此按正则忽略，避免「配置有变化」天天误报">变更忽略规则…</button>
             <button type="button" class="tb" id="bkNow">立即备份当前地址</button>
             <button type="button" class="tb" data-act="openfolder">打开目录</button>
             <button type="button" class="tb primary" data-act="close">关闭</button>
@@ -7383,7 +11340,7 @@ function openConfigBackups(devicePreset) {
     } catch (e) { contentEl.textContent = '（读取失败）'; }
   };
   const fmtDiff = (d) => {
-    if (!d.ok) return '（对比失败：' + (d.error || '') + '）';
+    if (!d.ok) return '（对比失败：' + U.escHtml(d.error || '') + '）'; // 返回值可能经 innerHTML 渲染，内部也转义
     if (!d.changed) return '两份备份内容一致';
     const html = [];
     for (const h of d.hunks) {
@@ -7455,11 +11412,15 @@ function openConfigBackups(devicePreset) {
     try {
       const d = await window.topoConfigBackup.diff(cur.device, cur.host, oldN, newN);
       if (!d || !d.ok) { diffInfoEl.textContent = ''; contentEl.textContent = '（对比失败：' + ((d && d.error) || '') + '）'; return; }
-      diffInfoEl.textContent = '对比 ' + oldN + ' → ' + newN + '（+' + (d.added || 0) + '/-' + (d.removed || 0) + ' 行）';
-      contentEl.innerHTML = fmtDiff(d); // 行内容已逐行 escHtml；失败分支已改走 textContent
+      diffInfoEl.textContent = '对比 ' + oldN + ' → ' + newN + '（+' + (d.added || 0) + '/-' + (d.removed || 0) + ' 行'
+        + (d.ignoredRules ? '，已按 ' + d.ignoredRules + ' 条规则忽略易变行' : '') + '）';
+      contentEl.innerHTML = d.changed
+        ? fmtDiff(d)
+        : '<div class="bk-empty">两份备份在忽略易变行后完全一致（时钟 / 运行时长这类噪声行不算变更）。</div>';
     } catch (e) { contentEl.textContent = '（对比失败）'; }
   };
   ov.querySelector('#bkComp').onclick = () => { close(); openComplianceCheck(); };
+  ov.querySelector('#bkIgnores').onclick = () => openConfigIgnoreRules();
   ov.querySelector('#bkAi').onclick = () => {
     if (sel.size !== 1) { toast('请先勾选一份备份再进行 AI 解析'); return; }
     const name = [...sel][0];
@@ -7527,9 +11488,9 @@ function openNetServices() {
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.innerHTML = `
-    <div class="modal nsv-dialog" role="dialog" style="width:1020px;height:86vh">
-      <h3>网络服务（TFTP / FTP / Syslog）</h3>
-      <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）并<b>向本机发送 syslog 日志</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
+    <div class="modal nsv-dialog" role="dialog" style="width:1100px;height:86vh">
+      <h3>网络服务（TFTP / FTP / Syslog / Trap）</h3>
+      <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）、<b>向本机发送 syslog 日志</b>并<b>把 SNMP Trap 告警上报到本机</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
       <div class="nsv-top">
         <div class="nsv-cards">
           <div class="nsv-card">
@@ -7552,6 +11513,37 @@ function openNetServices() {
             <div class="nsv-row"><label>端口</label><input type="number" id="nsvSysPort" min="1" max="65535"/><span class="nsv-hint">标准 514（UDP）</span></div>
             <div class="nsv-row"><label class="nsv-mini"><input type="checkbox" id="nsvSysTcp"/>同时监听 TCP（RFC 6587）</label></div>
             <div class="nsv-note">按来源主机 / 日期归档，支持级别过滤与关键字检索；超限自动限速丢弃并计数。</div>
+            <div style="border-top:1px dashed var(--border);padding-top:6px;margin-top:auto">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:3px">日志告警（命中弹通知并记入事件时间线，受设备静默策略约束；同主机同规则 5 分钟冷却）</div>
+              <div class="nsv-row"><label class="nsv-mini"><input type="checkbox" id="nsvSysAlertOn"/>启用</label>
+                <select id="nsvSysAlertSev" style="flex:1;min-width:0">
+                  <option value="off">不按级别（仅关键字）</option>
+                  <option value="2">crit 及以上告警</option>
+                  <option value="3" selected>err 及以上告警</option>
+                  <option value="4">warning 及以上告警</option>
+                  <option value="5">notice 及以上告警</option>
+                </select></div>
+              <div class="nsv-row"><label>关键字</label><input type="text" id="nsvSysAlertKw" placeholder="逗号分隔，如 down,attack（至多 16 个）" style="flex:1;min-width:0" spellcheck="false"/></div>
+            </div>
+          </div>
+          <div class="nsv-card">
+            <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvTrapOn"/>启用</label><b>SNMP Trap 接收</b><span class="nsv-dot" id="nsvTrapDot"></span></div>
+            <div class="nsv-st" id="nsvTrapSt"></div>
+            <div class="nsv-row"><label>端口</label><input type="number" id="nsvTrapPort" min="1" max="65535"/><span class="nsv-hint">标准 162（UDP）</span></div>
+            <div class="nsv-row"><label>团体字</label><input type="text" id="nsvTrapCommunity" maxlength="128" placeholder="留空接收全部（如 public）" autocomplete="off" spellcheck="false"/></div>
+            <div class="nsv-note">接收设备主动上报的告警（v1 / v2c / v3）：接口 Down/Up、重启、认证失败等；标准 Trap 弹通知（受静默策略约束），按来源 / 日期归档。填写团体字后仅接收匹配的 v1/v2c Trap（多个用逗号分隔）——v1/v2c 无源认证，建议填写以防伪造告警。</div>
+            <div style="border-top:1px dashed var(--border);padding-top:6px;margin-top:auto">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:3px">SNMP v3 接收用户（USM，可选：v3 Trap 按此验签并解密）</div>
+              <div class="nsv-row"><label>用户名</label><input type="text" id="nsvTrapV3User" maxlength="32" autocomplete="off" spellcheck="false"/></div>
+              <div class="nsv-row"><label>认证</label>
+                <select id="nsvTrapV3AP"><option value="sha">SHA-1</option><option value="md5">MD5</option></select>
+                <input type="password" id="nsvTrapV3AK" placeholder="认证口令" autocomplete="new-password" style="flex:1;min-width:90px"/>
+              </div>
+              <div class="nsv-row"><label>加密</label>
+                <select id="nsvTrapV3PP"><option value="aes">AES-128</option><option value="des">DES</option></select>
+                <input type="password" id="nsvTrapV3PK" placeholder="加密口令" autocomplete="new-password" style="flex:1;min-width:90px"/>
+              </div>
+            </div>
           </div>
         </div>
         <div class="nsv-aside">
@@ -7565,9 +11557,11 @@ function openNetServices() {
       <div class="nsv-tabs">
         <button type="button" class="mc-tab on" data-pane="files">接收文件（TFTP / FTP）</button>
         <button type="button" class="mc-tab" data-pane="syslog">Syslog 日志</button>
+        <button type="button" class="mc-tab" data-pane="trap">SNMP Trap</button>
         <span class="nsv-tabs-sp"></span>
         <button type="button" class="tb nsv-mini-btn" data-act="openfiles">打开文件目录</button>
         <button type="button" class="tb nsv-mini-btn" data-act="opensys">打开日志目录</button>
+        <button type="button" class="tb nsv-mini-btn" data-act="opentrap">打开 Trap 目录</button>
         <button type="button" class="tb nsv-mini-btn" data-act="refresh">刷新</button>
       </div>
       <div class="nsv-pane" data-pane="files">
@@ -7584,6 +11578,15 @@ function openNetServices() {
           <span class="nsv-logcnt" id="nsvLogCnt"></span>
         </div>
         <div class="nsv-log" id="nsvLog"></div>
+      </div>
+      <div class="nsv-pane" data-pane="trap" hidden>
+        <div class="nsv-logbar">
+          <input type="text" id="nsvTrapHost" placeholder="按来源地址过滤…"/>
+          <label class="nsv-mini"><input type="checkbox" id="nsvTrapPause"/>暂停滚动</label>
+          <span class="nsv-tabs-sp"></span>
+          <span class="nsv-logcnt" id="nsvTrapCnt"></span>
+        </div>
+        <div class="nsv-log" id="nsvTrapList"></div>
       </div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="defaults">恢复默认</button>
@@ -7618,8 +11621,13 @@ function openNetServices() {
     dotFor(ov.querySelector('#nsvFtpDot'), st.ftp); ov.querySelector('#nsvFtpSt').textContent = stText(st.ftp);
     dotFor(ov.querySelector('#nsvSysDot'), st.syslog); ov.querySelector('#nsvSysSt').textContent = st.syslog.running
       ? ('运行中 :' + st.syslog.port + (st.syslog.tcp ? '（UDP+TCP）' : '（UDP）')) : (st.syslog.error ? '错误：' + st.syslog.error : '已停止');
-    ov.querySelector('#nsvLogCnt').textContent = st.syslog.rxMsgs
-      ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : '')) : '';
+    dotFor(ov.querySelector('#nsvTrapDot'), st.trap); ov.querySelector('#nsvTrapSt').textContent = st.trap.running
+      ? ('运行中 :' + st.trap.port + '（UDP）' + (st.trap.rxPackets ? ' · 已收 ' + st.trap.rxPackets + ' 包' : '')
+        + (st.trap.communityGuard ? ' · 团体字白名单' + (st.trap.communityReject ? '（已拒 ' + st.trap.communityReject + '）' : '') : ''))
+      : (st.trap.error ? '错误：' + st.trap.error : '已停止');
+    ov.querySelector('#nsvLogCnt').textContent = (st.syslog.rxMsgs
+      ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : ''))
+      : '') + (st.syslog.alerts ? (st.syslog.rxMsgs ? ' · ' : '') + '告警 ' + st.syslog.alerts + ' 条' : '');
   }
   function fillForm(cfg) {
     ov.querySelector('#nsvTftpOn').checked = !!cfg.tftp.enabled;
@@ -7633,6 +11641,20 @@ function openNetServices() {
     ov.querySelector('#nsvSysOn').checked = !!cfg.syslog.enabled;
     ov.querySelector('#nsvSysPort').value = cfg.syslog.port;
     ov.querySelector('#nsvSysTcp').checked = !!cfg.syslog.tcp;
+    const sa = cfg.syslog.alert || {};
+    ov.querySelector('#nsvSysAlertOn').checked = !!sa.enabled;
+    ov.querySelector('#nsvSysAlertSev').value = (sa.severity == null ? 'off' : String(sa.severity));
+    if (ov.querySelector('#nsvSysAlertSev').selectedIndex < 0) ov.querySelector('#nsvSysAlertSev').value = '3';
+    ov.querySelector('#nsvSysAlertKw').value = (sa.keywords || []).join(',');
+    ov.querySelector('#nsvTrapOn').checked = !!cfg.trap.enabled;
+    ov.querySelector('#nsvTrapPort').value = cfg.trap.port;
+    ov.querySelector('#nsvTrapCommunity').value = cfg.trap.community || '';
+    const tv3 = (cfg.trap && cfg.trap.v3) || {};
+    ov.querySelector('#nsvTrapV3User').value = tv3.user || '';
+    ov.querySelector('#nsvTrapV3AP').value = tv3.authProto === 'md5' ? 'md5' : 'sha';
+    ov.querySelector('#nsvTrapV3AK').value = tv3.authPass || '';
+    ov.querySelector('#nsvTrapV3PP').value = tv3.privProto === 'des' ? 'des' : 'aes';
+    ov.querySelector('#nsvTrapV3PK').value = tv3.privPass || '';
   }
   function readForm() {
     const pasv = String(ov.querySelector('#nsvFtpPasv').value || '').match(/^(\d+)\s*-\s*(\d+)$/);
@@ -7647,7 +11669,29 @@ function openNetServices() {
         pasvMax: pasv ? parseInt(pasv[2], 10) : 0,
         overwrite: ov.querySelector('#nsvFtpOverwrite').checked
       },
-      syslog: { enabled: ov.querySelector('#nsvSysOn').checked, port: parseInt(ov.querySelector('#nsvSysPort').value, 10) || 514, tcp: ov.querySelector('#nsvSysTcp').checked }
+      syslog: {
+        enabled: ov.querySelector('#nsvSysOn').checked,
+        port: parseInt(ov.querySelector('#nsvSysPort').value, 10) || 514,
+        tcp: ov.querySelector('#nsvSysTcp').checked,
+        alert: {
+          enabled: ov.querySelector('#nsvSysAlertOn').checked,
+          severity: ov.querySelector('#nsvSysAlertSev').value === 'off' ? null : parseInt(ov.querySelector('#nsvSysAlertSev').value, 10),
+          keywords: String(ov.querySelector('#nsvSysAlertKw').value || '').split(/[,，;；\n]+/).map(s => s.trim()).filter(Boolean),
+          cooldownSec: 300
+        }
+      },
+      trap: {
+        enabled: ov.querySelector('#nsvTrapOn').checked,
+        port: parseInt(ov.querySelector('#nsvTrapPort').value, 10) || 162,
+        community: ov.querySelector('#nsvTrapCommunity').value.trim(),
+        v3: {
+          user: ov.querySelector('#nsvTrapV3User').value.trim(),
+          authProto: ov.querySelector('#nsvTrapV3AP').value,
+          authPass: ov.querySelector('#nsvTrapV3AK').value,
+          privProto: ov.querySelector('#nsvTrapV3PP').value,
+          privPass: ov.querySelector('#nsvTrapV3PK').value
+        }
+      }
     };
   }
   async function loadCfg() {
@@ -7687,6 +11731,7 @@ function openNetServices() {
     return s;
   }
   function buildCmdExample(ip) {
+    const comm = ov.querySelector('#nsvTrapCommunity').value.trim().split(/[,，;；\n]+/)[0] || 'public';
     return [
       '# 思科：推送配置到 TFTP / FTP',
       'copy running-config tftp://' + ip + '/r1.cfg',
@@ -7697,7 +11742,14 @@ function openNetServices() {
       '',
       '# 日志发送到本机 Syslog（华为/H3C：info-center；思科：logging）',
       'info-center loghost ' + ip,
-      'logging host ' + ip
+      'logging host ' + ip,
+      '',
+      '# Trap 上报到本机（华为，需开启 snmp-agent）',
+      'snmp-agent target-host trap address udp-domain ' + ip + ' params securityname ' + comm,
+      'snmp-agent trap enable',
+      '# H3C 同华为；思科：',
+      'snmp-server host ' + ip + ' ' + comm,
+      'snmp-server enable traps'
     ].join('\n');
   }
   ov.querySelector('[data-act=apply]').onclick = async () => {
@@ -7715,8 +11767,14 @@ function openNetServices() {
       if (r && r.ok) {
         st = r.status;
         renderStatus();
+        // 服务端兜底可能把默认/空口令替换为随机口令（旧版本带弱口令运行、或前端未拦住的路径）：
+        // 回填表单并提示，避免面板显示与实际生效口令不一致
+        if (r.ftpPasswordChanged && r.cfg && r.cfg.ftp) {
+          ov.querySelector('#nsvFtpPass').value = r.cfg.ftp.password || '';
+          toast('FTP 默认口令已由服务端替换为随机口令，请更新设备侧的 copy 命令');
+        }
         const parts = [];
-        for (const [k, nm] of [['tftp', 'TFTP'], ['ftp', 'FTP'], ['syslog', 'Syslog']]) {
+        for (const [k, nm] of [['tftp', 'TFTP'], ['ftp', 'FTP'], ['syslog', 'Syslog'], ['trap', 'Trap']]) {
           const s = r.status[k];
           parts.push(nm + (s.error ? '错误' : (s.running ? ':' + s.port : '已停止')));
         }
@@ -7726,12 +11784,13 @@ function openNetServices() {
     btn.disabled = false;
   };
   ov.querySelector('[data-act=defaults]').onclick = async () => {
-    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false } });
+    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } }, trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } } });
     ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
     toast('已恢复默认值（尚未保存，请点「保存并应用」）');
   };
   ov.querySelector('[data-act=openfiles]').onclick = () => { window.topoNetSvc.openFolder('tftp').catch(() => {}); };
   ov.querySelector('[data-act=opensys]').onclick = () => { window.topoNetSvc.openFolder('syslog').catch(() => {}); };
+  ov.querySelector('[data-act=opentrap]').onclick = () => { window.topoNetSvc.openFolder('trap').catch(() => {}); };
 
   /* ---------- 接收文件表 ---------- */
   async function loadFiles() {
@@ -7750,7 +11809,7 @@ function openNetServices() {
         const dev = nodeBySvcIp(f.ip);
         return '<div class="nsv-fr" data-i="' + i + '">' +
           '<span>' + U.fmtDateTime(new Date(f.time)) + '</span>' +
-          '<span><b class="nsv-badge ' + f.svc + '">' + (f.svc === 'tftp' ? 'TFTP' : 'FTP') + '</b></span>' +
+          '<span><b class="nsv-badge ' + U.escHtml(f.svc) + '">' + (f.svc === 'tftp' ? 'TFTP' : 'FTP') + '</b></span>' +
           '<span title="' + U.escHtml(dev ? '已匹配设备：' + dev.name : '未匹配到拓扑设备') + '">' + U.escHtml(f.ip || '—') + (dev ? ' ⇢ ' + U.escHtml(dev.name) : '') + '</span>' +
           '<span class="nm" title="' + U.escHtml(f.name) + '">' + U.escHtml(f.name) + '</span>' +
           '<span>' + U.fmtSize(f.size) + '</span>' +
@@ -7853,7 +11912,8 @@ function openNetServices() {
       if (m.severity != null && m.severity > sevMax) continue;
       if (hostF && String(m.host || '').toLowerCase().indexOf(hostF) < 0) continue;
       const d = new Date(m.ts);
-      html.push('<div class="nsv-lg ' + (m.severity != null ? NSV_SEV_CLS[m.severity] : '') + '">' +
+      const hitTitle = m.alert ? (' title="日志告警：命中「' + U.escHtml((m.alert.matched || []).join('、') || '级别阈值') + '」"') : '';
+      html.push('<div class="nsv-lg ' + (m.alert ? 's-hit ' : '') + (m.severity != null ? NSV_SEV_CLS[m.severity] : '') + '"' + hitTitle + '>' +
         '<span class="t">' + pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()) + ':' + pad2s(d.getSeconds()) + '</span>' +
         '<span class="sev">' + (m.severity != null ? NSV_SEV_NAME[m.severity] : '-') + '</span>' +
         '<span class="h" title="' + U.escHtml(m.host || '') + '">' + U.escHtml(m.host || '-') + '</span>' +
@@ -7881,12 +11941,49 @@ function openNetServices() {
   };
   ov.querySelector('#nsvLogKw').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.stopPropagation(); ov.querySelector('#nsvLogSearch').click(); } });
 
+  /* ---------- SNMP Trap 实时视图 ---------- */
+  let trapSeq = 0, trapPaused = false;
+  const trapEl = ov.querySelector('#nsvTrapList');
+  ov.querySelector('#nsvTrapPause').addEventListener('change', (e) => { trapPaused = e.target.checked; });
+  async function refreshTrapTail(reset) {
+    if (trapPaused && !reset) return;
+    try {
+      const r = await window.topoNetSvc.trapTail(reset ? 0 : trapSeq);
+      if (!r || !ov.isConnected) return;
+      trapSeq = r.last;
+      const cnt = ov.querySelector('#nsvTrapCnt');
+      if (cnt) cnt.textContent = ((r.last ? '已收 ' + r.last + ' 包' : '') + (r.dropped ? ' · 限速丢弃 ' + r.dropped : '') + (r.malformed ? ' · 畸形 ' + r.malformed : '')).trim();
+      appendTraps(r.msgs || [], reset);
+    } catch (e) { /* ignore */ }
+  }
+  function appendTraps(msgs, replaceAll) {
+    if (replaceAll) trapEl.innerHTML = '';
+    if (!msgs.length && !replaceAll) return;
+    const hostF = String(ov.querySelector('#nsvTrapHost').value || '').trim().toLowerCase();
+    const html = [];
+    for (const m of msgs) {
+      if (hostF && String(m.host || '').toLowerCase().indexOf(hostF) < 0) continue;
+      const d = new Date(m.ts);
+      html.push('<div class="nsv-lg ' + (m.standard ? 's-note' : 's-info') + '">' +
+        '<span class="t">' + pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()) + ':' + pad2s(d.getSeconds()) + '</span>' +
+        '<span class="sev">' + U.escHtml(m.version || '-') + '</span>' +
+        '<span class="h" title="' + U.escHtml(m.host || '') + '">' + U.escHtml(m.host || '-') + '</span>' +
+        '<span class="m"><b>' + U.escHtml(m.trap || 'unknown') + '</b>' + (m.uptime ? '（运行 ' + U.escHtml(m.uptime) + '）' : '') + (m.msg ? '：' + U.escHtml(m.msg) : '') + '</span></div>');
+    }
+    if (!html.length && !replaceAll) return;
+    const stick = trapEl.scrollHeight - trapEl.scrollTop - trapEl.clientHeight < 40;
+    trapEl.insertAdjacentHTML('beforeend', html.join(''));
+    while (trapEl.childElementCount > 600) trapEl.firstElementChild.remove();
+    if (stick || replaceAll) trapEl.scrollTop = trapEl.scrollHeight;
+  }
+
   /* ---------- 标签切换 / 轮询 / 实时事件 ---------- */
   ov.querySelectorAll('.nsv-tabs .mc-tab').forEach(tab => {
     tab.onclick = () => {
       ov.querySelectorAll('.nsv-tabs .mc-tab').forEach(t => t.classList.toggle('on', t === tab));
       ov.querySelectorAll('.nsv-pane').forEach(p => { p.hidden = p.dataset.pane !== tab.dataset.pane; });
       if (tab.dataset.pane === 'syslog') refreshTail(true);
+      else if (tab.dataset.pane === 'trap') refreshTrapTail(true);
       else loadFiles();
     };
   });
@@ -7902,11 +11999,13 @@ function openNetServices() {
     if (!ov.isConnected) { clearInterval(pollTimer); return; }
     window.topoNetSvc.getConfig().then((r) => { if (r && r.ok && ov.isConnected) { st = r.status; renderStatus(); } }).catch(() => {});
     refreshTail(false);
+    refreshTrapTail(false);
   }, 2500);
 
   loadCfg();
   loadFiles();
   refreshTail(true);
+  refreshTrapTail(true);
 }
 
 /* ================= Web Shell ================= */
@@ -8036,10 +12135,11 @@ function openWebShell(id) {
         host: ov.querySelector('#wsJumpHost').value.trim(),
         port: ov.querySelector('#wsJumpPort').value.trim(),
         username: ov.querySelector('#wsJumpUser').value.trim(),
-        password: ov.querySelector('#wsJumpPass').value
+        password: ov.querySelector('#wsJumpPass').value,
+        expectFp: trustedFpOf(ov.querySelector('#wsJumpHost').value.trim(), ov.querySelector('#wsJumpPort').value.trim())
       };
     }
-    try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
+    cfg.expectFp = trustedFpOf(cfg.host, cfg.port);
     if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
     // 标签恢复：密码加密为 DPAPI 密文随连接参数透传（Shell 窗口保存进恢复列表，明文不落盘）
     try {
@@ -8127,7 +12227,7 @@ async function openAiSettings() {
     fields: [
       { name: 'provider', label: '服务商预设', type: 'select', options: AI_PROVIDERS.map(p => [p.id, p.label]), value: matched.id },
       { name: 'baseUrl', label: 'API 地址', type: 'text', required: true, value: cfg.baseUrl, ph: '例如 https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1' },
-      { name: 'apiKey', label: 'API Key', type: 'password', value: '', ph: cfg.apiKeySet ? '已保存（' + cfg.apiKeyMasked + '），留空表示保持不变' : 'sk-…（本地服务可留空）' },
+      { name: 'apiKey', label: 'API Key', type: 'password', value: '', ph: cfg.apiKeySet ? (cfg.apiKeyHttpBlocked ? '已保存但当前为 http 地址，不会自动发送；如需使用请在此重新填写' : '已保存（' + cfg.apiKeyMasked + '），留空表示保持不变') : 'sk-…（本地服务可留空）' },
       { name: 'model', label: '模型名', type: 'text', required: true, value: cfg.model, ph: '例如 deepseek-chat / claude-sonnet-4-5 / glm-4.6' },
       { name: 'maxInputKB', label: '单次发送上限（KB，超出部分自动截断）', type: 'text', value: String(cfg.maxInputKB || 100) }
     ],
@@ -8712,11 +12812,36 @@ if (typeof globalThis !== 'undefined') {
     openComplianceCheck,
     exportXlsx,
     exportVisio,
+    exportInteractiveHtml,
     exportPdf,
     openMonitorConfig,
     openMonitorCenter,
+    openAlertSoundConfig,
+    alertLevelOf,
+    openLinkMonitor,
+    addLinkTasksForAllLinks,
+    reconcileLinkMon,
+    syncLinkMonOverlay,
     openMonitorLogs,
     openConfigBackups,
+    openConfigDeploy,
+    openDeployHistory,
+    openCredManager,
+    openTeamPackImport,
+    openSlaReport,
+    openL2Infer,
+    openUnderlayPanel,
+    applyUnderlay,
+    alertTopology: () => alertTopologySnapshot(),
+    openMacTrace,
+    openBatchInspect,
+    loadCreds,
+    openTopoDiscovery,
+    openIpam,
+    openProtoNeighbors,
+    openCustomFields,
+    openRackView,
+    editNode,
     openNetServices,
     openAiSettings,
     openAiAnalysis,

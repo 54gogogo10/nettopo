@@ -171,6 +171,23 @@ function upsertRestoreEntry(list, entry, cap) {
     return null;
   };
 
+  /* ---- 右侧工具栏收起 / 展开（本地记忆；宽度变化后活动终端需重新排版并上报尺寸） ---- */
+  const SIDE_KEY = 'topoShellSideOff';
+  const applySideOff = (off, remember) => {
+    document.body.classList.toggle('sh-side-off', !!off);
+    const toggleEl = $('#shSideToggle');
+    if (toggleEl) {
+      toggleEl.textContent = off ? '«' : '»';
+      toggleEl.title = off ? '展开工具栏' : '收起工具栏';
+    }
+    if (remember) { try { localStorage.setItem(SIDE_KEY, off ? '1' : '0'); } catch (e) { /* ignore */ } }
+    const a = activeSession();
+    if (a) {
+      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
+      window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows);
+    }
+  };
+
   function applyStatus(s, info) {
     const state = info && info.state;
     s.dotEl.className = 'dot' + (state === 'error' ? ' err' : state === 'connected' ? ' ok' : '');
@@ -211,7 +228,7 @@ function upsertRestoreEntry(list, entry, cap) {
     ov.querySelector('[data-act=cancel]').onclick = () => decide(false);
     ov.querySelector('[data-act=trust]').onclick = () => decide(true);
     function decide(trust) {
-      if (trust) { try { localStorage.setItem('topoShellFp:' + info.host, info.fp); } catch (e) { /* ignore */ } }
+      if (trust) { try { localStorage.setItem(fpKeyOf(info.host, info.port), info.fp); } catch (e) { /* ignore */ } }
       window.topoShell.trustFingerprint(info.host, trust);
       close();
       // 同主机的排队确认一并出队：trustFingerprint 已放行/拒绝该主机的全部待确认握手
@@ -331,7 +348,13 @@ function upsertRestoreEntry(list, entry, cap) {
       else if (item[0] === 'status') applyStatus(rec, item[1]);
       else if (item[0] === 'end') applyEnd(rec, item[1]);
     }
-    term.onData((d) => { if (!rec.ended) window.topoShell.sendData(sid, d); });
+    term.onData((d) => {
+      if (rec.ended) return;
+      // 主进程 shell:data 单次限长 1MB：粘贴整段大配置时 onData 一次性携带全部文本，超限被
+      // 静默丢弃（内容完全不发送且无提示）——按 512KB 分片下发
+      if (d.length <= 512 * 1024) { window.topoShell.sendData(sid, d); return; }
+      for (let off = 0; off < d.length; off += 512 * 1024) window.topoShell.sendData(sid, d.slice(off, off + 512 * 1024));
+    });
     // 选中即复制（PuTTY 风格）
     term.onSelectionChange(() => {
       try {
@@ -398,6 +421,7 @@ function upsertRestoreEntry(list, entry, cap) {
     try { s.term && s.term.dispose(); } catch (e) { /* ignore */ }
     sessions.delete(sid);
     castSel.delete(sid);
+    sftpPaths.delete(sid); // 会话级目录记忆随标签关闭释放（窗口长开频繁连断不再累积）
     refreshCastCount();
     if (sessions.size === 0) { if (castMode) setCastMode(false); emptyEl.classList.remove('hidden'); }
     else activate([...sessions.keys()][0]);
@@ -420,6 +444,15 @@ function upsertRestoreEntry(list, entry, cap) {
     }
   };
   const liveCount = () => { let n = 0; for (const [, s] of sessions) if (!s.ended) n++; return n; };
+  /** 底部条展开/收起改变终端可用高度：主动重算 fit，防 xterm 画布溢出压住条（群发条/AI 条/AI 结果条共用） */
+  const refitActive = () => {
+    const a = activeSession();
+    if (!a) return;
+    requestAnimationFrame(() => {
+      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
+      try { window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows); } catch (e) { /* ignore */ }
+    });
+  };
   const setCastMode = (on) => {
     castMode = on;
     if (castBtnEl) castBtnEl.classList.toggle('on', on);
@@ -432,6 +465,8 @@ function upsertRestoreEntry(list, entry, cap) {
       refreshCastCount();
       if (castInputEl) castInputEl.focus();
     }
+    // 群发条是 in-flow 子元素，显隐直接改变终端可用高度：与 setAiBar 同口径重算 fit，否则底部行被裁
+    refitActive();
   };
   const toggleCastSel = (sid) => {
     const s = sessions.get(sid);
@@ -523,9 +558,16 @@ function upsertRestoreEntry(list, entry, cap) {
    * 回放：读取录像 → 只读 xterm 按时间轴回放，支持 0.5~8 倍速 / 暂停 / 重播。 */
   const recBtnEl = $('#shRecBtn'), recPlayBtnEl = $('#shRecPlayBtn');
   let recActive = false, recFile = null, recStart = 0, recBuf = [], recTimer = null;
+  // 工具栏按钮为「图标 + 文案」两个节点：只改文案节点，避免整体重写 textContent 打平结构
+  const setRecBtnState = (on) => {
+    if (!recBtnEl) return;
+    recBtnEl.classList.toggle('on', on);
+    const tx = recBtnEl.querySelector('.tx');
+    if (tx) tx.textContent = on ? '录制中…' : '录制';
+  };
   const recPush = (data) => { if (recActive && recBuf.length < 20000) recBuf.push({ t: Date.now() - recStart, dir: 'out', d: data }); };
-  const recFlush = async () => {
-    if (!recActive || !recBuf.length) return;
+  const recFlush = async (force) => {
+    if ((!recActive && !force) || !recBuf.length) return;
     const lines = recBuf.map(e => JSON.stringify(e)).join('\n');
     recBuf = [];
     try {
@@ -543,17 +585,18 @@ function upsertRestoreEntry(list, entry, cap) {
     if (!r || !r.ok) { toast('录制启动失败：' + ((r && r.error) || '未知错误')); return; }
     recActive = true; recFile = r.name; recStart = Date.now(); recBuf = [];
     recTimer = setInterval(recFlush, 800);
-    if (recBtnEl) { recBtnEl.classList.add('on'); recBtnEl.textContent = '⏺ 录制中…'; }
+    setRecBtnState(true);
     toast('开始录制会话输出（再次点击停止）：' + r.name);
   };
   const stopRecording = async (silent) => {
     if (!recActive) return;
     recActive = false;
     if (recTimer) { clearInterval(recTimer); recTimer = null; }
-    await recFlush();
+    // 强制冲刷（force）：此时 recActive 已置 false，不冲会把距上次 800ms 周期之后的尾段静默丢弃
+    await recFlush(true);
     let r;
     try { r = await window.topoShell.recordStop(); } catch (e) { r = null; }
-    if (recBtnEl) { recBtnEl.classList.remove('on'); recBtnEl.textContent = '⏺ 录制'; }
+    setRecBtnState(false);
     if (!silent) toast('录制完成：' + ((r && r.name) || recFile || ''));
     recFile = null;
   };
@@ -603,7 +646,12 @@ function upsertRestoreEntry(list, entry, cap) {
     ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
     ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
     ov.querySelector('[data-act=close]').onclick = close;
-    playBtn.onclick = () => { paused = !paused; playBtn.textContent = paused ? '▶ 继续' : '⏸ 暂停'; };
+    playBtn.onclick = () => {
+      // 回放已结束（play 循环退出）：主按钮承担「重播」语义，否则只切换暂停
+      if (!playing) { play(); return; }
+      paused = !paused;
+      playBtn.textContent = paused ? '▶ 继续' : '⏸ 暂停';
+    };
     ov.querySelector('#rpRestart').onclick = () => { paused = false; playBtn.textContent = '⏸ 暂停'; play(); };
     speedEl.onchange = () => { /* 速度即时生效，无需重启 */ };
     const play = async () => {
@@ -758,23 +806,29 @@ function upsertRestoreEntry(list, entry, cap) {
       sftpListEl.appendChild(row);
     }
   }
+  let sftpPending = null; // busy 期间被静默拒绝的最新浏览目标（切标签场景补发，防列表停留旧会话）
+  const sftpFlushPending = () => {
+    const p = sftpPending; sftpPending = null;
+    if (p && !sftpBusy && p.sid === sftpSid) sftpBrowse(p.sid, p.path);
+  };
   async function sftpBrowse(sid, path, opts) {
     if (!sftpListEl || !sid) return;
     const s = sessions.get(sid);
     if (!s) { renderSftpEmpty('会话不存在'); return; }
     if (s.meta.protocol !== 'ssh') { renderSftpEmpty('Telnet 会话不支持 SFTP 文件浏览'); sftpSetStatus(''); return; }
     if (s.ended) { renderSftpEmpty('会话已断开，重新连接后可浏览远程文件'); sftpSetStatus(''); return; }
-    if (sftpBusy) return;
+    if (sftpBusy) { sftpPending = { sid, path: path || '.' }; return; }
     sftpBusy = true;
     if (!opts || !opts.keepList) sftpSetStatus('加载中…');
     let res;
     try { res = await window.topoShell.sftpList({ id: sid, path: path || '.' }); }
     catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
     sftpBusy = false;
-    if (sftpSid !== sid) return; // 期间已切到其他标签：结果作废
+    if (sftpSid !== sid) { sftpFlushPending(); return; } // 期间已切到其他标签：结果作废，补发切标签时被拒的浏览
     if (!res || !res.ok) {
       if (!opts || !opts.keepList) renderSftpEmpty((res && res.error) || '浏览失败');
       sftpSetStatus((res && res.error) || '浏览失败', true);
+      sftpFlushPending();
       return;
     }
     sftpPaths.set(sid, res.path);
@@ -782,6 +836,7 @@ function upsertRestoreEntry(list, entry, cap) {
     sftpSel = null;
     renderSftpList(res.items);
     sftpSetStatus(res.items.length + ' 项 · ' + res.path);
+    sftpFlushPending();
   }
   const sftpCurDir = () => sftpPaths.get(sftpSid) || '.';
   const sftpActiveRow = () => {
@@ -1064,14 +1119,14 @@ function upsertRestoreEntry(list, entry, cap) {
     if (aiEl) aiEl.classList.toggle('hidden', !on);
     if (!on) hideAiResult();
     if (on && aiInputEl) aiInputEl.focus();
-    // 底部条展开/收起改变终端可用高度：主动重算 fit，防 xterm 画布溢出压住条
-    const a = activeSession();
-    if (a) requestAnimationFrame(() => {
-      try { a.s.fit.fit(); } catch (e) { /* ignore */ }
-      try { window.topoShell.resize(a.id, a.s.term.cols, a.s.term.rows); } catch (e) { /* ignore */ }
-    });
+    refitActive();
   };
-  const hideAiResult = () => { if (!aiResultEl) return; aiResultEl.classList.add('hidden'); aiResultEl.innerHTML = ''; };
+  const hideAiResult = () => {
+    if (!aiResultEl || aiResultEl.classList.contains('hidden')) return;
+    aiResultEl.classList.add('hidden');
+    aiResultEl.innerHTML = '';
+    refitActive();
+  };
   /** 结果条渲染：notes 为 {text, err} 段落；cmds 为命令 chips（点击复制）；acts 为 {label, primary, act} 按钮 */
   const showAiResult = (notes, cmds, acts) => {
     if (!aiResultEl) return;
@@ -1113,6 +1168,7 @@ function upsertRestoreEntry(list, entry, cap) {
       aiResultEl.appendChild(bar);
     }
     aiResultEl.classList.remove('hidden');
+    refitActive(); // 结果条占高后终端底部行会被裁（.sh-terms overflow:hidden），重算 fit
   };
   /** 逐条下发命令到指定会话：每条追加回车，间隔 400ms 给设备处理时间；中途断开即中止 */
   const sendCommandsToSession = async (sid, cmds) => {
@@ -1178,6 +1234,23 @@ function upsertRestoreEntry(list, entry, cap) {
       showAiResult([{ text: '未能从回复中提取命令', err: true }], [], [{ label: '关闭', act: () => {} }]);
       return;
     }
+    // auto 模式对「破坏性命令」仍强制人工确认：终端上下文（横幅/MOTD）设备可控，可经提示注入
+    // 诱导 LLM 生成删配置/清盘类命令；直接执行无回旋余地，故命中破坏性关键词时降级为确认模式
+    if (aiMode === 'auto' && cmds.some((c) => isDestructiveCmd(c.text))) {
+      showAiResult(
+        [{ text: '检测到可能造成配置/数据丢失的命令（共 ' + cmds.length + ' 条，目标：' + target + '），已从「直接执行」降级为人工确认：', err: true }],
+        cmds,
+        [
+          { label: '执行全部', act: async () => {
+              const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
+              toast('已下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」');
+            } },
+          { label: '复制全部', act: () => { try { window.topoShell.copyText(cmds.map((c) => c.text).join('\n')); toast('命令已复制'); } catch (e) { /* ignore */ } } },
+          { label: '放弃', act: () => {} }
+        ]
+      );
+      return;
+    }
     if (aiMode === 'auto') {
       const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
       showAiResult([{ text: '已直接下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」（模式：直接执行）' }], cmds, [{ label: '关闭', act: () => {} }]);
@@ -1227,7 +1300,7 @@ function upsertRestoreEntry(list, entry, cap) {
     }
     ctxEl.innerHTML = items.map(it => it.sep
       ? '<div class="d-sep"></div>'
-      : `<button class="ci" ${it.disabled ? 'disabled' : ''}>${it.label}</button>`).join('');
+      : `<button class="ci" ${it.disabled ? 'disabled' : ''}>${escAttr(it.label)}</button>`).join('');
     ctxEl.classList.remove('hidden');
     const r = ctxEl.getBoundingClientRect();
     ctxEl.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 6)) + 'px';
@@ -1377,9 +1450,32 @@ function upsertRestoreEntry(list, entry, cap) {
     } else list.push(clean);
     saveBookmarks(list);
   };
+  /* 指纹记忆键：非默认端口（≠22）含端口后缀（与 ssh known_hosts 口径一致——同 IP 不同端口
+   * 是 NAT 映射多设备的常见形态，只按 host 存储会互相挤掉）；读取兼容旧版 host-only 键 */
+  const fpKeyOf = (host, port) => 'topoShellFp:' + host + (port && Number(port) !== 22 ? ':' + Number(port) : '');
+  /** 清除本机记住的指纹（键口径与 js/util.js 的 U.fpKeyOf 一致；shell.html 不引入 util.js，此处为最小镜像） */
+  const fpForget = (host, port) => {
+    try {
+      localStorage.removeItem(fpKeyOf(host, port));
+      localStorage.removeItem('topoShellFp:' + host);
+      localStorage.removeItem('topoShellFp:' + host + ':' + (port || 22)); // 兼容带端口写法
+    } catch (e) { /* ignore */ }
+  };
+  /** 连接失败若源于**本机记住的旧指纹**（ssh2 在客户端就拒：Host denied (verification failed)），
+   *  就地清掉本机记忆并提示重试。否则「重新连接」会一直复用同一份旧指纹，成为走不到指纹确认弹窗的死循环
+   *  ——真机排障实例：设备换过主机钥匙后，Web Shell 永远连不上，撤销主进程信任也没用。
+   *  交互式连接的指纹裁决归**主进程信任门**（权威库 + 首连确认弹窗 + 变化即拒的中文原因），
+   *  故下面不再把本机记住的指纹当 expectFp 传给客户端。 */
+  const healFpFailure = (res, host, port) => {
+    const err = String((res && res.error) || '');
+    if (!/Host denied|host denied|verification failed|指纹/i.test(err)) return false;
+    fpForget(host, port);
+    toast('已清除本机记住的 ' + host + ' 旧指纹：请重新连接（将按首次连接重新核对主机指纹）');
+    return true;
+  };
   async function connectBookmark(b) {
     const cfg = { protocol: b.protocol, host: b.host, port: b.port, username: b.username, encoding: b.encoding, title: b.name || b.host };
-    try { const fp = localStorage.getItem('topoShellFp:' + b.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
+    // 不传本机记住的 expectFp：交互式连接的指纹裁决交给主进程信任门（见 healFpFailure 注释）
     if (b.passwordEnc && window.topoSecure && window.topoSecure.decryptSecret) {
       try { const r = await window.topoSecure.decryptSecret(b.passwordEnc); if (r && r.ok && r.text) cfg.password = r.text; } catch (e) { /* 解密失败按无密码连接 */ }
     }
@@ -1391,7 +1487,7 @@ function upsertRestoreEntry(list, entry, cap) {
     }
     let res;
     try { res = await window.topoShell.connect(cfg); } catch (err) { res = { ok: false, error: String((err && err.message) || err) }; }
-    if (!res || !res.ok) { toast('连接失败：' + ((res && res.error) || '未知错误')); return false; }
+    if (!res || !res.ok) { if (!healFpFailure(res, cfg.host, cfg.port)) toast('连接失败：' + ((res && res.error) || '未知错误')); return false; }
     return true;
   }
   async function openBookmarks() {
@@ -1483,14 +1579,22 @@ function upsertRestoreEntry(list, entry, cap) {
   /* ---- 快速命令面板（Ctrl+P）：快捷按钮 / 连接书签 / 历史命令，模糊搜索回车执行 ---- */
   const CMDH_KEY = 'topoShellCmdHistory';
   const CMDH_CAP = 60;
+  // 凭据类命令不持久化：命令历史明文写 shell 窗 localStorage（Electron 下为 userData 明文 leveldb），
+  // 群发/AI/快捷按钮下发的 `password xxx` / `snmp-server community xxx` / `tacacs key xxx` 等会以明文长期驻留磁盘
+  const SENSITIVE_CMD_RE = /(?:^|[\s;"'])(?:password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key)[\s:=]+\S/i;
+  const isSensitiveCmd = (text) => SENSITIVE_CMD_RE.test(String(text == null ? '' : text));
+  // 破坏性命令（删配置/清盘/重启/格式化）：auto 模式命中时降级为人工确认。
+  // 启发式宁可多拦（多一次确认无损失），覆盖常见网络设备高危动词
+  const DESTRUCTIVE_CMD_RE = /(?:^|[\s;"'|&])(?:erase|format|delete|reset|undo\s+all|reload|reboot|shutdown|factory-?reset|write\s+erase|no\s+(?:interface|vlan|ip\s+route|router\s+\w+))(?:\s|$)/i;
+  const isDestructiveCmd = (text) => DESTRUCTIVE_CMD_RE.test(String(text == null ? '' : text));
   let cmdHistory = (() => {
     try {
       const a = JSON.parse(localStorage.getItem(CMDH_KEY) || '[]');
-      return Array.isArray(a) ? a.filter(x => x && typeof x.text === 'string' && x.text).slice(0, CMDH_CAP) : [];
+      return Array.isArray(a) ? a.filter(x => x && typeof x.text === 'string' && x.text && !isSensitiveCmd(x.text)).slice(0, CMDH_CAP) : [];
     } catch (e) { return []; }
   })();
   const saveCmdHistory = () => { try { localStorage.setItem(CMDH_KEY, JSON.stringify(cmdHistory)); } catch (e) { /* ignore */ } };
-  const recordCmd = (text) => { cmdHistory = mergeCmdHistory(cmdHistory, text, CMDH_CAP); saveCmdHistory(); };
+  const recordCmd = (text) => { if (isSensitiveCmd(text)) return; cmdHistory = mergeCmdHistory(cmdHistory, text, CMDH_CAP); saveCmdHistory(); };
   const palEl = $('#shPal'), palInputEl = $('#shPalInput'), palListEl = $('#shPalList');
   let palItems = [], palSel = 0;
   /** 发送原始文本到当前会话（面板「命令」项执行入口，与快捷按钮同通道） */
@@ -1683,10 +1787,10 @@ function upsertRestoreEntry(list, entry, cap) {
           host: ov.querySelector('#wsJumpHost').value.trim(),
           port: ov.querySelector('#wsJumpPort').value.trim(),
           username: ov.querySelector('#wsJumpUser').value.trim(),
-          password: ov.querySelector('#wsJumpPass').value
+          password: ov.querySelector('#wsJumpPass').value,
+          expectFp: undefined           // 同样不传本机记住的指纹（裁决交主进程信任门）
         };
       }
-      try { const fp = localStorage.getItem('topoShellFp:' + cfg.host) || ''; cfg.expectFp = fp.indexOf('SHA256:') === 0 ? fp : ''; } catch (e) { cfg.expectFp = ''; }
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
       // 标签恢复登记用：密码加密为 DPAPI 密文随建连参数透传（明文不落盘）
       try {
@@ -1699,6 +1803,8 @@ function upsertRestoreEntry(list, entry, cap) {
           if (rj && rj.ok && rj.cipher) cfg.jumpPwdEnc = rj.cipher;
         }
       } catch (e) { /* 加密失败仅影响恢复列表 */ }
+      // 加密/书签保存等 await 之后弹窗可能已被 Esc/点背景关闭：用户已取消，中止发起连接
+      if (!document.body.contains(ov)) return;
       try { localStorage.setItem('topoShellCfg', JSON.stringify({ protocol: cfg.protocol, port: cfg.port, username: cfg.username, encoding: cfg.encoding })); } catch (e) {}
       // 保存为书签（同键覆盖；勾选「记住密码」时密码经 DPAPI 加密后保存）
       if (ov.querySelector('#wsSaveBm').checked) {
@@ -1723,7 +1829,7 @@ function upsertRestoreEntry(list, entry, cap) {
       try { res = await window.topoShell.connect(cfg); } catch (err) { res = { ok: false, error: String(err && err.message || err) }; }
       if (!res || !res.ok) {
         btn.disabled = false; btn.textContent = '连接';
-        toast((res && res.error) || '无法发起连接');
+        if (!healFpFailure(res, cfg.host, cfg.port)) toast((res && res.error) || '无法发起连接');
         return;
       }
       close();
@@ -1756,6 +1862,13 @@ function upsertRestoreEntry(list, entry, cap) {
     if ($('#shFontDec')) $('#shFontDec').onclick = () => setFontSize(-1);
     if ($('#shFontInc')) $('#shFontInc').onclick = () => setFontSize(1);
     if (fontValEl) fontValEl.textContent = fontSize;
+
+    // 右侧工具栏收起 / 展开（记忆上次状态）
+    const sideToggleEl = $('#shSideToggle');
+    if (sideToggleEl) sideToggleEl.onclick = () => applySideOff(!document.body.classList.contains('sh-side-off'), true);
+    let sideOffSaved = false;
+    try { sideOffSaved = localStorage.getItem(SIDE_KEY) === '1'; } catch (e) { /* ignore */ }
+    applySideOff(sideOffSaved, false);
 
     // 快捷按钮条
     renderBar();

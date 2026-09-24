@@ -17,6 +17,12 @@ function buildSvgImage(graph, opts) {
   const M = 60; // 边距 px
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  // 底图（机房平面图）也参与取景：否则导出的图会把平面图裁掉一半
+  const underlay = (graph.underlay && graph.underlay.visible !== false && graph.underlay.dataUrl) ? graph.underlay : null;
+  if (underlay) {
+    minX = Math.min(minX, underlay.x); minY = Math.min(minY, underlay.y);
+    maxX = Math.max(maxX, underlay.x + underlay.w); maxY = Math.max(maxY, underlay.y + underlay.h);
+  }
   for (const r of regions) {
     minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
     maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h);
@@ -37,6 +43,11 @@ function buildSvgImage(graph, opts) {
   const parts = [];
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
   parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff"/>`);
+
+  // 底图先画（垫在所有元素之下）：透明度沿用画布设置，导出件与屏幕所见一致
+  if (underlay) {
+    parts.push(`<image x="${X(underlay.x)}" y="${Y(underlay.y)}" width="${underlay.w}" height="${underlay.h}" opacity="${Math.max(0.02, Math.min(1, underlay.opacity == null ? 1 : underlay.opacity))}" preserveAspectRatio="none" href="${underlay.dataUrl}" xlink:href="${underlay.dataUrl}"/>`);
+  }
 
   // 区域分组容器（设备底层背景框：浅色填充 + 虚线边 + 左上角标题）
   for (const r of regions) {
@@ -93,7 +104,9 @@ function buildSvgImage(graph, opts) {
     pad: 6,
     // SVG 坐标系 Y 向下：节点矩形左上角为 (X(n.x), Y(n.y))。
     // （旧写法用底边 Y(n.y + n.h)，障碍物整体下移一个节点高度，导致覆盖在节点上的标注不被推开）
-    obstacles: nodes.map(n => ({ x: X(n.x), y: Y(n.y), w: n.w, h: n.h }))
+    obstacles: nodes.map(n => ({ x: X(n.x), y: Y(n.y), w: n.w, h: n.h })),
+    // 页面边界钳制：密集拓扑的标注不被推出 PDF 页面可见区
+    bounds: { x: 0, y: 0, w: W, h: H }
   });
   for (let i = 0; i < labels.length; i++) {
     const lb = labels[i], ld = labelData[i];
@@ -122,7 +135,8 @@ function buildSvgImage(graph, opts) {
     const x = X(n.x), y = Y(n.y), w = n.w, h = n.h;
     parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="${esc(t.c1)}" stroke="${esc(t.stroke)}" stroke-width="1.5"/>`);
     const cx = x + w / 2, cy = y + h / 2;
-    const hasMgmt = !!(n.mgmt || '').trim();
+    // 管理地址判定与画布/VSDX 同口径走 nodeMgmts：mgmt 单字段为空而 mgmts 有值是合法数据
+    const hasMgmt = U.nodeMgmts(n).length > 0;
     // 超长设备名截断：SVG text 无裁剪直接溢出绘制，200 字符名会压盖相邻设备（画布上有 _fitName，导出同口径收敛）
     parts.push(`<text x="${cx}" y="${hasMgmt ? cy - 11 : cy - 4}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="13.5" font-weight="bold" fill="#ffffff" text-anchor="middle">${esc(U.truncate(n.name, 40))}</text>`);
     parts.push(`<text x="${cx}" y="${hasMgmt ? cy + 5 : cy + 15}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.8)" text-anchor="middle">${esc(t.label)}</text>`);
@@ -137,13 +151,22 @@ function buildSvgImage(graph, opts) {
   if (bwSet.size) {
     const entries = [...bwSet.entries()].sort((a, b) => b[0] - a[0]);
     let lx = 14;
-    parts.push(`<text x="${lx}" y="${H - 22}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#64748b">带宽：</text>`);
+    let ly = H - 22; // 图例基线（超宽折行时整块上移一行，与 VSDX 图例同口径）
+    parts.push(`<text x="${lx}" y="${ly}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#64748b">带宽：</text>`);
     lx += 34;
     for (const [n, color] of entries) {
       const lab = U.formatBw(n);
-      parts.push(`<line x1="${lx}" y1="${H - 18}" x2="${lx + 16}" y2="${H - 18}" stroke="${color}" stroke-width="3"/>`);
-      parts.push(`<text x="${lx + 22}" y="${H - 14}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#334155">${esc(lab)}</text>`);
-      lx += 22 + U.measureText(lab, 10) + 14;
+      const itemW = 22 + U.measureText(lab, 10) + 14;
+      if (lx + itemW > W - 14) { // 折行：normalizeBw 通用分支可产出任意档位（155M/622M/2.5G…），单行横排放不下
+        ly -= 16;
+        lx = 14 + itemW;
+        parts.push(`<line x1="${14 + 0}" y1="${ly + 4}" x2="${14 + 16}" y2="${ly + 4}" stroke="${color}" stroke-width="3"/>`);
+        parts.push(`<text x="${14 + 22}" y="${ly + 8}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#334155">${esc(lab)}</text>`);
+        continue;
+      }
+      parts.push(`<line x1="${lx}" y1="${ly + 4}" x2="${lx + 16}" y2="${ly + 4}" stroke="${color}" stroke-width="3"/>`);
+      parts.push(`<text x="${lx + 22}" y="${ly + 8}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="#334155">${esc(lab)}</text>`);
+      lx += itemW;
     }
   }
 

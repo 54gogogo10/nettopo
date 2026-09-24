@@ -76,10 +76,16 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   runBackup: (key) => ipcRenderer.invoke('monitor:run-backup', { key }),
   getSettings: () => ipcRenderer.invoke('monitor:get-settings'),
   setSettings: (notify) => ipcRenderer.invoke('monitor:set-settings', { notify }),
+  /* 告警等级与分级提示音：等级覆盖表与声音开关存主进程 settings.json；发声由渲染层合成 WebAudio */
+  setSound: (sound) => ipcRenderer.invoke('monitor:set-settings', { sound }),
+  setAlertLevels: (levels) => ipcRenderer.invoke('monitor:set-settings', { levels }),
+  onAlertSound: sub('monitor:alert-sound'),
   setTray: (enabled) => ipcRenderer.invoke('monitor:tray', { enabled }),
   testClose: () => ipcRenderer.invoke('monitor:test-close'),
   overview: () => ipcRenderer.invoke('monitor:overview'),
   uptime: () => ipcRenderer.invoke('monitor:uptime'),
+  /* 可用性（SLA）报表：按区间统计在线率 / 中断明细（可导出 CSV / Excel / 打印用 HTML） */
+  sla: (p) => ipcRenderer.invoke('monitor:sla', p),
   onStatus: sub('monitor:status'),
   onProbe: sub('monitor:probe'),
   onAlert: sub('monitor:alert'),
@@ -94,13 +100,37 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   httpHistory: (key) => ipcRenderer.invoke('monitor:httphistory', { key }),
   onHttp: sub('monitor:http'),
   onReboot: sub('monitor:reboot'),
+  /* 合规巡检结果 / 指标阈值告警 / 证书到期告警的实时推送（监控中心按需订阅） */
+  onCompliance: sub('monitor:compliance'),
+  onMetricAlert: sub('monitor:metric-alert'),
+  onCertAlert: sub('monitor:cert-alert'),
   /* 已信任主机指纹（TOFU 信任库）的查看与撤销：设备换机/重装后可在此重置 */
   trustList: () => ipcRenderer.invoke('monitor:trust-list'),
   trustRevoke: (host) => ipcRenderer.invoke('monitor:trust-revoke', { host }),
   /* 告警静默 / 维护窗口：静默期内通知不弹、事件时间线照常记录 */
   mute: (p) => ipcRenderer.invoke('monitor:mute', p),
   maintenanceGet: (p) => ipcRenderer.invoke('monitor:maintenance-get', p),
-  maintenanceSet: (p) => ipcRenderer.invoke('monitor:maintenance-set', p)
+  maintenanceSet: (p) => ipcRenderer.invoke('monitor:maintenance-set', p),
+  /* 告警依赖抑制：推送拓扑邻接表（上游失联时归并下游离线通知），另可查看当前归并状态 */
+  setTopology: (p) => ipcRenderer.invoke('monitor:topology', p),
+  alertDeps: () => ipcRenderer.invoke('monitor:alert-deps'),
+  /* 事件时间线确认/取消确认（确认时刻与备注留痕，随事件滚动淘汰） */
+  eventAck: (p) => ipcRenderer.invoke('monitor:event-ack', p),
+  eventUnack: (p) => ipcRenderer.invoke('monitor:event-unack', p)
+});
+
+/* 端到端链路连通性监测（监控 ▾ 链路连通性监测…）：任务由渲染层按拓扑算好后下发（js/link-path.js），
+ * 主进程按间隔探测（本机 ICMP/TCP，或从段起点设备执行 ping）并回推逐段结果与状态变化 */
+contextBridge.exposeInMainWorld('topoLink', {
+  start: (task) => ipcRenderer.invoke('link:start', task),
+  stop: (key) => ipcRenderer.invoke('link:stop', { key }),
+  stopAll: () => ipcRenderer.invoke('link:stop-all'),
+  status: () => ipcRenderer.invoke('link:status'),
+  probeNow: (key) => ipcRenderer.invoke('link:probe', { key }),
+  probeAll: () => ipcRenderer.invoke('link:probe-all'),
+  history: (key) => ipcRenderer.invoke('link:history', { key }),
+  onResult: sub('link:result'),
+  onState: sub('link:state')
 });
 
 /* 本机诊断工具箱（Ping / 路由跟踪 / TCP 端口 / DNS / 网段存活扫描 / SNMP Walk）：
@@ -120,7 +150,28 @@ contextBridge.exposeInMainWorld('topoConfigBackup', {
   read: (device, host, name) => ipcRenderer.invoke('backupcfg:read', { device, host, name }),
   remove: (device, host, name) => ipcRenderer.invoke('backupcfg:remove', { device, host, name }),
   diff: (device, host, a, b) => ipcRenderer.invoke('backupcfg:diff', { device, host, a, b }),
+  /* 配置变更判定的易变行忽略规则（时钟/运行时长等噪声行，避免「配置有变化」天天误报） */
+  ignoreGet: () => ipcRenderer.invoke('backupcfg:ignore-get'),
+  ignoreSet: (rules) => ipcRenderer.invoke('backupcfg:ignore-set', { rules }),
+  ignoreReset: () => ipcRenderer.invoke('backupcfg:ignore-reset'),
   openFolder: () => ipcRenderer.invoke('backupcfg:open')
+});
+
+/* 配置变更下发（监控 ▾ 配置变更下发）：会话、厂家命令口径与安全闸门全在主进程；
+ * 渲染层只提交「厂家键 + 配置行」，模式控制命令由主进程按厂家表决定 */
+contextBridge.exposeInMainWorld('topoDeploy', {
+  run: (p) => ipcRenderer.invoke('deploy:run', p),
+  history: (limit) => ipcRenderer.invoke('deploy:history', { limit }),
+  record: (name) => ipcRenderer.invoke('deploy:record', { name }),
+  recordRemove: (name) => ipcRenderer.invoke('deploy:record-remove', { name }),
+  clear: () => ipcRenderer.invoke('deploy:clear'),
+  openFolder: () => ipcRenderer.invoke('deploy:open-folder'),
+  onDone: sub('monitor:deploy')
+});
+
+/* 三层邻居（BGP/OSPF）异常留痕：采集结果由渲染层给出，主进程写事件时间线并弹通知 */
+contextBridge.exposeInMainWorld('topoProto', {
+  record: (p) => ipcRenderer.invoke('proto:record', p)
 });
 
 /* 密码等机密字段经主进程 safeStorage 加密后落盘（仅主窗口可用，主进程校验） */
@@ -129,11 +180,21 @@ contextBridge.exposeInMainWorld('topoSecure', {
   decryptSecret: (cipher) => ipcRenderer.invoke('secure:decrypt', cipher)
 });
 
-/* 在线升级（仅主窗口可用）：检查 / 下载校验 / 应用重启；进度与发现新版本经事件推送 */
+/* 统一凭据库（监控 ▾ 凭据库…）：设备访问凭据集中管理。清单不含机密（只回 hasPassword / hasKey 布尔），
+ * 连接类流程改传 credId，账号/口令/前置命令由主进程解析——明文永不跨 IPC 回渲染层（仅主窗口可用） */
+contextBridge.exposeInMainWorld('topoCred', {
+  list: () => ipcRenderer.invoke('cred:list'),
+  save: (p) => ipcRenderer.invoke('cred:save', p),
+  remove: (id) => ipcRenderer.invoke('cred:remove', { id }),
+  pick: (p) => ipcRenderer.invoke('cred:pick', p)
+});
+
+/* 在线升级（仅主窗口可用）：检查 / 下载校验 / 取消下载 / 应用重启；进度与发现新版本经事件推送 */
 contextBridge.exposeInMainWorld('topoUpdate', {
   check: () => ipcRenderer.invoke('update:check'),
   download: (assets) => ipcRenderer.invoke('update:download', { assets }),
   apply: () => ipcRenderer.invoke('update:apply'),
+  cancel: () => ipcRenderer.invoke('update:cancel'),
   reveal: () => ipcRenderer.invoke('update:reveal'),
   onStatus: sub('update:status'),
   onProgress: sub('update:progress'),
@@ -152,9 +213,12 @@ contextBridge.exposeInMainWorld('topoNetSvc', {
   syslogSearch: (p) => ipcRenderer.invoke('netsvc:syslog-search', p),
   syslogFiles: () => ipcRenderer.invoke('netsvc:syslog-files'),
   syslogRead: (host, date) => ipcRenderer.invoke('netsvc:syslog-read', { host, date }),
+  trapTail: (since) => ipcRenderer.invoke('netsvc:trap-tail', { since }),
   openFolder: (svc) => ipcRenderer.invoke('netsvc:open-folder', { svc }),
   onFile: sub('netsvc:file'),
-  onStatus: sub('netsvc:status')
+  onStatus: sub('netsvc:status'),
+  onTrap: sub('netsvc:trap'),
+  onSyslogAlert: sub('netsvc:syslog-alert')
 });
 
 /* AI 解析（LLM，仅主窗口可用）：配置/分析经主进程发起（渲染层 CSP 禁止直连外网）；
@@ -175,6 +239,5 @@ contextBridge.exposeInMainWorld('topoAI', {
   historyRead: (name) => ipcRenderer.invoke('ai:history-read', { name }),
   historyRemove: (name) => ipcRenderer.invoke('ai:history-remove', { name }),
   historyClear: () => ipcRenderer.invoke('ai:history-clear'),
-  onChunk: sub('ai:chunk'),
-  onStatus: sub('ai:status')
+  onChunk: sub('ai:chunk')
 });

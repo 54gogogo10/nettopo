@@ -1,14 +1,25 @@
 /* NetTopo Electron 主进程 */
 'use strict';
-const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu } = require('electron');
+const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu, shell: electronShell } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
+const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-backup.js');
+const { CredentialStore } = require('./js/credential-store.js');
+const { AlertDeps } = require('./js/alert-deps.js');
+const AL = require('./js/alert-level.js');
+const { LinkMonitor } = require('./js/link-monitor.js');
+const LP = require('./js/link-path.js');
+const { applyAck, clearAck, unackedCount } = require('./js/event-ack.js');
+const { buildReport: buildSlaReport, rangeOf: slaRangeOf, fmtPct: slaFmtPct } = require('./js/sla-report.js');
+const { DeployStore, deployVendor } = require('./js/config-deploy.js');
 const { NetServices } = require('./js/net-services.js');
+const { SEV_NAMES: SYSLOG_SEV_NAMES } = require('./js/svc-syslog.js');
 const { Maintenance, nextDailyRun } = require('./js/maintenance.js');
-const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList, expandScanTargets, scanSubnet } = require('./js/diag.js');
+const { ping, trace, scanPorts, dnsLookup, isValidDiagHost, parsePortList, expandScanTargets, scanSubnet, parsePingStats, pingEvidenceAlive } = require('./js/diag.js');
 const { searchMonitorLogs } = require('./js/log-search.js');
 const { Updater } = require('./js/updater.js');
 const { AiClient, AiHistoryStore, validateBaseUrl, validateProtocol, buildConfigPrompt, buildLogPrompt, buildShellPrompt, buildCompliancePrompt, buildDailyReportPrompt, parseShellCommands, truncateText, maskKey, DEFAULT_MAX_INPUT_KB } = require('./js/ai-llm.js');
@@ -27,7 +38,21 @@ function logCrash(kind, err) {
   try {
     const fs = require('fs');
     const line = '[' + new Date().toISOString() + '] ' + kind + ': ' + String((err && (err.stack || err.message)) || err) + '\n';
-    fs.appendFileSync(path.join(app.getPath('userData'), 'main-crash.log'), line.slice(0, 8000), 'utf8');
+    const file = path.join(app.getPath('userData'), 'main-crash.log');
+    // 异常风暴兜底：日志超 4MB 时保留后半重写（丢最旧一半），防反复 appendFileSync 写满磁盘
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 4 * 1024 * 1024) {
+        const fd = fs.openSync(file, 'r');
+        try {
+          const keep = Buffer.alloc(2 * 1024 * 1024);
+          fs.readSync(fd, keep, 0, keep.length, st.size - keep.length);
+          const nl = keep.indexOf(10);
+          fs.writeFileSync(file, keep.slice(nl >= 0 ? nl + 1 : 0));
+        } finally { try { fs.closeSync(fd); } catch (e2) { /* ignore */ } }
+      }
+    } catch (e2) { /* 大小检查失败照常追加 */ }
+    fs.appendFileSync(file, line.slice(0, 8000), 'utf8');
   } catch (e) { /* 日志失败忽略 */ }
   console.error('[main]', kind, err);
 }
@@ -38,9 +63,12 @@ process.on('unhandledRejection', (reason) => logCrash('unhandledRejection', reas
 if (process.env.NETTOPO_USERDATA) app.setPath('userData', process.env.NETTOPO_USERDATA);
 
 /* ---- 单实例锁：双开会产生双托盘、内置 TFTP/FTP/Syslog 端口互抢（第二实例服务全部起不来）、
- *   两边 settings.json 互相覆盖——第二个实例直接退出并唤起已有主窗 */
+ *   两边 settings.json 互相覆盖——第二个实例直接退出并唤起已有主窗。
+ *   app.quit() 是异步的：若不立即退出，后续模块级初始化（ShellManager/MonitorManager 建目录读配置、
+ *   IPC 注册）会在首实例仍在运行时并发执行——第二实例无任何待清理状态，直接同步退出兜底。 */
 if (!app.requestSingleInstanceLock()) {
   app.quit();
+  process.exit(0);
 } else {
   app.on('second-instance', () => {
     if (mainWin && !mainWin.isDestroyed()) {
@@ -63,8 +91,7 @@ const trayEnabled = () => trayWanted() && tray !== null;
 let trayJobCount = 0; // 托盘菜单显示的活动监控任务数
 let webReady = false;              // Web 管理页窗口渲染层是否就绪
 const pendingWebTabs = [];         // 等待 Web 窗口加载完成的 newtab 消息
-let certSeq = 0;
-const pendingCert = new Map();     // id -> { callback, host, url, error, fp }
+const pendingCert = new Map();     // id -> { callback, host, url, error, fp, shown }
 const allowedCerts = new Map();    // host -> 已允许的证书指纹（按指纹固定，指纹变化重新询问）
 const certQueue = [];              // 窗口未就绪时到达的证书告警
 let shellReady = false;            // Shell 窗口渲染层是否已就绪（did-finish-load）
@@ -75,7 +102,23 @@ const shell = new ShellManager({ logDir: path.join(app.getPath('userData'), 'mon
 
 /* ---- 设备后台静默监控（复用 Web Shell 底层连接，独立监视任务） ---- */
 const configBackup = new ConfigBackupStore(path.join(app.getPath('userData'), 'config-backups'));
-const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup });
+/* ---- 配置变更下发记录库（变更单/逐行结果/回滚留痕；口令打码后落盘） ---- */
+const deployStore = new DeployStore(path.join(app.getPath('userData'), 'deploy-records'));
+const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup, ignoreRules: () => configIgnoreRules() });
+// 指纹信任裁决统一收口到 monitor 的权威信任库：无人值守采集（runOneShot）也必须遵守
+// 「首连 TOFU、变化即拒」，否则已钉扎主机的指纹变化会被静默接受并反写渲染层长期钉扎
+shell.setTrustGate((host, port, fp) => monitor.verifyFingerprint(host, port, fp));
+
+/* ---- 配置变更判定的「易变行」忽略规则（全局设置）----
+ * 时钟/运行时长/时间戳这类天天变却不代表有人改配置的行，不过滤就会让「配置有变化」天天误报。
+ * 读取即校验：设置被外部改坏时回落到内置默认规则，绝不让备份变更判定失效。 */
+function configIgnoreRules() {
+  const raw = loadAppSettings().configIgnoreRules;
+  const norm = normalizeIgnoreRules(Array.isArray(raw) ? raw : DEFAULT_IGNORE_RULES);
+  return norm.ok ? norm.rules : DEFAULT_IGNORE_RULES;
+}
+/* ---- 告警依赖抑制（上游失联 → 归并下游离线通知）：邻接表由渲染层在拓扑/监控配置变化时推送 ---- */
+const alertDeps = new AlertDeps();
 
 /* ---- 在线率采样（监控中心 7 天趋势）：探测结果按 10 分钟桶落盘 ---- */
 const uptimeStore = new UptimeStore(path.join(app.getPath('userData'), 'monitor-uptime.json'));
@@ -92,10 +135,58 @@ netSvc.on('file', (info) => {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:file', info);
   if (notifyEnabled()) {
     notifyUser('网络拓扑管理软件 · 收到设备文件',
-      (info.svc === 'tftp' ? 'TFTP' : 'FTP') + ' 收到 ' + info.name + '（来自 ' + info.ip + '，' + info.size + ' 字节），可在「网络服务」面板导入配置备份库');
+      (info.svc === 'tftp' ? 'TFTP' : 'FTP') + ' 收到 ' + info.name + '（来自 ' + info.ip + '，' + info.size + ' 字节），可在「网络服务」面板导入配置备份库', levelOf('file'));
   }
 });
 netSvc.on('status', (st) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:status', st); });
+// Syslog 日志告警（关键字 / 级别阈值命中，服务端已按同主机同规则冷却）：实时推送面板 + 弹系统通知——
+// 来源主机匹配到监控任务的设备时走该设备的静默/维护窗口判定并记入事件时间线，未匹配设备直接通知
+netSvc.on('syslog-alert', (a) => {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:syslog-alert', a);
+  if (!notifyEnabled()) return;
+  let deviceId = '', name = '';
+  try {
+    const job = monitor.status().find(s => s.host === a.host);
+    if (job) { deviceId = job.deviceId; name = job.name || job.deviceId; }
+  } catch (e) { /* 匹配失败按未匹配处理 */ }
+  const sevName = (a.severity != null && SYSLOG_SEV_NAMES[a.severity]) || String(a.severity);
+  const why = (a.matched && a.matched.length)
+    ? '命中告警关键字「' + a.matched.join('、') + '」'
+    : '日志级别 ' + sevName + ' 达到告警阈值';
+  const title = '网络拓扑管理软件 · Syslog 告警';
+  const body = (name ? name + '（' + a.host + '）' : a.host) + ' ' + why + '：' + String(a.msg || '').slice(0, 120);
+  // 等级按日志自身的严重度取（设备自己标的级别比「命中即同级」更贴近现场）
+  const lv = AL.levelFromSyslogSeverity(a.severity);
+  if (deviceId) {
+    recordMonitorEvent({ key: deviceId + '@' + a.host, deviceId, host: a.host, name }, 'syslog-alert', why + '：' + (a.msg || ''), lv);
+    notifyForDevice(deviceId, title, body, lv);
+  } else {
+    notifyUser(title, body, lv);
+  }
+});
+// SNMP Trap：实时推送面板；标准 Trap（接口 Down/Up、冷/热启动、认证失败等）弹系统通知——
+// 来源 IP 能匹配到监控任务的设备时走该设备的静默/维护窗口判定并记入事件时间线，未匹配设备直接通知
+netSvc.on('trap', (t) => {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('netsvc:trap', t);
+  if (!t.standard || !notifyEnabled()) return;
+  let deviceId = '', name = '';
+  try {
+    const job = monitor.status().find(s => s.host === t.host);
+    if (job) { deviceId = job.deviceId; name = job.name || job.deviceId; }
+  } catch (e) { /* 匹配失败按未匹配处理 */ }
+  const title = '网络拓扑管理软件 · 收到 SNMP Trap';
+  const body = (name ? name + '（' + t.host + '）' : t.host) + ' 上报 ' + t.trap
+    + (t.uptime ? '，设备已运行 ' + t.uptime : '')
+    + (t.msg ? '：' + t.msg.slice(0, 120) : '');
+  // 等级按 Trap 含义取：接口断开 / 认证失败为严重，接口恢复为提示，冷热启动等为警告
+  const lv = AL.levelFromTrap(t.trap);
+  if (deviceId) {
+    recordMonitorEvent({ key: deviceId + '@' + t.host, deviceId, host: t.host, name }, 'trap', t.trap + (t.msg ? '：' + t.msg : ''), lv);
+    notifyForDevice(deviceId, title, body, lv);
+  } else {
+    notifyUser(title, body, lv);
+  }
+});
 
 /** 本机 IPv4 地址列表（面板展示，方便在设备侧配置 tftp/ftp/loghost 指向） */
 function localIPv4s() {
@@ -131,7 +222,12 @@ function loadAppSettings() {
 function saveAppSettings() {
   try {
     const fs = require('fs');
-    fs.writeFileSync(getSettingsFile(), JSON.stringify(appSettings || {}, null, 2), 'utf8');
+    // tmp+rename 原子写（与 AiHistoryStore/backup-store 同口径）：直接覆写在中途崩溃/断电时产生
+    // 截断 JSON，重启后 loadAppSettings 静默回退 {}——备份目录、网络服务（含加密口令）、AI 配置
+    // 等全部设置一次性丢失
+    const tmp = getSettingsFile() + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(appSettings || {}, null, 2), 'utf8');
+    fs.renameSync(tmp, getSettingsFile());
   } catch (e) { /* 失败不阻断 */ }
 }
 function defaultBackupDir() {
@@ -160,10 +256,33 @@ const maintenance = new Maintenance({
     }
   }
 });
-/** 设备告警的系统通知统一出口：静默期内（手动静默 / 维护窗口）不弹通知，事件时间线照常记录 */
-function notifyForDevice(deviceId, title, body) {
+/** 告警等级设置（settings.json ：alertLevels / alertSound）——读写一律经 js/alert-level.js 归一化，
+ *  损坏或手改的设置只影响其自身字段，不改变默认等级 */
+function alertLevelOverrides() { return AL.normalizeOverrides(loadAppSettings().alertLevels); }
+function alertSoundSettings() { return AL.normalizeSoundSettings(loadAppSettings().alertSound); }
+/** 事件类型 → 当前生效等级（用户覆盖优先，其次默认表） */
+function levelOf(type) { return AL.levelFor(type, alertLevelOverrides()); }
+
+/** 设备告警的系统通知统一出口：静默期内（手动静默 / 维护窗口）不弹通知，事件时间线照常记录。
+ *  level 省略时按事件默认等级；告警等级与提示音见 js/alert-level.js */
+function notifyForDevice(deviceId, title, body, level) {
   try { if (maintenance.isMuted(deviceId).muted) return; } catch (e) { /* 判定失败照常通知 */ }
-  notifyUser(title, body);
+  notifyUser(title, body, level);
+}
+
+/** 分级提示音：渲染层用 WebAudio 现场合成（无音频文件、离线可用、CSP 无外链）；
+ *  主窗口不可用（已销毁/加载失败）时退回系统提示音，保证告警不至全静音。
+ *  多台设备同时告警的合并与节流在渲染层做（见 app.js playAlertSound：按最高等级合并）。 */
+function emitAlertSound(level) {
+  const st = alertSoundSettings();
+  if (!AL.shouldPlay(level, st)) return;
+  if (mainWin && !mainWin.isDestroyed()) {
+    try {
+      mainWin.webContents.send('monitor:alert-sound', { level: AL.normalizeLevel(level), volume: st.volume, ts: Date.now() });
+      return;
+    } catch (e) { /* 发送失败：走下面的系统提示音兜底 */ }
+  }
+  try { electronShell.beep(); } catch (e) { /* 提示音失败不阻断通知 */ }
 }
 
 /* ---- 系统托盘常驻 ---- */
@@ -175,9 +294,9 @@ function rebuildTrayMenu() {
   items.push({ label: '显示主窗口', click: () => {
     if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); }
   } });
-  items.push({ label: '停止全部监控', click: () => { monitor.stopAll(); trayJobCount = 0; rebuildTrayMenu(); } });
+  items.push({ label: '停止全部监控', click: () => { monitor.stopAll(); linkMon.stopAll(); trayJobCount = 0; rebuildTrayMenu(); } });
   items.push({ type: 'separator' });
-  items.push({ label: '退出', click: () => { trayQuitting = true; monitor.stopAll(); shell.closeAll(); app.quit(); } });
+  items.push({ label: '退出', click: () => { trayQuitting = true; monitor.stopAll(); linkMon.stopAll(); shell.closeAll(); app.quit(); } });
   tray.setContextMenu(Menu.buildFromTemplate(items));
 }
 function applyTray() {
@@ -240,16 +359,27 @@ function createShellWindow() {
   return shellWin;
 }
 
-/** 会话事件统一出口：窗口未就绪时先入队，就绪后按序发送 */
+/** 会话事件统一出口：窗口未就绪时先入队，就绪后按序发送。
+ *  入队封顶（FIFO 丢最旧）：渲染进程崩溃/加载失败时 did-finish-load 不触发、shellReady 恒 false，
+ *  高频终端输出（cat 大文件等）会无限累积撑爆内存——丢最旧保最新，窗口恢复后仍能看到近段输出 */
+const SHELL_QUEUE_MAX = 2000;
 function emitShell(type, id, payload) {
   if (!shellWin || shellWin.isDestroyed()) return;
-  if (!shellReady) { shellQueue.push([type, id, payload]); return; }
+  if (!shellReady) {
+    if (shellQueue.length >= SHELL_QUEUE_MAX) shellQueue.shift();
+    shellQueue.push([type, id, payload]);
+    return;
+  }
   shellWin.webContents.send(type, id, payload);
 }
 
 function openShellTab(info) {
   const win = createShellWindow();
-  if (win.webContents.isLoading()) pendingTabs.push(info);
+  // 标签消息封顶：群发全选数百设备时上限远超实际标签数，只挡窗口加载异常期的无界堆积
+  if (win.webContents.isLoading()) {
+    if (pendingTabs.length >= 1024) pendingTabs.shift();
+    pendingTabs.push(info);
+  }
   else win.webContents.send('shell:newtab', info);
 }
 
@@ -266,7 +396,8 @@ monitor.on('status', (info) => {
 });
 // 监控事件历史（供监控中心时间线；主进程保存最近 500 条）
 const monitorEvents = [];
-function recordMonitorEvent(info, type, detail) {
+/** 事件时间线入账：level 省略时按事件类型取默认等级（告警等级见 js/alert-level.js） */
+function recordMonitorEvent(info, type, detail, level) {
   let name = info.name || '';
   // 兜底：事件未携带设备名时从任务状态表补齐（避免时间线显示 deviceId）
   if (!name && info && info.key) {
@@ -275,7 +406,7 @@ function recordMonitorEvent(info, type, detail) {
       if (it && it.name) name = it.name;
     } catch (e) { /* ignore */ }
   }
-  monitorEvents.push({ ts: Date.now(), type: type, key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' });
+  monitorEvents.push({ ts: Date.now(), type: type, level: AL.normalizeLevel(level || levelOf(type)), key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' });
   if (monitorEvents.length > 500) monitorEvents.splice(0, monitorEvents.length - 500);
 }
 // 在线探测状态 → 主窗口；离线/恢复转换时弹系统通知（受 settings.monitorNotify 开关控制）
@@ -287,25 +418,101 @@ const notifyEnabled = () => loadAppSettings().monitorNotify !== false;
 function sendMonitor(channel, info) {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(channel, info);
 }
-function notifyUser(title, body) {
+function notifyUser(title, body, level) {
+  // 分级提示音先发（与系统通知是否可用无关）：渲染层合成的音型才算「按等级发声」
+  emitAlertSound(level);
   try {
     if (!Notification.isSupported()) return;
-    const n = new Notification({ title: title, body: body, silent: false });
+    // silent 恒为 true：提示音一律由本软件按等级合成——既避免与系统提示音叠加成两声，
+    // 也让「禁用声音」是真正的全静音（系统通知音是关不掉的，只能靠 silent 抑制）
+    const n = new Notification({ title: title, body: body, silent: true });
     n.on('click', () => { if (mainWin && !mainWin.isDestroyed()) { if (mainWin.isMinimized()) mainWin.restore(); mainWin.focus(); } });
+    // 通知对象须保活至事件触发：局部引用可能被 GC，导致通知不显示/点击失效（告警漏报）。
+    // 保活集封顶：部分平台 close 事件不可靠（条目永不回收），超限丢弃最旧引用防 Set 无界增长
+    if (liveNotifications.size >= 64) { const oldest = liveNotifications.values().next().value; liveNotifications.delete(oldest); }
+    liveNotifications.add(n);
+    n.on('close', () => liveNotifications.delete(n));
     n.show();
   } catch (e) { /* 通知失败不阻断 */ }
 }
+const liveNotifications = new Set();
+
+/* ---- 告警依赖抑制（上游失联时归并下游离线通知）----
+ * 拓扑邻接表由渲染层推送（拓扑或监控配置变化时，键与监控任务一致：deviceId@host）。
+ * 判定窗口：下游离线后先等一个窗口再决定是否通知——各设备探测定时器彼此独立，上游与下游的离线
+ * 事件到达顺序是随机的，不设窗口就只能在一半情况下归并成功；窗口也顺带抑制瞬时抖动（窗口内恢复
+ * 则两条通知都不发，在线率采样照常记录）。
+ * 窗口长度：有「在监控清单里的邻居」时用 ALERT_DEP_WINDOW_MS（值得等上游事件到达再裁决），
+ * 否则只用 ALERT_FLAP_WINDOW_MS 做抖动抑制（行为接近旧版）。
+ * 注意：不能等到「邻居已判为离线」才延迟——先失败的那台此刻还不知道邻居的情况，
+ * 那样会让它跳过窗口直接通知，归并随即失效（实测踩过）。 */
+const ALERT_DEP_WINDOW_MS = 8000;
+const ALERT_FLAP_WINDOW_MS = 2000;
+const pendingOffline = new Map();   // key -> timer（等待窗口内是否出现上游失联）
+function fireOffline(info) {
+  pendingOffline.delete(info.key);
+  const dep = alertDeps.judgeOffline(info.key);
+  if (dep.suppress) {
+    alertDeps.noteSuppressed(info.key, dep.rootKey);
+    // 只归并通知；事件时间线照常记录并写明归并原因（证据不丢）
+    recordMonitorEvent(info, 'offline', '探测失败，设备可能离线（上游 ' + dep.rootName + ' 同时失联，通知已归并）');
+    return;
+  }
+  recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
+  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线', levelOf('offline'));
+}
 monitor.on('probe', (info) => {
   sendMonitor('monitor:probe', info);
+  // failSince 为该轮故障的起始时刻：根因判据「同故障分量里最早失败者」据此裁决（与事件到达顺序无关）
+  alertDeps.noteProbe(info.key, info.ok === true ? true : (info.ok === false ? false : undefined), info.failSince);
   const prev = lastProbeOk.get(info.key);
   if (info.ok === false && prev !== false) {
     lastProbeOk.set(info.key, false);
-    recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
-    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线');
+    const win = alertDeps.hasMonitoredNeighbor(info.key) ? ALERT_DEP_WINDOW_MS : ALERT_FLAP_WINDOW_MS;
+    const old = pendingOffline.get(info.key);
+    if (old) clearTimeout(old);
+    pendingOffline.set(info.key, setTimeout(() => { try { fireOffline(info); } catch (e) { logCrash('alertDeps', e); } }, win));
   } else if (info.ok === true && prev === false) {
     lastProbeOk.set(info.key, true);
-    recordMonitorEvent(info, 'recovery', '探测恢复在线');
-    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备恢复', info.name + '（' + info.host + '）已恢复在线');
+    const pend = pendingOffline.get(info.key);
+    if (pend) {
+      // 窗口内自行恢复：离线通知从未发出，恢复通知同样不必发（只留一条事件说明，避免抖动刷屏）
+      clearTimeout(pend);
+      pendingOffline.delete(info.key);
+      recordMonitorEvent(info, 'recovery', '探测一度失败，在通知归并窗口内自行恢复（未打扰）');
+    } else {
+      const rc = alertDeps.judgeRecover(info.key);
+      const agg = rc.aggregate && rc.aggregate.count ? rc.aggregate : null;
+      if (rc.suppress) {
+        recordMonitorEvent(info, 'recovery', '探测恢复在线（随上游 ' + rc.rootName + ' 恢复，通知已归并）');
+      } else {
+        // 根因设备恢复时，把随之恢复的下游一并播报（下游各自的恢复通知已被归并，信号不丢）；
+        // 仍未恢复的下游如实单列——它们的离线通知此前从未发出，下面按第一条补发
+        let tail = '';
+        if (agg) {
+          const parts = [];
+          if (agg.recoveredNames.length) parts.push('已随之恢复 ' + agg.recoveredNames.join('、'));
+          if (agg.stillDownNames.length) parts.push('仍不可达 ' + agg.stillDownNames.join('、'));
+          tail = '；此前因其失联的 ' + agg.count + ' 台设备' + (parts.length ? '：' + parts.join('；') : '');
+        }
+        recordMonitorEvent(info, 'recovery', '探测恢复在线' + tail);
+        if (notifyEnabled()) {
+          notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备恢复',
+            info.name + '（' + info.host + '）已恢复在线' + tail, levelOf('recovery'));
+          for (const k of ((agg && agg.stillDownKeys) || [])) {
+            const i = k.lastIndexOf('@');
+            const devId = i > 0 ? k.slice(0, i) : k;
+            const host = i > 0 ? k.slice(i + 1) : '';
+            const nm = alertDeps.nameOf(k);
+            // 该设备的离线通知此前被归并（从未发出），此处补发是第一条而非重复；同时记入时间线留痕
+            recordMonitorEvent({ key: k, deviceId: devId, host, name: nm }, 'offline',
+              '仍不可达（此前因 ' + (agg && agg.rootName) + ' 失联，离线通知已归并）');
+            notifyForDevice(devId, '网络拓扑管理软件 · 设备仍不可达',
+              nm + (host ? '（' + host + '）' : '') + '仍未恢复在线（此前因 ' + (agg && agg.rootName) + ' 失联未单独通知）', levelOf('offline'));
+          }
+        }
+      }
+    }
   } else {
     lastProbeOk.set(info.key, info.ok);
   }
@@ -322,11 +529,11 @@ monitor.on('alert', (info) => {
       lastAlertOn.set(info.key, true);
       lastAlertPatterns.set(info.key, cur);
       recordMonitorEvent(info, 'alert', detail);
-      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
+      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail, levelOf('alert'));
     } else if (added.length) {
       lastAlertPatterns.set(info.key, cur);
       recordMonitorEvent(info, 'alert', detail + '（新增 ' + added.join('、') + '）');
-      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail);
+      if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 输出告警', info.name + '（' + info.host + '）' + detail, levelOf('alert'));
     }
   } else if (lastAlertOn.get(info.key) === true) {
     lastAlertOn.set(info.key, false);
@@ -335,9 +542,9 @@ monitor.on('alert', (info) => {
   }
 });
 monitor.on('trust', (info) => {
-  // 首次连接自动信任主机指纹：安全敏感事件，始终通知用户（不随 monitorNotify 开关关闭）
+  // 首次连接自动信任主机指纹：安全敏感事件，始终通知用户（不随 monitorNotify 开关关闭；仍受「告警提示音」开关约束）
   notifyUser('网络拓扑管理软件 · 首次信任主机指纹',
-    info.name + '（' + info.host + '）首次连接已自动信任指纹 ' + info.fp + '；后续指纹变化将拒绝连接');
+    info.name + '（' + info.host + '）首次连接已自动信任指纹 ' + info.fp + '；后续指纹变化将拒绝连接', levelOf('trust'));
 });
 const lastBackupChangeAt = new Map(); // key -> 上次变更通知时间（节流）
 monitor.on('compliance', (info) => {
@@ -346,7 +553,7 @@ monitor.on('compliance', (info) => {
     ? '合规巡检通过（' + info.total + ' 项）'
     : '合规违规 ' + info.failed + '/' + info.total + '：' + (info.items || []).map(i => i.name).join('、');
   recordMonitorEvent(info, 'compliance', detail);
-  if (!info.ok && notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail);
+  if (!info.ok && notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置合规违规', info.name + '（' + info.host + '）' + detail, levelOf('compliance'));
 });
 monitor.on('sysinfo', (info) => sendMonitor('monitor:sysinfo', info));
 // SNMP 性能采样（CPU/内存/sysUpTime）：实时推送监控中心「性能」页
@@ -356,7 +563,7 @@ monitor.on('reboot', (info) => {
   sendMonitor('monitor:reboot', info);
   const detail = '设备可能已重启（sysUpTime ' + fmtUptimeTicks(info.prev) + ' → ' + fmtUptimeTicks(info.cur) + '）';
   recordMonitorEvent(info, 'reboot', detail);
-  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备重启', info.name + '（' + info.host + '）' + detail);
+  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备重启', info.name + '（' + info.host + '）' + detail, levelOf('reboot'));
 });
 // SNMP 接口流量：实时采样推送主窗口；接口 up/down 跳变记入事件时间线并弹通知（接口离线才弹）
 monitor.on('iftraffic', (info) => sendMonitor('monitor:iftraffic', info));
@@ -366,7 +573,7 @@ monitor.on('ifstatus', (info) => {
     recordMonitorEvent(info, ch.to === 'down' ? 'if-down' : 'if-up',
       '接口 ' + ch.name + ' ' + (ch.to === 'down' ? 'DOWN（离线）' : 'UP（恢复）'));
     if (ch.to === 'down' && notifyEnabled()) {
-      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 接口离线', info.name + '（' + info.host + '）接口 ' + ch.name + ' DOWN');
+      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 接口离线', info.name + '（' + info.host + '）接口 ' + ch.name + ' DOWN', levelOf('if-down'));
     }
   }
 });
@@ -377,7 +584,7 @@ monitor.on('metric-alert', (info) => {
   const detail = (info.detail || (info.alerting ? '指标超阈值' : '指标告警解除'));
   recordMonitorEvent(info, info.alerting ? 'metric' : 'metric-clear', detail);
   if (info.alerting && notifyEnabled()) {
-    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 指标告警', info.name + '（' + info.host + '）' + detail);
+    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 指标告警', info.name + '（' + info.host + '）' + detail, levelOf('metric'));
   }
 });
 // HTTP 健康探测：状态沿（失败/恢复）记入时间线并弹通知（与在线探测同口径）
@@ -388,11 +595,11 @@ monitor.on('http', (info) => {
   if (info.ok === false && prev !== false) {
     lastHttpOk.set(info.key, false);
     recordMonitorEvent(info, 'http-fail', 'HTTP 探测失败：' + info.url + (info.error ? '（' + info.error + '）' : ''));
-    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测失败', info.name + '（' + info.host + '）' + info.url + ' 探测失败' + (info.error ? '：' + info.error : ''));
+    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测失败', info.name + '（' + info.host + '）' + info.url + ' 探测失败' + (info.error ? '：' + info.error : ''), levelOf('http-fail'));
   } else if (info.ok === true && prev === false) {
     lastHttpOk.set(info.key, true);
     recordMonitorEvent(info, 'http-ok', 'HTTP 探测恢复：' + info.url + (info.status ? '（HTTP ' + info.status + '）' : ''));
-    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测恢复', info.name + '（' + info.host + '）' + info.url + ' 已恢复');
+    if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · HTTP 探测恢复', info.name + '（' + info.host + '）' + info.url + ' 已恢复', levelOf('http-ok'));
   } else {
     lastHttpOk.set(info.key, info.ok);
   }
@@ -405,7 +612,7 @@ monitor.on('cert-alert', (info) => {
     : '证书剩余 ' + info.days + ' 天，已高于告警阈值：' + info.url;
   recordMonitorEvent(info, info.alerting ? 'cert' : 'cert-clear', detail);
   if (info.alerting && notifyEnabled()) {
-    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 证书即将到期', info.name + '（' + info.host + '）' + detail);
+    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 证书即将到期', info.name + '（' + info.host + '）' + detail, levelOf('cert'));
   }
 });
 monitor.on('backup', (info) => {
@@ -415,14 +622,15 @@ monitor.on('backup', (info) => {
   if (!notifyEnabled()) return;
   if (info.ok) {
     if (info.first) recordMonitorEvent(info, 'backup', '首次备份：' + (info.fileName || ''));
-    else if (info.changed) recordMonitorEvent(info, 'backup-change', '配置有变化（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）：' + (info.fileName || ''));
+    else if (info.changed) recordMonitorEvent(info, 'backup-change', '配置有变化（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）' + (info.summary ? '：' + info.summary : '') + '　' + (info.fileName || ''));
     else recordMonitorEvent(info, 'backup', '与上次一致：' + (info.fileName || ''));
     if (info.changed) {
       const now = Date.now();
       const last = lastBackupChangeAt.get(info.key) || 0;
       if (now - last > 30 * 60 * 1000) {
         lastBackupChangeAt.set(info.key, now);
-        notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置变更', info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）');
+        notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置变更',
+          info.name + '（' + info.host + '）配置与上次备份不同（+' + (info.added || 0) + '/-' + (info.removed || 0) + ' 行）' + (info.summary ? '：' + info.summary : ''), levelOf('backup-change'));
       }
     }
   } else {
@@ -431,17 +639,91 @@ monitor.on('backup', (info) => {
     const prevErr = lastBackupErrAt.get(info.key) || 0;
     if (now - prevErr > 10 * 60 * 1000) {
       lastBackupErrAt.set(info.key, now);
-      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'));
+      notifyForDevice(info.deviceId, '网络拓扑管理软件 · 配置备份失败', info.name + '（' + info.host + '）：' + (info.error || '未知错误'), levelOf('backup-error'));
     }
   }
+});
+
+/* ================= 端到端链路连通性监测（调度器 js/link-monitor.js + 本进程注入的探测实现） =================
+ * 分层：拓扑与任务由渲染层用 js/link-path.js 算好后送来（段/目标地址），主进程只管
+ * 「按间隔发包 → 状态机 → 事件」；本机探测用 link-monitor 的内置实现（diag 的判定口径），
+ * 设备侧探测复用 Shell 的一次性会话——凭据要么给统一凭据库的 credId，要么给监控配置的明文快照
+ * （只在主进程内存里，与 monitor:start 同一条口径，不落盘）。 */
+const linkMon = new LinkMonitor({
+  probes: {
+    /** 段起点设备上执行 ping：命令由 link-path.probeCommand 按厂家生成（见该模块 VENDOR_PING） */
+    device: async (seg, task, o) => {
+      const cred = credPatchOf({ credId: seg.from.credId });
+      if (!cred.ok) return { ok: null, latencyMs: null, raw: '', error: cred.error };
+      const p = cred.patch || {};
+      const conn = {
+        host: seg.from.host,
+        port: seg.from.port || p.port || '',
+        protocol: seg.from.protocol || p.protocol || '',
+        username: seg.from.username || p.username || '',
+        password: seg.from.password || p.password || '',
+        privateKey: seg.from.privateKey || p.privateKey || '',
+        keyPassphrase: seg.from.keyPassphrase || p.keyPassphrase || '',
+        preCmd: seg.from.preCmd || p.preCmd || '',
+        expectFp: seg.from.expectFp || ''
+      };
+      let r = null;
+      try {
+        r = await shell.runOneShot(Object.assign({}, conn, {
+          commands: [o.command],
+          waitMs: 1500,
+          cmdTimeoutMs: Math.max(4000, (o.timeoutMs || 3000) + 3000),
+          readyTimeoutMs: 12000
+        }));
+      } catch (e) {
+        return { ok: null, latencyMs: null, raw: '', error: String((e && e.message) || e) };
+      }
+      if (!r || !r.ok) return { ok: null, latencyMs: null, raw: '', error: (r && r.error) || '设备会话建立失败' };
+      const text = String(((r.outputs || [])[0] || {}).text || '');
+      // 判定与「在线探测/诊断工具箱」同一口径；判不出来就返回 null（不改链路状态，见 link-path 头注）
+      const stats = parsePingStats(text);
+      let ok = stats ? pingEvidenceAlive(text, stats, seg.target) : null;
+      if (ok === null) ok = LP.judgeProbeText(text, seg.target);
+      return { ok: ok, latencyMs: LP.parseProbeLatency(text), raw: text.slice(0, 400), error: ok === null ? '未能从设备回显判定（命令语法/权限/输出格式不匹配？）' : '' };
+    }
+  }
+});
+/** 链路状态变化的中文描述（事件时间线与通知共用） */
+function linkEventDetail(info, down) {
+  const where = info.kind === 'path' ? '端到端路径' : '链路';
+  const view = info.mode === 'device' ? '设备视角' : '本机视角';
+  if (down) {
+    const at = (info.brokenAt != null && info.segments && info.segments[info.brokenAt])
+      ? '；断点：第 ' + (info.brokenAt + 1) + ' 段 ' + (info.segments[info.brokenAt].fromName || '') + ' → ' + (info.segments[info.brokenAt].target || '')
+      : '';
+    const why = info.lastError ? '（' + info.lastError + '）' : '';
+    return where + '中断：' + info.name + at + why + '（' + view + '）';
+  }
+  return where + '恢复：' + info.name + (info.latencyMs != null ? '；往返时延 ' + info.latencyMs + 'ms' : '') + '（' + view + '）';
+}
+linkMon.on('result', (info) => { try { sendMonitor('link:result', info); } catch (e) { logCrash('linkMon', e); } });
+linkMon.on('state', (info) => {
+  sendMonitor('link:state', info);
+  if (info.reason === 'started' || info.reason === 'stopped') return;   // 启停不是链路事件
+  if (!info.event) return;
+  const down = info.event === 'link-down';
+  const detail = linkEventDetail(info, down);
+  const src = { key: 'link:' + info.key, deviceId: info.deviceId || '', host: info.host || '', name: info.name || '' };
+  recordMonitorEvent(src, info.event, detail, levelOf(info.event));
+  if (!notifyEnabled()) return;
+  const title = '网络拓扑管理软件 · ' + (down ? '链路中断' : '链路恢复');
+  const body = detail;
+  if (info.deviceId) notifyForDevice(info.deviceId, title, body, levelOf(info.event));
+  else notifyUser(title, body, levelOf(info.event));
 });
 
 /* ---- Web Shell 会话录制（JSONL 录像：{t, dir, d} 每行一条；渲染层缓冲批量追加） ---- */
 const SHELL_REC_RE = /^rec_\d{8}_\d{6}(?:_\d+)?\.ntrec\.jsonl$/;
 let shellRecFile = null; // 当前录制文件全路径（null = 未在录制；全局单文件）
+let shellRecOwner = null; // 发起录制的 webContents：append/stop 只接受同一来源，防另一窗口注入伪造录像行
 function shellRecDir() { return path.join(app.getPath('userData'), 'shell-recordings'); }
 ipcMain.handle('shell:record-start', (e) => {
-  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  if (!shellWinSender(e)) return { ok: false, error: 'forbidden' };
   if (shellRecFile) return { ok: true, name: path.basename(shellRecFile), existed: true };
   try {
     fs.mkdirSync(shellRecDir(), { recursive: true });
@@ -451,22 +733,27 @@ ipcMain.handle('shell:record-start', (e) => {
     let name = base + '.ntrec.jsonl';
     for (let i = 2; fs.existsSync(path.join(shellRecDir(), name)); i++) name = base + '_' + i + '.ntrec.jsonl';
     shellRecFile = path.join(shellRecDir(), name);
+    shellRecOwner = e.sender;
     fs.writeFileSync(shellRecFile, JSON.stringify({ t: 0, dir: 'meta', d: { startedAt: Date.now() } }) + '\n', 'utf8');
     return { ok: true, name };
-  } catch (err) { shellRecFile = null; return { ok: false, error: String((err && err.message) || err) }; }
+  } catch (err) { shellRecFile = null; shellRecOwner = null; return { ok: false, error: String((err && err.message) || err) }; }
 });
 ipcMain.handle('shell:record-append', (e, p) => {
-  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  if (!shellWinSender(e)) return { ok: false, error: 'forbidden' };
   if (!shellRecFile) return { ok: false, error: '未在录制中' };
+  // 只接受发起录制的那一个窗口：会话录像属审计证据，别窗口（含被注入的主窗）不得追加伪造行
+  if (shellRecOwner && e.sender !== shellRecOwner) return { ok: false, error: 'forbidden' };
   const lines = String((p && p.lines) || '');
   if (!lines || lines.length > 1024 * 1024) return { ok: false, error: '录制数据为空或过大' };
   try { fs.appendFileSync(shellRecFile, lines.endsWith('\n') ? lines : lines + '\n', 'utf8'); return { ok: true }; }
   catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
 });
 ipcMain.handle('shell:record-stop', (e) => {
-  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  if (!shellWinSender(e)) return { ok: false, error: 'forbidden' };
+  if (shellRecOwner && e.sender !== shellRecOwner) return { ok: false, error: 'forbidden' };
   const f = shellRecFile;
   shellRecFile = null;
+  shellRecOwner = null;
   return { ok: true, name: f ? path.basename(f) : null };
 });
 ipcMain.handle('shell:record-list', (e) => {
@@ -475,7 +762,8 @@ ipcMain.handle('shell:record-list', (e) => {
     const dir = shellRecDir();
     const items = (fs.readdirSync(dir) || [])
       .filter(n => SHELL_REC_RE.test(n))
-      .map(n => { const st = fs.statSync(path.join(dir, n)); return { name: n, size: st.size, at: st.mtimeMs }; })
+      .map(n => { const st = fs.lstatSync(path.join(dir, n)); if (!st.isFile()) return null; return { name: n, size: st.size, at: st.mtimeMs }; })
+      .filter(Boolean)
       .sort((a, b) => b.at - a.at);
     return { ok: true, items };
   } catch (err) { return { ok: true, items: [] }; }
@@ -487,7 +775,7 @@ ipcMain.handle('shell:record-read', (e, p) => {
   const full = path.join(shellRecDir(), name);
   if (!full.startsWith(path.resolve(shellRecDir()) + path.sep)) return { ok: false, error: 'forbidden' };
   try {
-    const st = fs.statSync(full);
+    const st = fs.lstatSync(full);
     if (!st.isFile() || st.size > 32 * 1024 * 1024) return { ok: false, error: '录像文件过大' };
     return { ok: true, content: fs.readFileSync(full, 'utf8') };
   } catch (err) { return { ok: false, error: '录像读取失败' }; }
@@ -584,20 +872,35 @@ function createWebWindow() {
   return webWin;
 }
 
-/** 证书告警统一出口：窗口未就绪先入队；无窗口则直接拒绝该请求 */
+/** 证书告警统一出口：窗口未就绪先入队；无窗口则直接拒绝该请求。
+ *  队列封顶（FIFO 拒最旧）：设备页持坏证书自动重连且窗口长时间未就绪时，certQueue 与挂起的
+ *  Chromium 请求句柄会无限累积——与 pendingCert 的 32 上限同思路，超限先拒最旧的等待项 */
+const CERT_QUEUE_MAX = 64;
 function emitCertError(info) {
   if (!webWin || webWin.isDestroyed()) {
     const rec = pendingCert.get(info.id);
     if (rec) { pendingCert.delete(info.id); rec.callback(false); }
     return;
   }
-  if (!webReady) { certQueue.push(info); return; }
+  if (!webReady) {
+    if (certQueue.length >= CERT_QUEUE_MAX) {
+      const oldest = certQueue.shift();
+      const rec = oldest ? pendingCert.get(oldest.id) : null;
+      if (oldest) pendingCert.delete(oldest.id);
+      if (rec) { try { rec.callback(false); } catch (e) { /* ignore */ } }
+    }
+    certQueue.push(info);
+    return;
+  }
   webWin.webContents.send('web:cert-error', info);
 }
 
 function openWebTab(info) {
   const win = createWebWindow();
-  if (win.webContents.isLoading()) pendingWebTabs.push(info);
+  if (win.webContents.isLoading()) {
+    if (pendingWebTabs.length >= 256) pendingWebTabs.shift();
+    pendingWebTabs.push(info);
+  }
   else win.webContents.send('web:newtab', info);
 }
 
@@ -626,6 +929,38 @@ function decryptSecretValue(value) {
   } catch (e) { return ''; }
 }
 
+/* ---- 统一凭据库（监控 ▾ 凭据库…）：设备访问凭据集中管理，口令经 safeStorage 密文落盘 ----
+ * 与 settings.json 的「加密不可用则原样落盘」不同，凭据库**不允许退化成明文**：
+ * 适配器在加密不可用时返回空串，由 CredentialStore 拒存口令并回报「口令未保存」告警。
+ * 渲染层只拿得到元数据（hasPassword 布尔）与 id，明文只在主进程内解密后交给会话/下发管道。 */
+const credStore = new CredentialStore(path.join(app.getPath('userData'), 'credentials'), {
+  encrypt: (text) => {
+    try {
+      const { safeStorage } = require('electron');
+      if (!safeStorage || !safeStorage.isEncryptionAvailable()) return '';
+      return ENC_PREFIX + safeStorage.encryptString(String(text)).toString('base64');
+    } catch (e) { return ''; }
+  },
+  decrypt: (cipher) => decryptSecretValue(cipher)
+});
+
+/** 把渲染层给出的「凭据标识」解析成可连接参数（明文只在主进程内存在，不跨 IPC 回渲染层）。
+ *  显式 credId 优先；解析失败即如实报错——不静默回退成默认/匿名账号，否则排障方向会被带偏。
+ *  协议与端口：调用方显式给了就以调用方为准（面板上用户看得见也改得动），否则取凭据档案里的值。 */
+function credPatchOf(p) {
+  const id = p && p.credId;
+  if (!id) return { ok: true, patch: {} };
+  const r = credStore.resolve(String(id));
+  if (!r.ok) return { ok: false, error: '凭据不可用：' + (r.error || '') };
+  const c = r.cred;
+  const patch = { username: c.username, password: c.password, privateKey: c.privateKey, keyPassphrase: c.keyPassphrase };
+  // 前置命令：调用方显式给了就以调用方为准（配置下发面板上那条前置命令是变更计划的一部分，不该被档案悄悄换掉）
+  if (c.preCmd && !(p && p.preCmd)) patch.preCmd = c.preCmd;
+  if (!(p && p.protocol)) patch.protocol = c.protocol;
+  if (!(p && p.port)) patch.port = c.port;
+  return { ok: true, patch };
+}
+
 /* ---- Web Shell IPC ---- */
 /** Shell 相关 IPC 仅允许主窗口与 Shell 窗口调用（两窗口都加载同一 preload） */
 function shellSender(e) {
@@ -633,6 +968,13 @@ function shellSender(e) {
     (mainWin && !mainWin.isDestroyed() && e.sender === mainWin.webContents) ||
     (shellWin && !shellWin.isDestroyed() && e.sender === shellWin.webContents)
   ));
+}
+/** 仅 Web Shell 窗口：会话录像（审计证据）的**写入**通道专用。
+ *  recordStart/append/stop 若沿用 shellSender（主窗口也算合法），被注入的主窗口可以自行
+ *  recordStart 成为 owner，再 recordAppend 凭空写入一条合法命名的录像——审计证据的完整性
+ *  就没有保证了。录像 UI 只存在于 shell-ui.js（app.js 对 record* 调用数为 0），收紧无功能损失。 */
+function shellWinSender(e) {
+  return !!(e && e.sender && shellWin && !shellWin.isDestroyed() && e.sender === shellWin.webContents);
 }
 ipcMain.handle('web:cert-allow', (e, payload) => {
   if (!webWin || webWin.isDestroyed() || e.sender !== webWin.webContents) return { ok: false, error: 'forbidden' };
@@ -666,12 +1008,12 @@ ipcMain.handle('shell:connect', (e, opts) => {
     // 不含任何明文凭据。
     const tabInfo = {
       sid: r.id,
-      title: (opts.title || host) + ' · ' + proto + ' ' + host + ':' + (opts.port || (proto === 'TELNET' ? 23 : 22)),
-      host,
+      title: String(opts.title || host).slice(0, 256) + ' · ' + proto + ' ' + host + ':' + (opts.port || (proto === 'TELNET' ? 23 : 22)),
+      host: host.slice(0, 256),
       port: String(opts.port || (proto === 'TELNET' ? 23 : 22)),
       protocol: proto.toLowerCase(),
-      username: String(opts.username || ''),
-      deviceName: String(opts.title || ''),
+      username: String(opts.username || '').slice(0, 128),
+      deviceName: String(opts.title || '').slice(0, 256),
       encoding: opts.encoding === 'gbk' ? 'gbk' : 'utf8'
     };
     if (typeof opts.pwdEnc === 'string' && opts.pwdEnc && opts.pwdEnc.length <= 8192) tabInfo.pwdEnc = opts.pwdEnc;
@@ -698,14 +1040,18 @@ ipcMain.handle('shell:reconnect', (e, p) => {
   if (!/^s\d+$/.test(sid)) return { ok: false, error: '无效会话' };
   return shell.reconnect(sid);
 });
+/** IPC 的 shell:data/resize/close 只允许操作 Web Shell 窗口自己的 UI 会话。
+ *  监控/独立采集会话（owner='monitor'）的输出与 id 会广播给 Shell 窗，若不加归属校验，
+ *  被注入的 Shell 窗渲染层可向正在运行的后台监控/备份连接注入命令（越过监控 readOnly 语义）或掐断连接。 */
+const shellUiSession = (id) => shell.ownerOf(id) === 'ui';
 ipcMain.on('shell:data', (e, id, data) => {
-  if (!shellSender(e)) return;
+  if (!shellSender(e) || !shellUiSession(id)) return;
   if (typeof data !== 'string') return; // 仅接受字符串：防非字符串绕过限长并致流写入崩溃
   if (data.length > 1024 * 1024) return; // 防超大粘贴/异常数据
   shell.write(id, data);
 });
-ipcMain.on('shell:resize', (e, id, cols, rows) => { if (shellSender(e)) shell.resize(id, cols, rows); });
-ipcMain.on('shell:close', (e, id) => { if (shellSender(e)) shell.close(id); });
+ipcMain.on('shell:resize', (e, id, cols, rows) => { if (shellSender(e) && shellUiSession(id)) shell.resize(id, cols, rows); });
+ipcMain.on('shell:close', (e, id) => { if (shellSender(e) && shellUiSession(id)) shell.close(id); });
 ipcMain.handle('shell:clipboard-write', (e, text) => {
   if (!shellSender(e)) return { ok: false, error: 'forbidden' };
   text = String(text == null ? '' : text);
@@ -880,21 +1226,72 @@ ipcMain.handle('secure:decrypt', (e, cipher) => {
     return { ok: true, text };
   } catch (err) { return { ok: false, error: '解密失败' }; }
 });
-ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? { ok: true, notify: loadAppSettings().monitorNotify !== false, tray: trayEnabled() } : { ok: false, error: 'forbidden' });
+/* ---- 统一凭据库 IPC（监控 ▾ 凭据库…，仅主窗口可调用）----
+ * 清单不含机密：口令/私钥只回 hasPassword / hasKey 布尔，明文永不跨 IPC 回渲染层。
+ * 连接类流程（采集/下发）只提交 credId，由主进程解析后补齐参数（见 credPatchOf）。 */
+ipcMain.handle('cred:list', (e) => monitorGuard(e) ? credStore.list() : { ok: false, error: 'forbidden', items: [] });
+ipcMain.handle('cred:save', (e, p) => monitorGuard(e) ? credStore.save(p || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('cred:remove', (e, p) => monitorGuard(e) ? credStore.remove(String((p && p.id) || '')) : { ok: false, error: 'forbidden' });
+/** 按厂家 / 显式 id 选取凭据 id 顺序（面板「自动匹配」用；选取规则见 CredentialStore.pick） */
+ipcMain.handle('cred:pick', (e, p) => monitorGuard(e)
+  ? credStore.pickFor({ ids: p && p.ids, vendor: p && p.vendor })
+  : { ok: false, error: 'forbidden', ids: [] });
+/* 告警依赖抑制的拓扑邻接表（渲染层推送；键与监控任务一致 deviceId@host）：
+ * 只用于「上游同时失联时归并下游离线通知」的判定，不落盘、不出网 */
+ipcMain.handle('monitor:topology', (e, p) => monitorGuard(e) ? alertDeps.setTopology(p || {}) : { ok: false, error: 'forbidden' });
+/* 事件时间线确认（值班交接用）：确认只落在事件对象上，随容量滚动一起淘汰，不额外占空间 */
+ipcMain.handle('monitor:event-ack', (e, p) => monitorGuard(e) ? applyAck(monitorEvents, p || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:event-unack', (e, p) => monitorGuard(e) ? clearAck(monitorEvents, p || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:alert-deps', (e) => monitorGuard(e)
+  ? { ok: true, pending: alertDeps.pending(), stats: alertDeps.stats(), debug: alertDeps.debugView() }
+  : { ok: false, error: 'forbidden', pending: [], stats: null, debug: [] });
+/* 监控/告警全局设置：通知开关、托盘常驻、告警等级覆盖表（alertLevels）与分级提示音（alertSound）。
+ * 渲染层的「设备监控」与「告警等级与提示音…」共用这一对接口（settings.json 单点持久化） */
+function monitorSettingsView() {
+  return {
+    ok: true,
+    notify: loadAppSettings().monitorNotify !== false,
+    tray: trayEnabled(),
+    sound: alertSoundSettings(),
+    levels: alertLevelOverrides()
+  };
+}
+ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? monitorSettingsView() : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:set-settings', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
-  if (p && typeof p.notify === 'boolean') {
-    loadAppSettings().monitorNotify = p.notify;
-    saveAppSettings();
+  const s = loadAppSettings();
+  let dirty = false;
+  if (p && typeof p.notify === 'boolean') { s.monitorNotify = p.notify; dirty = true; }
+  // 声音与等级覆盖一律经 alert-level 归一化后落盘：渲染层传来的脏数据不会写出半有效的设置。
+  // 声音设置按字段合并（局部更新不会把未提交的字段重置回默认）
+  if (p && p.sound && typeof p.sound === 'object' && !Array.isArray(p.sound)) {
+    s.alertSound = AL.normalizeSoundSettings(Object.assign({}, s.alertSound, p.sound));
+    dirty = true;
   }
-  return { ok: true, notify: loadAppSettings().monitorNotify !== false };
+  if (p && p.levels && typeof p.levels === 'object' && !Array.isArray(p.levels)) {
+    s.alertLevels = AL.normalizeOverrides(p.levels);
+    dirty = true;
+  }
+  if (dirty) saveAppSettings();
+  return monitorSettingsView();
 });
+/* 端到端链路连通性监测：任务载荷由渲染层（js/link-path.js）算好，主进程只调度探测并回推结果。
+ * 状态与历史只存内存——链路任务是「运行态」，重启后由渲染层按工程配置重新下发（与监控任务同口径）。 */
+ipcMain.handle('link:start', (e, p) => monitorGuard(e) ? linkMon.start(p || {}) : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:stop', (e, p) => monitorGuard(e) ? linkMon.stop((p && p.key) || p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:stop-all', (e) => monitorGuard(e) ? linkMon.stopAll() : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:status', (e) => monitorGuard(e) ? linkMon.status() : { ok: false, error: 'forbidden', items: [] });
+ipcMain.handle('link:probe', (e, p) => monitorGuard(e) ? linkMon.probeNow((p && p.key) || p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:probe-all', (e) => monitorGuard(e) ? linkMon.probeAll() : { ok: false, error: 'forbidden' });
+ipcMain.handle('link:history', (e, p) => monitorGuard(e) ? linkMon.history((p && p.key) || p) : { ok: false, error: 'forbidden', items: [] });
 ipcMain.handle('monitor:overview', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   return {
     ok: true,
     jobs: monitor.status(),
+    links: linkMon.status().items,
     events: monitorEvents.slice(-200).reverse(),
+    unacked: unackedCount(monitorEvents),
     backups: (configBackup.hosts().items || []).slice(0, 100)
   };
 });
@@ -902,6 +1299,41 @@ ipcMain.handle('monitor:overview', (e) => {
 ipcMain.handle('monitor:uptime', (e) => monitorGuard(e)
   ? { ok: true, series: uptimeStore.snapshot() }
   : { ok: false, error: 'forbidden' });
+/* 可用性（SLA）报表：在线探测采样的区间统计。明细桶（10 分钟，7 天）算中断明细，
+ * 按天汇总（400 天）兜长期可用率；区间超出明细覆盖时如实降级并标注（不拿部分数据冒充全区间）。 */
+ipcMain.handle('monitor:sla', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const rg = slaRangeOf(String((p && p.range) || 'last7'), Date.now(), p && p.from, p && p.to);
+  const series = uptimeStore.snapshot();
+  const daily = uptimeStore.dailyOf();
+  const targets = [];
+  const seen = new Set();
+  const push = (key, name, host) => {
+    const k = String(key || '');
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    const i = k.indexOf('@');
+    targets.push({ key: k, name: name || (i > 0 ? k.slice(0, i) : k), host: host || (i > 0 ? k.slice(i + 1) : '') });
+  };
+  for (const j of monitor.status()) push(j.key, j.name || j.deviceId, j.host);
+  // 只有历史采样、当前已停监控的键也要纳入，否则「停掉监控」会让设备的 SLA 凭空消失
+  for (const k of Object.keys(series)) push(k);
+  for (const k of Object.keys(daily)) push(k);
+  const rep = buildSlaReport({
+    targets, series, daily, from: rg.from, to: rg.to,
+    bucketMs: uptimeStore.bucketMs, now: Date.now(),
+    minUptime: Number.isFinite(Number(p && p.minUptime)) ? Number(p.minUptime) : 99.9
+  });
+  const days = Object.keys(daily).reduce((m, k) => Math.max(m, Object.keys(daily[k] || {}).length), 0);
+  return Object.assign({}, rep, {
+    label: rg.label,
+    rangeKind: String((p && p.range) || 'last7'),
+    detailKeepDays: Math.round(uptimeStore.keepMs / (24 * 60 * 60 * 1000)),
+    dailyKeepDays: uptimeStore.keepDays,
+    historyDays: days,
+    summaryText: rep.summary.uptimePct == null ? '（区间内无采样）' : slaFmtPct(rep.summary.uptimePct)
+  });
+});
 // 接口流量历史（监控中心「接口流量」页按需拉取采样序列）
 ipcMain.handle('monitor:ifhistory', (e, key) => monitorGuard(e)
   ? monitor.ifHistory(String((key && key.key) || key || ''))
@@ -1008,24 +1440,152 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const host = String((p && p.host) || '');
   if (!isValidDiagHost(host)) return { ok: false, error: '主机地址无效' };
-  const oid = String((p && p.oid) || '').trim();
+  // 前导点/末尾点容错（厂商文档常写 .1.3.6.1，与监控侧 cleanOid/berOid 口径一致）
+  const oid = String((p && p.oid) || '').trim().replace(/^\.+/, '').replace(/\.+$/, '');
   if (!DIAG_OID_RE.test(oid) || oid.length > 64) return { ok: false, error: 'OID 无效（点分十进制，如 1.3.6.1.2.1.1.1）' };
-  const community = String((p && p.community) || 'public').trim().slice(0, 64) || 'public';
+  // v2c 团体字；v3 时 target 为用户对象（walk 与回退 GET 均走 USM 通道）
+  const community = String((p && p.community) || 'public').trim().slice(0, 64);
+  let target = community;
+  if (String((p && p.version) || '') === 'v3') {
+    const v3user = String((p && p.v3User) || '').trim().slice(0, 32);
+    if (!v3user) return { ok: false, error: 'SNMP v3 需填写用户名' };
+    target = {
+      user: v3user,
+      authProto: String((p && p.v3AuthProto) || 'sha').toLowerCase() === 'md5' ? 'md5' : 'sha',
+      authPass: String((p && p.v3AuthPass) || '').slice(0, 128),
+      privProto: String((p && p.v3PrivProto) || 'aes').toLowerCase() === 'des' ? 'des' : 'aes',
+      privPass: String((p && p.v3PrivPass) || '').slice(0, 128)
+    };
+  }
   let port = parseInt(p && p.port, 10);
   if (!(port > 0 && port <= 65535)) port = 161;
   const timeoutMs = Math.max(300, Math.min(10000, parseInt(p && p.timeoutMs, 10) || 1500));
-  const r = await snmpWalk(oid, host, community, timeoutMs, port, 512);
-  // walk 为空时回退单值 GET（叶子 OID 无子树，GETNEXT 也不命中时给 GET 一次机会）
+  // 行数上限：默认 512（诊断随手查足够）；二层拓扑推断要拉整张转发表，允许调到 8192
+  const maxRows = Math.max(1, Math.min(8192, parseInt(p && p.max, 10) || 512));
+  const r = await snmpWalk(oid, host, target, timeoutMs, port, maxRows);
+  // walk 为空时回退单值 GET（叶子 OID 无子树，GETNEXT 也不命中时给 GET 一次机会）；
+  // 回退必须沿用同一 target——v3 模式下若误用 v2c 团体字，v3-only 设备永远白等一次超时
   if (r.ok && !r.varbinds.length) {
-    const g = await snmpGetValue(host, community, oid, timeoutMs, port);
+    const g = await snmpGetValue(host, target, oid, timeoutMs, port);
     if (g.ok) return { ok: true, varbinds: [{ oid: g.oid, value: g.value }] };
   }
   return { ok: !!r.ok, varbinds: r.varbinds || [], error: r.error || null };
 });
-/* 一次性命令执行（采集邻居表 / MAC·ARP 定位）：独立会话在 shell.js 内完成，凭据不落盘不进日志明文 */
+/* 一次性命令执行（采集邻居表 / MAC·ARP 定位）：独立会话在 shell.js 内完成，凭据不落盘不进日志明文。
+ * 面板可只给 credId（统一凭据库），账号/口令/前置命令由主进程补齐，明文不经过渲染层 */
 ipcMain.handle('shell:oneshot', (e, p) => {
   if (!monitorGuard(e)) return Promise.resolve({ ok: false, outputs: [], fingerprint: null, error: 'forbidden', errors: [] });
-  return shell.runOneShot(p || {});
+  const cp = credPatchOf(p);
+  if (!cp.ok) return Promise.resolve({ ok: false, outputs: [], fingerprint: null, error: cp.error, errors: [] });
+  const opts = Object.assign({}, p || {}, cp.patch);
+  delete opts.credId;
+  return shell.runOneShot(opts);
+});
+
+/* ---- 配置变更下发（监控 ▾ 配置变更下发）----
+ * 事务顺序（任一步失败都留下明确结论，不静默降级）：
+ *   ① shell.runDeploy：一条会话内 前置备份 → 逐行下发（失败即停）→ 退出配置模式 → 可选保存 → 可选回采
+ *   ② 前置备份正文落配置备份库（回滚基线；下发记录里只留文件名，正文不进审计文件）
+ *   ③ 下发记录落 DeployStore（口令类关键字打码后才落盘）
+ *   ④ 事件时间线 + 系统通知（失败必通知；成功但保存失败也通知）
+ * 模式控制命令（关分页/取配置/进配置模式/退出/保存）由主进程按厂家表决定，渲染层只传厂家键。 */
+const DEPLOY_MAX_LINES = 200;
+function deployTargetOf(p) {
+  const device = String((p && p.device) || '').slice(0, 120);
+  const host = String((p && p.host) || '').trim().slice(0, 120);
+  if (!host || host.indexOf('..') >= 0) return null;
+  return { device: device || host, host };
+}
+ipcMain.handle('deploy:run', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  // 凭据可以是「统一凭据库」里的一条（credId）：账号/口令/私钥/前置命令在主进程内补齐后统一走同一条管道
+  const cpD = credPatchOf(p);
+  if (!cpD.ok) return { ok: false, error: cpD.error };
+  p = Object.assign({}, p || {}, cpD.patch);
+  const dh = deployTargetOf(p);
+  if (!dh) return { ok: false, error: '缺少管理地址' };
+  const v = deployVendor(p && p.vendor);
+  const lines = Array.isArray(p && p.lines) ? p.lines.slice(0, DEPLOY_MAX_LINES + 1) : [];
+  if (!lines.length) return { ok: false, error: '未提供要下发的配置行' };
+  if (lines.length > DEPLOY_MAX_LINES) return { ok: false, error: '配置行超过 ' + DEPLOY_MAX_LINES + ' 行上限' };
+  const protocol = String((p && p.protocol) || 'ssh').toLowerCase() === 'telnet' ? 'telnet' : 'ssh';
+  const port = parseInt(p && p.port, 10) || (protocol === 'telnet' ? 23 : 22);
+  const doSave = !!(p && p.doSave);
+  const verify = !!(p && p.verify);
+  const kind = (p && p.kind === 'rollback') ? 'rollback' : 'change';
+  const r = await shell.runDeploy({
+    protocol, host: dh.host, port,
+    username: p && p.username, password: p && p.password,
+    privateKey: p && p.privateKey, keyPassphrase: p && p.keyPassphrase,
+    jump: p && p.jump, encoding: p && p.encoding, expectFp: p && p.expectFp,
+    lines,
+    screenCmd: v.screen, showCmd: v.showCfg, enterCmd: v.enter, exitCmd: v.exit, saveCmd: v.save,
+    // 前置命令由渲染层显式给出（如思科用户模式需先 enable）：空则不发
+    preCmd: String((p && p.preCmd) || '').trim().slice(0, 256),
+    doSave, verify,
+    waitMs: p && p.waitMs, cmdTimeoutMs: p && p.cmdTimeoutMs, readyTimeoutMs: p && p.readyTimeoutMs
+  });
+  // ② 前置备份正文入库（这是回滚的唯一基线，入库失败要显式告知）
+  let backupFile = '';
+  if (r.backup && r.backup.ok && r.backup.content) {
+    const sv = configBackup.save(dh.device, dh.host, r.backup.content);
+    if (sv.ok) backupFile = sv.name;
+    else if (!r.backup.error) r.backup.error = '备份正文入库失败：' + sv.error;
+  }
+  // ③ 审计留痕（口令打码）
+  const kindLabel = kind === 'rollback' ? '配置回滚' : '配置变更';
+  const saved = deployStore.save({
+    device: dh.device, deviceId: String((p && p.deviceId) || ''), host: dh.host, port, protocol,
+    vendor: String((p && p.vendor) || ''), vendorLabel: v.label, user: String((p && p.username) || ''),
+    kind, plan: String((p && p.plan) || ''), lines, applied: r.applied,
+    result: { ok: r.ok, appliedCount: r.appliedCount, failedAt: r.failedAt, remaining: r.remaining, error: r.error },
+    backup: { ok: r.backup.ok && !!backupFile, file: backupFile, error: r.backup.error },
+    saved: { ok: r.saved.ok, error: r.saved.error },
+    verify: { ok: r.post.ok, error: r.post.error }
+  });
+  // ④ 事件时间线 + 通知
+  const info = { key: 'deploy:' + dh.host, deviceId: String((p && p.deviceId) || ''), host: dh.host, name: dh.device };
+  const detail = (r.ok ? '下发成功 ' + r.appliedCount + '/' + lines.length + ' 行' : (r.error || '下发失败'))
+    + (backupFile ? '；前置备份 ' + backupFile : '；前置备份未入库')
+    + (doSave ? (r.saved.ok ? '；已保存配置' : '；保存配置失败') : '')
+    + (saved.ok && saved.maskedCount ? '；记录已打码 ' + saved.maskedCount + ' 行' : '');
+  recordMonitorEvent(info, r.ok ? 'deploy' : 'deploy-error', kindLabel + '：' + detail);
+  if (!r.ok) notifyForDevice(info.deviceId, '网络拓扑管理软件 · ' + kindLabel + '失败', dh.device + '（' + dh.host + '）：' + (r.error || '未知错误'), levelOf('deploy-error'));
+  else if (doSave && !r.saved.ok) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 保存配置失败', dh.device + '（' + dh.host + '）：变更已下发但保存配置失败，设备重启后可能丢失', levelOf('deploy-error'));
+  sendMonitor('monitor:deploy', { host: dh.host, deviceId: info.deviceId, ok: r.ok, error: r.error || null, appliedCount: r.appliedCount, kind });
+  return Object.assign({}, r, {
+    backupFile, vendorLabel: v.label,
+    record: saved.ok ? saved.name : '', recordError: saved.ok ? null : saved.error, maskedCount: saved.maskedCount || 0
+  });
+});
+ipcMain.handle('deploy:history', (e, p) => monitorGuard(e) ? deployStore.list(p && p.limit) : { ok: false, error: 'forbidden' });
+ipcMain.handle('deploy:record', (e, p) => monitorGuard(e) ? deployStore.read(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
+ipcMain.handle('deploy:record-remove', (e, p) => monitorGuard(e) ? deployStore.remove(String((p && p.name) || '')) : { ok: false, error: 'forbidden' });
+ipcMain.handle('deploy:clear', (e) => monitorGuard(e) ? deployStore.clear() : { ok: false, error: 'forbidden' });
+ipcMain.handle('deploy:open-folder', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  try { fs.mkdirSync(deployStore.baseDir, { recursive: true }); } catch (err) { /* ignore */ }
+  return require('electron').shell.openPath(deployStore.baseDir).then(() => ({ ok: true }), (err) => ({ ok: false, error: String((err && err.message) || err) }));
+});
+
+/* ---- 三层邻居（BGP/OSPF）异常留痕：采集是一次性的，异常写进监控事件时间线并弹通知 ----
+ * 只接受「设备名 + 主机 + 明细」，不做任何采集（采集在渲染层经 shell:oneshot 完成）。 */
+ipcMain.handle('proto:record', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const items = (Array.isArray(p && p.items) ? p.items : []).slice(0, 50);
+  let n = 0;
+  for (const it of items) {
+    const host = String((it && it.host) || '').slice(0, 120);
+    const info = { key: 'proto:' + host, deviceId: String((it && it.deviceId) || ''), host, name: String((it && it.device) || '') .slice(0, 120) };
+    recordMonitorEvent(info, 'proto', String((it && it.detail) || '').slice(0, 300));
+    n++;
+  }
+  const first = items[0];
+  if (first && notifyEnabled()) {
+    notifyForDevice(String(first.deviceId || ''), '网络拓扑管理软件 · 三层邻居异常',
+      String(first.device || first.host || '') + '：共 ' + items.length + ' 条邻居异常（详见事件时间线）', levelOf('proto'));
+  }
+  return { ok: true, recorded: n };
 });
 
 /* ---- 在线升级（仅主窗口可调用）----
@@ -1050,17 +1610,15 @@ function getUpdater() {
   return updater;
 }
 ipcMain.handle('update:check', (e) => monitorGuard(e) ? getUpdater().check() : { ok: false, error: 'forbidden' });
-ipcMain.handle('update:download', async (e, p) => {
+ipcMain.handle('update:download', async (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const u = getUpdater();
-  let assets = p && p.assets;
-  if (!assets) {
-    // 渲染层未携带资产信息（如经启动通知进入的流程）：重新检查取最新资产
-    const c = await u.check();
-    if (!c.ok || !c.update || !c.assets) return { ok: false, error: (c && c.error) || '当前没有可下载的升级资产' };
-    assets = c.assets;
-  }
-  return u.downloadAndVerify(assets);
+  // 资产信息一律以主进程实时拉取的 release 为准：渲染层回传的 assets 属不可信输入，
+  // 直接采信其中的下载 URL 会让 SHA256 完整性校验退化为自证（exe 与清单都来自同一注入源），
+  // 也绕过 check() 的「仅严格更新版本」约束（降级风险）。check 内部按平台 pickAssets 并核对版本。
+  const c = await u.check();
+  if (!c.ok || !c.update || !c.assets) return { ok: false, error: (c && c.error) || '当前没有可下载的升级资产' };
+  return u.downloadAndVerify(c.assets);
 });
 ipcMain.handle('update:apply', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1071,6 +1629,7 @@ ipcMain.handle('update:apply', (e) => {
   }
   return r;
 });
+ipcMain.handle('update:cancel', (e) => monitorGuard(e) ? getUpdater().cancel() : { ok: false, error: 'forbidden' });
 ipcMain.handle('update:reveal', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const fs = require('fs');
@@ -1114,9 +1673,12 @@ ipcMain.handle('monitor:logs-tree', (e) => {
       const files = [];
       let fnames = [];
       try { fnames = fs.readdirSync(dDir); } catch (err) { fnames = []; }
-      for (const f of fnames.slice(-300)) {
-        // 兼容按天固定文件名（设备_管理口.log）与超限滚动/历史格式（设备_管理口_日期_时间[_n].log）
-        if (!/^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)(?:_\d{8}_\d{6}(?:_\d+)?)?\.log$/.test(f)) continue;
+      // 先按文件名白名单过滤再取量：readdirSync 是目录序（NTFS 近字母序/ext4 哈希序），
+      // 直接触发 slice(-300) 会无差别丢弃白名单内的日志（列表查不到实际存在的文件）
+      const LOG_FILE_RE = /^(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)_(?:[\u4e00-\u9fa5A-Za-z0-9_.-]+)(?:_\d{8}_\d{6}(?:_\d+)?)?\.log$/;
+      fnames = fnames.filter(f => LOG_FILE_RE.test(f));
+      if (fnames.length > 1000) fnames = fnames.slice(-1000); // 病态目录兜底，正常每日滚动远达不到
+      for (const f of fnames) {
         const full = path.join(dDir, f);
         try { st = fs.lstatSync(full); } catch (err) { continue; }
         if (!st.isFile() || st.isSymbolicLink()) continue;
@@ -1206,12 +1768,38 @@ ipcMain.handle('backupcfg:diff', (e, p) => {
   const a = String((p && p.a) || ''), b = String((p && p.b) || '');
   if (!a || !b) return { ok: false, error: '请选择两份备份' };
   if (a === b) return { ok: false, error: '请选择两份不同的备份' };
-  return configBackup.diff(dh.device, dh.host, a, b);
+  // 与自动备份的变更判定同口径：先按「易变行忽略规则」过滤，界面看到的差异就是会触发告警的那些差异
+  const ra = configBackup.read(dh.device, dh.host, a), rb = configBackup.read(dh.device, dh.host, b);
+  if (!ra.ok || !rb.ok) return { ok: false, error: '读取备份失败：' + ((ra.error || rb.error) || '') };
+  return ConfigBackupStore.diffConfigText(ra.content, rb.content, configIgnoreRules());
 });
 ipcMain.handle('backupcfg:open', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   try { require('fs').mkdirSync(configBackup.baseDir, { recursive: true }); } catch (err) { /* ignore */ }
   return require('electron').shell.openPath(configBackup.baseDir).then(() => ({ ok: true }), (err) => ({ ok: false, error: String(err && err.message || err) }));
+});
+
+/* ---- 配置变更判定的易变行忽略规则（全局设置，仅主窗口可改）---- */
+ipcMain.handle('backupcfg:ignore-get', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden', rules: [], defaults: [] };
+  return { ok: true, rules: configIgnoreRules(), defaults: DEFAULT_IGNORE_RULES.slice(), isDefault: !Array.isArray(loadAppSettings().configIgnoreRules) };
+});
+ipcMain.handle('backupcfg:ignore-set', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const list = (p && Array.isArray(p.rules)) ? p.rules.slice(0, 200) : [];
+  const norm = normalizeIgnoreRules(list);
+  if (!norm.ok) return { ok: false, error: norm.error };
+  loadAppSettings().configIgnoreRules = norm.rules;
+  saveAppSettings();
+  monitor.setIgnoreRules(() => configIgnoreRules());   // 立即生效，不必重启监控任务
+  return { ok: true, rules: norm.rules };
+});
+ipcMain.handle('backupcfg:ignore-reset', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  delete loadAppSettings().configIgnoreRules;
+  saveAppSettings();
+  monitor.setIgnoreRules(() => configIgnoreRules());
+  return { ok: true, rules: DEFAULT_IGNORE_RULES.slice() };
 });
 
 /* ---- 内置网络服务 IPC（TFTP / FTP / Syslog，仅主窗口可调用） ---- */
@@ -1222,25 +1810,42 @@ ipcMain.handle('netsvc:get', (e) => {
 ipcMain.handle('netsvc:set', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const cfg = (p && p.cfg && typeof p.cfg === 'object') ? p.cfg : {};
+  // 渲染层载荷尺寸封顶（纵深）：正常面板载荷 < 4KB，超限视为异常输入直接拒绝，
+  // 防 settings.json 被无界撑大（applyConfig 内各字段本身有白名单归一化）
+  try { if (Buffer.byteLength(JSON.stringify(cfg), 'utf8') > 64 * 1024) return { ok: false, error: '配置载荷过大' }; } catch (err) { return { ok: false, error: '配置载荷无效' }; }
   const status = await netSvc.applyConfig(cfg);
+  // 落盘用 applyConfig 后的「生效配置」：normalizeConfig 可能把默认/空 FTP 口令替换为随机口令，
+  // 若仍落盘原始 payload，重启后又会生成新随机口令，设备侧配置的 copy 口令每次重启即失效
+  const effective = netSvc.getConfig();
+  const ftpPasswordChanged = !!effective._ftpPasswordChanged;
   // 运行态用明文；落盘前把 FTP 口令密文化（与项目「密码经 safeStorage 落盘」惯例对齐，
   // 此前明文写 settings.json，本机其他用户可读）
   try {
-    const stored = JSON.parse(JSON.stringify(cfg));
+    const stored = JSON.parse(JSON.stringify(effective));
+    delete stored._ftpPasswordChanged;
     if (stored.ftp && typeof stored.ftp === 'object' && typeof stored.ftp.password === 'string'
       && stored.ftp.password && stored.ftp.password.indexOf(ENC_PREFIX) !== 0) {
       stored.ftp.password = encryptSecretValue(stored.ftp.password);
     }
+    // Trap v3 口令同样密文化落盘
+    if (stored.trap && typeof stored.trap === 'object' && stored.trap.v3 && typeof stored.trap.v3 === 'object') {
+      for (const f of ['authPass', 'privPass']) {
+        if (typeof stored.trap.v3[f] === 'string' && stored.trap.v3[f] && stored.trap.v3[f].indexOf(ENC_PREFIX) !== 0) {
+          stored.trap.v3[f] = encryptSecretValue(stored.trap.v3[f]);
+        }
+      }
+    }
     loadAppSettings().netSvc = stored;
     saveAppSettings();
   } catch (err) { /* 落盘失败不影响运行态 */ }
-  return { ok: true, cfg: netSvc.getConfig(), status };
+  return { ok: true, cfg: effective, status, ftpPasswordChanged };
 });
 ipcMain.handle('netsvc:files', (e) => monitorGuard(e) ? netSvc.listFiles() : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:file-read', (e, p) => monitorGuard(e) ? netSvc.readFile(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:file-delete', (e, p) => monitorGuard(e) ? netSvc.deleteFile(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:import', (e, p) => monitorGuard(e) ? netSvc.importBackup(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:syslog-tail', (e, p) => monitorGuard(e) ? netSvc.syslogTail(p && p.since) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:trap-tail', (e, p) => monitorGuard(e) ? netSvc.trapTail(p && p.since) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:syslog-search', (e, p) => monitorGuard(e) ? netSvc.syslogSearch(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:open-folder', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1319,12 +1924,42 @@ ipcMain.handle('netsvc:syslog-read', (e, p) => {
 /* ---- AI 解析（LLM，仅主窗口可调用）----
  * OpenAI 兼容接口的调用全部在主进程完成（渲染层 CSP 禁止直连外网）；
  * API Key 经 safeStorage 密文存 settings.json 的 ai 键，明文只在主进程内存中出现、不回传渲染层。 */
+/** 已存 API Key 只随 https 端点出网：http:// baseUrl 不自动附带已存 Key。
+ *  否则渲染层被注入后仅需 `ai:set-config({baseUrl:'http://attacker'})`（不动 Key 字段）再触发任意
+ *  一次请求，主进程就会把用户已存的 Key 明文发往攻击者（CSP 禁渲染层直连、但主进程代发不受限）。 */
+function isHttpsUrl(u) {
+  try { return new URL(String(u)).protocol === 'https:'; } catch (e) { return false; }
+}
+/** 端点主机（小写 host:port）：已存 API Key 的绑定键——Key 只在它被保存时的那台主机上出网 */
+function aiHostOf(u) {
+  try { const p = new URL(String(u)); return (p.hostname || '').toLowerCase() + ':' + (p.port || (p.protocol === 'https:' ? '443' : '80')); } catch (e) { return ''; }
+}
+/** 端点变更审计：API 地址被改动会决定「凭据与数据发往哪台主机」，是本应用最敏感的可写配置之一。
+ *  记录到 userData/ai-endpoint.log，使「渲染层被注入后改端点」这类行为事后可查（不是无声的）。 */
+function logAiEndpointChange(from, to) {
+  try {
+    const line = '[' + new Date().toISOString() + '] AI 端点变更：' + (from || '(未配置)') + ' → ' + (to || '(清空)') + '\n';
+    fs.appendFileSync(path.join(app.getPath('userData'), 'ai-endpoint.log'), line, 'utf8');
+  } catch (e) { /* 审计日志失败不影响主流程 */ }
+}
 function aiCfgFromSettings() {
   const s = loadAppSettings().ai || {};
+  const baseUrl = typeof s.baseUrl === 'string' ? s.baseUrl : '';
+  const apiKeyStored = s.apiKeyEnc ? decryptSecretValue(s.apiKeyEnc) : '';
+  // 已存 Key **只随它被保存时的那台主机出网**：仅挡 http 是不够的——渲染层只要把 baseUrl 改成
+  // 攻击者的 https 地址（ai:set-config 不动 Key 字段，或 ai:list-models 空 Key 触发回退），主进程就会
+  // 把 Key 作为 Authorization 头发出去。绑定主机后，「改端点」这一动作本身带不走凭据。
+  // 兼容旧配置：升级前保存的 Key 没有 apiKeyHost，首次使用时就地绑定到当前端点（不改变既有行为）。
+  if (apiKeyStored && !s.ai_host) { s.ai_host = aiHostOf(baseUrl); try { saveAppSettings(); } catch (e) { /* ignore */ } }
+  const hostOk = !apiKeyStored || !s.ai_host || aiHostOf(baseUrl) === s.ai_host;
+  const apiKey = (apiKeyStored && hostOk && isHttpsUrl(baseUrl)) ? apiKeyStored : ''; // 非 https 或主机不符：不带 Key
   return {
-    baseUrl: typeof s.baseUrl === 'string' ? s.baseUrl : '',
+    baseUrl,
     model: typeof s.model === 'string' ? s.model : '',
-    apiKey: s.apiKeyEnc ? decryptSecretValue(s.apiKeyEnc) : '',
+    apiKey,
+    apiKeyStored,
+    // 有已存 Key 但当前端点主机与保存时不一致：界面据此提示「端点已改，请重新填写 API Key」
+    apiKeyHostMismatch: !!(apiKeyStored && s.ai_host && aiHostOf(baseUrl) !== s.ai_host),
     maxInputKB: Number(s.maxInputKB) > 0 ? Math.min(2048, Math.floor(Number(s.maxInputKB))) : DEFAULT_MAX_INPUT_KB,
     protocol: validateProtocol(s.protocol)
   };
@@ -1340,7 +1975,7 @@ let aiActiveClient = null;
 ipcMain.handle('ai:get-config', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   const c = aiCfgFromSettings();
-  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
+  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKeyStored, apiKeyMasked: maskKey(c.apiKeyStored), apiKeyHttpBlocked: !!c.apiKeyStored && !c.apiKey, apiKeyHostMismatch: !!c.apiKeyHostMismatch };
 });
 ipcMain.handle('ai:set-config', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1350,6 +1985,7 @@ ipcMain.handle('ai:set-config', (e, p) => {
   if (p && 'baseUrl' in p) {
     const base = validateBaseUrl(p.baseUrl); // 空值合法（表示未配置）；非法格式直接拒绝并提示
     if (!base && String(p.baseUrl || '').trim()) return { ok: false, error: 'API 地址无效：需以 http:// 或 https:// 开头' };
+    if (aiHostOf(base) !== aiHostOf(s.ai.baseUrl)) logAiEndpointChange(s.ai.baseUrl, base); // 端点变更留痕
     s.ai.baseUrl = base;
   }
   if (p && 'model' in p) s.ai.model = String(p.model || '').trim().slice(0, 200);
@@ -1357,11 +1993,16 @@ ipcMain.handle('ai:set-config', (e, p) => {
     const n = Math.floor(Number(p.maxInputKB));
     s.ai.maxInputKB = (n >= 4 && n <= 2048) ? n : DEFAULT_MAX_INPUT_KB;
   }
-  if (p && p.clearApiKey) delete s.ai.apiKeyEnc;
-  else if (p && typeof p.apiKey === 'string' && p.apiKey) s.ai.apiKeyEnc = encryptSecretValue(p.apiKey); // 空串=保持不变
+  if (p && p.clearApiKey) { delete s.ai.apiKeyEnc; delete s.ai.ai_host; }
+  else if (p && typeof p.apiKey === 'string' && p.apiKey) {
+    // 空串=保持不变；限长与 secure:encrypt 口径一致。保存 Key 的同时绑定当前端点主机：
+    // 之后无论谁改动 baseUrl，这把 Key 都不会被发往别的主机（见 aiCfgFromSettings）
+    s.ai.apiKeyEnc = encryptSecretValue(p.apiKey.slice(0, 4096));
+    s.ai.ai_host = aiHostOf(s.ai.baseUrl);
+  }
   saveAppSettings();
   const c = aiCfgFromSettings();
-  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKey, apiKeyMasked: maskKey(c.apiKey) };
+  return { ok: true, baseUrl: c.baseUrl, model: c.model, maxInputKB: c.maxInputKB, protocol: c.protocol, apiKeySet: !!c.apiKeyStored, apiKeyMasked: maskKey(c.apiKeyStored), apiKeyHttpBlocked: !!c.apiKeyStored && !c.apiKey, apiKeyHostMismatch: !!c.apiKeyHostMismatch };
 });
 ipcMain.handle('ai:test', async (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -1373,14 +2014,20 @@ ipcMain.handle('ai:list-models', async (e, p) => {
   const protocol = validateProtocol(p && p.protocol);
   const baseUrl = String((p && p.baseUrl) || '');
   if (!validateBaseUrl(baseUrl)) return { ok: false, error: '请先填写有效的 API 地址（http:// 或 https:// 开头）' };
-  // 表单未填 Key 时回退已保存的 Key（编辑已配置服务时不必重复输入）
+  // 表单未填 Key 时回退已保存的 Key（编辑已配置服务时不必重复输入）；但必须同时满足：
+  // ① https；② 该端点主机与 Key 保存时的主机一致。否则渲染层只要传一个自己的 https 地址
+  // 就能借这次回退把已存 Key 作为 Authorization 头发往任意主机（仅挡 http 挡不住这条路）。
   let apiKey = String((p && p.apiKey) || '');
-  if (!apiKey) apiKey = aiCfgFromSettings().apiKey;
+  const cfg = aiCfgFromSettings();
+  if (!apiKey && isHttpsUrl(baseUrl) && cfg.apiKey && aiHostOf(baseUrl) === aiHostOf(cfg.baseUrl)) apiKey = cfg.apiKey;
   const client = new AiClient({ baseUrl, apiKey, protocol });
   return client.listModels();
 });
 ipcMain.handle('ai:analyze', async (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  // 单飞：分析客户端按次新建，若并发发起，aiActiveClient 会被覆盖、ai:cancel 只能取消最近一次，
+  // 先前的分析无法停止且 chunk 推送交错——与 AiClient 自身的「进行中拒绝新请求」语义保持一致
+  if (aiActiveClient) return { ok: false, error: '已有分析正在进行中，请先取消或等待完成' };
   const kind = String((p && p.kind) || '');
   if (kind !== 'config' && kind !== 'syslog' && kind !== 'monlog' && kind !== 'compliance' && kind !== 'daily') return { ok: false, error: '未知的分析类型' };
   const content = String((p && p.content) == null ? '' : p.content);
@@ -1395,7 +2042,9 @@ ipcMain.handle('ai:analyze', async (e, p) => {
     : kind === 'daily' ? buildDailyReportPrompt(cut.text, p && p.extra)
     : buildLogPrompt(kind, cut.text, p && p.extra);
   const title = String((p && p.title) || '').slice(0, 200);
-  // 流式增量批量转发主窗口（120ms 合批，避免高频 IPC 淹没渲染层）
+  // 流式增量批量转发主窗口（120ms 合批，避免高频 IPC 淹没渲染层）。
+  // 注意只走 chat 的 onDelta 回调一条通道：AiClient 的 'chunk' 事件对同一批增量也会再发一次，
+  // 两路同时挂会把每段增量重复推送（界面逐句出现两遍直到完成态覆盖）
   const push = (ch, data) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(ch, data); };
   let pend = '';
   let lastFlush = Date.now();
@@ -1404,10 +2053,10 @@ ipcMain.handle('ai:analyze', async (e, p) => {
     const now = Date.now();
     if (now - lastFlush >= 120) { lastFlush = now; if (pend) { push('ai:chunk', { text: pend }); pend = ''; } }
   };
-  client.on('chunk', (c) => { if (c && c.text) onDelta(c.text); });
   aiActiveClient = client;
-  const r = await client.chat({ messages, onDelta });
-  aiActiveClient = null;
+  let r;
+  try { r = await client.chat({ messages, onDelta }); }
+  finally { aiActiveClient = null; } // 异常路径同样释放单飞锁，防后续分析被永久拒绝
   if (pend) push('ai:chunk', { text: pend });
   if (r && r.ok) {
     // 成功的分析落历史库（含截断标注），供「分析记录」回看/导出
@@ -1445,6 +2094,8 @@ ipcMain.handle('ai:shell-chat', async (e, p) => {
   // 设备类型注入（SHELL_DEVICE_TYPES 白名单键，非法值回落 auto 不注入）；生成类型 cmd/config
   const kind = (p && p.kind === 'config') ? 'config' : 'cmd';
   const messages = buildShellPrompt(requirement, cut.text, String((p && p.deviceType) || ''), kind);
+  // 并发上限：渲染层异常时不得同时发起任意数量 LLM 请求（各持 socket/定时器，空耗配额与内存）
+  if (aiShellClients.size >= 4) return { ok: false, error: '命令生成请求过多，请稍候再试' };
   aiShellClients.add(client);
   try {
     const r = await client.chat({ messages, maxTokens: kind === 'config' ? 4096 : 1024 });
@@ -1486,8 +2137,8 @@ function buildDailySnapshotMain() {
     if (j.probeLatency != null) bits.push('探测时延 ' + j.probeLatency + 'ms');
     if (j.alert) bits.push('命中告警关键字「' + j.alert + '」');
     if (j.backupEnabled) {
-      bits.push('最近备份 ' + (j.backupLast && j.backupLast.at ? fmtDTMain(new Date(j.backupLast.at)) : '无')
-        + (j.backupLast && j.backupLast.error ? '（失败：' + j.backupLast.error + '）' : (j.backupLast && j.backupLast.changed ? '（有变化）' : '')));
+      bits.push('最近备份 ' + (j.backup && j.backup.at ? fmtDTMain(new Date(j.backup.at)) : '无')
+        + (j.backup && j.backup.error ? '（失败：' + j.backup.error + '）' : (j.backup && j.backup.changed ? '（有变化）' : '')));
     }
     if (j.compliance && j.compliance.total) bits.push('合规违规 ' + j.compliance.failed + '/' + j.compliance.total);
     if (j.lastPerf && (j.lastPerf.cpu != null || j.lastPerf.mem != null)) {
@@ -1532,7 +2183,7 @@ async function runAiDailyReportNow() {
   const cfg = aiCfgFromSettings();
   const client = new AiClient(cfg);
   if (!client.ready) {
-    notifyUser('网络拓扑管理软件 · AI 巡检日报未生成', '请先在「AI ▾ AI 设置」中配置 API 地址与模型名');
+    notifyUser('网络拓扑管理软件 · AI 巡检日报未生成', '请先在「AI ▾ AI 设置」中配置 API 地址与模型名', levelOf('ai-daily-error'));
     return { ok: false, error: 'AI 未配置' };
   }
   const snapshot = buildDailySnapshotMain();
@@ -1548,13 +2199,13 @@ async function runAiDailyReportNow() {
         content: (cut.truncated ? '【输入已截断：原文共 ' + cut.totalBytes + ' 字节】\n\n' : '') + r.text
       });
       if (!hist.ok) console.warn('[ai] 定时日报保存失败：' + hist.error);
-      notifyUser('网络拓扑管理软件 · AI 巡检日报已生成', '已保存到「AI ▾ 分析记录」（' + fmtDTMain(new Date()).slice(11, 16) + '）');
+      notifyUser('网络拓扑管理软件 · AI 巡检日报已生成', '已保存到「AI ▾ 分析记录」（' + fmtDTMain(new Date()).slice(11, 16) + '）', levelOf('ai-daily'));
       return { ok: true };
     }
-    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((r && r.error) || '未知错误').slice(0, 200));
+    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((r && r.error) || '未知错误').slice(0, 200), levelOf('ai-daily-error'));
     return { ok: false, error: (r && r.error) || 'unknown' };
   } catch (err) {
-    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((err && err.message) || err).slice(0, 200));
+    notifyUser('网络拓扑管理软件 · AI 巡检日报生成失败', String((err && err.message) || err).slice(0, 200), levelOf('ai-daily-error'));
     return { ok: false, error: String((err && err.message) || err) };
   }
 }
@@ -1611,6 +2262,10 @@ app.whenReady().then(() => {
   const webPartition = session.fromPartition('persist:nettopo-web');
   webPartition.setPermissionRequestHandler((wc, permission, callback) => callback(permission === 'fullscreen'));
   webPartition.setPermissionCheckHandler((wc, permission) => permission === 'fullscreen');
+  // 主窗/Shell 窗（defaultSession，本地渲染层）同口径收敛：被注入的渲染层不应能静默请求
+  // 通知/定位/媒体等权限（与 webPartition 的 deny-all 保持一致，仅放行 fullscreen）
+  session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => callback(permission === 'fullscreen'));
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => permission === 'fullscreen');
   // 设备管理页（webview 分区，远程不可信内容）下载同样弹出「另存为」，避免静默写文件到下载目录
   session.fromPartition('persist:nettopo-web').on('will-download', (e, item) => {
     item.setSaveDialogOptions({
@@ -1641,7 +2296,28 @@ app.whenReady().then(() => {
         && restored.ftp.password.indexOf(ENC_PREFIX) === 0) {
         restored.ftp.password = decryptSecretValue(restored.ftp.password);
       }
-      netSvc.applyConfig(restored).catch(() => { /* 恢复失败由面板状态展示 */ });
+      if (restored.trap && typeof restored.trap === 'object' && restored.trap.v3 && typeof restored.trap.v3 === 'object') {
+        for (const f of ['authPass', 'privPass']) {
+          if (typeof restored.trap.v3[f] === 'string' && restored.trap.v3[f].indexOf(ENC_PREFIX) === 0) {
+            restored.trap.v3[f] = decryptSecretValue(restored.trap.v3[f]);
+          }
+        }
+      }
+      netSvc.applyConfig(restored).then(() => {
+        // 旧版本可能带着默认/空 FTP 口令落盘运行：applyConfig 会替换为随机口令（见 normalizeConfig），
+        // 这里把生效口令密文化回写，避免每次重启重新生成随机口令导致设备侧 copy 口令失效
+        const eff = netSvc.getConfig();
+        if (eff && eff._ftpPasswordChanged && eff.ftp) {
+          try {
+            const s2 = loadAppSettings();
+            const nsv = s2.netSvc && typeof s2.netSvc === 'object' ? s2.netSvc : {};
+            if (!nsv.ftp || typeof nsv.ftp !== 'object') nsv.ftp = {};
+            nsv.ftp.password = encryptSecretValue(eff.ftp.password);
+            s2.netSvc = nsv;
+            saveAppSettings();
+          } catch (err) { /* ignore */ }
+        }
+      }).catch(() => { /* 恢复失败由面板状态展示 */ });
     }
   } catch (e) { /* ignore */ }
   // Linux 无密钥环（gnome-keyring/kwallet）时 safeStorage 回退 basic_text（弱混淆非加密）：
@@ -1651,19 +2327,29 @@ app.whenReady().then(() => {
       const { safeStorage } = require('electron');
       if (safeStorage.getSelectedStorageBackend && safeStorage.getSelectedStorageBackend() === 'basic_text') {
         setTimeout(() => notifyUser('网络拓扑管理软件 · 凭据保护降级',
-          '未检测到系统密钥环（gnome-keyring/kwallet），设备密码仅以弱混淆方式保存在本机工程文件中，请注意文件访问权限'), 3000);
+          '未检测到系统密钥环（gnome-keyring/kwallet），设备密码仅以弱混淆方式保存在本机工程文件中，请注意文件访问权限', levelOf('cred-degraded')), 3000);
       }
     } catch (e) { /* ignore */ }
   }
   // 设备管理 Web 页（webview）证书处理：自签名/无效证书需用户手动确认
   app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
-    if (webContents.getType() !== 'webview') return; // 仅处理设备管理页内嵌浏览器
+    // 非 webview 目标必须显式回调，否则该请求永久悬挂（既不拒绝也不放行）
+    if (webContents.getType() !== 'webview') return callback(false); // 仅处理设备管理页内嵌浏览器
     let host = '';
     try { host = new URL(url).host; } catch (e) { host = url; }
     // 按证书指纹信任：仅当「本次运行已允许该主机且指纹一致」才静默放行；指纹变化视为证书被替换，重新询问
     if (allowedCerts.get(host) === certificate.fingerprint) { callback(true); return; }
     event.preventDefault();
-    const id = 'cert' + (++certSeq);
+    // id 用随机值（非自增）：渲染层若被注入，可循环猜自增 id 抢先放行他人未确认的证书（含 MITM 坏证书）
+    const id = 'cert' + require('crypto').randomBytes(16).toString('hex');
+    // 挂起确认封顶（FIFO 拒最旧）：设备页持坏证书自动重连/重载且用户不处理弹窗时，
+    // pendingCert 与对应挂起的 Chromium 请求句柄会无限累积（慢速内存/句柄泄漏）
+    if (pendingCert.size >= 32) {
+      const oldest = pendingCert.keys().next().value;
+      const rec = oldest != null ? pendingCert.get(oldest) : null;
+      if (oldest != null) pendingCert.delete(oldest);
+      if (rec) { try { rec.callback(false); } catch (e) { /* ignore */ } }
+    }
     pendingCert.set(id, { callback, host, url, error, fp: certificate.fingerprint });
     emitCertError({ id, host, url, error });
   });
@@ -1671,12 +2357,28 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
     else if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); } // 托盘模式隐藏后经 Dock 唤回
   });
-  // 导航守卫：宿主窗口（主窗/Shell 窗/设备页宿主窗）只允许 file:// 本地页面——
-  // 一旦被诱导跳转到远程页面，preload 桥（topoShell/topoBackup）将随之泄露；webview guest 不受限
+  // 导航守卫：宿主窗口（主窗/Shell 窗/设备页宿主窗）只允许导航到本应用自身的三个本地页面——
+  // 一旦被诱导跳转到其它本地 HTML（如攻击者经 TFTP/FTP 收件目录投递的 evil.html），preload 桥
+  //（topoShell/topoSecure/topoUpdate/topoNetSvc）会随之泄露，且绕开页面 CSP；webview guest 不受限
+  // 允许的本地页面：loadFile 相对 app.getAppPath() 解析，打包后可能与 __dirname 不等，两者都纳入
+  const pageBases = [__dirname];
+  try { const ap = app.getAppPath(); if (ap && ap !== __dirname) pageBases.push(ap); } catch (e) { /* ignore */ }
+  const ALLOWED_PAGES = new Set();
+  for (const b of pageBases) for (const f of ['index.html', 'shell.html', 'webview.html']) ALLOWED_PAGES.add(path.resolve(b, f).toLowerCase());
+  const isAllowedLocalPage = (rawUrl) => {
+    let u;
+    try { u = new URL(String(rawUrl)); } catch (e) { return false; }
+    if (u.protocol !== 'file:') return false;
+    let p;
+    try { p = decodeURIComponent(u.pathname); } catch (e) { return false; }
+    // Windows 下 file:///D:/... 的 pathname 为 /D:/...：去除前导斜杠后交由 path.resolve 归一
+    p = p.replace(/^\/([A-Za-z]:)/, '$1');
+    return ALLOWED_PAGES.has(path.resolve(p).toLowerCase());
+  };
   app.on('web-contents-created', (e, contents) => {
     contents.on('will-navigate', (ev, url) => {
       if (contents.getType() === 'webview') return; // 设备页内嵌 guest 自由导航（另有 popup 拦截）
-      if (!/^file:/i.test(String(url))) ev.preventDefault();
+      if (!isAllowedLocalPage(url)) ev.preventDefault();
     });
     // 纵深：guest 一律无 preload、无 Node；src 仅放行 http(s)（渲染层已校验，此处兜底）
     contents.on('will-attach-webview', (ev, webPreferences, params) => {
@@ -1684,6 +2386,13 @@ app.whenReady().then(() => {
         delete webPreferences.preload;
         webPreferences.nodeIntegration = false;
         webPreferences.contextIsolation = true;
+        // 显式覆写而非依赖从宿主继承：<webview webpreferences="sandbox=no"> / disablewebsecurity
+        // 这类元素属性会带来降级的 guest，只有在这里主动纠正才拦得住（Electron 安全清单的要求）
+        webPreferences.sandbox = true;
+        webPreferences.webSecurity = true;
+        webPreferences.allowRunningInsecureContent = false;
+        webPreferences.nodeIntegrationInSubFrames = false;
+        webPreferences.webviewTag = false;
         if (!/^https?:\/\//i.test(String((params && params.src) || ''))) ev.preventDefault();
       } catch (err) { /* ignore */ }
     });
@@ -1696,6 +2405,7 @@ app.whenReady().then(() => {
 app.on('before-quit', () => { trayQuitting = true; });
 app.on('will-quit', () => {
   monitor.stopAll();
+  linkMon.stopAll();
   shell.closeAll();
   uptimeStore.flush();
   netSvc.stopAll();

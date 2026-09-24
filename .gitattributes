@@ -1,0 +1,3 @@
+# 远端执行的 shell 脚本必须保持 LF：CRLF 会让 Linux 上的 bash 直接解析失败
+# （test/live-lab.sh 会被上传到实验机执行）
+*.sh text eol=lf

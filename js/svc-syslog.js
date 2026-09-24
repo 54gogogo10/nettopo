@@ -6,6 +6,7 @@
  *   - 消息解析：PRI(设施/严重级别) → RFC5424 → RFC3164 → 裸文本 三级回退；无时间戳用本机接收时间
  *   - 存储：<baseDir>/<主机名或来源IP>/<YYYY-MM-DD>.log，行格式「时间 [级别/设施] 主机 消息」
  *   - 防洪限速（每秒 maxPerSec 条，超出丢弃并计数）、按天滚动、过期清理（keepDays）
+ *   - 日志告警：关键字 / 级别阈值命中发 alert 事件（同主机同规则冷却防风暴），setAlertRules 热更新
  *   - 目录/文件名全部白名单清洗 + 最终路径必须仍在 baseDir 内，杜绝穿越
  * 可在 Node 测试中直接使用。
  */
@@ -24,6 +25,9 @@ const MAX_MSG_LEN = 8 * 1024;        // 单条消息长度上限（超长截断�
 const MAX_RING = 1000;               // 环形缓冲条数
 const TAIL_MAX = 300;                // 单次返回条数上限
 const MAX_TCP_CONNS = 64;            // TCP 并发连接上限（内核层挂起超限 accept，防句柄耗尽）
+const MAX_HOST_DIRS = 1024;          // 主机目录数上限（HOST 由消息体自报，防伪造 HOST 目录爆炸撑爆磁盘/inode）
+const MAX_NEW_DIRS_PER_MIN = 60;     // 每分钟新建主机目录数上限（名额可 LRU 回收后，仍需限住目录洪流速率）
+const WRITE_BACKLOG_LIMIT = 8 * 1024 * 1024; // 单写流积压上限（慢盘下防用户态缓冲无界增长）
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const pad3 = (n) => String(n).padStart(3, '0');
@@ -98,8 +102,13 @@ function parseSyslogMsg(text, peerHost) {
   // 攻击者用来注入自带时间戳/级别的伪造日志行（TCP octet 帧内容允许原始 \n），破坏审计完整性
   msg = msg.replace(/[\r\n]+$/, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').replace(/[\r\n]+/g, ' ');
   if (msg.length > MAX_MSG_LEN) msg = msg.slice(0, MAX_MSG_LEN);
+  // HOST 可来自消息体自报（RFC5424/RFC3164 的 (\S+) 能匹配非换行控制字符）：
+  // 与 msg 同口径剔除，防裸控制字符污染落盘行与检索显示
+  host = String(host).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').slice(0, 128) || 'unknown';
   const facility = pri == null ? null : Math.floor(pri / 8);
   const severity = pri == null ? null : pri % 8;
+  // TAG 同 msg/host 口径剔除裸控制字符（RFC5424 的 (\S+) 可含 ESC/BEL）：tag 会落盘并经终端复制展示
+  tag = String(tag == null ? '' : tag).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 48);
   return { pri, facility, severity, ts, host, tag, msg };
 }
 
@@ -129,6 +138,48 @@ function fmtLogLine(d, ent) {
 
 function fmtDate(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
 
+/* ---- 日志告警规则（关键字 / 级别阈值）：命中即向管理器发 alert 事件，通知与事件时间线由上层桥接 ---- */
+/** 归一化告警规则：非法值回退默认（enabled=false / severity=err）；severity=null 表示不按级别（只按关键字）。
+ *  关键字剔除控制字符、截断 64 字符、按大小写不敏感去重、上限 16 个；冷却 10~3600 秒（防告警风暴）。 */
+function normalizeAlertRules(a) {
+  const out = { enabled: false, severity: 3, keywords: [], cooldownSec: 300 };
+  if (!a || typeof a !== 'object') return out;
+  out.enabled = a.enabled === true;
+  if (a.severity == null || a.severity === 'off') out.severity = null;
+  else {
+    const sev = Math.floor(Number(a.severity));
+    out.severity = (sev >= 0 && sev <= 7) ? sev : 3;
+  }
+  const kw = Array.isArray(a.keywords) ? a.keywords : [];
+  const seen = new Set();
+  for (let k of kw) {
+    k = String(k == null ? '' : k).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64);
+    if (!k) continue;
+    const key = k.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.keywords.push(k);
+    if (out.keywords.length >= 16) break;
+  }
+  const cd = Math.floor(Number(a.cooldownSec));
+  out.cooldownSec = (cd >= 10 && cd <= 3600) ? cd : 300;
+  return out;
+}
+
+/** 评估单条日志是否命中告警规则：命中返回 {matched:[关键字], via}，未启用/未命中返回 null。
+ *  匹配范围 = tag + msg（大小写不敏感的子串匹配）；级别命中 = severity <= 阈值（0=emerg 最严重）。 */
+function matchAlert(ent, rules) {
+  if (!rules || !rules.enabled) return null;
+  const matched = [];
+  const hay = ((ent.tag ? ent.tag + ' ' : '') + (ent.msg || '')).toLowerCase();
+  for (const k of rules.keywords) {
+    if (hay.indexOf(k.toLowerCase()) >= 0) matched.push(k);
+  }
+  const sevHit = rules.severity != null && ent.severity != null && ent.severity <= rules.severity;
+  if (!matched.length && !sevHit) return null;
+  return { matched, via: matched.length ? (sevHit ? 'keyword+severity' : 'keyword') : 'severity' };
+}
+
 class SyslogServer extends EventEmitter {
   /** @param opts { baseDir, ringMax=1000, keepDays=90, maxPerSec=200 } */
   constructor(opts) {
@@ -138,17 +189,33 @@ class SyslogServer extends EventEmitter {
     this.ringMax = Math.max(50, Math.floor(Number(opts.ringMax) || MAX_RING));
     this.keepDays = Math.max(1, Math.floor(Number(opts.keepDays) || 90));
     this.maxPerSec = Math.max(10, Math.floor(Number(opts.maxPerSec) || 200));
+    // 目录回收静默期：名额满时只回收「无活跃写流且最新文件早于该静默期」的来源目录（释放磁盘与名额）。
+    // 这让目录总量在持续伪造 HOST 洪流下保持有界（约 新建速率×静默期），而不是只靠限速拖时间；
+    // 回收计数进 stats.dirsRecycled 并在面板可见，不做无声删除
+    this.hostDirReclaimMs = Math.max(60000, Math.floor(Number(opts.hostDirReclaimMs) || 30 * 60000));
     this.udp = null;
     this.tcp = null;
     this.port = 0;
+    this.tcpPort = 0;
     this.tcpOn = false;
     this.running = false;
     this.lastError = '';
     this.ring = [];
     this.seq = 0;
     this.streams = new Map();   // 'host\x00date' -> fs.WriteStream
+    // 已落盘主机目录名缓存（Set，**插入序即 LRU 序**；null=惰性，首条落盘时从磁盘初始化）。
+    // 写入命中时 delete+add 移到队尾；满员时逐出队首（最久未写）——旧实现「满员即永久丢弃」会让
+    // 一次伪造 HOST 冲刷（1024 条报文可占满）之后所有真实设备的落盘归档**长期静默失效且无法自愈**。
+    this.hostDirs = null;
+    // 新建目录速率限制：名额可回收后，攻击者仍可不断用新主机名挤名额。若不限速，目录数会无界增长
+    // （这正是当初加 MAX_HOST_DIRS 要防的），故对「新增目录」单独限速：窗口内超过上限的新主机
+    // 只进环形缓冲并计入 diskDropped，不建目录。真实设备新增主机名远达不到该速率。
+    this._newDirWinStart = 0;
+    this._newDirWinCount = 0;
     this.lastDay = '';
-    this.stats = { rxMsgs: 0, dropped: 0, hosts: 0 };
+    this.stats = { rxMsgs: 0, dropped: 0, hosts: 0, alerts: 0, diskDropped: 0, dirsRecycled: 0, hostsOverCap: 0 };
+    this.alertRules = normalizeAlertRules(null);
+    this.alertLast = new Map();  // 告警冷却：'主机\x00规则键' -> 上次告警时间
     this._winStart = 0;
     this._winCount = 0;
     try { fs.mkdirSync(this.baseDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
@@ -200,11 +267,18 @@ class SyslogServer extends EventEmitter {
         };
         tcp.once('error', failTcp);
         // TCP 与 UDP 同端口（不同协议互不冲突）；仅接受整行/字节数 framing 的 RFC 6587。
-        // 随机端口场景（port=0）TCP 必须跟随 UDP 实际绑定的端口，保证「同端口」语义
+        // 固定端口场景保持「同端口」语义；**port=0（自动端口）不能跟随**：UDP 与 TCP 的临时端口
+        // 区间在 Windows 上重叠，跟随会随机撞上已占用的 TCP 端口而 EADDRINUSE，start() 返回 ok:false
+        // 且 this.port 停在 0（调用方若据此连接会拿到 EADDRNOTAVAIL/连接被拒）。此时让 TCP 自己取端口。
+        // 注意：随机端口场景（port=0）TCP 必须**跟随 UDP 实际绑定的端口**，这是「同端口」语义的
+        // 一部分（设备配置 logging host 只写一个端口号，TCP/UDP 走同一号）。代价是 Windows 下
+        // TCP 临时端口区间与 UDP 重叠时可能撞车 → EADDRINUSE，此时 start 如实返回 ok:false、
+        // this.port 保持 0；调用方必须检查返回值（测试侧的重复重试见 run-tests 的 startSyslogWithRetry）
         tcp.listen(udpPort, '0.0.0.0', () => {
           if (settled) return;
           tcp.removeListener('error', failTcp);
           this.tcp = tcp;
+          try { this.tcpPort = tcp.address().port; } catch (e) { this.tcpPort = 0; }
           tcp.maxConnections = MAX_TCP_CONNS; // 内核层限流：连接洪泛超限时挂起 accept 而非耗尽句柄
           tcp.on('error', (err) => {
             this.lastError = String(err && err.message || err);
@@ -222,6 +296,12 @@ class SyslogServer extends EventEmitter {
   }
 
   _onTcpConn(sock) {
+    // stop() 竞态守卫：连接回调排在 stop 之后同批执行时（内核已 accept），不得继续收流重建写流
+    if (!this.running) { try { sock.destroy(); } catch (e) { /* ignore */ } return; }
+    // 登记：stop() 必须把已 accept 的连接一并销毁——net.Server.close 只停监听不影响存量连接，
+    // 长连接设备（rsyslog over TCP 等）会继续收日志、继续重建写流落盘，「停止」语义完全失效
+    if (!this._tcpConns) this._tcpConns = new Set();
+    this._tcpConns.add(sock);
     let acc = Buffer.alloc(0);
     // 空闲保护覆盖整个连接生命周期：每收到数据都重置（否则发过一条消息后保护消失，
     // 对端僵死/NAT 重置出的半开 TCP 连接会缓慢累积句柄）
@@ -269,7 +349,16 @@ class SyslogServer extends EventEmitter {
       }
     });
     sock.on('error', () => { if (idle) clearTimeout(idle); });
-    sock.on('close', () => { if (idle) clearTimeout(idle); });
+    sock.on('close', () => {
+      if (idle) clearTimeout(idle);
+      if (this._tcpConns) this._tcpConns.delete(sock);
+      // 换行 framing 下不少设备发完最后一条即关闭且不带尾部 \n（RFC 6587 未强制）：
+      // 不 flush 残留缓冲会丢最后一条日志（日志收集的高频丢包路径）
+      if (framing !== 'octet' && acc.length) {
+        try { this._ingest(acc.toString('utf8').replace(/\r$/, ''), peer); } catch (e) { /* ignore */ }
+        acc = Buffer.alloc(0);
+      }
+    });
   }
 
   _bindHint(err) {
@@ -283,8 +372,34 @@ class SyslogServer extends EventEmitter {
     this.running = false;
     if (this.udp) { const s = this.udp; this.udp = null; try { s.close(); } catch (e) { /* ignore */ } }
     if (this.tcp) { const s = this.tcp; this.tcp = null; try { s.close(); } catch (e) { /* ignore */ } }
+    // 已 accept 的 TCP 连接一并销毁：close() 只停监听不影响存量连接（长连接设备会继续收日志落盘）
+    if (this._tcpConns) {
+      for (const s of this._tcpConns) { try { s.destroy(); } catch (e) { /* ignore */ } }
+      this._tcpConns.clear();
+    }
     for (const st of this.streams.values()) { try { st.end(); } catch (e) { /* ignore */ } }
     this.streams.clear();
+  }
+
+  /** 热更新告警规则（不重启服务，下一条件即刻生效） */
+  setAlertRules(rules) { this.alertRules = normalizeAlertRules(rules); }
+
+  /** 告警评估：命中的条目在环形缓冲打 alert 标记（面板高亮）；emit 受同主机同规则冷却约束（防风暴） */
+  _evalAlert(ent) {
+    const hit = matchAlert(ent, this.alertRules);
+    if (!hit) return;
+    ent.alert = hit;
+    const cdKey = ent.host + '\x00' + (hit.matched.length ? hit.matched.join(',').toLowerCase() : 'sev');
+    const now = Date.now();
+    const last = this.alertLast.get(cdKey) || 0;
+    if (now - last < this.alertRules.cooldownSec * 1000) return;
+    this.alertLast.set(cdKey, now);
+    if (this.alertLast.size > 512) this.alertLast.clear(); // 冷却表只防风暴，无需精确：超限整体清零重新冷却
+    this.stats.alerts++;
+    this.emit('alert', {
+      seq: ent.seq, ts: ent.ts, host: ent.host, severity: ent.severity, facility: ent.facility,
+      tag: ent.tag, msg: ent.msg, matched: hit.matched, via: hit.via
+    });
   }
 
   /** 限速 + 解析 + 落盘 + 环形缓冲 */
@@ -296,19 +411,23 @@ class SyslogServer extends EventEmitter {
     ent.ts = ent.ts == null ? now : ent.ts;
     ent.seq = ++this.seq;
     this.stats.rxMsgs++;
-    this.ring.push({ seq: ent.seq, ts: ent.ts, host: ent.host, facility: ent.facility, severity: ent.severity, tag: ent.tag, msg: ent.msg });
+    this.ring.push(ent); // 环形缓冲直接持有 ent：告警标记（ent.alert）要能从 tail() 拿到
     if (this.ring.length > this.ringMax) this.ring.splice(0, this.ring.length - this.ringMax);
     this._writeEntry(ent);
+    this._evalAlert(ent);
     this.emit('message', ent);
   }
 
   _writeEntry(ent) {
-    const d = new Date(ent.ts);
+    let d = new Date(ent.ts);
+    // 设备时钟报未来日期（如 9999 年）会生成永不过期的日志文件（清理按 t < cutoff 判定，未来日期恒不满足）。
+    // 落盘日期一律不晚于本机当日：未来时间戳折到本机当日归档，消息 ts 原样保留供展示
+    const localDay = fmtDate(new Date());
+    if (fmtDate(d) > localDay) d = new Date();
     const day = fmtDate(d);
     // 过期清理按本机墙上时钟的「天」滚动触发一次：消息时间戳可能因设备时钟错误落在
     // 过去/未来（差出一天即触发），若按消息日期触发会在正常消息后立即清掉刚写入的
     // 「旧日期」文件（设备时钟回拨场景下日志一写就丢）
-    const localDay = fmtDate(new Date());
     if (this.lastDay && this.lastDay !== localDay) this._cleanupOld();
     this.lastDay = localDay;
     const hostDir = sanitizeHostDir(ent.host);
@@ -318,9 +437,41 @@ class SyslogServer extends EventEmitter {
     const key = hostDir + '\x00' + day;
     let st = this.streams.get(key);
     if (!st) {
+      // 主机目录数封顶：HOST 由发送方自报，需防伪造 HOST 目录爆炸（耗尽目录项/磁盘）。
+      // 采用「LRU 名额 + 新建限速」双闸：
+      //  - 名额满时逐出**最久未写**的主机（只回收内存名额，不删任何日志文件，保留 keepDays 承诺），
+      //    使真实设备永远拿得到名额——旧实现「满员即永久丢弃」会让一次 5 秒冲刷之后所有真实
+      //    设备的落盘归档长期静默失效、且重启/清理都无法自愈。
+      //  - 新目录单独限速：名额可回收后攻击者仍能靠不断换主机名制造目录洪流，故窗口内新建数超限
+      //    的**新**主机只进环形缓冲（计入 diskDropped）；已存在的主机不受此限，真实设备不受影响。
+      if (this.hostDirs === null) {
+        this.hostDirs = new Set();
+        try {
+          for (const h of fs.readdirSync(base)) {
+            try { if (fs.lstatSync(path.join(base, h)).isDirectory()) this.hostDirs.add(h); } catch (e2) { /* ignore */ }
+          }
+        } catch (e) { /* ignore */ }
+      }
+      const known = this.hostDirs.has(hostDir);
+      if (known || this.hostDirs.size < MAX_HOST_DIRS) {
+        if (known) {
+          this.hostDirs.delete(hostDir); this.hostDirs.add(hostDir); // 命中即移到队尾（LRU）
+        } else {
+          const nowMs = Date.now();
+          if (nowMs - this._newDirWinStart >= 60000) { this._newDirWinStart = nowMs; this._newDirWinCount = 0; }
+          if (++this._newDirWinCount > MAX_NEW_DIRS_PER_MIN) { this.stats.diskDropped++; return; }
+          this.hostDirs.add(hostDir);
+        }
+      } else {
+        // 满员：回收「最久未写且已静默」的主机目录（释放磁盘与名额）——攻击者自造的目录会被自己
+        // 的洪流优先回收，真实活跃设备因 mtime 新鲜不会被选中。找不到可回收目标时（例如全部目录
+        // 都在静默期内）仍放行本次写入，绝不永久饿死新来源，同时计入 hostsOverCap 供面板告警
+        if (!this._reclaimHostDir(base)) this.stats.hostsOverCap++;
+        this.hostDirs.add(hostDir);
+      }
       try {
         // 纵深：主机目录若被同机攻击者替换为符号链接，跟随写入会把日志写到任意位置
-        try { if (fs.lstatSync(dir).isSymbolicLink()) return; } catch (e2) { /* 不存在则照常创建 */ }
+        try { if (fs.lstatSync(dir).isSymbolicLink()) { this.stats.diskDropped++; return; } } catch (e2) { /* 不存在则照常创建 */ }
         fs.mkdirSync(dir, { recursive: true });
         st = fs.createWriteStream(path.join(dir, day + '.log'), { flags: 'a' });
         st.on('error', () => { this.streams.delete(key); }); // 写失败：丢弃该流，下次重建
@@ -329,9 +480,47 @@ class SyslogServer extends EventEmitter {
           const keys = [...this.streams.keys()].slice(0, 32);
           for (const k of keys) { const old = this.streams.get(k); this.streams.delete(k); try { old.end(); } catch (e) { /* ignore */ } }
         }
-      } catch (e) { return; }
+      } catch (e) { this.stats.diskDropped++; return; }
     }
-    try { st.write(fmtLogLine(d, ent) + '\n'); } catch (e) { /* ignore */ }
+    // 写流背压：写不动（慢盘/网络盘挂起）时不再无界堆积内存——丢弃本条并计数，环形缓冲与实时
+    // 告警不受影响；积压过高时直接重建该流（旧流已失去意义）
+    const line = fmtLogLine(d, ent) + '\n';
+    try {
+      if (!st.write(line)) {
+        this.stats.diskDropped++;
+        if (st.writableLength > WRITE_BACKLOG_LIMIT) { this.streams.delete(key); try { st.destroy(); } catch (e) { /* ignore */ } }
+      }
+    } catch (e) { this.stats.diskDropped++; }
+  }
+
+  /** 名额满时回收一个「已静默」的主机目录（按 LRU 序尝试）：
+   *  条件 = 无活跃写流 + 目录内无符号链接 + 最新文件 mtime 早于 hostDirReclaimMs。
+   *  释放磁盘与内存名额，使归档容量在伪造 HOST 洪流下有界；成功返回目录名，否则 null。 */
+  _reclaimHostDir(base) {
+    if (!this.hostDirs) return null;
+    const nowMs = Date.now();
+    for (const h of this.hostDirs) {
+      let active = false;
+      for (const k of this.streams.keys()) { if (k.slice(0, k.indexOf('\x00')) === h) { active = true; break; } }
+      if (active) continue;
+      const hd = path.join(base, h);
+      if (!hd.startsWith(base + path.sep)) continue; // 纵深：只动库内目录
+      let newest = 0, ok = true;
+      try {
+        for (const f of fs.readdirSync(hd)) {
+          const fst = fs.lstatSync(path.join(hd, f));
+          if (fst.isSymbolicLink()) { ok = false; break; } // 含链接的目录不碰（防误删链接目标）
+          if (fst.mtimeMs > newest) newest = fst.mtimeMs;
+        }
+      } catch (e) { ok = false; }
+      if (!ok) continue;
+      if (nowMs - newest < this.hostDirReclaimMs) continue; // 仍在活跃期：不回收
+      try { fs.rmSync(hd, { recursive: true, force: true }); } catch (e) { continue; }
+      this.hostDirs.delete(h);
+      this.stats.dirsRecycled++;
+      return h;
+    }
+    return null;
   }
 
   /** 删除超过 keepDays 天的日期文件（按文件名日期判定） */
@@ -353,6 +542,15 @@ class SyslogServer extends EventEmitter {
           const t = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
           if (Number.isFinite(t) && t < cutoff) { try { fs.unlinkSync(full); } catch (e) { /* ignore */ } }
         }
+        // 清理过期日志后顺手删掉空主机目录（rmdir 仅在目录为空时成功）：过期文件清完目录永久残留，
+        // 既放大伪造 HOST 的目录爆炸，也让每日清理的同步遍历越来越重。有活跃写流的主机跳过
+        let streaming = false;
+        for (const k of this.streams.keys()) { if (k.slice(0, k.indexOf('\x00')) === host) { streaming = true; break; } }
+        if (!streaming) {
+          try { fs.rmdirSync(hd); if (this.hostDirs) this.hostDirs.delete(host); } catch (e) { /* 非空：忽略 */ }
+        }
+        // 目录已在外部被删除（人工清理/误删）时同步剔除内存名额，否则名额被幽灵条目永久占用
+        try { if (!fs.existsSync(hd) && this.hostDirs) this.hostDirs.delete(host); } catch (e) { /* ignore */ }
       }
     } catch (e) { /* ignore */ }
   }
@@ -375,10 +573,14 @@ class SyslogServer extends EventEmitter {
 
   status() {
     return {
-      running: this.running, port: this.port, tcp: !!this.tcp, error: this.lastError,
-      rxMsgs: this.stats.rxMsgs, dropped: this.stats.dropped, buffered: this.ring.length
+      running: this.running, port: this.port, tcpPort: this.tcpOn ? this.tcpPort : 0, tcp: !!this.tcp,
+      error: this.lastError,
+      rxMsgs: this.stats.rxMsgs, dropped: this.stats.dropped, diskDropped: this.stats.diskDropped,
+      dirsRecycled: this.stats.dirsRecycled, hostsOverCap: this.stats.hostsOverCap,
+      hosts: this.hostDirs ? this.hostDirs.size : 0,
+      buffered: this.ring.length, alerts: this.stats.alerts, alertOn: this.alertRules.enabled
     };
   }
 }
 
-module.exports = { SyslogServer, parseSyslogMsg, sanitizeHostDir, SEV_NAMES, FAC_NAMES };
+module.exports = { SyslogServer, parseSyslogMsg, sanitizeHostDir, SEV_NAMES, FAC_NAMES, normalizeAlertRules, matchAlert };

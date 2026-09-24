@@ -89,6 +89,9 @@ class ShellManager extends EventEmitter {
    *  按天归档为 <logDir>/WebShell-<主机>/<日期>/<主机>_<端口>_<时间>.log，与监控日志共用浏览/搜索） */
   constructor(opts) {
     super();
+    // 每个在飞的一次性会话（runOneShot/runDeploy/监控独立备份）都在 manager 上挂 3 个临时监听器，
+    // 批量巡检/链路监测并发 ≥9 时会超 EventEmitter 默认 10 上限刷告警——抬高阈值（监听器均有 finish 清理，无泄漏）
+    this.setMaxListeners(100);
     opts = opts || {};
     this.sessions = new Map();
     this._seq = 0;
@@ -260,6 +263,12 @@ class ShellManager extends EventEmitter {
     const s = this.sessions.get(id);
     if (s) s.write(data);
   }
+  /** 会话归属（'ui' | 'monitor'）：IPC 侧据此只允许操作 Web Shell 窗口自己的 UI 会话，
+   *  防 Shell 窗渲染层向后台监控/独立采集会话注入命令或掐断连接（越过 readOnly 语义）。 */
+  ownerOf(id) {
+    const base = this._params.get(id);
+    return base ? (base.owner === 'monitor' ? 'monitor' : 'ui') : null;
+  }
   resize(id, cols, rows) {
     const s = this.sessions.get(id);
     if (!s) return;
@@ -282,12 +291,42 @@ class ShellManager extends EventEmitter {
       }
       this.close(id);
     }
+    // 已断开的 UI 会话不在 sessions 里（end 即移除），close 走不到——但其建连参数（含明文
+    // 密码）仍在 _params 滞留供「重新连接」；窗口关闭后前端已不可能再触发重连，一并清掉，
+    // 否则用户反复开关窗口会累积不可达的凭据副本（与 close() 的「内存不留凭据」语义对齐）
+    if (exceptOwner) {
+      for (const id of [...this._params.keys()]) {
+        const base = this._params.get(id);
+        if (base && base.owner === exceptOwner) continue;
+        this._params.delete(id);
+      }
+    }
   }
 
-  /** SSH 首次连接指纹确认：用户信任后放行该主机的全部待确认握手（TOFU） */
-  trustFingerprint(host, trust) {
+  /** SSH 首次连接指纹确认：用户信任后放行该主机的全部待确认握手（TOFU）。
+   *  onlyOwner 提供时仅放行/拒绝该归属的握手，其余保持排队：后台（monitor/一次性采集）
+   *  的自动信任不得绕过 UI 会话正在等待的人工确认（用户还没点「信任」连接已建立、
+   *  点「取消」已无效果），反向的用户拒绝也不误杀后台采集 */
+  /** 注入指纹信任裁决（由 electron-main 接到 MonitorManager.verifyFingerprint）。
+   *  无人值守采集没有渲染层介入，必须由主进程的权威信任库裁决「已钉扎且变化 ⇒ 拒」。
+   *  未注入时（纯 Node 单测/独立使用）保持 TOFU 放行语义。 */
+  setTrustGate(fn) {
+    this._trustGate = typeof fn === 'function' ? fn : null;
+  }
+
+  trustFingerprint(host, trust, onlyOwner) {
     const arr = this._pendingVerify.get(host);
     if (!arr || !arr.length) return false;
+    if (onlyOwner) {
+      let hit = false;
+      const rest = arr.filter((rec) => {
+        if (rec && rec.owner === onlyOwner) { hit = true; try { rec.verify(!!trust); } catch (e) { /* ignore */ } return false; }
+        return true;
+      });
+      if (rest.length) this._pendingVerify.set(host, rest);
+      else this._pendingVerify.delete(host);
+      return hit;
+    }
     this._pendingVerify.delete(host);
     for (const rec of arr) { try { rec.verify(!!trust); } catch (e) { /* ignore */ } }
     return true;
@@ -324,11 +363,17 @@ class ShellManager extends EventEmitter {
       }
       if (cmdInvalid) { resolve({ ok: false, outputs: [], fingerprint: null, error: '命令包含控制字符或超过 256 字符，已拒绝执行', errors: [] }); return; }
       if (!commands.length) { resolve({ ok: false, outputs: [], fingerprint: null, error: '未提供要执行的命令', errors: [] }); return; }
+      // 前置命令（凭据档案携带，如思科用户模式需先 enable、FRR 直连 vty 需先 enable 才能读配置）：
+      // 单条、同样禁控制字符（防换行注入拆分/伪造命令）
+      const preCmd = String(opts.preCmd == null ? '' : opts.preCmd).trim();
+      if (preCmd && (/[\u0000-\u001f\u007f]/.test(preCmd) || preCmd.length > 256)) {
+        resolve({ ok: false, outputs: [], fingerprint: null, error: '前置命令包含控制字符或超过 256 字符，已拒绝执行', errors: [] }); return;
+      }
       const clamp = (v, lo, hi, d) => { const n = parseInt(v, 10); return (n >= lo && n <= hi) ? n : d; };
       const waitMs = clamp(opts.waitMs, 200, 20000, 1200);
       const cmdTimeoutMs = clamp(opts.cmdTimeoutMs, 1000, 60000, 10000);
       const readyTimeoutMs = clamp(opts.readyTimeoutMs, 3000, 60000, 15000);
-      const overallMs = readyTimeoutMs + commands.length * (cmdTimeoutMs + waitMs) + 15000;
+      const overallMs = readyTimeoutMs + commands.length * (cmdTimeoutMs + waitMs) + (preCmd ? cmdTimeoutMs + waitMs : 0) + 15000;
 
       const r = this.connect({
         protocol, host, port,
@@ -402,10 +447,27 @@ class ShellManager extends EventEmitter {
         if (info.state === 'connected') {
           connectedOnce = true;
         } else if (info.state === 'fingerprint') {
-          // 无人值守采集的指纹语义与监控一致：首次连接自动信任（TOFU），变化拒绝由渲染层传入 expectFp 严格比对
+          // 无人值守采集的指纹语义与监控一致：首次连接自动信任（TOFU）、**变化即拒**。
+          // 变化判定必须问主进程的权威信任库（MonitorManager，经 setTrustGate 注入）——此前这里
+          // 无条件放行，于是「已钉扎主机的指纹变化」被静默接受，采集到的指纹还会被渲染层反写成
+          // 长期钉扎值，此后真实设备反而被拒（钉扎语义被一次采集反转）
+          // port 必须随回执带出：渲染层指纹记忆键按 host:port 拆分（非 22 端口）
           const fh = String((info && info.host) || host);
-          fpOut.v = { host: fh, fp: String(info.fp || '') };
-          try { this.trustFingerprint(fh, true); } catch (e) { /* ignore */ }
+          const fpv = String(info.fp || '');
+          fpOut.v = { host: fh, port: info.port, fp: fpv };
+          let verdict = null;
+          if (typeof this._trustGate === 'function') {
+            try { verdict = this._trustGate(fh, info.port, fpv); } catch (e) { verdict = null; }
+          }
+          if (verdict && verdict.ok === false) {
+            // 顺序要紧：先 finish 把**明确的中文原因**定为本次结果，再以「不信任」释放挂起的握手。
+            // 反过来的话，verify(false) 会同步触发 ssh2 的 error 事件，把结果写成它自己的
+            // "Host denied (verification failed)"，用户看不到「可能为中间人攻击」这一关键提示
+            finish(false, verdict.error || '主机指纹变化，已拒绝连接');
+            try { this.trustFingerprint(fh, false, 'monitor'); } catch (e) { /* ignore */ }
+            return;
+          }
+          try { this.trustFingerprint(fh, true, 'monitor'); } catch (e) { /* ignore */ }
         } else if (info.state === 'error') {
           if (!connectedOnce) { finish(false, info.text || '连接失败'); return; }
           errors.push(String(info.text || '会话错误'));
@@ -454,6 +516,16 @@ class ShellManager extends EventEmitter {
         if (!ready) errors.push('未识别到命令提示符（会话可能未就绪），已按超时继续');
         // 首条命令前的输出（登录横幅/提示符回显）不属于命令输出：丢弃
         lineBuf = '';
+        // 前置命令：先于采集命令下发一次并等提示符，其输出不进任何命令窗口（与配置下发的 preCmd 语义一致）
+        if (preCmd) {
+          curCap = { lines: [], chars: 0 };
+          try { this.write(sid, preCmd + eol); } catch (e) { errors.push('前置命令写入失败：' + preCmd); }
+          await sleep(Math.min(waitMs, 800));
+          await waitCmdDone();
+          await sleep(150);
+          curCap = null;
+          lineBuf = '';
+        }
         for (const cmd of commands) {
           if (settled) break;
           curCap = { lines: [], chars: 0 };
@@ -472,6 +544,318 @@ class ShellManager extends EventEmitter {
         }
         finish(true, null);
       })().catch((e) => finish(false, '采集异常：' + String((e && e.message) || e)));
+    });
+  }
+
+  /* ---------- 配置变更下发（监控 ▾ 配置变更下发） ---------- */
+  /** 在**一条会话内**完成「前置备份 → 逐行下发（失败即停）→ 退出配置模式 → 可选保存 → 可选回采校验」。
+   *  与 runOneShot 的差别（配置段不是几条只读命令）：
+   *  - 行数上限 200、逐行等提示符并用**设备报错模式**判定该行失败（失败即停，不再往下灌）；
+   *  - 进出配置模式由管道显式下发；中段视图切换（quit/exit）照常下发；
+   *  - 下发途中若设备要求交互确认（[Y/N]）**立即中止**——变更工具不该替人确认未知影响
+   *    （保存配置的提示是唯一的例外，见 doSave）；
+   *  - 主进程独立硬守卫：控制字符/超长/超行数/**自己的禁止清单**一律拒绝（不依赖渲染层校验）。
+   *  opts: {protocol, host, port, username, password, privateKey, keyPassphrase, jump, encoding, expectFp,
+   *         vendor, lines:[...], showCmd, screenCmd, enterCmd, exitCmd, saveCmd, doSave, verify,
+   *         waitMs, cmdTimeoutMs, readyTimeoutMs}
+   *  返回 {ok, error, applied:[{line, ok, out, error}], appliedCount, failedAt, remaining,
+   *        backup:{ok, content, error}, post:{ok, content, error}, saved:{ok, error, out}, fingerprint, errors} */
+  runDeploy(opts) {
+    return new Promise((resolve) => {
+      opts = opts || {};
+      const cleanLog = (s) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]/g, '');
+      const protocol = String(opts.protocol || 'ssh').toLowerCase() === 'telnet' ? 'telnet' : 'ssh';
+      const host = cleanLog(opts.host).trim();
+      const errors = [];
+      const empty = {
+        ok: false, error: null, applied: [], appliedCount: 0, failedAt: -1, remaining: 0,
+        backup: { ok: false, content: '', error: null }, post: { ok: false, content: '', error: null },
+        saved: { ok: false, error: null, out: '' }, fingerprint: null, errors
+      };
+      const bail = (error) => resolve(Object.assign({}, empty, { error }));
+      if (!host) { bail('未填写主机地址'); return; }
+      let port = parseInt(opts.port, 10);
+      if (!(port >= 1 && port <= 65535)) port = protocol === 'telnet' ? 23 : 22;
+      // ---- 主进程独立硬守卫（与渲染层 U.checkChangeSet 口径一致但互不依赖）----
+      const FORBIDDEN = [
+        /^reload\b/i, /^reboot\b/i, /^erase\b/i, /^format\b/i, /^factory-reset\b/i,
+        /^reset\s+saved-configuration\b/i, /^write\s+erase\b/i, /^undo\s+startup\s+saved-configuration\b/i,
+        /^startup\s+saved-configuration\b/i, /^delete\b/i, /^undelete\b/i,
+        /^(rm|rmdir|mkfs|dd|fdisk|parted|mkswap)\b/i, /^shutdown\s+[-/]/, /^boot\b/i, /^patch\b/i
+      ];
+      const lines = [];
+      for (const c of (Array.isArray(opts.lines) ? opts.lines : [])) {
+        const raw = String(c == null ? '' : c);
+        if (/[\u0000-\u001f\u007f]/.test(raw)) { bail('配置行含控制字符，已拒绝执行'); return; }
+        const t = raw.replace(/[ ]+$/, '');
+        if (!t.trim()) continue;
+        if (t.length > 256) { bail('配置行超过 256 字符，已拒绝执行'); return; }
+        if (FORBIDDEN.some(re => re.test(t.trim()))) { bail('配置行命中禁止下发清单，已拒绝执行：' + t.trim().slice(0, 80)); return; }
+        lines.push(t);
+        if (lines.length > 200) { bail('配置行超过 200 行上限，已拒绝执行'); return; }
+      }
+      if (!lines.length) { bail('未提供要下发的配置行'); return; }
+      const clamp = (v, lo, hi, d) => { const n = parseInt(v, 10); return (n >= lo && n <= hi) ? n : d; };
+      const waitMs = clamp(opts.waitMs, 200, 20000, 1200);
+      const cmdTimeoutMs = clamp(opts.cmdTimeoutMs, 1000, 60000, 10000);
+      const readyTimeoutMs = clamp(opts.readyTimeoutMs, 3000, 60000, 15000);
+      const showCmd = cleanLog(opts.showCmd).trim().slice(0, 256);
+      const screenCmd = cleanLog(opts.screenCmd).trim().slice(0, 256);
+      // 前置命令（如 FRR/vtysh 设备需先 `enable` 进特权模式才能读配置与进配置模式）：
+      // 在关分页与前置备份之前发送，失败即中止——后面每一步都依赖它
+      const preCmd = cleanLog(opts.preCmd).trim().slice(0, 256);
+      const enterCmd = cleanLog(opts.enterCmd).trim().slice(0, 256);
+      const exitCmd = cleanLog(opts.exitCmd).trim().slice(0, 256);
+      const saveCmd = cleanLog(opts.saveCmd).trim().slice(0, 256);
+      const doSave = !!opts.doSave && !!saveCmd;
+      const verify = !!opts.verify && !!showCmd;
+      // 上限：逐行等待按 4s 估（实际多为提示符就绪即返回）；最多 30 分钟兜底
+      const overallMs = Math.min(30 * 60 * 1000, readyTimeoutMs + 60000 + lines.length * 4000);
+
+      const r = this.connect({
+        protocol, host, port,
+        username: cleanLog(opts.username).trim().slice(0, 128) || 'admin',
+        password: String(opts.password || ''),
+        privateKey: typeof opts.privateKey === 'string' ? opts.privateKey.trim() : '',
+        keyPassphrase: typeof opts.keyPassphrase === 'string' ? opts.keyPassphrase.slice(0, 1024) : '',
+        jump: opts.jump && typeof opts.jump === 'object' ? opts.jump : null,
+        cols: 200, rows: 50,
+        autoLogin: protocol === 'telnet',
+        encoding: opts.encoding === 'gbk' ? 'gbk' : 'utf8',
+        expectFp: String(opts.expectFp || '').trim(),
+        owner: 'monitor' // 后台语义：Web Shell 窗口关闭的 closeAll('monitor') 不误杀
+      });
+      if (!r.ok) { bail(r.error || '连接失败'); return; }
+      const sid = r.id;
+      const sleep = (ms) => new Promise(x => setTimeout(x, ms));
+      const eol = protocol === 'telnet' ? '\r\n' : '\n';
+      const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/;
+      const MORE_RE = /--+\s*more\s*--+\s*$/i;
+      // 设备报错模式（逐行判定，避免多行噪声误伤）：只在被判定行的输出里找。
+      // 注意 FRR 会在 `%` 后带**守护进程标签**（真机实测：`% [ZEBRA] Unknown command: ip route ...`），
+      // 不接受该标签会漏判——配置下发就成了「以为下发成功、其实一条没生效」。
+      const ERR_RES = [
+        /^%\s*(?:\[[A-Za-z0-9_-]{1,16}\]\s*)?(invalid|incomplete|ambiguous|unrecognized|unknown|error|wrong|too many)/i,
+        // error/failure 起头必须带冒号：华为云路由配置里有形如「error-down auto-recovery cause …」的合法配置行，
+        // 冒号可选时 ^error 会把它误判成设备报错，前置备份被拦、下发整体中止
+        /^(error|failure)[:：]/i,
+        /^(wrong parameter|invalid input|incomplete command|ambiguous command|unrecognized command|unknown command|too many parameters)(\s|[:：]|$)/i,
+        /(^|\s)(invalid input|incomplete command|ambiguous command|unrecognized command|unknown command|wrong parameter|too many parameters)(\s|$)/i,
+        /^failed to\b/i
+      ];
+      const CONFIRM_RE = /(\[Y\/N\]|\[y\/n\]|\(y\/n\)|\[yes\/no\]|are you sure|continue\?)/i;
+      const FILENAME_RE = /(destination filename|startup-config\]|\[flash:)/i;
+
+      let settled = false;
+      let curCap = null;
+      let lineBuf = '';
+      let promptSeen = false;
+      let connectedOnce = false;
+      let lastMoreAt = 0;
+      const fpOut = { v: null };
+      const applied = [];
+      let failedAt = -1;
+      const backup = { ok: false, content: '', error: null };
+      const post = { ok: false, content: '', error: null };
+      const saved = { ok: false, error: null, out: '' };
+
+      const finish = (ok, error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(overallTimer);
+        this.removeListener('output', onOutput);
+        this.removeListener('status', onStatus);
+        this.removeListener('end', onEnd);
+        try { this.close(sid); } catch (e) { /* ignore */ }
+        resolve({
+          ok: !!ok, error: error || null, applied, appliedCount: applied.filter(a => a.ok).length,
+          failedAt, remaining: failedAt >= 0 ? lines.length - failedAt - 1 : 0,
+          backup, post, saved, fingerprint: fpOut.v, errors
+        });
+      };
+      const overallTimer = setTimeout(() => { finish(false, '下发超时（已下发的行照常返回，请核对设备当前配置）'); }, overallMs);
+
+      const maybeMore = () => {
+        const now = Date.now();
+        if (now - lastMoreAt < 150) return;
+        const tail = (lineBuf || '').trimEnd();
+        if (MORE_RE.test(tail)) { lastMoreAt = now; try { this.write(sid, ' '); } catch (e) { /* ignore */ } }
+      };
+      const onOutput = (sid2, data) => {
+        if (sid2 !== sid) return;
+        let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '');
+        text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        lineBuf += text;
+        const parts = lineBuf.split('\n');
+        lineBuf = parts.pop();
+        for (const ln of parts) {
+          const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          if (!t) continue;
+          if (!promptSeen && PROMPT_RE.test(t.trim())) promptSeen = true;
+          if (curCap && curCap.chars + t.length + 1 <= 4 * 1024 * 1024) { curCap.lines.push(t); curCap.chars += t.length + 1; }
+        }
+        maybeMore();
+      };
+      const onStatus = (sid2, info) => {
+        if (sid2 !== sid || !info) return;
+        if (info.state === 'connected') { connectedOnce = true; return; }
+        if (info.state === 'fingerprint') {
+          // 指纹语义与监控/一次性采集一致：首连 TOFU 自动信任、**变化即拒**（问主进程权威信任库）
+          const fh = String((info && info.host) || host);
+          const fpv = String(info.fp || '');
+          fpOut.v = { host: fh, port: info.port, fp: fpv };
+          let verdict = null;
+          if (typeof this._trustGate === 'function') {
+            try { verdict = this._trustGate(fh, info.port, fpv); } catch (e) { verdict = null; }
+          }
+          if (verdict && verdict.ok === false) {
+            finish(false, verdict.error || '主机指纹变化，已拒绝连接');
+            try { this.trustFingerprint(fh, false, 'monitor'); } catch (e) { /* ignore */ }
+            return;
+          }
+          try { this.trustFingerprint(fh, true, 'monitor'); } catch (e) { /* ignore */ }
+          return;
+        }
+        if (info.state === 'error') {
+          if (!connectedOnce) { finish(false, info.text || '连接失败'); return; }
+          errors.push(String(info.text || '会话错误'));
+        }
+      };
+      const onEnd = (sid2, reason) => {
+        if (sid2 !== sid) return;
+        finish(false, '连接已断开：' + String(reason || '').slice(0, 120) + (applied.length ? '（已下发的行见结果）' : ''));
+      };
+      this.on('output', onOutput);
+      this.on('status', onStatus);
+      this.on('end', onEnd);
+
+      const waitReady = async () => {
+        if (!(protocol === 'telnet' && String(opts.password || ''))) { try { this.write(sid, '\r\n'); } catch (e) { /* ignore */ } }
+        const t0 = Date.now();
+        while (!settled && (Date.now() - t0) < readyTimeoutMs) {
+          if (promptSeen) return true;
+          const tail = (lineBuf || '').trim();
+          if (tail && PROMPT_RE.test(tail)) { promptSeen = true; return true; }
+          await sleep(150);
+        }
+        return !!promptSeen;
+      };
+      const waitCmdDone = async () => {
+        const t0 = Date.now();
+        let lastLen = -1, quietMs = 0;
+        while (!settled && (Date.now() - t0) < cmdTimeoutMs) {
+          maybeMore();
+          const len = curCap ? curCap.lines.length : 0;
+          quietMs = (len === lastLen) ? quietMs + 100 : 0;
+          lastLen = len;
+          const tail = (lineBuf || '').trimEnd();
+          if (quietMs >= 350 && tail && PROMPT_RE.test(tail)) break;
+          if (quietMs >= 3000) break;
+          await sleep(100);
+        }
+      };
+      /** 下发一条命令并收集其输出（剥命令回显）。返回 {text, err} */
+      const sendOne = async (cmd) => {
+        if (settled) return { text: '', err: '会话已结束' };
+        curCap = { lines: [], chars: 0 };
+        try { this.write(sid, cmd + eol); } catch (e) { curCap = null; return { text: '', err: '命令写入失败' }; }
+        await sleep(Math.min(waitMs, 800));
+        await waitCmdDone();
+        await sleep(150);
+        const tail = (lineBuf || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+        if (tail.trim() && curCap) { curCap.lines.push(tail); curCap.chars += tail.length + 1; }
+        lineBuf = '';
+        const ls = curCap ? curCap.lines : [];
+        curCap = null;
+        if (ls.length && (ls[0].trim() === cmd || (cmd && ls[0].trim().endsWith(cmd)))) ls.shift();
+        return { text: ls.join('\n'), err: null };
+      };
+      /** 设备报错行提取（无则空串） */
+      const errOf = (text) => {
+        for (const ln of String(text || '').split('\n')) {
+          const t = ln.trim();
+          if (!t) continue;
+          if (ERR_RES.some(re => re.test(t))) return t.slice(0, 200);
+        }
+        return '';
+      };
+
+      (async () => {
+        const ready = await waitReady();
+        if (!ready) errors.push('未识别到命令提示符（会话可能未就绪），已按超时继续');
+        lineBuf = '';
+        // 0) 前置命令（best-effort 不成立：失败即中止，见上）
+        if (preCmd) {
+          const rp = await sendOne(preCmd);
+          const pe = errOf(rp.text);
+          if (rp.err || pe) { finish(false, '前置命令失败（' + preCmd + '）：' + (rp.err || pe)); return; }
+          if (settled) return;
+        }
+        // 1) 关分页（best-effort：部分平台无此命令，报错忽略）
+        if (screenCmd) await sendOne(screenCmd);
+        // 2) 前置备份：抓当前运行配置（这是回滚的唯一依据，拿不到就不该继续）
+        if (showCmd) {
+          const rb = await sendOne(showCmd);
+          backup.content = rb.text;
+          const be = errOf(rb.text);
+          if (rb.err) backup.error = rb.err;
+          else if (!backup.content.trim()) backup.error = '取当前运行配置为空（' + showCmd + '）';
+          else if (be) backup.error = '取当前运行配置时设备报错：' + be;
+          else backup.ok = true;
+          if (settled) return;
+          if (!backup.ok) { finish(false, '前置备份失败，已中止下发：' + backup.error); return; }
+        }
+        // 3) 进入配置模式
+        if (enterCmd) {
+          const re = await sendOne(enterCmd);
+          const ee = errOf(re.text);
+          if (re.err || ee) { finish(false, '进入配置模式失败：' + (re.err || ee)); return; }
+          if (settled) return;
+        }
+        // 4) 逐行下发：失败即停
+        for (let i = 0; i < lines.length; i++) {
+          if (settled) return;
+          const res = await sendOne(lines[i]);
+          if (settled) return;
+          const e = errOf(res.text);
+          if (res.err) { applied.push({ line: lines[i], ok: false, out: res.text, error: res.err }); failedAt = i; break; }
+          if (CONFIRM_RE.test(res.text)) {
+            applied.push({ line: lines[i], ok: false, out: res.text, error: '设备要求交互确认，已中止（请确认影响后手工执行）' });
+            failedAt = i; break;
+          }
+          if (e) { applied.push({ line: lines[i], ok: false, out: res.text, error: '设备报错：' + e }); failedAt = i; break; }
+          applied.push({ line: lines[i], ok: true, out: res.text, error: null });
+        }
+        // 5) 退出配置模式（无论成败都要退，避免会话停在配置视图）
+        if (!settled && exitCmd) await sendOne(exitCmd);
+        // 6) 保存（可选）：仅此处的交互提示自动应答
+        if (!settled && doSave) {
+          const rs = await sendOne(saveCmd);
+          let out = rs.text;
+          let resp = rs.text;   // 只看**最新一次**应答：累积文本里的旧提示会导致重复应答
+          for (let k = 0; k < 2 && !settled; k++) {
+            if (CONFIRM_RE.test(resp)) { resp = (await sendOne('y')).text; out += '\n' + resp; }
+            else if (FILENAME_RE.test(resp)) { resp = (await sendOne('')).text; out += '\n' + resp; }
+            else break;
+          }
+          saved.out = out;
+          const se = errOf(out);
+          saved.ok = !rs.err && !se;
+          saved.error = rs.err || se || null;
+        }
+        // 7) 回采校验（可选）：再抓一次运行配置，供界面与变更前做 diff
+        if (!settled && verify) {
+          const rp = await sendOne(showCmd);
+          post.content = rp.text;
+          const pe = errOf(rp.text);
+          if (rp.err) post.error = rp.err;
+          else if (!post.content.trim()) post.error = '回采为空';
+          else if (pe) post.error = '回采时设备报错：' + pe;
+          else post.ok = true;
+        }
+        if (settled) return;
+        finish(failedAt < 0, failedAt < 0 ? null : ('第 ' + (failedAt + 1) + ' 行下发失败，已停止后续下发'));
+      })().catch((e) => finish(false, '下发异常：' + String((e && e.message) || e)));
     });
   }
 
@@ -585,6 +969,9 @@ class ShellManager extends EventEmitter {
     const local = String(localPath == null ? '' : localPath).trim();
     if (!local) return { ok: false, error: '本地保存路径无效' };
     let sftp = null;
+    // 先写 .part 临时文件再 rename 覆盖：用户在另存为对话框选择覆盖既有文件时，下载中途
+    // 失败不得删掉原文件（系统覆盖确认的语义是「成功后才替换」，直接 unlink 会把原文件一并毁掉）
+    const part = local + '.nettopo.part';
     try {
       sftp = await this._sftpOf(id);
       const total = await new Promise((resolve) => {
@@ -592,7 +979,7 @@ class ShellManager extends EventEmitter {
       });
       await new Promise((resolve, reject) => {
         let lastEmit = 0;
-        sftp.fastGet(p, local, {
+        sftp.fastGet(p, part, {
           step: (transferred) => {
             if (typeof onProgress !== 'function') return;
             const now = Date.now();
@@ -602,11 +989,12 @@ class ShellManager extends EventEmitter {
           }
         }, (err) => { try { err ? reject(err) : resolve(); } catch (e) { reject(e); } });
       });
+      fs.renameSync(part, local);
       if (typeof onProgress === 'function') { try { onProgress({ op: 'download', id: String(id), name: p, transferred: total, total }); } catch (e) { /* ignore */ } }
       return { ok: true, path: local, size: total };
     } catch (e) {
-      // 失败时清理半成品文件，不留损坏产物
-      try { fs.unlinkSync(local); } catch (e2) { /* ignore */ }
+      // 失败时只清理 .part 半成品，用户选择覆盖的本地原文件保持原样
+      try { fs.unlinkSync(part); } catch (e2) { /* ignore */ }
       return { ok: false, error: String((e && e.message) || e) };
     } finally {
       if (sftp) { try { sftp.end(); } catch (e) { /* ignore */ } }
@@ -651,8 +1039,9 @@ class ShellManager extends EventEmitter {
     const client = new Client();
     let stream = null;
     let closed = false;
-    const pendingRec = { verify: null }; // 目标主机的指纹确认记录（结束时只移除自己的，不影响同主机其它会话）
-    const jumpRec = { verify: null };    // 跳板主机的指纹确认记录（独立排队）
+    const recOwner = o.owner === 'monitor' ? 'monitor' : 'ui';
+    const pendingRec = { verify: null, owner: recOwner }; // 目标主机的指纹确认记录（结束时只移除自己的，不影响同主机其它会话）
+    const jumpRec = { verify: null, owner: recOwner };    // 跳板主机的指纹确认记录（独立排队）
     let jumpClient = null;
     let targetStarted = false; // 跳板通道建立后置位：此后跳板断开由目标会话收尾，避免双重 end
     const removeFromPending = (host, rec) => {
@@ -702,15 +1091,15 @@ class ShellManager extends EventEmitter {
         }));
       };
     };
-    // 主机密钥校验（TOFU）：目标与跳板各自独立排队确认；带 expectFp 的目标严格比对
-    const makeVerifier = (host, rec) => (key, verify) => {
+    // 主机密钥校验（TOFU）：目标与跳板各自独立排队确认；带 expectFp 的端（目标或跳板）严格比对
+    const makeVerifier = (host, port, rec, expectFp) => (key, verify) => {
       try {
         const hex = String(key).toLowerCase();
         // ssh2 传入的是 SHA256 的 hex 摘要，转成 OpenSSH 标准 SHA256:<base64> 格式，便于与 ssh-keygen 输出核对
         const fp = 'SHA256:' + Buffer.from(hex, 'hex').toString('base64').replace(/=+$/, '');
-        if (o.expectFp && host === o.host) {
-          if (o.expectFp !== fp) {
-            em.emit('status', { state: 'error', text: '主机密钥指纹不匹配：' + fp + '（期望 ' + o.expectFp + '），可能存在中间人攻击' });
+        if (expectFp) {
+          if (expectFp !== fp) {
+            em.emit('status', { state: 'error', text: (host === o.host ? '主机' : '跳板') + '密钥指纹不匹配：' + fp + '（期望 ' + expectFp + '），可能存在中间人攻击' });
             return false;
           }
           em.emit('status', { state: 'info', host, fp, text: '主机密钥指纹: ' + fp });
@@ -721,7 +1110,7 @@ class ShellManager extends EventEmitter {
         const arr = this._pendingVerify.get(host);
         if (arr) arr.push(rec);
         else this._pendingVerify.set(host, [rec]);
-        em.emit('status', { state: 'fingerprint', host, fp, text: '首次连接，请核对主机指纹: ' + fp });
+        em.emit('status', { state: 'fingerprint', host, port, fp, text: '首次连接，请核对主机指纹: ' + fp });
         return undefined; // 异步确认，不立即 verify
       } catch (e) {
         return false;
@@ -744,7 +1133,7 @@ class ShellManager extends EventEmitter {
       keepaliveInterval: 15000,
       keepaliveCountMax: 4,
       hostHash: 'sha256',
-      hostVerifier: makeVerifier(o.host, pendingRec)
+      hostVerifier: makeVerifier(o.host, o.port, pendingRec, o.expectFp || '')
     };
     if (o.privateKey) {
       cfg.privateKey = o.privateKey;
@@ -778,7 +1167,7 @@ class ShellManager extends EventEmitter {
         keepaliveInterval: 15000,
         keepaliveCountMax: 4,
         hostHash: 'sha256',
-        hostVerifier: makeVerifier(o.jump.host, jumpRec)
+        hostVerifier: makeVerifier(o.jump.host, o.jump.port || 22, jumpRec, o.jump.expectFp || '')
       };
       if (o.jump.privateKey) {
         jumpCfg.privateKey = o.jump.privateKey;
@@ -791,7 +1180,9 @@ class ShellManager extends EventEmitter {
     }
 
     em.write = (data) => { if (stream && !closed) stream.write(data); };
-    em.resize = (cols, rows) => { if (stream && !closed) stream.setWindow(rows, cols); };
+    // 回写 o.cols/o.rows（与 _telnet 同口径）：reconnect 按首次 connect 的 base 尺寸开新 shell 通道，
+    // 不回写则重连后 pty 停留在最初的 80x24，与本地 xterm 尺寸错位（折行错乱、全屏程序花屏）
+    em.resize = (cols, rows) => { o.cols = cols; o.rows = rows; if (stream && !closed) stream.setWindow(rows, cols); };
     em._close = () => finish('closed');
     em._client = client; // SFTP 复用同一 SSH 连接按需开通道（会话关闭时随 client.end() 一并失效）
     return em;
@@ -835,11 +1226,14 @@ class ShellManager extends EventEmitter {
     const loginFeed = (plain) => {
       if (loginPhase >= 3) return;
       loginBuf = (loginBuf + plain).slice(-160); // 提示符可能跨包拆分（"Usernam"+"e: "），滑窗匹配尾部
-      if (/(?:user\s*name|username|login)\s*[:：]\s*$/i.test(loginBuf)) {
+      // 提示符后的尾随空白只认空格/制表符：登录提示总是行内等待输入，永不被 \r\n 收尾。
+      // 华为 VRP 真机会在收下口令后单独回包一个 \r\n 换行，若尾随 \s 也匹配，滑窗尾串
+      // "Password: \r\n" 仍命中重发逻辑，口令被二次发送并落在命令行提示符上明文回显。
+      if (/(?:user\s*name|username|login)[ \t]*[:：][ \t]*$/i.test(loginBuf)) {
         if (loginPhase === 2) { loginFail('Telnet 认证失败：用户名或密码被设备拒绝'); return; } // 密码已提交仍要用户名＝凭据被拒
         if (loginPhase === 0) { loginPhase = 1; send(String(o.username) + '\r\n'); }
         // phase 1 的重复 Username:（重印提示）不重复发送，等 Password:
-      } else if (/password\s*[:：]\s*$/i.test(loginBuf)) {
+      } else if (/password[ \t]*[:：][ \t]*$/i.test(loginBuf)) {
         if (loginPhase === 2) {
           if (loginPwdRetry) { loginFail('Telnet 认证失败：密码被设备拒绝'); return; }
           loginPwdRetry = true; // 密码提示重印（探测空行落在提示上）：容忍一次重发

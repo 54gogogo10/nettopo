@@ -138,6 +138,15 @@ input, select, textarea { font: inherit; color: inherit; }
 .link:hover .ln { stroke: var(--muted); stroke-width: 2.6; }
 .link.selected .ln { stroke: var(--link-sel); stroke-width: 3; }
 .link.down .ln { stroke: #ef4444; stroke-width: 2.6; stroke-dasharray: 7 4; }
+.link.inferred .ln { stroke-dasharray: 5 5; opacity: .85; }
+/* 事件时间线确认状态：未确认左侧橙条 + 徽标计数，已确认行弱化并显示确认时刻/备注 */
+.mc-badge { display: inline-block; min-width: 16px; margin-left: 5px; padding: 0 4px; border-radius: 8px; background: #f59e0b; color: #fff; font-size: 10.5px; line-height: 16px; text-align: center; }
+.mc-ev.unacked { border-left: 3px solid #f59e0b; padding-left: 6px; }
+.mc-ev.acked { opacity: .72; }
+.mc-ev .mc-ack { margin-left: 8px; color: var(--ok, #22c55e); font-size: 11.5px; }
+.mc-ev .mc-ackbtn { margin-left: auto; }
+.mc-ev { display: flex; align-items: baseline; gap: 4px; }
+.link.inferred .lab .lb { font-style: italic; }
 .link.down.selected .ln { stroke: #ef4444; stroke-width: 3; }
 .link .lb {
   font-size: 11px; fill: var(--text);
@@ -812,7 +821,11 @@ html[data-theme="dark"] .ai-item.sel { border-color: var(--accent2); }
 .cfg-issues .ci-item.ci-err::before { content: '✖'; }
 .cfg-issues .ci-item.ci-warn { color: #f59e0b; }
 /* ============ 监控中心 ============ */
-.mc-dialog .mc-main { display: flex; gap: 10px; height: calc(100% - 130px); min-height: 0; }
+/* 弹层自身改为 flex 列、由 .mc-main 吃掉剩余高度：
+ * 原实现写死 height: calc(100% - 130px) 预留头部，但实际头部（标题+副标题+统计+开机时长+动作行）
+ * 远高于 130px → 内容比弹层高约 200px，整层滚动会把页签/统计一起滚走，页内列表的底部也被截断 */
+.mc-dialog { display: flex; flex-direction: column; min-height: 0; }
+.mc-dialog .mc-main { display: flex; gap: 10px; flex: 1 1 auto; min-height: 0; height: auto; }
 .mc-dialog .mc-stats { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .mc-stat { flex: 1; min-width: 86px; border: 1px solid var(--border); border-radius: 10px; padding: 7px 10px; text-align: center; background: var(--panel2); }
 .mc-stat b { display: block; font-size: 17px; line-height: 1.3; }
@@ -1045,11 +1058,13 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
   font-size: 12px; border-bottom: 1px solid var(--panel2);
 }
 .mc-if-head { color: var(--muted); font-size: 11px; font-weight: 600; border-bottom: 1px solid var(--border); }
-.mc-if-head span:nth-child(1), .mc-if-nm { flex: 1.6; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-if-head span:nth-child(1), .mc-if-nm { flex: 1.8; min-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-if-head span:nth-child(2), .mc-if-op { flex: 0.6; }
 .mc-if-head span:nth-child(3), .mc-if-head span:nth-child(4), .mc-if-rate { flex: 1; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .mc-if-head span:nth-child(5), .mc-if-spd { flex: 0.8; white-space: nowrap; color: var(--muted); }
-.mc-if-head span:nth-child(6), .mc-if-spark { flex: 2; display: flex; gap: 4px; justify-content: flex-end; }
+.mc-if-head span:nth-child(6), .mc-if-spark { flex: 1.4; min-width: 0; display: flex; gap: 4px; justify-content: flex-end; }
+/* 首采样尚无计数器差值：速率列弱化显示（旧实现只有「↓ —」，看不出是还没采到还是设备不支持） */
+.mc-if-rate.mc-none { color: var(--muted); }
 .mc-if-op .t-ok { color: #16a34a; font-weight: 600; }
 .mc-if-op .t-off { color: #ef4444; font-weight: 600; }
 .mc-if-op .t-mut { color: var(--muted); }
@@ -1089,8 +1104,8 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 
 /* ============ 网络服务（TFTP / FTP / Syslog）面板 ============ */
 .nsv-dialog { display: flex; flex-direction: column; }
-.nsv-top { display: flex; gap: 10px; margin-bottom: 10px; }
-.nsv-cards { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.nsv-top { display: flex; gap: 10px; margin-bottom: 10px; min-height: 150px; max-height: 46%; overflow-y: auto; flex: 0 1 auto; }
+.nsv-cards { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-content: start; }
 .nsv-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--panel2); display: flex; flex-direction: column; gap: 6px; }
 .nsv-card-h { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .nsv-card-h b { font-size: 12.5px; white-space: nowrap; }
@@ -1162,6 +1177,8 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .nsv-lg.s-dbg .sev, .nsv-lg.s-dbg .m { color: var(--muted); }
 .nsv-lg.s-found .dt { flex: 0 0 84px; color: var(--muted); }
 .nsv-lg.s-srchhead { color: var(--muted); padding: 3px 0; font-family: inherit; }
+.nsv-lg.s-hit { box-shadow: inset 3px 0 0 var(--danger); padding-left: 5px; }
+.nsv-lg.s-hit .m { font-weight: 600; }
 
 /* ---- 拓扑画布监控状态叠加角标（监控 ▾ 监控状态叠加） ---- */
 .mon-dot { stroke: var(--panel); stroke-width: 2; pointer-events: none; }
@@ -1169,6 +1186,25 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .mon-dot.pending { fill: #f59e0b; }
 .mon-dot.alert { fill: var(--danger); animation: monPulse 1.2s ease-in-out infinite; }
 @keyframes monPulse { 50% { opacity: .3; } }
+
+/* ---- 拓扑画布链路流量叠加徽标（监控 ▾ 链路流量叠加） ---- */
+.flow-badge { pointer-events: none; }
+.flow-badge rect { fill: var(--panel); stroke: var(--border); stroke-width: 1; }
+.flow-badge text { font: 600 10px/1 var(--font-ui, sans-serif); fill: var(--text); }
+.flow-badge.ok rect { fill: rgba(34, 197, 94, .92); stroke: transparent; }
+.flow-badge.warn rect { fill: rgba(245, 158, 11, .92); stroke: transparent; }
+.flow-badge.crit rect { fill: rgba(239, 68, 68, .92); stroke: transparent; animation: monPulse 1.6s ease-in-out infinite; }
+.flow-badge.ok text, .flow-badge.warn text, .flow-badge.crit text { fill: #fff; }
+.flow-badge.down rect { fill: var(--panel2); }
+.flow-badge.down text { fill: var(--muted); text-decoration: line-through; }
+
+/* ---- 拓扑画布三层协议视图徽标（监控 ▾ 三层邻居与协议视图）：正常绿 / 异常红 ---- */
+.proto-badge { pointer-events: none; }
+.proto-badge rect { fill: var(--panel); stroke: var(--border); stroke-width: 1; }
+.proto-badge text { font: 600 10px/1 var(--font-ui, sans-serif); fill: var(--text); }
+.proto-badge.ok rect { fill: rgba(34, 197, 94, .92); stroke: transparent; }
+.proto-badge.bad rect { fill: rgba(239, 68, 68, .92); stroke: transparent; animation: monPulse 1.6s ease-in-out infinite; }
+.proto-badge.ok text, .proto-badge.bad text { fill: #fff; }
 
 /* ---- IP 地址管理视图 ---- */
 .ipam-t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -1179,3 +1215,92 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .ipam-bar > span { display: block; height: 100%; border-radius: 4px; }
 .ipam-conflict { font-size: 12.5px; background: rgba(220,38,38,.06); border: 1px solid rgba(220,38,38,.25); border-radius: 8px; padding: 6px 10px; }
 .ipam-cip { display: inline-block; font: 12px/1.6 Consolas, monospace; color: var(--danger); font-weight: 600; margin-right: 8px; }
+
+/* ---- 机柜 U 位视图（编辑 ▾ 机柜视图） ---- */
+.rv-wrap { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.rv-rack { border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--panel); min-width: 240px; }
+.rv-hd { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.rv-hd .m-sub { margin: 0; }
+.rv-body { border: 1.5px solid var(--border); border-radius: 6px; overflow: hidden; }
+.rv-u { position: relative; height: 22px; border-bottom: 1px solid var(--panel2); background: var(--panel2); }
+.rv-u:last-child { border-bottom: 0; }
+.rv-u .rv-n { position: absolute; left: 4px; top: 50%; transform: translateY(-50%); font: 9px/1 Consolas, monospace; color: var(--muted); }
+.rv-filled { background: var(--panel); border-left: 3px solid var(--border); }
+.rv-filled.rv-bad { border-color: var(--danger); box-shadow: inset 0 0 0 1px rgba(220,38,38,.5); }
+.rv-dev { position: absolute; left: 30px; top: 3px; font: 600 11.5px/1.3 var(--font-ui, sans-serif); color: var(--text); border-left: 6px solid var(--border); padding-left: 6px; max-width: calc(100% - 40px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- 告警等级与分级提示音（监控 ▾ 告警等级与提示音…）----
+ * 四级配色与「提示 < 警告 < 严重 < 紧急」对应：级别越高越红；徽标同时用于事件时间线与设置弹窗 */
+.as-lv { flex: 0 0 auto; font-size: 9.5px; font-weight: 600; padding: 1px 6px; border-radius: 8px; border: 1px solid transparent; }
+.as-lv.lvl-info { color: #64748b; background: rgba(100,116,139,.14); }
+.as-lv.lvl-warning { color: #d97706; background: rgba(245,158,11,.14); }
+.as-lv.lvl-critical { color: #ea580c; background: rgba(234,88,12,.15); }
+.as-lv.lvl-emergency { color: #dc2626; background: rgba(220,38,38,.15); }
+.as-dialog .as-ck { display: flex; align-items: center; gap: 6px; margin: 0; font-weight: 500; font-size: 12.5px; white-space: nowrap; }
+.as-dialog .as-vol { color: var(--muted); font-size: 11.5px; min-width: 36px; }
+.as-sect { margin: 12px 0 5px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.as-tone-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.as-tone { display: flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; background: var(--panel2); }
+.as-tone-t { font-size: 11px; color: var(--muted); }
+.as-ev-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 14px; max-height: 250px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.as-ev { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.as-ev-nm { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.as-ev-nm .as-ev-dft { color: var(--muted); font-size: 10.5px; border: 1px solid var(--border); border-radius: 8px; padding: 0 5px; }
+.as-ev-sel { flex: 0 0 auto; width: 76px; }
+
+/* ---- 链路连通性监测：连线按状态着色（监控 ▾ 链路连通性监测…）
+ * 与手动「故障标记」（.link.down 红虚线）并存：手动标记语义更强，选择器显式排除 .down，
+ * 因此同一条连线同时被标记与监测时，看到的仍是用户显式标注的断链 */
+.link.lk-up:not(.down) .ln { stroke: #22c55e; stroke-width: 2.6; }
+.link.lk-down:not(.down) .ln { stroke: #ef4444; stroke-width: 3; stroke-dasharray: 7 4; animation: monPulse 1.6s ease-in-out infinite; }
+.link.lk-unknown:not(.down) .ln { stroke: #94a3b8; stroke-width: 2.2; stroke-dasharray: 2 4; }
+.link.lk-up.selected .ln, .link.lk-down.selected .ln { stroke-width: 3.2; }
+
+/* ---- 链路连通性监测面板 / 监控中心「链路」页签（监控 ▾ 链路连通性监测…）---- */
+.lm-dialog .lm-stats { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 6px 0 8px; font-size: 12.5px; }
+.lm-dialog .lm-st b { font-size: 14px; }
+.lm-dialog .lm-st.ok b { color: #22c55e; }
+.lm-dialog .lm-st.bad b { color: #ef4444; }
+.lm-dialog .lm-st.unk b { color: var(--muted); }
+.lm-dialog .lm-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.lm-hint { color: var(--muted); font-size: 11.5px; }
+.lm-list, .mc-links { flex: 1; min-height: 160px; max-height: 52vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; }
+.mc-links { max-height: none; border: none; padding: 0; }
+.lm-empty { padding: 18px 10px; color: var(--muted); text-align: center; font-size: 12.5px; }
+.lm-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px; border-bottom: 1px dashed var(--border); font-size: 12.5px; }
+.lm-row:last-of-type { border-bottom: none; }
+.lm-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--border); }
+.lm-dot.up { background: #22c55e; }
+.lm-dot.down { background: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,.25); animation: monPulse 1.6s ease-in-out infinite; }
+.lm-dot.unknown { background: #f59e0b; }
+.lm-dot.off { background: var(--muted); }
+.lm-name { flex: 1 1 auto; min-width: 0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lm-name:hover { color: var(--accent); }
+.lm-kind { margin-left: 6px; font-size: 10px; color: var(--muted); background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; }
+.lm-state { flex: 0 0 auto; font-size: 12px; }
+.lm-state.up { color: #16a34a; }
+.lm-state.down { color: #dc2626; font-weight: 600; }
+.lm-state.unknown { color: var(--muted); }
+.lm-state.off { color: var(--muted); }
+.lm-lat { flex: 0 0 56px; text-align: right; color: var(--muted); font-size: 11.5px; }
+.lm-time { flex: 0 0 44px; text-align: right; color: var(--muted); font-size: 11px; }
+.lm-ops { flex: 0 0 auto; display: flex; gap: 2px; }
+.lm-err { margin-left: 6px; color: var(--danger); font-weight: 700; cursor: help; }
+.lm-segs { padding: 4px 2px 8px 20px; }
+.lm-seg { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; padding: 1px 0; }
+.lm-seg.broken { background: rgba(239,68,68,.09); border-left: 3px solid #ef4444; padding-left: 5px; }
+.lm-seg-i { flex: 0 0 16px; color: var(--muted); font: 10.5px/1 Consolas, monospace; }
+.lm-seg-from { flex: 0 0 auto; }
+.lm-seg-arrow { color: var(--muted); }
+.lm-seg-t { flex: 0 0 auto; font-family: Consolas, monospace; }
+.lm-seg-v { flex: 0 0 auto; }
+.lm-seg-v.ok { color: #16a34a; }
+.lm-seg-v.bad { color: #dc2626; font-weight: 600; }
+.lm-seg-v.unk, .lm-seg-v.none { color: var(--muted); }
+.lm-seg-e { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-lk-sum { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.mc-lk-row { font-size: 12px; }
+/* 侧栏设备列表的链路监测标记：方形小点，与圆形「监控」标记区分 */
+.pitem .lk-badge { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 2px; display: inline-block; user-select: none; cursor: help; }
+.pitem .lk-badge.ok { background: #22c55e; }
+.pitem .lk-badge.down { background: #ef4444; animation: monPulse 1.6s ease-in-out infinite; }

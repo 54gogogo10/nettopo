@@ -1168,6 +1168,1355 @@ function findChrome() {
   console.log('区域慢速拖动+撤销:', dragOk ? 'OK' : 'FAIL', JSON.stringify({ before: rg.rx, after: rgMoved, undo: rgUndo }));
   if (!dragOk) errors.push('[region] 慢速拖动未记为拖动或撤销未还原（before=' + rg.rx + ' after=' + rgMoved + ' undo=' + rgUndo + '）');
 
+  /* ================= 集成场景补充（第二批）：跨模块往返与状态联动 ================= */
+
+  // 公共小工具：下载目录准备/等待产物/读取文本（CDP 拦截下载）
+  const dlReset = (tag) => {
+    const d = path.join(__dirname, '_e2e-dl-' + tag);
+    fs.rmSync(d, { recursive: true, force: true }); fs.mkdirSync(d, { recursive: true });
+    return d;
+  };
+  const dlWait = async (dir, ext, ms) => {
+    const t0 = Date.now();
+    let f = [];
+    while (Date.now() - t0 < (ms || 5000)) {
+      f = fs.readdirSync(dir).filter(x => x.endsWith(ext));
+      if (f.length) return f;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return f;
+  };
+  /** 拦截下载执行 fn（下载落到临时目录 dir），执行完毕清理目录 */
+  const withDownload = async (tag, fn) => {
+    const dir = dlReset(tag);
+    const client = await page.createCDPSession();
+    await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    try { return await fn(dir); } finally { client.detach(); fs.rmSync(dir, { recursive: true, force: true }); }
+  };
+  /** 载入拓扑并点掉「导入将替换当前拓扑」确认（块体不返回 promise——返回 loadGraph 的 promise 会与确认框死等） */
+  const loadGraphUI = async (graph, waitMs) => {
+    await page.evaluate((g) => { window.__topo.loadGraph(g, 'e2e'); }, graph);
+    await new Promise(r => setTimeout(r, 250));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, waitMs || 400));
+  };
+  /** 当前拓扑指纹：节点（名称/坐标/管理地址/备注/VLAN 接口）+ 连线（两端设备名与接口/IP/掩码/二层/VLAN/模式，忽略导入后重建的 id） */
+  const graphFingerprint = () => page.evaluate(() => {
+    const st = window.__topo.state, U = window.TopoUtil;
+    const nameOf = (id) => { const n = st.nodes.find(x => x.id === id); return n ? n.name : '?'; };
+    const nodes = st.nodes.map(n => [n.name, Math.round(n.x * 10) / 10, Math.round(n.y * 10) / 10,
+      U.nodeMgmts(n).join(','), n.note || '', (n.vlans || []).map(v => v.id + ':' + v.ip + '/' + v.mask).join(';')].join('|')).sort();
+    const links = st.links.map(l => {
+      const one = (s) => [nameOf(l[s]), l[s + 'If'], l[s + 'Ip'], l[s + 'Mask'],
+        l[s + 'L2'] ? 'L2' : '', l[s + 'Vlan'] || '', l[s + 'VlanMode'] || ''].join('~');
+      const p = one('a'), q = one('b');
+      return (p < q ? [p, q] : [q, p]).join('|') + '|bw=' + U.normalizeBw(l.bw) + '|agg=' + (l.agg || '') + '|note=' + (l.note || '');
+    }).sort();
+    return { nodes, links };
+  });
+
+  // ---- 集成 1：CSV 导出（文件下载）→ 文件导入 往返一致性（表格契约守恒） ----
+  {
+    await loadGraphUI({
+      nodes: [
+        { id: 'n1', name: 'E2E核心路由器RX', type: 'router', x: 120, y: 90, w: 160, h: 56, mgmt: '10.200.0.1', note: 'E2E源端备注', vlans: [{ id: '10', ip: '10.200.10.1', mask: 26 }] },
+        { id: 'n2', name: 'E2E汇聚交换机SX', type: 'switch', x: 620, y: 90, w: 160, h: 56, mgmt: '10.200.0.2', note: 'E2E对端备注', vlans: [{ id: '20', ip: '10.200.20.1', mask: 24 }] },
+        { id: 'n3', name: 'E2E接入交换机IX', type: 'switch', x: 620, y: 400, w: 160, h: 56, mgmt: '10.200.0.3' },
+        { id: 'n4', name: 'E2E孤岛存储ZX', type: 'storage', x: 1100, y: 400, w: 160, h: 56 }
+      ],
+      links: [
+        { id: 'l1', a: 'n1', b: 'n2', aIf: 'GE0/0/1', aIp: '10.201.0.1', aMask: 26, bIf: 'GE1/0/1', bIp: '10.201.0.2', bMask: 26, bw: 1000, agg: 'Eth-Trunk9', note: 'E2E链路备注', aVlan: '30', aVlanMode: 'trunk', bVlan: '40', bVlanMode: 'hybrid' },
+        { id: 'l2', a: 'n2', b: 'n3', aIf: 'GE1/0/2', aL2: true, bIf: 'GE0/0/1', bIp: '10.202.0.2', bMask: 24, bw: 100 }
+      ],
+      texts: []
+    });
+    const before = await graphFingerprint();
+    const tmpCsv = path.join(__dirname, '_e2e-roundtrip.csv');
+    const exp = await withDownload('rt', async (dir) => {
+      const hit = await clickMenuItem('btnDropExport', '导出 CSV 表格');
+      const files = await dlWait(dir, '.csv');
+      if (!files.length) return { hit, files, head: '', lines: 0 };
+      const raw = fs.readFileSync(path.join(dir, files[0]), 'utf8');
+      fs.writeFileSync(tmpCsv, raw); // 复制出来供随后的文件导入使用
+      const lines = raw.replace(/^\uFEFF/, '').trim().split(/\r?\n/);
+      return { hit, files, head: lines[0], lines: lines.length };
+    });
+    // 表头关键列齐全；数据行 = 2 条链路 + 1 台孤立设备（孤立设备行不丢）+ 表头
+    const csvOk = exp.hit && exp.files.length === 1 && exp.lines === 4
+      && exp.head.includes('源设备') && exp.head.includes('目标设备') && exp.head.includes('源掩码')
+      && exp.head.includes('聚合组') && exp.head.includes('源管理地址') && exp.head.includes('目标VLAN接口');
+    console.log('集成1 CSV 导出产物:', csvOk ? 'OK' : 'FAIL', JSON.stringify({ lines: exp.lines, head: exp.head.slice(0, 40) }));
+    if (!csvOk) errors.push('[roundtrip] CSV 导出产物不符（表头关键列/行数）: ' + JSON.stringify({ lines: exp.lines, head: exp.head }));
+    // 用导出的文件再导入 → 指纹必须守恒
+    await page.$eval('input#fileInput', (el) => { el.value = ''; });
+    const fiCsv = await page.$('input#fileInput');
+    await fiCsv.uploadFile(tmpCsv);
+    await new Promise(r => setTimeout(r, 700));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 700));
+    fs.unlinkSync(tmpCsv);
+    const after = await graphFingerprint();
+    const nodesSame = JSON.stringify(before.nodes) === JSON.stringify(after.nodes);
+    const linksSame = JSON.stringify(before.links) === JSON.stringify(after.links);
+    console.log('集成1 往返指纹:', '节点一致=' + nodesSame, '连线一致=' + linksSame);
+    if (!nodesSame) errors.push('[roundtrip] CSV 往返后节点不一致（名称/坐标/管理地址/备注/VLAN 接口）: before=' + JSON.stringify(before.nodes) + ' after=' + JSON.stringify(after.nodes));
+    if (!linksSame) errors.push('[roundtrip] CSV 往返后连线不一致（接口/IP/掩码/二层/VLAN/带宽/聚合组/备注）: before=' + JSON.stringify(before.links) + ' after=' + JSON.stringify(after.links));
+    // 设备类型：CSV 无类型列，按名称关键词推断——关键词型名称必须推断正确
+    const rtTypes = await page.evaluate(() => window.__topo.state.nodes.map(n => n.name + ':' + n.type).sort());
+    const typeOk = rtTypes.includes('E2E核心路由器RX:router') && rtTypes.includes('E2E汇聚交换机SX:switch') && rtTypes.includes('E2E接入交换机IX:switch');
+    console.log('集成1 往返后类型推断:', typeOk ? 'OK' : 'FAIL', JSON.stringify(rtTypes));
+    if (!typeOk) errors.push('[roundtrip] CSV 往返后设备类型推断不符: ' + JSON.stringify(rtTypes));
+  }
+
+  // ---- 集成 2：CSV 往返的「单端管理地址/VLAN 接口」串台检查（现存缺陷，如实失败） ----
+  {
+    await loadGraphUI({
+      nodes: [
+        { id: 'xa', name: '串台源路由器A', type: 'router', x: 120, y: 90, w: 160, h: 56, mgmt: '10.9.9.1', vlans: [{ id: '10', ip: '10.9.10.1', mask: 24 }] },
+        { id: 'xb', name: '串台目标交换机B', type: 'switch', x: 620, y: 90, w: 160, h: 56 }
+      ],
+      links: [{ id: 'xl1', a: 'xa', b: 'xb', aIf: 'GE0/0/1', aIp: '10.9.0.1', bIf: 'GE0/0/2', bIp: '10.9.0.2' }],
+      texts: []
+    });
+    const tmpDefect = path.join(__dirname, '_e2e-defect.csv');
+    await withDownload('defect', async (dir) => {
+      await clickMenuItem('btnDropExport', '导出 CSV 表格');
+      const files = await dlWait(dir, '.csv');
+      if (files.length) fs.writeFileSync(tmpDefect, fs.readFileSync(path.join(dir, files[0])));
+    });
+    await page.$eval('input#fileInput', (el) => { el.value = ''; });
+    const fiDef = await page.$('input#fileInput');
+    await fiDef.uploadFile(tmpDefect);
+    await new Promise(r => setTimeout(r, 700));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 700));
+    fs.unlinkSync(tmpDefect);
+    const got = await page.evaluate(() => {
+      const n = window.__topo.state.nodes.find(x => x.name === '串台目标交换机B');
+      return { mgmt: n ? window.TopoUtil.nodeMgmts(n).join(',') : '(设备丢失)', vlans: n ? (n.vlans || []).map(v => v.id + ':' + v.ip).join(',') : '' };
+    });
+    const clean = got.mgmt === '' && got.vlans === '';
+    console.log('集成2 单端管理地址/VLAN 往返（目标端应保持为空）:', clean ? 'OK' : 'FAIL', JSON.stringify(got));
+    if (!clean) {
+      errors.push('[roundtrip-defect] CSV 导出→导入串台：目标端「串台目标交换机B」继承了源端「串台源路由器A」的字段（' + JSON.stringify(got)
+        + '），期望目标端管理地址与 VLAN 接口均为空。最小复现：两端只有源端配置了管理地址/VLAN 接口时，导出→导入后对端被写入同样的值'
+        + '（js/model.js recordsToGraph 的旧单列回退：按端列已应用后，「管理地址/VLAN接口」旧单列仍按「源优先、目标其次」再写一次）');
+    }
+  }
+
+  // ---- 集成 3：保存工程 → 打开工程 全量往返（多图纸 / 附注文本 / 自定义类型 / 区域 / 故障标记） ----
+  {
+    const ctKey = await page.evaluate((img) => TopoUtil.addCustomType('E2E工程往返类型', img).key, imgDataURL);
+    await loadGraphUI({
+      nodes: [
+        { id: 'wa', name: '工程往返设备A', type: ctKey, x: 150, y: 120, w: 160, h: 56, mgmt: '10.70.0.1', note: '工程备注A' },
+        { id: 'wb', name: '工程往返设备B', type: 'switch', x: 650, y: 120, w: 160, h: 56 }
+      ],
+      links: [{ id: 'wl1', a: 'wa', b: 'wb', aIf: 'GE0/0/1', aIp: '10.70.1.1', bIf: 'GE0/0/2', bIp: '10.70.1.2' }],
+      texts: []
+    });
+    // 附注文本走 UI：编辑 ▾ → 添加文本框 → 编辑文本框弹窗保存
+    await menuClick('添加文本框');
+    await new Promise(r => setTimeout(r, 300));
+    const txSaved = await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot .overlay');
+      const ta = ov && ov.querySelector('#txText');
+      if (!ta) return 'no-modal';
+      ta.value = 'E2E 附注文本\n第二行';
+      ov.querySelector('[data-act=save]').click();
+      return 'ok';
+    });
+    await new Promise(r => setTimeout(r, 300));
+    // 区域（背景分组框）：与既有区域场景同口径直接注入 state.regions
+    await page.evaluate(() => {
+      const st = window.__topo.state;
+      st.regions = [{ id: 'rg_e2e2', name: 'E2E工程区域', x: 100, y: 60, w: 520, h: 260, color: '#10b981' }];
+      window.__topo.renderer.setData(st.nodes, st.links, st.texts, st.regions);
+    });
+    // 链路故障标记（右键菜单）——必须随工程往返
+    await page.evaluate(() => {
+      const l = window.__topo.state.links[0];
+      const el = document.querySelector('g.link[data-id="' + l.id + '"]');
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: r.left + 20, clientY: r.top + 5 }));
+    });
+    await new Promise(r => setTimeout(r, 200));
+    const faultHit = await page.evaluate(() => {
+      const t = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('标记链路故障'));
+      if (t) t.click();
+      return !!t;
+    });
+    await new Promise(r => setTimeout(r, 300));
+    // 多图纸：先记下现有页数，再新建一页并放一台设备，最后切回第 1 页保存
+    const sheetsBefore = await page.evaluate(() => window.__topo.state.sheets.length);
+    await page.evaluate(() => document.getElementById('sheetAdd').click());
+    await new Promise(r => setTimeout(r, 500));
+    await clickMenuItem('btnDropEdit', '从模板添加设备…');
+    await new Promise(r => setTimeout(r, 300));
+    const tplHit = await page.evaluate(() => { const b = document.querySelector('.tpl'); if (b) b.click(); return !!b; });
+    await new Promise(r => setTimeout(r, 400));
+    const sheetState = await page.evaluate(() => ({
+      sheets: window.__topo.state.sheets.length, idx: window.__topo.state.sheetIdx,
+      pageNodes: window.__topo.state.nodes.length, page0: (window.__topo.state.sheets[0].nodes || []).map(n => n.name)
+    }));
+    await page.evaluate(() => document.querySelector('#sheetTabs .sheet-tab[data-idx="0"]').click());
+    await new Promise(r => setTimeout(r, 500));
+    const tmpProj = path.join(__dirname, '_e2e-project.nettopo');
+    const projInfo = await withDownload('proj', async (dir) => {
+      await clickMenuItem('btnDropFile', '保存工程');
+      await new Promise(r => setTimeout(r, 300));
+      const hasDialog = await page.evaluate(() => !!document.querySelector('#modalRoot .overlay [data-act=save]'));
+      await page.evaluate(() => { const b = document.querySelector('#modalRoot .overlay [data-act=save]'); if (b) b.click(); });
+      const files = await dlWait(dir, '.nettopo');
+      if (!files.length) return { hasDialog, files: [], data: null };
+      fs.copyFileSync(path.join(dir, files[0]), tmpProj);
+      return { hasDialog, files, data: JSON.parse(fs.readFileSync(tmpProj, 'utf8')) };
+    });
+    const sv = projInfo.data || {};
+    const saveOk = projInfo.hasDialog && projInfo.files.length === 1 && sv.app === 'NetTopo' && sv.version === 3
+      && (sv.nodes || []).length === 2 && (sv.links || []).length === 1
+      && (sv.sheets || []).length === sheetsBefore + 1 && sv.sheetIdx === 0
+      && (sv.texts || []).some(t => t.text === 'E2E 附注文本\n第二行')
+      && (sv.customTypes || []).some(t => t.key === ctKey && t.label === 'E2E工程往返类型')
+      && (sv.nodes || []).some(n => n.name === '工程往返设备A' && n.type === ctKey)
+      && (sv.downLinks || []).length === 1 && faultHit
+      && (sv.regions || []).some(r => r.name === 'E2E工程区域');
+    console.log('集成3 保存工程内容:', saveOk ? 'OK' : 'FAIL', JSON.stringify({
+      version: sv.version, nodes: (sv.nodes || []).length, sheets: (sv.sheets || []).length, sheetIdx: sv.sheetIdx,
+      texts: (sv.texts || []).map(t => t.text), customTypes: (sv.customTypes || []).map(t => t.key), downLinks: sv.downLinks,
+      regions: (sv.regions || []).map(r => r.name), sheetsBefore, sheetState, txSaved, tplHit
+    }));
+    if (!saveOk) errors.push('[project] 保存工程内容不完整（多图纸/附注文本/自定义类型/区域/故障标记）: ' + JSON.stringify({
+      app: sv.app, version: sv.version, nodes: (sv.nodes || []).length, sheets: (sv.sheets || []).length,
+      texts: (sv.texts || []).map(t => t.text), customTypes: (sv.customTypes || []).map(t => t.key),
+      downLinks: sv.downLinks, regions: (sv.regions || []).map(r => r.name), sheetsBefore, sheetState, txSaved, tplHit
+    }));
+    // 清空画布 → 打开刚保存的工程 → 断言运行态（画布 DOM + 状态对象）与保存前一致
+    await page.evaluate(() => { window.__topo.newGraph(); });
+    await new Promise(r => setTimeout(r, 300));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 400));
+    await page.$eval('input#projInput', (el) => { el.value = ''; });
+    const projInput2 = await page.$('input#projInput');
+    await projInput2.uploadFile(tmpProj);
+    await new Promise(r => setTimeout(r, 900));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 800));
+    fs.unlinkSync(tmpProj);
+    const opened = await page.evaluate((key) => {
+      const st = window.__topo.state, U = window.TopoUtil;
+      return {
+        sheets: st.sheets.length, idx: st.sheetIdx, nodes: st.nodes.length, links: st.links.length,
+        names: st.nodes.map(n => n.name + ':' + n.type).sort(),
+        texts: st.texts.map(t => t.text), annDom: document.querySelectorAll('g.ann').length,
+        annText: (((document.querySelector('g.ann .ann-text') || {}).textContent) || '').replace(/\s+/g, ' '),
+        down: [...st.downLinks], downDom: document.querySelectorAll('.link.down').length,
+        regions: (st.regions || []).map(r => r.name), regionDom: document.querySelectorAll('g.region').length,
+        tabs: [...document.querySelectorAll('#sheetTabs .sheet-tab')].map(t => t.textContent),
+        customTypes: U.customTypes.map(t => t.key + ':' + t.label),
+        customGradient: !!document.querySelector('#defs linearGradient#g-' + key),
+        undoDisabled: document.getElementById('btnUndo').disabled
+      };
+    }, ctKey);
+    const openOk = opened.idx === 0 && opened.sheets === sheetsBefore + 1 && opened.nodes === 2 && opened.links === 1
+      && opened.names.includes('工程往返设备A:' + ctKey) && opened.names.includes('工程往返设备B:switch')
+      && opened.texts.length === 1 && opened.texts[0] === 'E2E 附注文本\n第二行'
+      && opened.annDom === 1 && opened.annText.includes('E2E 附注文本') && opened.annText.includes('第二行')
+      && opened.down.length === 1 && opened.downDom === 1
+      && opened.regions.includes('E2E工程区域') && opened.regionDom === 1
+      && opened.tabs.length === sheetsBefore + 1 && opened.customTypes.some(s => s.startsWith(ctKey + ':'))
+      && opened.customGradient && opened.undoDisabled;
+    console.log('集成3 打开工程往返:', openOk ? 'OK' : 'FAIL', JSON.stringify(opened));
+    if (!openOk) errors.push('[project] 打开工程未还原多图纸/附注文本/自定义类型/区域/故障标记: ' + JSON.stringify(opened));
+  }
+
+  // ---- 集成 4：连线弹窗 ↔ 接口总表 双向一致（改连线反映到表、改表写回连线/画布/面板） ----
+  {
+    await loadGraphUI({
+      nodes: [
+        { id: 'ta', name: '总表A', type: 'switch', x: 200, y: 200, w: 160, h: 56 },
+        { id: 'tb', name: '总表B', type: 'switch', x: 700, y: 200, w: 160, h: 56 }
+      ],
+      links: [{ id: 'tl1', a: 'ta', b: 'tb', aIf: 'GE0/0/1', aIp: '10.31.0.1', bIf: 'GE0/0/2', bIp: '10.31.0.2' }],
+      texts: []
+    });
+    // 右键连线 → 编辑连线… → 改两端接口/IP/掩码/VLAN/带宽/聚合组/备注
+    await page.evaluate(() => {
+      const l = window.__topo.state.links[0];
+      const el = document.querySelector('g.link[data-id="' + l.id + '"]');
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: r.left + 20, clientY: r.top + 5 }));
+    });
+    await new Promise(r => setTimeout(r, 200));
+    const dlgHit = await page.evaluate(() => {
+      const t = [...document.querySelectorAll('#ctx .ci')].find(x => x.textContent.includes('编辑连线'));
+      if (t) t.click();
+      return !!t;
+    });
+    await new Promise(r => setTimeout(r, 300));
+    const dlgSaved = await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot .overlay');
+      if (!ov || !ov.querySelector('.lk-if')) return 'no-dialog';
+      const sideA = ov.querySelector('[data-side="a"]'), sideB = ov.querySelector('[data-side="b"]');
+      sideA.querySelector('.lk-if').value = 'Ten-GigabitEthernet1/0/1';
+      sideA.querySelector('.lk-ip').value = '10.31.9.1';
+      sideA.querySelector('.lk-mask').value = '26';
+      sideB.querySelector('.lk-ip').value = '10.31.9.2';
+      const hv = sideB.querySelector('.lk-hasvlan');
+      hv.checked = true; hv.dispatchEvent(new Event('change', { bubbles: true }));
+      sideB.querySelector('.lk-vlan').value = '77';
+      sideB.querySelector('.lk-vlanmode').value = 'trunk';
+      ov.querySelector('.lk-bw').value = '10G';
+      ov.querySelector('.lk-agg').value = 'Eth-Trunk3';
+      ov.querySelector('.lk-note').value = 'E2E链路备注';
+      ov.querySelector('[data-act=save]').click();
+      return 'ok';
+    });
+    await new Promise(r => setTimeout(r, 350));
+    const linkState = await page.evaluate(() => {
+      const l = window.__topo.state.links[0];
+      return { aIf: l.aIf, aIp: l.aIp, aMask: l.aMask, bIp: l.bIp, bMask: l.bMask, bVlan: l.bVlan, bVlanMode: l.bVlanMode, bw: l.bw, agg: l.agg, note: l.note };
+    });
+    const canvasAfterDlg = await page.evaluate(() => {
+      document.querySelector('.tab[data-tab=links]').click();
+      return {
+        labels: [...document.querySelectorAll('g.link .lb')].map(t => t.textContent),
+        panel: [...document.querySelectorAll('#listWrap .pitem')].map(x => x.textContent.replace(/\s+/g, ' ').trim())
+      };
+    });
+    const dlgOk = dlgHit && dlgSaved === 'ok' && linkState.aIf === 'Ten-GigabitEthernet1/0/1' && linkState.aIp === '10.31.9.1' && linkState.aMask === 26
+      && linkState.bIp === '10.31.9.2' && linkState.bVlan === '77' && linkState.bVlanMode === 'trunk' && linkState.bw === 10000
+      && linkState.agg === 'Eth-Trunk3' && linkState.note === 'E2E链路备注'
+      && canvasAfterDlg.labels.some(s => s.includes('Ten-GigabitEthernet1/0/1') && s.includes('10.31.9.1'))
+      && canvasAfterDlg.labels.some(s => s === '聚合: Eth-Trunk3')
+      && canvasAfterDlg.panel.length === 1 && canvasAfterDlg.panel[0].includes('10.31.9.2') && canvasAfterDlg.panel[0].includes('10G');
+    console.log('集成4 连线弹窗→画布/面板:', dlgOk ? 'OK' : 'FAIL', JSON.stringify({ linkState, labels: canvasAfterDlg.labels }));
+    if (!dlgOk) errors.push('[iftable] 连线弹窗改动未同步到画布标注/面板: ' + JSON.stringify({ dlgHit, dlgSaved, linkState, canvasAfterDlg }));
+    // 打开接口总表：表内行必须与连线数据一致（含只读的对端/备注列）
+    await clickMenuItem('btnDropEdit', '接口总表');
+    await new Promise(r => setTimeout(r, 350));
+    const tbl = await page.evaluate(() => [...document.querySelectorAll('#modalRoot .overlay #iftBody tr[data-key]')].map(tr => ({
+      key: tr.dataset.key,
+      ifn: tr.querySelector('input[data-f=ifn]').value, ip: tr.querySelector('input[data-f=ip]').value,
+      mask: tr.querySelector('input[data-f=mask]').value, vlan: tr.querySelector('input[data-f=vlan]').value,
+      agg: tr.querySelector('input[data-f=agg]').value, cells: [...tr.querySelectorAll('td')].map(td => td.textContent.trim())
+    })));
+    const rowA = tbl.find(r => r.key.endsWith('|a')), rowB = tbl.find(r => r.key.endsWith('|b'));
+    const tblOk = tbl.length === 2 && rowA && rowB
+      && rowA.ifn === 'Ten-GigabitEthernet1/0/1' && rowA.ip === '10.31.9.1' && rowA.mask === '26' && rowA.agg === 'Eth-Trunk3'
+      && rowB.ifn === 'GE0/0/2' && rowB.ip === '10.31.9.2' && rowB.vlan === '77' && rowB.agg === 'Eth-Trunk3'
+      && rowA.cells[7] === '总表B' && rowA.cells[8] === 'GE0/0/2' && rowA.cells[9] === 'E2E链路备注'
+      && rowB.cells[0] === '总表B' && rowB.cells[9] === 'E2E链路备注';
+    console.log('集成4 连线→接口总表:', tblOk ? 'OK' : 'FAIL', JSON.stringify(tbl));
+    if (!tblOk) errors.push('[iftable] 接口总表未反映连线数据（接口/IP/掩码/VLAN/聚合组/对端/备注）: ' + JSON.stringify(tbl));
+    // 表内修改对端 IP/掩码/聚合组 → 应用 → 状态 + 画布标注 + 面板同步
+    await page.evaluate(() => {
+      const tr = [...document.querySelectorAll('#modalRoot .overlay #iftBody tr[data-key]')].find(r => r.dataset.key.endsWith('|b'));
+      const set = (sel, v) => { const i = tr.querySelector(sel); i.value = v; i.dispatchEvent(new Event('input', { bubbles: true })); };
+      set('input[data-f=ip]', '10.31.9.222'); set('input[data-f=mask]', '28'); set('input[data-f=agg]', 'Eth-Trunk4');
+      document.querySelector('#modalRoot .overlay [data-act=apply]').click();
+    });
+    await new Promise(r => setTimeout(r, 400));
+    const writeBack = await page.evaluate(() => {
+      const l = window.__topo.state.links[0];
+      return {
+        bIp: l.bIp, bMask: l.bMask, agg: l.agg,
+        labels: [...document.querySelectorAll('g.link .lb')].map(t => t.textContent),
+        panel: [...document.querySelectorAll('#listWrap .pitem')].map(x => x.textContent.replace(/\s+/g, ' ').trim())
+      };
+    });
+    const wbOk = writeBack.bIp === '10.31.9.222' && writeBack.bMask === 28 && writeBack.agg === 'Eth-Trunk4'
+      && writeBack.labels.some(s => s.includes('10.31.9.222')) && writeBack.labels.some(s => s === '聚合: Eth-Trunk4')
+      && writeBack.panel.length === 1 && writeBack.panel[0].includes('10.31.9.222'); // 面板只列接口/IP/带宽，掩码看状态字段 bMask
+    console.log('集成4 接口总表→连线/画布:', wbOk ? 'OK' : 'FAIL', JSON.stringify(writeBack));
+    if (!wbOk) errors.push('[iftable] 接口总表应用修改未写回连线/画布标注/面板: ' + JSON.stringify(writeBack));
+  }
+
+  // ---- 集成 5：拓扑校验 ↔ 修复/回退联动（重复 IP 报错 → 修正消失 → 改回重现）+ 报告内定位 ----
+  {
+    await loadGraphUI({
+      nodes: [
+        { id: 'va', name: '校验A', type: 'switch', x: 100, y: 100, w: 160, h: 56 },
+        { id: 'vb', name: '校验B', type: 'switch', x: 500, y: 100, w: 160, h: 56 },
+        { id: 'vc', name: '校验C', type: 'switch', x: 900, y: 100, w: 160, h: 56 }
+      ],
+      links: [
+        { id: 'vl1', a: 'va', b: 'vb', aIf: 'GE0/0/1', aIp: '10.61.0.1', bIf: 'GE0/0/1', bIp: '10.61.0.2' },
+        { id: 'vl2', a: 'va', b: 'vc', aIf: 'GE0/0/9', aIp: '10.61.0.1', bIf: 'GE0/0/1', bIp: '10.61.0.3' }
+      ],
+      texts: []
+    });
+    await page.evaluate(() => { document.querySelector('.tab[data-tab=nodes]').click(); });
+    await clickMenuItem('btnDropLayout', '拓扑校验');
+    await new Promise(r => setTimeout(r, 350));
+    const v1 = await page.evaluate(() => ({
+      msgs: [...document.querySelectorAll('#modalRoot .overlay .v-msg')].map(v => v.textContent),
+      sub: (document.querySelector('#modalRoot .overlay .m-sub') || {}).textContent
+    }));
+    const dup1 = v1.msgs.some(m => m.includes('IP 重复') && m.includes('10.61.0.1'));
+    console.log('集成5 初始校验（应报重复 IP）:', dup1 ? 'OK' : 'FAIL', JSON.stringify(v1));
+    if (!dup1) errors.push('[validation] 重复 IP 未被校验报出: ' + JSON.stringify(v1));
+    // 报告内定位按钮 → 选中涉事设备，详情卡/面板与状态一致
+    const loc = await page.evaluate(() => {
+      const row = [...document.querySelectorAll('#modalRoot .overlay .vrow')].find(r => r.textContent.includes('IP 重复'));
+      if (row) row.querySelector('[data-act=locate]').click();
+      const st = window.__topo.state;
+      const n = st.nodes.find(x => x.id === (st.sel || {}).id);
+      return {
+        selKind: (st.sel || {}).kind, name: n ? n.name : '',
+        card: document.querySelector('#selCard').textContent.replace(/\s+/g, ' ').trim(),
+        panelSel: [...document.querySelectorAll('#listWrap .pitem.sel')].map(x => x.textContent.replace(/\s+/g, ' ').trim())
+      };
+    });
+    const locOk = loc.selKind === 'node' && loc.name === '校验A' && loc.card.includes('校验A')
+      && loc.card.includes('接口数量：2 条连线') && loc.panelSel.length === 1 && loc.panelSel[0].includes('2 线');
+    console.log('集成5 校验报告定位:', locOk ? 'OK' : 'FAIL', JSON.stringify(loc));
+    if (!locOk) errors.push('[validation] 校验报告定位未选中涉事设备或详情卡字段不一致: ' + JSON.stringify(loc));
+    // 经接口总表修正重复 IP → 校验不再报（失败）→ 改回 → 重现（回归）
+    await clickMenuItem('btnDropEdit', '接口总表');
+    await new Promise(r => setTimeout(r, 350));
+    await page.evaluate(() => {
+      const tr = [...document.querySelectorAll('#modalRoot .overlay #iftBody tr[data-key]')].find(r =>
+        r.querySelector('input[data-f=ip]').value === '10.61.0.1' && r.querySelector('input[data-f=ifn]').value === 'GE0/0/9');
+      const i = tr.querySelector('input[data-f=ip]');
+      i.value = '10.61.0.9';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#modalRoot .overlay [data-act=apply]').click();
+    });
+    await new Promise(r => setTimeout(r, 350));
+    await clickMenuItem('btnDropLayout', '拓扑校验');
+    await new Promise(r => setTimeout(r, 350));
+    const v2 = await page.evaluate(() => [...document.querySelectorAll('#modalRoot .overlay .v-msg')].map(v => v.textContent));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot .overlay [data-act=close]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 200));
+    const fixedOk = !v2.some(m => m.includes('IP 重复'));
+    console.log('集成5 修正后校验:', fixedOk ? 'OK（重复 IP 消失）' : 'FAIL', JSON.stringify(v2));
+    if (!fixedOk) errors.push('[validation] 修正 IP 后仍报重复: ' + JSON.stringify(v2));
+    await clickMenuItem('btnDropEdit', '接口总表');
+    await new Promise(r => setTimeout(r, 350));
+    await page.evaluate(() => {
+      const tr = [...document.querySelectorAll('#modalRoot .overlay #iftBody tr[data-key]')].find(r =>
+        r.querySelector('input[data-f=ip]').value === '10.61.0.9' && r.querySelector('input[data-f=ifn]').value === 'GE0/0/9');
+      const i = tr.querySelector('input[data-f=ip]');
+      i.value = '10.61.0.1';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#modalRoot .overlay [data-act=apply]').click();
+    });
+    await new Promise(r => setTimeout(r, 350));
+    await clickMenuItem('btnDropLayout', '拓扑校验');
+    await new Promise(r => setTimeout(r, 350));
+    const v3 = await page.evaluate(() => [...document.querySelectorAll('#modalRoot .overlay .v-msg')].map(v => v.textContent));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot .overlay [data-act=close]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 200));
+    const backOk = v3.some(m => m.includes('IP 重复') && m.includes('10.61.0.1'));
+    console.log('集成5 改回后校验:', backOk ? 'OK（重复 IP 重现）' : 'FAIL', JSON.stringify(v3));
+    if (!backOk) errors.push('[validation] 改回重复 IP 后校验未重现: ' + JSON.stringify(v3));
+  }
+
+  // ---- 集成 6：布局切换（网格/环形/分层/拓扑分层）后连线端点跟随节点（不悬空、不落原点） ----
+  {
+    await loadGraphUI({
+      nodes: [
+        { id: 'ga', name: '布局核心A', type: 'switch', x: 120, y: 100, w: 160, h: 56 },
+        { id: 'gb', name: '布局汇聚B', type: 'switch', x: 560, y: 320, w: 160, h: 56 },
+        { id: 'gc', name: '布局接入C', type: 'switch', x: 1000, y: 120, w: 160, h: 56 },
+        { id: 'gd', name: '布局接入D', type: 'switch', x: 1000, y: 480, w: 160, h: 56 }
+      ],
+      links: [
+        { id: 'gl1', a: 'ga', b: 'gb', aIf: 'GE0/0/1', bIf: 'GE0/0/2' },
+        { id: 'gl2', a: 'gb', b: 'gc', aIf: 'GE0/0/3', bIf: 'GE0/0/1' },
+        { id: 'gl3', a: 'gb', b: 'gd', aIf: 'GE0/0/4', bIf: 'GE0/0/1' }
+      ],
+      texts: []
+    });
+    const layouts = [['网格布局', 'grid'], ['环形布局', 'ring'], ['分层布局（按类型）', 'layer'], ['拓扑分层布局（最少交叉）', 'topo']];
+    for (const [label, tag] of layouts) {
+      const posBefore = await page.evaluate(() => window.__topo.state.nodes.map(n => [n.x, n.y]));
+      await clickMenuItem('btnDropLayout', label);
+      await new Promise(r => setTimeout(r, 800));
+      const geo = await page.evaluate(() => {
+        const st = window.__topo.state;
+        const screenPt = (el, pt) => { const m = el.getScreenCTM(); return { x: pt.x * m.a + pt.y * m.c + m.e, y: pt.x * m.b + pt.y * m.d + m.f }; };
+        const inside = (p, r) => p.x >= r.left - 2 && p.x <= r.right + 2 && p.y >= r.top - 2 && p.y <= r.bottom + 2;
+        const out = [];
+        for (const l of st.links) {
+          const el = document.querySelector('g.link[data-id="' + l.id + '"] .ln');
+          if (!el) { out.push({ id: l.id, err: '连线元素缺失' }); continue; }
+          const total = el.getTotalLength();
+          const p0 = screenPt(el, el.getPointAtLength(0));
+          const p1 = screenPt(el, el.getPointAtLength(total));
+          const ra = document.querySelector('g.node[data-id="' + l.a + '"] .shape').getBoundingClientRect();
+          const rb = document.querySelector('g.node[data-id="' + l.b + '"] .shape').getBoundingClientRect();
+          out.push({ id: l.id, total: +total.toFixed(2), aIn: inside(p0, ra), bIn: inside(p1, rb) });
+        }
+        return {
+          links: out, positions: st.nodes.map(n => [n.x, n.y]),
+          finite: st.nodes.every(n => Number.isFinite(n.x) && Number.isFinite(n.y)),
+          atOrigin: st.nodes.filter(n => !n.x && !n.y).length,
+          rendered: document.querySelectorAll('g.link .ln').length
+        };
+      });
+      const bad = geo.links.filter(l => l.err || !(l.total > 0.01) || !l.aIn || !l.bIn);
+      const moved = geo.positions.filter((p, i) => Math.abs(p[0] - posBefore[i][0]) > 1 || Math.abs(p[1] - posBefore[i][1]) > 1).length;
+      const layoutOk = bad.length === 0 && geo.links.length === 3 && geo.rendered === 3 && geo.finite && geo.atOrigin === 0 && moved >= 1;
+      console.log('集成6 布局「' + label + '」连线端点跟随:', layoutOk ? 'OK' : 'FAIL', JSON.stringify({ bad, moved, atOrigin: geo.atOrigin }));
+      if (!layoutOk) errors.push('[layout] 布局「' + label + '」后连线端点未落在节点上或节点落原点（bad=' + JSON.stringify(bad) + ' moved=' + moved + ' atOrigin=' + geo.atOrigin + '）');
+    }
+  }
+
+  // ---- 集成 7：多图纸 × 撤销/重做（A 页操作 → 新页操作 → 撤销不串页） ----
+  {
+    await loadGraphUI({
+      nodes: [{ id: 'ma', name: 'A页原设备', type: 'switch', x: 400, y: 300, w: 160, h: 56 }],
+      links: [], texts: []
+    });
+    // A 页双击改名（进入撤销栈）
+    await page.evaluate(() => {
+      const n = window.__topo.state.nodes[0];
+      const el = document.querySelector('g.node[data-id="' + n.id + '"]');
+      el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, view: window }));
+    });
+    await new Promise(r => setTimeout(r, 300));
+    const renamed = await page.evaluate(() => {
+      const inp = document.querySelector('.modal input[name=name]');
+      if (!inp) return 'no-modal';
+      inp.value = 'A页改名设备';
+      document.querySelector('.modal form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      return 'ok';
+    });
+    await new Promise(r => setTimeout(r, 350));
+    const s7a = await page.evaluate(() => ({
+      name: window.__topo.state.nodes[0].name, undoDisabled: document.getElementById('btnUndo').disabled,
+      sheets: window.__topo.state.sheets.length, idx: window.__topo.state.sheetIdx
+    }));
+    const renameOk = renamed === 'ok' && s7a.name === 'A页改名设备' && !s7a.undoDisabled;
+    console.log('集成7 A 页改名:', renameOk ? 'OK' : 'FAIL', JSON.stringify(s7a));
+    if (!renameOk) errors.push('[sheets] A 页改名未生效或未进入撤销栈: ' + JSON.stringify({ renamed, s7a }));
+    // 新建图纸页：撤销栈按页清空，A 页数据冻结在第 1 页
+    await page.evaluate(() => document.getElementById('sheetAdd').click());
+    await new Promise(r => setTimeout(r, 500));
+    const s7b = await page.evaluate(() => ({
+      sheets: window.__topo.state.sheets.length, idx: window.__topo.state.sheetIdx, nodes: window.__topo.state.nodes.length,
+      undoDisabled: document.getElementById('btnUndo').disabled, redoDisabled: document.getElementById('btnRedo').disabled,
+      page0: (window.__topo.state.sheets[0].nodes || []).map(n => n.name)
+    }));
+    const newPageOk = s7b.sheets === s7a.sheets + 1 && s7b.idx === s7b.sheets - 1 && s7b.nodes === 0
+      && s7b.undoDisabled && s7b.redoDisabled && JSON.stringify(s7b.page0) === JSON.stringify(['A页改名设备']);
+    console.log('集成7 新建图纸页:', newPageOk ? 'OK' : 'FAIL', JSON.stringify(s7b));
+    if (!newPageOk) errors.push('[sheets] 新建图纸页未隔离（撤销栈/页数据异常）: ' + JSON.stringify(s7b));
+    // 在第 2 页加设备 → 撤销 → 只影响本页，A 页不受影响
+    await clickMenuItem('btnDropEdit', '从模板添加设备…');
+    await new Promise(r => setTimeout(r, 300));
+    await page.evaluate(() => { const b = document.querySelector('.tpl'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 400));
+    const s7c = await page.evaluate(() => ({
+      nodes: window.__topo.state.nodes.length, name: (window.__topo.state.nodes[0] || {}).name || '',
+      undoDisabled: document.getElementById('btnUndo').disabled,
+      page0: (window.__topo.state.sheets[0].nodes || []).map(n => n.name)
+    }));
+    await page.evaluate(() => document.getElementById('btnUndo').click());
+    await new Promise(r => setTimeout(r, 400));
+    const s7d = await page.evaluate(() => ({
+      nodes: window.__topo.state.nodes.length,
+      page0: (window.__topo.state.sheets[0].nodes || []).map(n => n.name)
+    }));
+    const crossOk = s7c.nodes === 1 && !s7c.undoDisabled && JSON.stringify(s7c.page0) === JSON.stringify(['A页改名设备'])
+      && s7d.nodes === 0 && JSON.stringify(s7d.page0) === JSON.stringify(['A页改名设备']);
+    console.log('集成7 第2页撤销不串页:', crossOk ? 'OK' : 'FAIL', JSON.stringify({ s7c, s7d }));
+    if (!crossOk) errors.push('[sheets] 撤销串页或第 2 页撤销未生效: ' + JSON.stringify({ s7c, s7d }));
+    // 切回第 1 页：数据与 DOM 一致，撤销栈为空（切页清栈语义）
+    await page.evaluate(() => document.querySelector('#sheetTabs .sheet-tab[data-idx="0"]').click());
+    await new Promise(r => setTimeout(r, 500));
+    const s7e = await page.evaluate(() => ({
+      idx: window.__topo.state.sheetIdx, nodes: window.__topo.state.nodes.map(n => n.name),
+      dom: [...document.querySelectorAll('g.node .nm')].map(t => t.textContent),
+      undoDisabled: document.getElementById('btnUndo').disabled,
+      tabs: [...document.querySelectorAll('#sheetTabs .sheet-tab')].map(t => t.textContent)
+    }));
+    const backOk = s7e.idx === 0 && JSON.stringify(s7e.nodes) === JSON.stringify(['A页改名设备'])
+      && JSON.stringify(s7e.dom) === JSON.stringify(['A页改名设备']) && s7e.undoDisabled && s7e.tabs.length === s7b.sheets;
+    console.log('集成7 切回第1页:', backOk ? 'OK' : 'FAIL', JSON.stringify(s7e));
+    if (!backOk) errors.push('[sheets] 切回图纸页后数据/DOM/撤销栈不符: ' + JSON.stringify(s7e));
+  }
+
+  // ---- 集成 8：网段分析结果 ↔ 点击行定位高亮 ↔ 选中详情字段一致 ----
+  {
+    await loadGraphUI({
+      nodes: [
+        { id: 'sa', name: '网段A设备', type: 'switch', x: 100, y: 100, w: 160, h: 56 },
+        { id: 'sb', name: '网段B设备', type: 'switch', x: 500, y: 100, w: 160, h: 56 },
+        { id: 'sc', name: '网段C设备', type: 'switch', x: 900, y: 300, w: 160, h: 56 }
+      ],
+      links: [
+        { id: 'sl1', a: 'sa', b: 'sb', aIf: 'GE0/0/1', aIp: '10.10.0.1', bIf: 'GE0/0/1', bIp: '10.10.0.2' },
+        { id: 'sl2', a: 'sb', b: 'sc', aIf: 'GE0/0/2', aIp: '10.10.0.3', bIf: 'GE0/0/2', bIp: '192.168.9.1' }
+      ],
+      texts: []
+    });
+    await page.evaluate(() => { document.querySelector('.tab[data-tab=nodes]').click(); });
+    // 期望值：直接调用产品同一函数 buildSubnetTable（表格/高亮必须与它逐字段一致）
+    const expect = await page.evaluate(() => {
+      const st = window.__topo.state;
+      const nameOf = (id) => { const n = st.nodes.find(x => x.id === id); return n ? n.name : '?'; };
+      return window.TopoUtil.buildSubnetTable(st.nodes, st.links).rows.map(r => ({
+        cidr: r.cidr, mask: r.mask, nodes: r.nodeIds.map(nameOf).sort(),
+        links: r.linkIds.length, used: r.used, usable: r.usable, util: Math.round(r.util * 100)
+      }));
+    });
+    await clickMenuItem('btnDropLayout', '网段分析');
+    await new Promise(r => setTimeout(r, 400));
+    const snt = await page.evaluate(() => ({
+      rows: [...document.querySelectorAll('#modalRoot .overlay #sntBody tr[data-i]')].map(tr => [...tr.querySelectorAll('td')].map(td => td.textContent.trim())),
+      sub: (document.querySelector('#modalRoot .overlay .m-sub') || {}).textContent
+    }));
+    const rowOf = (cidr) => snt.rows.find(r => r[1].startsWith(cidr));
+    const e1 = expect.find(r => r.cidr === '10.10.0.0/24'), e2 = expect.find(r => r.cidr === '192.168.9.0/24');
+    const t1 = rowOf('10.10.0.0/24'), t2 = rowOf('192.168.9.0/24');
+    const tblOk = !!e1 && !!e2 && snt.rows.length === expect.length && snt.sub.includes(expect.length + ' 个网段')
+      && t1 && t1[2] === e1.mask && t1[4] === String(e1.nodes.length) && t1[5] === String(e1.links)
+      && t1[6] === e1.used + '/' + e1.usable && t1[7] === e1.util + '%'
+      && t2 && t2[4] === String(e2.nodes.length) && t2[5] === String(e2.links);
+    console.log('集成8 网段分析表格 ↔ 计算结果:', tblOk ? 'OK' : 'FAIL', JSON.stringify({ rows: snt.rows.length, t1, t2, e1, e2 }));
+    if (!tblOk) errors.push('[subnet] 网段分析表格与 buildSubnetTable 结果不一致: ' + JSON.stringify({ snt, expect }));
+    // 点击行 → 金色高亮集合必须正好等于该网段的成员设备 + 成员链路
+    const hl = await page.evaluate(() => {
+      const st = window.__topo.state;
+      const nameOf = (id) => { const n = st.nodes.find(x => x.id === id); return n ? n.name : '?'; };
+      const tr = [...document.querySelectorAll('#modalRoot .overlay #sntBody tr[data-i]')].find(t => t.textContent.includes('10.10.0.0/24'));
+      if (tr) tr.click();
+      const row = window.TopoUtil.buildSubnetTable(st.nodes, st.links).rows.find(r => r.cidr === '10.10.0.0/24');
+      return {
+        pathHl: document.querySelectorAll('.path-hl').length,
+        nodes: [...document.querySelectorAll('g.node.path-hl')].map(g => nameOf(g.dataset.id)).sort(),
+        links: document.querySelectorAll('g.link.path-hl').length,
+        expectNodes: row.nodeIds.map(nameOf).sort(), expectLinks: row.linkIds.length
+      };
+    });
+    const hlOk = hl.nodes.length === hl.expectNodes.length && JSON.stringify(hl.nodes) === JSON.stringify(hl.expectNodes)
+      && hl.links === hl.expectLinks && hl.pathHl === hl.expectNodes.length + hl.expectLinks
+      && hl.expectNodes.includes('网段A设备') && hl.expectNodes.includes('网段B设备');
+    console.log('集成8 点击行定位高亮:', hlOk ? 'OK' : 'FAIL', JSON.stringify(hl));
+    if (!hlOk) errors.push('[subnet] 点击网段行后高亮成员与网段成员不一致: ' + JSON.stringify(hl));
+    // 点击高亮设备 → 选中详情卡/面板字段与节点状态一致（接口数量 = 状态中该设备连线数）
+    const det = await page.evaluate(() => {
+      const st = window.__topo.state;
+      const n = st.nodes.find(x => x.name === '网段B设备');
+      const el = document.querySelector('g.node[data-id="' + n.id + '"]');
+      const r = el.getBoundingClientRect();
+      const ev = { bubbles: true, cancelable: true, pointerId: 9, pointerType: 'mouse', isPrimary: true, clientX: r.left + 10, clientY: r.top + 10, buttons: 1 };
+      el.dispatchEvent(new PointerEvent('pointerdown', ev));
+      el.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, ev, { buttons: 0 })));
+      const cnt = st.links.filter(l => l.a === n.id || l.b === n.id).length;
+      return {
+        selOk: (st.sel || {}).id === n.id, cnt,
+        card: document.querySelector('#selCard').textContent.replace(/\s+/g, ' ').trim(),
+        panel: [...document.querySelectorAll('#listWrap .pitem.sel')].map(x => x.textContent.replace(/\s+/g, ' ').trim())
+      };
+    });
+    const detOk = det.selOk && det.cnt === 2 && det.card.includes('网段B设备') && det.card.includes('接口数量：2 条连线')
+      && det.panel.length === 1 && det.panel[0].includes('网段B设备') && det.panel[0].includes('2 线');
+    console.log('集成8 高亮设备选中详情:', detOk ? 'OK' : 'FAIL', JSON.stringify(det));
+    if (!detOk) errors.push('[subnet] 高亮设备选中后详情卡/面板字段与节点状态不一致: ' + JSON.stringify(det));
+    // 关闭弹窗 → 高亮清除（状态复原）
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot .overlay [data-act=close]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    const cleared = await page.evaluate(() => document.querySelectorAll('.path-hl').length);
+    console.log('集成8 关闭网段分析后高亮清除:', cleared === 0 ? 'OK' : 'FAIL', 'path-hl=' + cleared);
+    if (cleared !== 0) errors.push('[subnet] 关闭网段分析后高亮未清除: path-hl=' + cleared);
+  }
+
+  // ---- 集成 9：快速搜索 → 定位选中 → 详情卡字段与节点状态一致；Esc 关闭后状态复原 ----
+  {
+    await loadGraphUI({
+      nodes: [
+        { id: 'qa', name: 'E2E定位目标设备ZQ', type: 'switch', x: 200, y: 200, w: 160, h: 56, mgmt: '10.88.0.5', note: '定位备注ZQ' },
+        { id: 'qb', name: 'E2E邻接设备L1', type: 'router', x: 700, y: 120, w: 160, h: 56 },
+        { id: 'qc', name: 'E2E邻接设备L2', type: 'router', x: 700, y: 360, w: 160, h: 56 }
+      ],
+      links: [
+        { id: 'ql1', a: 'qa', b: 'qb', aIf: 'GE0/0/1', aIp: '10.88.1.1', bIf: 'GE0/0/1', bIp: '10.88.1.2' },
+        { id: 'ql2', a: 'qa', b: 'qc', aIf: 'GE0/0/2', aIp: '10.88.2.1', bIf: 'GE0/0/1', bIp: '10.88.2.2' }
+      ],
+      texts: []
+    });
+    await page.evaluate(() => { document.querySelector('.tab[data-tab=nodes]').click(); });
+    // Ctrl+F 呼出 → 按管理地址搜索（结果副标题必须来自节点真实字段）
+    await page.evaluate(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true })); });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => {
+      const inp = document.querySelector('#qsInput');
+      inp.value = '10.88.0.5';
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 200));
+    const q1 = await page.evaluate(() => ({
+      visible: !document.querySelector('#quickSearch').classList.contains('hidden'),
+      count: document.querySelector('#qsCount').textContent,
+      items: [...document.querySelectorAll('#qsList .qs-item')].map(x => ({
+        kind: x.querySelector('.qs-kind').textContent, title: x.querySelector('.qs-t').textContent, sub: x.querySelector('.qs-s').textContent
+      }))
+    }));
+    await page.evaluate(() => document.querySelector('#qsInput').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+    await new Promise(r => setTimeout(r, 250));
+    const detail = await page.evaluate(() => {
+      const st = window.__topo.state, n = st.nodes.find(x => x.id === (st.sel || {}).id);
+      const cnt = n ? st.links.filter(l => l.a === n.id || l.b === n.id).length : -1;
+      return {
+        selKind: (st.sel || {}).kind, selId: (st.sel || {}).id, name: n ? n.name : '', cnt,
+        card: document.querySelector('#selCard').textContent.replace(/\s+/g, ' ').trim(),
+        panelSel: [...document.querySelectorAll('#listWrap .pitem.sel')].map(x => x.textContent.replace(/\s+/g, ' ').trim()),
+        domSel: document.querySelectorAll('g.node.selected').length
+      };
+    });
+    const qsOk = q1.visible && q1.count === '1 个匹配' && q1.items.length === 1 && q1.items[0].kind === '设备'
+      && q1.items[0].title === 'E2E定位目标设备ZQ' && q1.items[0].sub === '管理地址 10.88.0.5'
+      && detail.selKind === 'node' && detail.name === 'E2E定位目标设备ZQ' && detail.cnt === 2 && detail.domSel === 1
+      && detail.card.includes('E2E定位目标设备ZQ') && detail.card.includes('接口数量：2 条连线')
+      && detail.card.includes('管理地址：10.88.0.5') && detail.card.includes('备注：定位备注ZQ')
+      && detail.panelSel.length === 1 && detail.panelSel[0].includes('E2E定位目标设备ZQ') && detail.panelSel[0].includes('2 线');
+    console.log('集成9 快速搜索定位/详情字段:', qsOk ? 'OK' : 'FAIL', JSON.stringify({ q1, detail }));
+    if (!qsOk) errors.push('[quicksearch] 搜索定位后详情卡/面板字段与节点状态不一致: ' + JSON.stringify({ q1, detail }));
+    // Esc 关闭：浮层隐藏但选中与详情保持；重新呼出输入与结果已重置；按接口可命中连线并定位
+    await page.evaluate(() => document.querySelector('#qsInput').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    await new Promise(r => setTimeout(r, 200));
+    const afterEsc = await page.evaluate(() => ({
+      hidden: document.querySelector('#quickSearch').classList.contains('hidden'),
+      selId: (window.__topo.state.sel || {}).id,
+      cardVisible: !document.querySelector('#selCard').classList.contains('hidden')
+    }));
+    await page.evaluate(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true })); });
+    await new Promise(r => setTimeout(r, 200));
+    const reopened = await page.evaluate(() => ({
+      value: document.querySelector('#qsInput').value, count: document.querySelector('#qsCount').textContent,
+      items: document.querySelectorAll('#qsList .qs-item').length
+    }));
+    await page.evaluate(() => {
+      const inp = document.querySelector('#qsInput');
+      inp.value = 'GE0/0/2';
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 200));
+    const q2 = await page.evaluate(() => [...document.querySelectorAll('#qsList .qs-item')].map(x => ({
+      kind: x.querySelector('.qs-kind').textContent, title: x.querySelector('.qs-t').textContent, sub: x.querySelector('.qs-s').textContent
+    })));
+    await page.evaluate(() => document.querySelector('#qsInput').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+    await new Promise(r => setTimeout(r, 250));
+    const linkSel = await page.evaluate(() => {
+      const st = window.__topo.state, l = st.links.find(x => x.id === (st.sel || {}).id);
+      return { kind: (st.sel || {}).kind, aIf: l ? l.aIf : '' };
+    });
+    await page.evaluate(() => document.querySelector('#qsInput').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    const escOk = afterEsc.hidden && afterEsc.selId === detail.selId && afterEsc.cardVisible
+      && reopened.value === '' && reopened.count === '' && reopened.items === 0
+      && q2.length === 1 && q2[0].kind === '连线' && q2[0].sub.includes('GE0/0/2')
+      && linkSel.kind === 'link' && linkSel.aIf === 'GE0/0/2';
+    console.log('集成9 Esc 复原/连线搜索:', escOk ? 'OK' : 'FAIL', JSON.stringify({ afterEsc, reopened, q2, linkSel }));
+    if (!escOk) errors.push('[quicksearch] Esc 关闭后状态未复原或连线搜索未定位: ' + JSON.stringify({ afterEsc, reopened, q2, linkSel }));
+  }
+
+  // ---- 集成 10：类型配色 ↔ 画布渐变 ↔ 导出 SVG 三方一致；导出产物固定浅色（与主题解耦） ----
+  {
+    const ctKey2 = await page.evaluate((img) => TopoUtil.addCustomType('E2E配色类型', img).key, imgDataURL);
+    await loadGraphUI({
+      nodes: [
+        { id: 'ca', name: '配色设备A', type: ctKey2, x: 200, y: 200, w: 160, h: 56, mgmt: '10.90.0.1' },
+        { id: 'cb', name: '配色设备B', type: 'switch', x: 700, y: 200, w: 160, h: 56 }
+      ],
+      links: [{ id: 'cl1', a: 'ca', b: 'cb', aIf: 'GE0/0/1', aIp: '10.90.1.1', bIf: 'GE0/0/2', bIp: '10.90.1.2', bw: 1000 }],
+      texts: []
+    });
+    // 经「类型管理」弹窗改类型颜色（input[type=color] 的 input 事件）
+    await clickMenuItem('btnDropEdit', '类型管理');
+    await new Promise(r => setTimeout(r, 400));
+    const colorSet = await page.evaluate((key) => {
+      const row = document.querySelector('#tmCustom .tm-row[data-key="' + key + '"]');
+      if (!row) return 'no-row';
+      const inp = row.querySelector('input.tm-color');
+      inp.value = '#123456';
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      return 'ok';
+    }, ctKey2);
+    await new Promise(r => setTimeout(r, 300));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot .overlay [data-act=close]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 250));
+    const canvasColor = await page.evaluate((key) => {
+      const stop = document.querySelector('#defs linearGradient#g-' + key + ' stop[offset="0"]');
+      const shape = document.querySelector('g.node .shape');
+      const ov = JSON.parse(localStorage.getItem(TopoUtil.OVERRIDE_KEY) || '{}')[key] || {};
+      return {
+        theme: document.documentElement.getAttribute('data-theme'),
+        gradientStop: stop && stop.getAttribute('stop-color'),
+        nodeFill: shape.getAttribute('fill'),
+        typeColor: TopoUtil.getType(key).c1, typeStroke: TopoUtil.getType(key).stroke,
+        persisted: ov.c1
+      };
+    }, ctKey2);
+    const colorOk = colorSet === 'ok' && canvasColor.theme === 'light' && canvasColor.gradientStop === '#123456'
+      && canvasColor.typeColor === '#123456' && canvasColor.nodeFill === 'url(#g-' + ctKey2 + ')'
+      && canvasColor.persisted === '#123456';
+    console.log('集成10 类型配色→画布渐变:', colorOk ? 'OK' : 'FAIL', JSON.stringify(canvasColor));
+    if (!colorOk) errors.push('[theme] 类型管理改色未同步到画布渐变/持久化: ' + JSON.stringify({ colorSet, canvasColor }));
+    // 导出 SVG（走 UI 下载）→ 断言产物内容：背景白底、节点填充=类型色、设备名白字、标注固定色
+    const exportSvg = () => withDownload('svg', async (dir) => {
+      await clickMenuItem('btnDropExport', '导出图片');
+      await new Promise(r => setTimeout(r, 300));
+      await page.evaluate(() => { const b = document.querySelector('#modalRoot .overlay [data-act=svg]'); if (b) b.click(); });
+      const files = await dlWait(dir, '.svg');
+      if (!files.length) return { files, bg: false, nodeRect: '', label: false, name: false };
+      const txt = fs.readFileSync(path.join(dir, files[0]), 'utf8');
+      const at = txt.indexOf('配色设备A');
+      const bi = at >= 0 ? txt.lastIndexOf('<rect ', at) : -1;
+      return {
+        files, bytes: txt.length, bg: txt.includes('fill="#ffffff"'),
+        nodeRect: bi >= 0 ? txt.slice(bi, txt.indexOf('/>', bi) + 2) : '',
+        label: txt.includes('fill="#334155"'),
+        name: txt.includes('fill="#ffffff"')
+      };
+    });
+    const svgLight = await exportSvg();
+    const svgOkLight = svgLight.files.length === 1 && svgLight.bg && svgLight.label && svgLight.name
+      && svgLight.nodeRect.includes('fill="#123456"') && svgLight.nodeRect.includes('stroke="' + canvasColor.typeStroke + '"');
+    console.log('集成10 浅色导出 SVG:', svgOkLight ? 'OK' : 'FAIL', JSON.stringify(svgLight));
+    if (!svgOkLight) errors.push('[theme] 导出 SVG 与类型配色/画布不一致: ' + JSON.stringify({ svgLight, typeStroke: canvasColor.typeStroke }));
+    // 切暗色主题：画布描边随主题变，但导出产物仍为固定浅色底 + 类型配色不变（可打印，且与画布类型色一致）
+    await page.evaluate(() => document.getElementById('btnTheme').click());
+    await new Promise(r => setTimeout(r, 300));
+    const dark = await page.evaluate(() => ({
+      theme: document.documentElement.getAttribute('data-theme'),
+      stroke: getComputedStyle(document.querySelector('g.node .shape')).stroke
+    }));
+    const svgDark = await exportSvg();
+    const svgOkDark = dark.theme === 'dark' && dark.stroke.startsWith('rgba(0, 0, 0')
+      && svgDark.files.length === 1 && svgDark.bg && svgDark.label
+      && svgDark.nodeRect.includes('fill="#123456"') && svgDark.nodeRect.includes('stroke="' + canvasColor.typeStroke + '"');
+    console.log('集成10 暗色主题下导出 SVG:', svgOkDark ? 'OK' : 'FAIL', JSON.stringify({ dark, nodeRect: svgDark.nodeRect }));
+    if (!svgOkDark) errors.push('[theme] 暗色主题下导出 SVG 未保持固定浅色底/类型配色: ' + JSON.stringify({ dark, svgDark }));
+    await page.evaluate(() => document.getElementById('btnTheme').click());
+    await new Promise(r => setTimeout(r, 250));
+    const themeBack = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+    if (themeBack !== 'light') errors.push('[theme] 集成场景未把主题复位为浅色: ' + themeBack);
+  }
+
+  // ---- 配置变更下发 UI（注入 mock 主进程桥）：菜单入口 → dry-run 预览/闸门 → 下发结果 → 回滚生成 → 记录 ----
+  {
+    await page.evaluate(() => {
+      // 带管理地址的设备（面板只列有管理地址或监控凭据的设备）
+      window.__topo.loadGraph({
+        nodes: [{ id: 'dpl', name: '下发测试SW', type: 'switch', x: 200, y: 120, w: 160, h: 56, mgmt: '10.0.10.1' }],
+        links: [], texts: []
+      }, 'e2e');
+      // 基线（配置备份库）与主进程桥的 mock：真实会话逻辑由单测的 mock 设备覆盖
+      window.topoConfigBackup = {
+        list: async () => ({ ok: true, items: [{ name: 'cfg_base.cfg' }] }),
+        read: async () => ({ ok: true, content: 'sysname SW1\n#\ninterface Vlanif10\n ip address 10.0.10.1 255.255.255.0\n description OLD\n#\nreturn\n' })
+      };
+      window.__deployCalls = [];
+      window.topoDeploy = {
+        run: async (p) => {
+          window.__deployCalls.push(p);
+          return {
+            ok: false, error: '第 2 行下发失败，已停止后续下发',
+            applied: [
+              { line: 'interface Vlanif30', ok: true, out: '', error: null },
+              { line: ' ip address 10.0.30.1 255.255.255.0', ok: false, out: "Error: Unrecognized command found at '^' position.", error: "设备报错：Error: Unrecognized command found at '^' position." }
+            ],
+            appliedCount: 1, failedAt: 1, remaining: 0,
+            backup: { ok: true, content: 'sysname SW1\nreturn\n' }, post: { ok: true, content: 'sysname SW1\nreturn\n' },
+            saved: { ok: false, error: null }, backupFile: 'cfg_20260912_101010.cfg', maskedCount: 1, fingerprint: null
+          };
+        },
+        history: async () => ({ ok: true, items: [{ name: 'deploy_20260912_101010_abcd.json', ts: Date.now(), device: '下发测试SW', host: '10.0.10.1', vendorLabel: '华为 VRP', kind: 'change', lineCount: 2, ok: false, appliedCount: 1, failedAt: 1, backupFile: 'cfg_20260912_101010.cfg', saved: false, maskedCount: 1, error: '第 2 行下发失败' }] }),
+        record: async () => ({ ok: true, rec: { device: '下发测试SW', host: '10.0.10.1', protocol: 'ssh', port: 22, user: 'admin', vendorLabel: '华为 VRP', kind: 'change', at: '2026-09-12T10:10:10', lineCount: 2, applied: [{ line: 'interface Vlanif30', ok: true }, { line: ' ip address 10.0.30.1 255.255.255.0', ok: false, error: '设备报错' }], result: { ok: false, appliedCount: 1, error: '第 2 行下发失败' }, backup: { ok: true, file: 'cfg_20260912_101010.cfg' }, saved: {}, verify: { ok: true }, maskedCount: 1, plan: 'interface Vlanif30\n ip address 10.0.30.1 255.255.255.0' } }),
+        recordRemove: async () => ({ ok: true }),
+        clear: async () => ({ ok: true }),
+        openFolder: async () => ({ ok: true }),
+        onDone: () => () => {}
+      };
+    });
+    await new Promise(r => setTimeout(r, 200));
+    // 画布非空时 loadGraph 会先弹「替换当前画布」确认，确认后才真正载入
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    await page.evaluate(() => window.__topo.openConfigDeploy());
+    await new Promise(r => setTimeout(r, 600));
+    const opened = await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot');
+      return { has: !!ov.querySelector('#cdPlan'), base: (ov.querySelector('#cdBase') || {}).textContent || '' };
+    });
+    // ① 硬禁止命令：勾选「我已核对」也不能执行（不可覆盖）
+    await page.evaluate(() => {
+      const ta = document.querySelector('#modalRoot #cdPlan');
+      ta.value = 'erase startup-config\nreload';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 500));
+    const hardBlocked = await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot');
+      const before = ov.querySelector('#cdRun').disabled;
+      ov.querySelector('#cdAck').checked = true;
+      ov.querySelector('#cdAck').dispatchEvent(new Event('change', { bubbles: true }));
+      return { before, after: ov.querySelector('#cdRun').disabled, title: ov.querySelector('#cdRun').title };
+    });
+    // ② 正常变更集（含删除类 + 改写管理地址）：dry-run 计数可读，两级确认须按顺序解锁
+    await page.evaluate(() => {
+      const ta = document.querySelector('#modalRoot #cdPlan');
+      ta.value = ['interface Vlanif10', ' ip address 10.0.10.9 255.255.255.0', 'interface Vlanif30', ' ip address 10.0.30.1 255.255.255.0', ' undo snmp-agent'].join('\n');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 500));
+    const gates = await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot');
+      const sh = (id) => ov.querySelector(id).style.display !== 'none';
+      const dis = () => ov.querySelector('#cdRun').disabled;
+      const click = (sel) => { const el = ov.querySelector(sel); el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); };
+      const r = { warn: sh('#cdWarnWrap'), lock: sh('#cdLockWrap'), d0: dis(),
+        prev: ov.querySelector('#cdPrev').textContent.replace(/\s+/g, ' ') };
+      click('#cdWarnAck'); r.d1 = dis();            // 已确认删除类，但自断风险未确认 → 仍禁用
+      click('#cdLockAck'); r.d2 = dis();            // 两个风险都确认，但「我已核对」未勾 → 仍禁用
+      click('#cdAck'); r.d3 = dis();                // 三项齐备 → 可执行
+      return r;
+    });
+    // ③ 执行下发 → 逐行结果（mock 主进程返回第 2 行失败）
+    await page.evaluate(() => document.querySelector('#modalRoot #cdRun').click());
+    await new Promise(r => setTimeout(r, 700));
+    const ran = await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot');
+      const rows = [...ov.querySelectorAll('#cdPrev tbody tr')].map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+      const c0 = window.__deployCalls[0] || null;
+      return {
+        calls: window.__deployCalls.length,
+        sent: c0 ? { vendor: c0.vendor, lines: c0.lines.length, host: c0.host, save: c0.doSave, verify: c0.verify, plan: c0.plan.length > 0 } : null,
+        rows, roll: !ov.querySelector('#cdRoll').disabled, csv: !ov.querySelector('#cdCsv').disabled
+      };
+    });
+    // ④ 生成回滚变更单（依前置备份求逆）→ 载入变更集
+    await page.evaluate(() => document.querySelector('#modalRoot #cdRoll').click());
+    await new Promise(r => setTimeout(r, 500));
+    const roll = await page.evaluate(() => {
+      const ovs = [...document.querySelectorAll('#modalRoot .overlay')];
+      const top = ovs[ovs.length - 1];
+      const txt = (top.querySelector('pre') || {}).textContent || '';
+      const b = top.querySelector('#rbLoad');
+      if (b) b.click();
+      return { has: /undo interface Vlanif30/.test(txt), restore: / ip address 10\.0\.10\.1 255\.255\.255\.0/.test(txt) };
+    });
+    await new Promise(r => setTimeout(r, 400));
+    const loaded = await page.evaluate(() => (document.querySelector('#modalRoot #cdPlan') || {}).value || '');
+    // ⑤ 下发记录（审计）列表
+    await page.evaluate(() => document.querySelector('#modalRoot #cdHist').click());
+    await new Promise(r => setTimeout(r, 600));
+    const hist = await page.evaluate(() => {
+      const ovs = [...document.querySelectorAll('#modalRoot .overlay')];
+      const top = ovs[ovs.length - 1];
+      const rows = [...top.querySelectorAll('#dhList tbody tr')].map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+      return { rows, has: /下发测试SW/.test(top.textContent) && /cfg_20260912_101010\.cfg/.test(top.textContent) };
+    });
+    const dpOk = opened.has && /cfg_base\.cfg/.test(opened.base)
+      && hardBlocked.before === true && hardBlocked.after === true && /禁止下发/.test(hardBlocked.title)
+      && gates.warn === true && gates.lock === true && gates.d0 === true
+      && gates.d1 === true && gates.d2 === true && gates.d3 === false
+      && /将下发 5 行/.test(gates.prev) && /覆盖 1/.test(gates.prev)
+      && ran.calls === 1 && !!ran.sent && ran.sent.lines === 5 && ran.sent.vendor === 'huawei' && ran.sent.host === '10.0.10.1'
+      && ran.sent.save === false && ran.sent.verify === true && ran.sent.plan === true
+      && ran.rows.length === 3 && /Unrecognized/.test(ran.rows[2]) && ran.roll === true && ran.csv === true
+      && roll.has === true && roll.restore === true && /undo interface Vlanif30/.test(loaded)
+      && hist.has === true && hist.rows.length >= 1;
+    console.log('配置变更下发 UI:', dpOk ? 'OK' : 'FAIL', JSON.stringify({ opened, hardBlocked, gates, ran, roll, loaded: loaded.slice(0, 60), hist }));
+    if (!dpOk) errors.push('[deploy] 配置变更下发 UI 流程未生效: ' + JSON.stringify({ opened, hardBlocked, gates, ran, roll, loaded: loaded.slice(0, 80), hist }));
+    await page.evaluate(() => { document.querySelectorAll('#modalRoot .overlay').forEach(o => o.remove()); });
+  }
+
+  // ---- 拓扑自动发现 UI（注入 mock 主进程桥 + 四台假设备）：种子 → 递归爬 2 层 → 预览 → 合并进拓扑 ----
+  {
+    await page.evaluate(() => {
+      window.__topo.loadGraph({
+        nodes: [{ id: 'dc1', name: 'CORE', type: 'switch', x: 200, y: 120, w: 160, h: 56, mgmt: '10.0.0.1' }],
+        links: [], texts: []
+      }, 'e2e');
+      // 假设备的 LLDP verbose 输出（带 Management address —— 递归下钻的唯一依据）
+      const lldp = (rows) => rows.map(r => [
+        'GigabitEthernet0/0/' + r[3] + ' has 1 neighbor(s):',
+        'Neighbor index                :1',
+        'Port ID type                  :Interface name',
+        'Port ID                       :' + r[1],
+        'System name                   :' + r[0],
+        'Management address type       :IPv4',
+        'Management address            :' + r[2]
+      ].join('\r\n')).join('\r\n');
+      const VER = 'Huawei Versatile Routing Platform Software\r\nVRP (R) software, Version 5.170 (S5720 V200R019C10SPC500)\r\nHUAWEI S5720-28X-SI Routing Switch uptime is 3 weeks, 2 days';
+      const MAP = {
+        '10.0.0.1': { lldp: lldp([['SW2', 'GigabitEthernet0/0/1', '10.0.0.2', '1'], ['SW3', 'GigabitEthernet0/0/1', '10.0.0.3', '2']]), ver: VER },
+        '10.0.0.2': { lldp: lldp([['CORE', 'GigabitEthernet0/0/1', '10.0.0.1', '1'], ['SW4', 'GigabitEthernet0/0/1', '10.0.0.4', '3']]), ver: VER },
+        '10.0.0.3': { lldp: '', ver: VER },            // 未启用 LLDP：应记为失败
+        '10.0.0.4': { lldp: lldp([['SW5', 'GigabitEthernet0/0/1', '10.0.0.5', '9']]), ver: VER } // 层 3 超上限：不再展开
+      };
+      window.__discoCalls = [];
+      window.topoShell = {
+        runOneShot: async (p) => {
+          window.__discoCalls.push({ host: p.host, cmds: (p.commands || []).length });
+          const dev = MAP[p.host];
+          const outputs = (p.commands || []).map(cmd => {
+            const c = String(cmd).toLowerCase();
+            if (!dev) return { cmd, text: '' };
+            if (/lldp|cdp/.test(c)) return { cmd, text: dev.lldp || '' };
+            if (/version/.test(c)) return { cmd, text: dev.ver || '' };
+            return { cmd, text: '' };
+          });
+          return { ok: true, outputs, errors: [], fingerprint: null };
+        }
+      };
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    await page.evaluate(() => window.__topo.openTopoDiscovery());
+    await new Promise(r => setTimeout(r, 500));
+    const dcOpen = await page.evaluate(() => !!document.querySelector('#modalRoot #dcSeeds'));
+    await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot');
+      ov.querySelector('#dcDepth').value = '2';
+      ov.querySelector('#dcConc').value = '2';
+      // 默认只勾选「有保存凭据」的设备；这里按实际用户操作勾上种子
+      ov.querySelectorAll('#dcSeeds input[type=checkbox]').forEach(cb => { cb.checked = true; });
+      ov.querySelector('#dcGo').click();
+    });
+    await new Promise(r => setTimeout(r, 2000));
+    const dcRes = await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot');
+      const devRows = [...ov.querySelectorAll('#dcDevTable tbody tr')].map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+      const linkRows = [...ov.querySelectorAll('#dcLinkTable tbody tr')].map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+      return {
+        calls: window.__discoCalls.length,
+        hosts: window.__discoCalls.map(c => c.host).sort(),
+        cmds: window.__discoCalls[0] ? window.__discoCalls[0].cmds : 0,
+        prog: ov.querySelector('#dcProg').textContent.replace(/\s+/g, ' ').trim(),
+        devRows, linkRows,
+        mergeEnabled: !ov.querySelector('#dcMerge').disabled,
+        csvEnabled: !ov.querySelector('#dcCsv').disabled
+      };
+    });
+    await page.evaluate(() => document.querySelector('#modalRoot #dcMerge').click());
+    await new Promise(r => setTimeout(r, 700));
+    const dcMerged = await page.evaluate(() => {
+      const st = window.__topo.state;
+      return {
+        names: st.nodes.map(n => n.name).sort(),
+        links: st.links.length,
+        coreVendor: (st.nodes.find(n => n.name === 'CORE') || {}).vendor || '',
+        sw2mgmt: (st.nodes.find(n => n.name === 'SW2') || {}).mgmt || '',
+        sw4mgmt: (st.nodes.find(n => n.name === 'SW4') || {}).mgmt || ''
+      };
+    });
+    const dcOk = dcOpen && dcRes.calls === 4 && dcRes.cmds === 5
+      && dcRes.hosts.join(',') === '10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4'
+      && /共发现 4 台/.test(dcRes.prog) && /链路 3/.test(dcRes.prog) && /成功 3/.test(dcRes.prog) && /失败 1/.test(dcRes.prog)
+      && dcRes.devRows.length === 5 && /SW4/.test(dcRes.devRows[4]) && dcRes.linkRows.length === 4 && /SW4/.test(dcRes.linkRows[3]) && dcRes.mergeEnabled && dcRes.csvEnabled
+      && dcMerged.names.join(',') === 'CORE,SW2,SW3,SW4' && dcMerged.links === 3
+      && dcMerged.coreVendor === 'huawei' && dcMerged.sw2mgmt === '10.0.0.2' && dcMerged.sw4mgmt === '10.0.0.4';
+    console.log('拓扑自动发现 UI:', dcOk ? 'OK' : 'FAIL', JSON.stringify({ dcOpen, dcRes, dcMerged }));
+    if (!dcOk) errors.push('[discovery] 拓扑自动发现流程未生效: ' + JSON.stringify({ dcOpen, dcRes, dcMerged }));
+    await page.evaluate(() => { document.querySelectorAll('#modalRoot .overlay').forEach(o => o.remove()); });
+  }
+
+  // ---- IPAM 实网核对 UI（注入 mock 存活扫描 + 设备 ARP/MAC 表）：规划 × 实网 → 分类结论 ----
+  {
+    await page.evaluate(() => {
+      window.__topo.loadGraph({
+        nodes: [
+          { id: 'ia1', name: 'CORE', type: 'switch', x: 120, y: 120, w: 160, h: 56, mgmt: '10.0.0.1' },
+          { id: 'ia2', name: 'SW2', type: 'switch', x: 520, y: 120, w: 160, h: 56, mgmt: '10.0.0.2' },
+          { id: 'ia3', name: 'SW3', type: 'switch', x: 920, y: 120, w: 160, h: 56, mgmt: '10.0.0.3' }
+        ],
+        links: [{ id: 'ial1', a: 'ia1', b: 'ia2', aIf: 'GE0/0/1', aIp: '10.0.10.1', aMask: 24, bIf: 'GE0/0/1', bIp: '10.0.10.2', bMask: 24 }],
+        texts: []
+      }, 'e2e');
+      // 本机存活扫描：10.0.0.2 出现两个不同 MAC（IP 冲突/私接）、10.0.0.99 未登记（黑户）
+      window.topoDiag = {
+        subnetScan: async () => ({
+          ok: true, dead: 2,
+          alive: [
+            { ip: '10.0.0.1', mac: 'aa:aa:aa:00:00:01' },
+            { ip: '10.0.0.2', mac: 'bb:bb:bb:00:00:02' },
+            { ip: '10.0.0.2', mac: 'ff:ff:ff:00:00:99' },
+            { ip: '10.0.0.99', mac: 'cc:cc:cc:00:00:99' },
+            { ip: '10.0.10.1', mac: 'aa:aa:aa:00:00:01' }
+          ]
+        })
+      };
+      // 设备侧 ARP / MAC 表（只读命令的 mock 输出）
+      const ARP = ['IP address       MAC address        VLAN  Interface',
+        '10.0.0.2         bb:bb:bb:00:00:02   1    GE0/0/2',
+        '10.0.0.2         ff:ff:ff:00:00:99  30    GE0/0/3'].join('\r\n');
+      const MACT = ['MAC address        VLAN  Interface',
+        'bb:bb:bb:00:00:02   1    GE0/0/9'].join('\r\n');
+      window.__iaCalls = [];
+      window.topoShell = {
+        runOneShot: async (p) => {
+          window.__iaCalls.push(p.host);
+          const outputs = (p.commands || []).map(cmd => {
+            const c = String(cmd).toLowerCase();
+            if (/arp/.test(c) && p.host === '10.0.0.1') return { cmd, text: ARP };
+            if (/mac-address|mac address-table/.test(c) && p.host === '10.0.0.3') return { cmd, text: MACT };
+            return { cmd, text: '' };
+          });
+          return { ok: true, outputs, errors: [], fingerprint: null };
+        }
+      };
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    await page.evaluate(() => window.__topo.openIpam());
+    await new Promise(r => setTimeout(r, 400));
+    const iaOpen = await page.evaluate(() => !!document.querySelector('#modalRoot #ipamBody'));
+    await page.evaluate(() => {
+      const btn = document.querySelector('#modalRoot [data-act=audit]');
+      if (btn) btn.click();
+    });
+    await new Promise(r => setTimeout(r, 500));
+    const iaPanel = await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      return { has: !!ov.querySelector('#iaGo'), subnets: ov.querySelectorAll('#iaSubnets input[type=checkbox]').length, pick: (ov.querySelector('#iaPick') || {}).textContent || '' };
+    });
+    await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      ov.querySelector('#iaGo').click();
+    });
+    await new Promise(r => setTimeout(r, 2500));
+    const iaRes = await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      const rows = [...ov.querySelectorAll('#iaRowTable tbody tr')].map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+      const subRows = [...ov.querySelectorAll('#iaSubTable tbody tr')].map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+      return {
+        calls: window.__iaCalls.length,
+        prog: ov.querySelector('#iaProg').textContent.replace(/\s+/g, ' ').trim(),
+        head: (ov.querySelector('#iaRes') || {}).textContent.replace(/\s+/g, ' ').slice(0, 120),
+        rows, subRows,
+        csvEnabled: !ov.querySelector('#iaCsv').disabled,
+        locButtons: ov.querySelectorAll('#iaRowTable button[data-loc]').length
+      };
+    });
+    // 定位按钮 → 选中对应设备
+    await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      const b = [...ov.querySelectorAll('#iaRowTable button[data-loc]')].find(x => x.dataset.loc === 'ia1');
+      if (b) b.click();
+    });
+    await new Promise(r => setTimeout(r, 300));
+    const iaLoc = await page.evaluate(() => (window.__topo.state.sel || {}).id || '');
+    const hj = iaRes.rows.find(r => r.includes('IP 冲突/私接'));
+    const bk = iaRes.rows.find(r => r.includes('未登记在用'));
+    const ms = iaRes.rows.find(r => r.includes('登记未在线'));
+    const iaOk = iaOpen && iaPanel.has && iaPanel.subnets === 2 && /已选 2 \/ 2/.test(iaPanel.pick)
+      && iaRes.calls >= 1 && /核对完成/.test(iaRes.prog)
+      && /IP 冲突\/私接 1/.test(iaRes.head) && /未登记在用 1/.test(iaRes.head) && /登记未在线 2/.test(iaRes.head)
+      && !!hj && /10\.0\.0\.2/.test(hj) && /CORE\/GE0\/0\/2/.test(hj) && /ff:ff:ff/.test(hj)
+      && !!bk && /10\.0\.0\.99/.test(bk) && !!ms
+      && iaRes.subRows.length === 3 && /10\.0\.0\.0\/24/.test(iaRes.subRows[1])
+      && iaRes.locButtons >= 1 && iaLoc === 'ia1' && iaRes.csvEnabled;
+    console.log('IPAM 实网核对 UI:', iaOk ? 'OK' : 'FAIL', JSON.stringify({ iaOpen, iaPanel, iaRes: { calls: iaRes.calls, prog: iaRes.prog, head: iaRes.head, rowN: iaRes.rows.length, subRows: iaRes.subRows, locButtons: iaRes.locButtons, csvEnabled: iaRes.csvEnabled }, iaLoc, hj, bk, ms }));
+    if (!iaOk) errors.push('[ipam-audit] IPAM 实网核对流程未生效: ' + JSON.stringify({ iaOpen, iaPanel, iaRes, iaLoc }));
+    await page.evaluate(() => { document.querySelectorAll('#modalRoot .overlay').forEach(o => o.remove()); });
+  }
+
+  // ---- 三层邻居与协议视图 UI（注入 mock 主进程桥 + 三台假路由器）：采集 → 匹配 → 画布徽标 + 异常留痕 ----
+  {
+    await page.evaluate(() => {
+      window.__topo.loadGraph({
+        nodes: [
+          { id: 'pr1', name: 'R1', type: 'router', x: 120, y: 120, w: 160, h: 56, mgmt: '10.0.0.1' },
+          { id: 'pr2', name: 'R2', type: 'router', x: 520, y: 120, w: 160, h: 56, mgmt: '10.0.0.2' },
+          { id: 'pr3', name: 'R3', type: 'router', x: 920, y: 120, w: 160, h: 56, mgmt: '10.0.0.3' }
+        ],
+        links: [
+          { id: 'pk1', a: 'pr1', b: 'pr2', aIf: 'GigabitEthernet0/0/1', aIp: '10.10.12.1', aMask: 30, bIf: 'GigabitEthernet0/0/1', bIp: '10.10.12.2', bMask: 30 },
+          { id: 'pk2', a: 'pr1', b: 'pr3', aIf: 'GigabitEthernet0/0/2', aIp: '10.10.13.1', aMask: 30, bIf: 'GigabitEthernet0/0/1', bIp: '10.10.13.2', bMask: 30 }
+        ],
+        texts: []
+      }, 'e2e');
+      const OSPF = ['OSPF Process 1 with Router ID 10.0.0.1', '                 Peer Statistic Information',
+        ' Area Id          Interface                        Neighbor id      State',
+        ' 0.0.0.0          GigabitEthernet0/0/1             10.0.0.2         Full',
+        ' 0.0.0.0          GigabitEthernet0/0/2             10.0.0.3         2-Way'].join('\r\n');
+      const BGP = ['BGP local router ID : 10.0.0.1', ' Local AS number : 65001',
+        '  Peer            V          AS  MsgRcvd  MsgSent  OutQ  Up/Down       State  PrefRcv',
+        '  10.0.0.2        4       65002      123      120     0  01:23:45 Established       5',
+        '  10.0.0.3        4       65003        0        0     0  00:00:00 Idle              0'].join('\r\n');
+      // R2 报出「拓扑外邻居」（10.0.0.9）与「规划外邻接」（与 R3 有 BGP 但拓扑无链路）
+      const OSPF2 = ['OSPF Process 1 with Router ID 10.0.0.2', '                 Peer Statistic Information',
+        ' Area Id          Interface                        Neighbor id      State',
+        ' 0.0.0.0          GigabitEthernet0/0/9             10.0.0.9         Full'].join('\r\n');
+      const BGP2 = ['BGP local router ID : 10.0.0.2', ' Local AS number : 65002',
+        '  Peer            V          AS  MsgRcvd  MsgSent  OutQ  Up/Down       State  PrefRcv',
+        '  10.0.0.3        4       65003       12       11     0  00:05:00 Established       7'].join('\r\n');
+      window.__pnCalls = [];
+      window.__protoRec = null;
+      window.topoShell = {
+        runOneShot: async (p) => {
+          window.__pnCalls.push(p.host);
+          const outputs = (p.commands || []).map(cmd => {
+            const c = String(cmd).toLowerCase();
+            if (/ospf/.test(c) && p.host === '10.0.0.1') return { cmd, text: OSPF };
+            if (/bgp/.test(c) && p.host === '10.0.0.1') return { cmd, text: BGP };
+            if (/ospf/.test(c) && p.host === '10.0.0.2') return { cmd, text: OSPF2 };
+            if (/bgp/.test(c) && p.host === '10.0.0.2') return { cmd, text: BGP2 };
+            return { cmd, text: '' };
+          });
+          return { ok: true, outputs, errors: [], fingerprint: null };
+        }
+      };
+      window.topoProto = { record: async (p) => { window.__protoRec = p; return { ok: true, recorded: (p.items || []).length }; } };
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    await page.evaluate(() => window.__topo.openProtoNeighbors());
+    await new Promise(r => setTimeout(r, 500));
+    const pnOpen = await page.evaluate(() => !!document.querySelector('#modalRoot #pnGo'));
+    await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      ov.querySelector('#pnGo').click();
+    });
+    await new Promise(r => setTimeout(r, 1800));
+    const pnRes = await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      const adj = [...ov.querySelectorAll('#pnAdjTable tbody tr')].map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+      const anom = [...ov.querySelectorAll('#pnAnomTable tbody tr')].map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+      return {
+        calls: window.__pnCalls.length,
+        prog: ov.querySelector('#pnProg').textContent.replace(/\s+/g, ' ').trim(),
+        adj, anom,
+        badges: document.querySelectorAll('#linkLayer .proto-badge').length,
+        badgeLabels: [...document.querySelectorAll('#linkLayer .proto-badge text')].map(t => t.textContent).sort(),
+        hlLinks: ((window.__topo.renderer || {}).pathHl || {}).linkIds || [],
+        csvEnabled: !ov.querySelector('#pnCsv').disabled,
+        recEnabled: !ov.querySelector('#pnRecord').disabled,
+        viewEnabled: !ov.querySelector('#pnView').disabled
+      };
+    });
+    // 异常记入事件时间线
+    await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      ov.querySelector('#pnRecord').click();
+    });
+    await new Promise(r => setTimeout(r, 500));
+    const pnRec = await page.evaluate(() => ({
+      items: window.__protoRec ? window.__protoRec.items.length : 0,
+      first: window.__protoRec && window.__protoRec.items[0] ? window.__protoRec.items[0].detail : '',
+      toast: (document.querySelector('#toastTmp') || {}).textContent || ''
+    }));
+    // 清除协议视图
+    await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      ov.querySelector('#pnClearView').click();
+    });
+    await new Promise(r => setTimeout(r, 300));
+    const pnCleared = await page.evaluate(() => document.querySelectorAll('#linkLayer .proto-badge').length);
+    const pnOk = pnOpen && pnRes.calls === 3
+      && /邻接 6 条/.test(pnRes.prog) && /异常 2/.test(pnRes.prog) && /拓扑外邻居 1/.test(pnRes.prog) && /规划外邻接 1/.test(pnRes.prog)
+      && pnRes.adj.length === 7 && pnRes.anom.length === 5
+      && pnRes.badges === 2 && pnRes.badgeLabels.join('|') === 'OSPF 2-Way / BGP AS65003 Idle|OSPF Full / BGP AS65002 Established'
+      && pnRes.hlLinks.length === 2 && pnRes.csvEnabled && pnRes.recEnabled && pnRes.viewEnabled
+      && pnRec.items === 4 && /OSPF 邻居未达 Full/.test(pnRec.first) && /已记入事件时间线 4 条/.test(pnRec.toast)
+      && pnCleared === 0;
+    console.log('三层邻居与协议视图 UI:', pnOk ? 'OK' : 'FAIL', JSON.stringify({ pnOpen, pnRes, pnRec, pnCleared }));
+    if (!pnOk) errors.push('[proto] 三层邻居与协议视图流程未生效: ' + JSON.stringify({ pnOpen, pnRes, pnRec, pnCleared }));
+    await page.evaluate(() => { document.querySelectorAll('#modalRoot .overlay').forEach(o => o.remove()); });
+  }
+
+  // ---- 自定义字段 + 机柜 U 位视图 UI：编辑设备填写 → 机柜立面摆放/重叠/未上架 → 导出 ----
+  {
+    await page.evaluate(() => {
+      window.__topo.loadGraph({
+        nodes: [
+          { id: 'cf1', name: '核心SW1', type: 'switch', x: 120, y: 120, w: 160, h: 56, mgmt: '10.0.0.1', fields: { owner: '张三', rack: 'A01', uPos: '42' } },
+          { id: 'cf2', name: '汇聚SW2', type: 'switch', x: 520, y: 120, w: 160, h: 56, mgmt: '10.0.0.2', fields: { owner: '李四', rack: 'A01', uPos: '40-41' } },
+          { id: 'cf3', name: '防火墙FW1', type: 'router', x: 920, y: 120, w: 160, h: 56, mgmt: '10.0.0.3', fields: { rack: 'A01', uPos: '41' } },
+          { id: 'cf4', name: '未上架SW9', type: 'switch', x: 520, y: 420, w: 160, h: 56, mgmt: '10.0.0.9', fields: { dept: '运维部' } }
+        ],
+        links: [], texts: []
+      }, 'e2e');
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot [data-act=yes]'); if (b) b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    await page.evaluate(() => window.__topo.openRackView());
+    await new Promise(r => setTimeout(r, 400));
+    const rv0 = await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      return {
+        racks: ov.querySelectorAll('#rvBody .rv-rack').length,
+        filled: ov.querySelectorAll('#rvBody .rv-filled').length,
+        bad: ov.querySelectorAll('#rvBody .rv-bad').length,
+        hint: ov.querySelector('#rvHint').textContent.replace(/\s+/g, ' ').trim(),
+        body: ov.querySelector('#rvBody').textContent.replace(/\s+/g, ' ').trim().slice(0, 150)
+      };
+    });
+    // 编辑设备填写自定义字段（含机柜/U 位）→ 保存后应进入机柜视图
+    await page.evaluate(() => window.__topo.editNode('cf4'));
+    await new Promise(r => setTimeout(r, 400));
+    const cfInputs = await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      return {
+        hasOwner: !!ov.querySelector('input[name="cf_owner"]'),
+        hasRack: !!ov.querySelector('input[name="cf_rack"]'),
+        hasU: !!ov.querySelector('input[name="cf_uPos"]'),
+        n: ov.querySelectorAll('input[name^="cf_"]').length,
+        ownerVal: (ov.querySelector('input[name="cf_owner"]') || {}).value || ''
+      };
+    });
+    await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      const set = (nm, val) => { const el = ov.querySelector('input[name="' + nm + '"]'); if (el) { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); } };
+      set('cf_owner', '王五');
+      set('cf_rack', 'A01');
+      set('cf_uPos', '38');
+      const btn = [...ov.querySelectorAll('button')].find(b => b.type === 'submit');
+      if (btn) btn.click();
+    });
+    await new Promise(r => setTimeout(r, 500));
+    const cfSaved = await page.evaluate(() => {
+      const n = window.__topo.state.nodes.find(x => x.name === '未上架SW9');
+      return { fields: (n && n.fields) || {}, rack: n ? TopoUtil.getNodeField(n, 'rack') : '', u: n ? TopoUtil.getNodeField(n, 'uPos') : '' };
+    });
+    // 重开机柜视图：新填的设备应已上架
+    await page.evaluate(() => { document.querySelectorAll('#modalRoot .overlay').forEach(o => o.remove()); window.__topo.openRackView(); });
+    await new Promise(r => setTimeout(r, 400));
+    const rv1 = await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      const body = ov.querySelector('#rvBody').textContent.replace(/\s+/g, ' ');
+      const b4 = [...ov.querySelectorAll('#rvBody .rv-dev')].map(x => x.textContent.trim());
+      return {
+        racks: ov.querySelectorAll('#rvBody .rv-rack').length,
+        filled: ov.querySelectorAll('#rvBody .rv-filled').length,
+        bad: ov.querySelectorAll('#rvBody .rv-bad').length,
+        names: b4,
+        hasUnplaced: /未上架（缺机柜或 U 位）/.test(body),
+        hint: ov.querySelector('#rvHint').textContent.replace(/\s+/g, ' ').trim()
+      };
+    });
+    // 24U 机柜：三台上架设备越界 → 转入未上架
+    await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      ov.querySelector('#rvU').value = '24';
+      ov.querySelector('#rvU').dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 300));
+    const rv24 = await page.evaluate(() => {
+      const ov = [...document.querySelectorAll('#modalRoot .overlay')].pop();
+      return { racks: ov.querySelectorAll('#rvBody .rv-rack').length, body: ov.querySelector('#rvBody').textContent.replace(/\s+/g, ' ').slice(0, 160) };
+    });
+    const c1 = rv0.racks === 1, c2 = rv0.filled === 2, c3 = rv0.bad === 1, c4 = /未上架/.test(rv0.hint), c5 = /U 位重叠/.test(rv0.hint);
+    const c6 = cfInputs.hasOwner && cfInputs.hasRack && cfInputs.hasU, c7 = cfInputs.n === 6, c8 = cfInputs.ownerVal === '';
+    const c9 = cfSaved.fields.owner === '王五' && cfSaved.rack === 'A01' && cfSaved.u === '38';
+    const c10 = rv1.racks === 1, c11 = rv1.filled === 3, c12 = rv1.bad === 1, c13 = rv1.names.join(',').indexOf('未上架SW9') >= 0, c14 = rv1.hasUnplaced === false;
+    const c15 = rv24.racks === 0, c16 = /没有可展示的机柜/.test(rv24.body);
+    const rvOk = c1 && c2 && c3 && c4 && c5 && c6 && c7 && c8 && c9 && c10 && c11 && c12 && c13 && c14 && c15 && c16;
+    console.log('自定义字段 + 机柜视图 UI:', rvOk ? 'OK' : 'FAIL', JSON.stringify({ flags: { c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16 }, rv0, cfInputs, cfSaved, rv1, rv24 }));
+    if (!rvOk) errors.push('[rack] 自定义字段/机柜视图流程未生效: ' + JSON.stringify({ rv0, cfInputs, cfSaved, rv1, rv24 }));
+    await page.evaluate(() => { document.querySelectorAll('#modalRoot .overlay').forEach(o => o.remove()); });
+  }
+
   console.log(errors.length ? '发现错误:\n' + errors.join('\n') : '无控制台错误 ✓');
   await browser.close();
   process.exit(errors.length ? 1 : 0);

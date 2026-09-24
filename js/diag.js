@@ -13,10 +13,11 @@ const net = require('net');
 const dnsPromises = require('dns').promises;
 const { spawn } = require('child_process');
 
-/** 主机地址白名单：IPv4 / IPv6 / 主机名（字母数字点连下划线冒号），供外部命令与探测共用 */
+/** 主机地址白名单：IPv4 / IPv6 / 主机名（字母数字点连下划线冒号），供外部命令与探测共用。
+ *  拒绝 '-' 开头：host 作为 ping/tracert 的最后一个参数直传 spawn，'-…' 会被解释为选项而非主机 */
 function isValidDiagHost(host) {
   const s = String(host == null ? '' : host).trim();
-  return s.length > 0 && s.length <= 253 && /^[A-Za-z0-9_.:-]+$/.test(s);
+  return s.length > 0 && s.length <= 253 && s[0] !== '-' && /^[A-Za-z0-9_.:-]+$/.test(s);
 }
 
 /** 端口列表解析：'22, 80, 8000-8002' → [22,80,8000,8001,8002]；去重升序，总量封顶 256 */
@@ -91,14 +92,15 @@ async function scanPorts(host, ports, timeoutMs) {
   return results;
 }
 
-/** DNS 解析：A 记录（lookup all）+ 首个 IPv4 的 PTR 反查；单项失败不影响整体 */
+/** DNS 解析：A 记录（lookup all）+ CNAME（resolveCname，失败保持 null）+ 首个 IPv4 的 PTR 反查；单项失败不影响整体 */
 async function dnsLookup(host) {
   const out = { host, addresses: [], cname: null, reverse: [], error: null };
   try {
     const all = await dnsPromises.lookup(host, { all: true, verbatim: true });
     out.addresses = (all || []).map(a => a.address).slice(0, 16);
-    for (const a of all || []) { if (a && a.type === 'CNAME' && !out.cname) out.cname = a.address; }
   } catch (e) { out.error = '解析失败：' + ((e && (e.message || e.code)) || e); return out; }
+  // lookup 的返回元素只有 {address, family}，不含记录类型——CNAME 须用 resolveCname 单独查
+  try { const cn = await dnsPromises.resolveCname(host); if (cn && cn.length) out.cname = cn[0]; } catch (e) { /* 无 CNAME 或不支持：保持 null */ }
   const v4 = out.addresses.find(a => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(a));
   if (v4) {
     try { out.reverse = (await dnsPromises.reverse(v4)).slice(0, 8); } catch (e) { /* 无 PTR 属正常 */ }
@@ -143,6 +145,24 @@ function runCommand(cmd, args, timeoutMs, maxChars) {
   });
 }
 
+/** 存活判定：**必须有目标自身的成功回复证据**。
+ *  只凭退出码 0 会被两类假象骗过（真机验证实测）：
+ *   ① 输出为空/被截断（高并发扫描时出现）；
+ *   ② Windows 会把路由器的「Destination host unreachable / 无法访问目标主机」回包也算成
+ *      Received=1 且不打印 RTT——于是半个网段被报成「存活」，既无延迟也无 MAC。
+ *  判据：出现失败标记即否；出现**目标 IP 的带字节数回复行**即真；其余情况仅在有 received>0 时接受。 */
+function pingEvidenceAlive(output, stats, target) {
+  const t = String(output == null ? '' : output);
+  if (/(?:Destination\s+(?:host\s+|net(?:work)?\s+)?unreachable|无法访问目标主机|目标主机不可达|请求超时|Request\s+timed\s+out|100%\s*(?:packet\s+)?loss|100%\s*丢失)/i.test(t)) return false;
+  const fromBytes = /(?:Reply\s+from\s+\S+:\s*bytes=)|(?:\d+\s+bytes\s+from\s+\S+)/i.test(t);
+  if (fromBytes) {
+    if (!target) return true;
+    const esc = String(target).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(?:Reply\\s+from\\s+' + esc + ':\\s*bytes=)|(?:\\d+\\s+bytes\\s+from\\s+' + esc + ')', 'i').test(t);
+  }
+  return !!(stats && stats.received != null && stats.received > 0);
+}
+
 /** Ping：count 钳制 1~10；返回 {ok, output, stats}（stats 为 parsePingStats 结果，可能为 null） */
 async function ping(host, count) {
   const h = String(host == null ? '' : host).trim();
@@ -150,7 +170,8 @@ async function ping(host, count) {
   const n = Math.max(1, Math.min(10, parseInt(count, 10) || 4));
   const args = process.platform === 'win32' ? ['-n', String(n), '-w', '2000', h] : ['-c', String(n), '-W', '2', h];
   const r = await runCommand('ping', args, 30000);
-  return { ok: !!r.ok, output: r.output, stats: parsePingStats(r.output), error: r.error };
+  const stats = parsePingStats(r.output);
+  return { ok: !!r.ok && pingEvidenceAlive(r.output, stats, h), output: r.output, stats, error: r.error };
 }
 
 /* ---------------- 网段存活扫描（CIDR 展开 + ICMP 并发 sweep + 本机 ARP 解析） ---------------- */
@@ -193,7 +214,14 @@ function expandScanTargets(text) {
       if (a == null) continue;
       const bRaw = m[2];
       let b;
-      if (/^\d{1,3}$/.test(bRaw)) { b = (a & 0xffffff00) | parseInt(bRaw, 10); if (b < a) b = a; }
+      if (/^\d{1,3}$/.test(bRaw)) {
+        const last = parseInt(bRaw, 10);
+        if (last > 255) continue; // 数字后缀仅指末八位组：>255 会借位溢出到第三段，语义歧义直接拒绝
+        // 无符号化必须显式 >>>0：a 为纯算术正数（首段 ≥128 时 ≥2^31），而按位或产出有符号
+        // int32 负数 → b < a 恒成立 → 192.168.x/172.16.x 等主流内网段静默退化为单 IP 扫描
+        b = (((a >>> 0) & 0xffffff00 | last) >>> 0);
+        if (b < a) b = a;
+      }
       else { b = ipv4ToIntDiag(bRaw); }
       if (b == null || b < a) continue;
       if (b - a > 4095) b = a + 4095;
@@ -301,4 +329,4 @@ async function trace(host) {
   return { ok: !!r.ok, output: r.output, error: r.error };
 }
 
-module.exports = { isValidDiagHost, parsePortList, parsePingStats, scanPorts, tcpProbe, dnsLookup, ping, trace, expandScanTargets, parseLocalArp, scanSubnet, localArpTable };
+module.exports = { isValidDiagHost, parsePortList, parsePingStats, pingEvidenceAlive, scanPorts, tcpProbe, dnsLookup, ping, trace, expandScanTargets, parseLocalArp, scanSubnet, localArpTable, decodeCmdOutput };

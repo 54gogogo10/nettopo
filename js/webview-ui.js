@@ -120,7 +120,8 @@
     });
     wv.addEventListener('did-start-loading', () => { rec.loading = true; rec.spinEl.style.display = ''; clearErr(rec); });
     wv.addEventListener('did-stop-loading', () => { rec.loading = false; rec.spinEl.style.display = 'none'; });
-    wv.addEventListener('did-fail-load', (e) => { if (e.errorCode !== -3) showErr(rec, e.errorDescription); });
+    // 仅主框架加载失败才算页面故障：子框架/内嵌资源失败也触发本事件，误盖「页面加载失败」
+    wv.addEventListener('did-fail-load', (e) => { if (e.errorCode !== -3 && e.isMainFrame !== false) showErr(rec, e.errorDescription); });
     wv.addEventListener('did-navigate', (e) => {
       rec.tabEl.title = e.url;
       if (active() === id) { addrEl.value = e.url; setAddrSecurity(e.url); updateNavBtns(); }

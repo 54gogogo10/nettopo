@@ -75,14 +75,16 @@ class Maintenance {
   isMuted(deviceId, now) {
     deviceId = String(deviceId == null ? '' : deviceId).slice(0, 64);
     if (!deviceId) return { muted: false };
+    // 两分支统一时钟口径：now 形参供测试/复算注入，手动静默分支不得绕过（否则与维护窗口分支分裂）
+    const t = Number.isFinite(now) ? now : Date.now();
     const until = this.mutes.get(deviceId);
     if (until != null) {
-      if (Date.now() < until) return { muted: true, reason: 'manual', until };
+      if (t < until) return { muted: true, reason: 'manual', until };
       this.mutes.delete(deviceId); // 到期即清，防 Map 无界增长
     }
     const w = this.windows.get(deviceId);
     if (w) {
-      const d = new Date(Number.isFinite(now) ? now : Date.now());
+      const d = new Date(t);
       if (inWindow(d.getHours() * 60 + d.getMinutes(), w.from, w.to)) {
         return { muted: true, reason: 'window', window: w };
       }

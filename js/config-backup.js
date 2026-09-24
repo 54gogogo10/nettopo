@@ -15,6 +15,60 @@ const MAX_KEEP = 50;                          // 每台设备保留份数上限
 const MAX_BYTES = 8 * 1024 * 1024;            // 单份配置上限 8MB
 const NAME_RE = /^cfg_\d{8}_\d{6}(?:_\d+)?\.cfg$/;
 
+/* ---------- 配置变更漂移：易变行忽略规则 ----------
+ * 设备配置里有一批**天天都不一样、却不代表有人改过配置**的行（时钟、运行时长、构建时间戳、
+ * 会话/计数器、最近登录时间……）。不过滤它们，「配置有变化」告警每天必然误报，上线三天就会被关掉。
+ * 规则是正则（大小写不敏感、逐行匹配），命中即视为噪声行：既不参与 diff 判定，也不产生新备份。 */
+const DEFAULT_IGNORE_RULES = [
+  '^\\s*!\\s*Last configuration change',
+  '^\\s*!\\s*Configuration last modified',
+  '^\\s*!\\s*NVRAM config last updated',
+  '^\\s*!\\s*Startup-config last updated',
+  '^\\s*#?\\s*(Current|Building)\\s+configuration',
+  '^\\s*!\\s*(Time|Clock)\\s*:',
+  '^\\s*(ntp\\s+clock-period|clock\\s+timezone)',
+  '^\\s*!\\s*\\d+\\s+(days?|weeks?|hours?|minutes?|seconds?)\\s+ago',
+  '^\\s*!\\s*(Last|Previous)\\s+(login|reboot)',
+  '^\\s*#\\s*(System|Boot|Config)\\s+(time|uptime)',
+  'uptime\\s+is\\s+',
+  '(total\\s+)?(input|output)\\s+(rate|packets|bytes)\\s*[:=]'
+];
+const MAX_IGNORE_RULES = 30;
+const MAX_IGNORE_RULE_LEN = 200;
+
+/** 校验/规范化忽略规则列表：返回 {ok, rules} 或 {ok:false, error}。
+ *  规则来自用户输入，逐条编译校验——一条写坏的正则会让整套变更判定失效，宁可整批拒绝并说明是第几条。 */
+function normalizeIgnoreRules(list) {
+  const arr = Array.isArray(list) ? list : [];
+  if (arr.length > MAX_IGNORE_RULES) return { ok: false, error: '忽略规则最多 ' + MAX_IGNORE_RULES + ' 条' };
+  const rules = [];
+  const seen = new Set();
+  for (let i = 0; i < arr.length; i++) {
+    const raw = String(arr[i] == null ? '' : arr[i]);
+    if (!raw.trim()) continue;
+    if (raw.length > MAX_IGNORE_RULE_LEN) return { ok: false, error: '第 ' + (i + 1) + ' 条规则超过 ' + MAX_IGNORE_RULE_LEN + ' 字符' };
+    if (/[\u0000-\u001f\u007f]/.test(raw)) return { ok: false, error: '第 ' + (i + 1) + ' 条规则含控制字符' };
+    try { new RegExp(raw, 'i'); } catch (e) { return { ok: false, error: '第 ' + (i + 1) + ' 条正则无法编译：' + ((e && e.message) || e) }; }
+    if (seen.has(raw)) continue;   // 重复规则无意义，静默去重（不算错误）
+    seen.add(raw);
+    rules.push(raw);
+  }
+  return { ok: true, rules };
+}
+
+/** 按忽略规则过滤配置文本（命中规则的行整行丢弃）。rules 为空即原样返回 */
+function applyIgnoreRules(text, rules) {
+  const src = String(text == null ? '' : text).replace(/\r\n/g, '\n');
+  const list = (Array.isArray(rules) ? rules : []).map(r => (r instanceof RegExp ? r : new RegExp(String(r), 'i')));
+  if (!list.length) return src;
+  return src.split('\n').filter(line => !list.some(re => { try { return re.test(line); } catch (e) { return false; } })).join('\n');
+}
+
+/** 过滤后两份配置是否等价（「无变化不新增备份」必须用过滤后的口径，否则时钟行一变就多一份文件） */
+function sameAfterIgnore(aText, bText, rules) {
+  return applyIgnoreRules(aText, rules) === applyIgnoreRules(bText, rules);
+}
+
 /** 文件名/目录名安全化（与 monitor.js 一致）：白名单外的字符替换外，剔除穿越成分与首尾点号 */
 function sanitizeFilename(s) {
   let out = String(s == null ? '' : s);
@@ -74,7 +128,7 @@ class ConfigBackupStore {
         seq++;
         name = 'cfg_' + ts() + '_' + seq + '.cfg';
       }
-      tmpPath = path.join(dir, name + '.tmp-' + process.pid);
+      tmpPath = path.join(dir, name + '.tmp-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));
       fs.writeFileSync(tmpPath, content, 'utf8');
       fs.renameSync(tmpPath, path.join(dir, name));
       const trimFailed = this._trim(device, host);
@@ -252,6 +306,41 @@ class ConfigBackupStore {
     return { ok: true, added, removed, changed: added + removed > 0, hunks };
   }
 
+  /** 带忽略规则的配置 diff：先按规则过滤噪声行，再走同一套行级 diff。
+   *  返回 {ok, added, removed, changed, hunks, summary, ignoredRules} */
+  static diffConfigText(aText, bText, rules) {
+    const norm = normalizeIgnoreRules(rules);
+    const use = norm.ok ? norm.rules : [];
+    const d = ConfigBackupStore.diffLines(applyIgnoreRules(aText, use), applyIgnoreRules(bText, use));
+    if (!d.ok) return d;
+    d.summary = ConfigBackupStore.summarizeDiff(d);
+    d.ignoredRules = use.length;
+    return d;
+  }
+
+  /** 变更摘要（一行文字，供事件时间线与系统通知）：列出少量具体变更行，便于一眼看出「变了什么」 */
+  static summarizeDiff(diff, maxChars) {
+    const max = Math.max(60, Math.min(600, parseInt(maxChars, 10) || 220));
+    if (!diff || !diff.changed) return '';
+    const adds = [], dels = [];
+    let more = 0;
+    for (const h of (diff.hunks || [])) {
+      for (const ln of (h.lines || [])) {
+        const t = String(ln.text == null ? '' : ln.text).trim();
+        if (!t) continue;
+        if (ln.type === 'add') { if (adds.length < 4) adds.push(t); else more++; }
+        else if (ln.type === 'del') { if (dels.length < 4) dels.push(t); else more++; }
+      }
+    }
+    const parts = [];
+    for (const a of adds) parts.push('+ ' + a);
+    for (const d of dels) parts.push('- ' + d);
+    let s = parts.join('；');
+    if (more > 0) s += '…（另有 ' + more + ' 行变化）';
+    if (s.length > max) s = s.slice(0, max - 1) + '…';
+    return s;
+  }
+
   /** 滚动清理：每台设备仅保留最新 keep 份。返回删除失败的 [{name, code}]（主线程可据此告警） */
   _trim(device, host, keep) {
     keep = Math.floor(Number(keep));
@@ -267,4 +356,8 @@ class ConfigBackupStore {
   }
 }
 
-module.exports = { ConfigBackupStore, MAX_KEEP, MAX_BYTES };
+module.exports = {
+  ConfigBackupStore, MAX_KEEP, MAX_BYTES,
+  DEFAULT_IGNORE_RULES, MAX_IGNORE_RULES,
+  normalizeIgnoreRules, applyIgnoreRules, sameAfterIgnore
+};

@@ -15,6 +15,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { RegexLab } = require('./regex-lab.js');
+const { ConfigBackupStore, sameAfterIgnore } = require('./config-backup.js');
 
 /** 文件名/目录名安全化：去掉 Windows 与常见控制字符，去空白、限长。
  *  注意：正则必须独立匹配字符类（不得写成 "/字符类"——那要求字面 / 前缀，永不匹配），
@@ -29,6 +30,16 @@ function sanitizeFilename(s) {
   if (/^(con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(?:\.|$)/i.test(out)) out = '_' + out;
   if (out.length > 60) out = out.slice(0, 60);
   return out;
+}
+
+/** 指纹信任库的键：host[:port]（默认 22 端口省略后缀，兼容既有 monitor-trust.json）。
+ *  SSH 主机密钥本就按「主机 + 端口」隔离——同一 IP 经 NAT 转发到 10.0.0.1:22 与 :2222 可能是两台
+ *  完全不同的设备，只按 host 记会让第二台被误判为「指纹变化 = 中间人」，并把监控任务永久置 fatal。
+ *  渲染层早已按 host:port 记忆（app.js fpKeyOf），主进程侧此前不一致。 */
+function fpKeyOf(host, port) {
+  const h = String(host == null ? '' : host).trim();
+  const p = parseInt(port, 10);
+  return (p && p !== 22) ? h + ':' + p : h;
 }
 
 /** 清理备份捕获行：只保留命令执行后的输出内容。
@@ -51,6 +62,10 @@ function cleanBackupLines(lines, cmds) {
     if (t.length <= 160 && /^[<\[][A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/.test(t)) continue;
     // 分页提示行（仅由连字符/空白组成 + More 字样）
     if (/^[\s-]*more[\s-]*$/i.test(t)) continue;
+    // 分页续行：真机翻页时设备以「ESC[nD + 空格串」擦除标记，ANSI 剥除后标记与下一行合并成一行
+    //（「  ---- More ----        cipher-suite …」）——剥掉行首标记段，保住被截断在页尾的真实配置行
+    const pg = t.replace(/^[\s-]*more[\s-]+/i, '');
+    if (pg !== t && !pg) continue;
     // 行首提示符剥除后的行内容：残片匹配对「提示符+残片」「残片+残渣」两种粘连形态生效
     const m = t.match(/^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]][ :]?/);
     const body = (m && m[0].length < t.length) ? t.slice(m[0].length) : t;
@@ -58,7 +73,7 @@ function cleanBackupLines(lines, cmds) {
       || (c.length >= 8 && (
         (body.length >= 2 && (c.startsWith(body) || c.endsWith(body)))  // 锚定命令首/尾的残片（≥2 字符）
         || (body.length >= 4 && c.includes(body)))))) continue;          // 居中片段（≥4 字符）
-    out.push(raw);
+    out.push(pg !== t ? pg : raw);
   }
   return out;
 }
@@ -70,6 +85,14 @@ function cleanBackupLines(lines, cmds) {
 const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/;
 /** 会话就绪等待上限：设备登录/初始化（banner）通常数秒内完成，超时兜底照常执行不阻塞 */
 const READY_TIMEOUT_MS = 15000;
+/* _onOutput 热路径正则（所有监控会话的每个输出 chunk 都执行，提升为模块常量避免逐 chunk 分配新 RegExp；
+ * 带 /g 的只用于 String.replace——replace 从 0 起匹配且完成后复位 lastIndex，共享无状态污染） */
+const RE_ANSI_CSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+const RE_ANSI_CHARSET = /\u001b[()][0-9A-B]/g;
+const RE_CRLF = /\r\n/g;
+const RE_CR = /\r/g;
+const RE_CTRL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const RE_MORE = /^[\s-]*more[\s-]*$/i;
 
 const pad2 = (n) => String(n).padStart(2, '0');
 function fmtDateTime(d) {
@@ -97,12 +120,46 @@ const OID_SYSUPTIME = '1.3.6.1.2.1.1.3.0'; // TimeTicks（1/100 秒），骤减�
 /* ifTable（MIB-2 interfaces）：接口名/速率/状态/收发字节计数（64 位优先，32 位兜底） */
 const OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2';
 const OID_IF_SPEED = '1.3.6.1.2.1.2.2.1.5'; // ifSpeed（bps）；.7 是 ifAdminStatus（1/2/3 枚举），勿混用
+// ifHighSpeed（Mbps）：RFC 3635/2863 规定 ifSpeed 上限 4294967295，标称速率 ≥4.29Gbps 的链路一律
+// 报该哨兵值（界面上就成了「4.294967295 G」这种既不好看也不准确的显示），真实速率在 ifHighSpeed
+const OID_IF_HIGHSPEED = '1.3.6.1.2.1.31.1.1.1.15';
+const IF_SPEED_SENTINEL = 4294967295;
 const OID_IF_OPER = '1.3.6.1.2.1.2.2.1.8';
 const OID_IF_IN32 = '1.3.6.1.2.1.2.2.1.10';
 const OID_IF_OUT32 = '1.3.6.1.2.1.2.2.1.16';
 const OID_IF_HCIN = '1.3.6.1.2.1.31.1.1.1.6';
 const OID_IF_HCOUT = '1.3.6.1.2.1.31.1.1.1.7';
 /* 接口流量历史容量（每次采样一条；默认 60s 间隔约覆盖 2 小时） */
+/* ---- CPU/内存利用率换算（纯函数，按厂商预设的 mode 选择语义；可单测） ----
+ * 各厂商 SNMP 给出的量纲并不一致，这里把差异收敛到 mode 上（预设表见 js/util.js 的 U.SNMP_VENDORS）：
+ *   cpuMode 'direct'   值即百分比（华为/华三/思科/Juniper/飞塔…）
+ *   cpuMode 'idle100'  值是无负载占比（Linux UCD ssCpuIdle）→ 100 − 值
+ *   memMode 'percent'  值即占用百分比（华为/华三 entity-ext、Juniper、飞塔）
+ *   memMode 'usedfree' 已用/(已用+空闲)（思科字节型）
+ *   memMode 'totalavail' (总量−可用)/总量（Linux UCD memTotalReal/memAvailReal）
+ * 解析不出数值一律返回 null（不产出 0 这种误导性的「正常」值）。 */
+const MEM_MODES = ['percent', 'usedfree', 'totalavail'];
+const pct1 = (v) => Math.max(0, Math.min(100, Math.round(v * 10) / 10));
+function cpuPctOf(mode, value) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return null;
+  return pct1(String(mode) === 'idle100' ? 100 - v : v);
+}
+function memPctOf(mode, used, free) {
+  const u = Number(used);
+  if (!Number.isFinite(u)) return null;
+  const f = Number(free);
+  if (String(mode) === 'usedfree') {
+    if (!Number.isFinite(f) || u + f <= 0) return null;
+    return Math.round(u / (u + f) * 1000) / 10;
+  }
+  if (String(mode) === 'totalavail') {
+    if (!Number.isFinite(f) || u <= 0) return null; // u 在此语义下是「总量」
+    return pct1((u - f) / u * 100);
+  }
+  return pct1(u);
+}
+
 const IF_HIST_MAX = 120;
 /** 计算速率（bps）：计数器差值 × 8 / 秒；计数器回绕/重置（负差）返回 null */
 function rateBps(curC, prevC, dtSec) {
@@ -114,17 +171,23 @@ function rateBps(curC, prevC, dtSec) {
 function berLen(n) {
   if (n < 128) return Buffer.from([n]);
   if (n < 256) return Buffer.from([0x81, n]);
-  return Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
+  if (n < 65536) return Buffer.from([0x82, (n >> 8) & 0xff, n & 0xff]);
+  if (n < 16777216) return Buffer.from([0x83, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
+  return Buffer.from([0x84, (n >>> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
 }
 function berTlv(tag, body) { return Buffer.concat([Buffer.from([tag]), berLen(body.length), body]); }
 function berInt(n) {
+  // 正数首字节高位为 1 时补前导 0x00，否则按补码解读为负数（与 snmp-v3.js 同款修复；
+  // v2c request-id 落在 0x8000~0xFFFF / 0x800000~0xFFFFFF 区间时会被编码成负值）
   const bytes = [];
   let v = n;
   do { bytes.unshift(v & 0xff); v = v >>> 8; } while (v);
+  if (bytes[0] & 0x80) bytes.unshift(0);
   return berTlv(0x02, Buffer.from(bytes));
 }
 function berOid(oid) {
-  const parts = String(oid).split('.').map(Number);
+  // 容忍常见输入形态：前导点（.1.3.6.1）/多余空白/末尾点——strip 后再编码，避免 NaN 静默产出坏包
+  const parts = String(oid).trim().replace(/^\.+/, '').replace(/\.+$/, '').split('.').map(Number);
   const body = [parts[0] * 40 + (parts[1] || 0)];
   for (let i = 2; i < parts.length; i++) {
     let v = parts[i];
@@ -221,7 +284,7 @@ function tlvWalk(buf, start) {
   let hs = 2;
   if (len & 0x80) {
     const n = len & 0x7f;
-    if (n > 2 || start + 2 + n > buf.length) return null;
+    if (n > 4 || start + 2 + n > buf.length) return null;
     len = 0;
     for (let i = 0; i < n; i++) len = len * 256 + buf[start + 2 + i];
     hs = 2 + n;
@@ -229,17 +292,23 @@ function tlvWalk(buf, start) {
   if (start + hs + len > buf.length) return null;
   return { tag, body: buf.subarray(start + hs, start + hs + len), next: start + hs + len };
 }
-/** SNMP v2c GET：返回 {ok, varbinds:[{oid,value}]} 或 {ok:false, error}；port 供测试注入 mock agent（默认 161）
- *  rid 混入进程级随机盐（纯顺序递增可被同网段盲猜抢答）；响应校验来源地址（IP 直连目标时）。 */
-function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
+/** SNMP 请求：target 为字符串时按 v2c 团体字；为对象（{user,authProto,authPass,privProto,privPass}）时走 SNMP v3（USM）通道。
+ *  返回 {ok, varbinds:[{oid,value}]} 或 {ok:false, error}；port 供测试注入 mock agent（默认 161）。
+ *  v2c rid 混入进程级随机盐（纯顺序递增可被同网段盲猜抢答）；响应校验来源地址（IP 直连目标时）。 */
+function snmpRequest(pduTag, host, target, oids, timeoutMs, port) {
+  if (target && typeof target === 'object') return v3Request(pduTag, host, target, oids, timeoutMs, port);
   return new Promise((resolve) => {
     try {
+      const community = String(target == null ? 'public' : target);
       const seq = (snmpGet._rid = (snmpGet._rid || 0) + 1) & 0x7fff;
-      if (snmpGet._salt == null) snmpGet._salt = Math.floor(Math.random() * 0x8000);
-      const rid = ((snmpGet._salt << 15) | seq) & 0x7fffffff;
+      // 高 16 位每请求随机：固定进程级盐时，嗅探到一个 rid 即可推出盐并预测后续全部 rid
+      // （配合 community 抢答污染监控数据）；随机后不可预测，仍保留 rid 回显校验。
+      // snmpGet._salt 仅测试注入固定 rid 用（生产恒为 null → 每请求随机）
+      const hi16 = snmpGet._salt != null ? snmpGet._salt : Math.floor(Math.random() * 0x10000);
+      const rid = ((hi16 << 15) | seq) & 0x7fffffff;
       const varb = oids.map(oid => berTlv(0x30, Buffer.concat([berOid(oid), Buffer.from([0x05, 0x00])])));
       const pdu = Buffer.concat([berInt(rid), berInt(0), berInt(0), berTlv(0x30, Buffer.concat(varb))]);
-      const msg = berTlv(0x30, Buffer.concat([berInt(1) /* v2c */, berTlv(0x04, Buffer.from(String(community || 'public'), 'utf8')), berTlv(pduTag, pdu)]));
+      const msg = berTlv(0x30, Buffer.concat([berInt(1) /* v2c */, berTlv(0x04, Buffer.from(community, 'utf8')), berTlv(pduTag, pdu)]));
       const sock = dgram.createSocket('udp4');
       // host 为点分 IPv4 时校验响应来源：伪造抢答包必须来自目标 IP 才可能通过后续 rid/community 校验
       const isIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(host || ''));
@@ -251,7 +320,7 @@ function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
           if (isIpLiteral && rinfo && rinfo.address !== host) return;
           // 再校验 request-id 与 community：不匹配的抢答包同样丢弃
           const meta = snmpResponseMeta(buf);
-          if (!meta || meta.rid !== rid || meta.community !== String(community || 'public')) return;
+          if (!meta || meta.rid !== rid || meta.community !== community) return;
           done({ ok: true, varbinds: parseSnmpResponse(buf) });
         }
         catch (e) { done({ ok: false, error: 'SNMP 响应解析失败' }); }
@@ -260,6 +329,92 @@ function snmpRequest(pduTag, host, community, oids, timeoutMs, port) {
       sock.send(msg, port || 161, host, (err) => { if (err) done({ ok: false, error: 'SNMP 发送失败' }); });
     } catch (e) { resolve({ ok: false, error: 'SNMP 构造失败' }); }
   });
+}
+
+/* ---------------- SNMP v3（USM）请求通道：引擎发现 + 时间同步 + 认证/加密（RFC 3414/3826） ---------------- */
+const V3 = require('./snmp-v3.js');
+let v3Rid = 0;
+const nextV3Rid = () => (((v3Rid = ((v3Rid || 0) + 1) & 0x7fff) + (Math.floor(Math.random() * 0xffff) << 15)) & 0x7fffffff) || 1;
+/** 发送并等待单个 v3 包（来源不符的包被忽略直至超时；解析与认证校验交给 snmp-v3） */
+function v3Transmit(msg, host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    const sock = dgram.createSocket('udp4');
+    const isIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(host || ''));
+    const done = (res) => { clearTimeout(t); try { sock.close(); } catch (e) { /* ignore */ } resolve(res); };
+    const t = setTimeout(() => done({ ok: false, error: 'SNMP v3 响应超时' }), timeoutMs || 3000);
+    sock.on('message', (buf, rinfo) => {
+      if (isIpLiteral && rinfo && rinfo.address !== host) return;
+      done({ ok: true, buf });
+    });
+    sock.on('error', () => done({ ok: false, error: 'SNMP v3 网络错误' }));
+    sock.send(msg, port, host, (err) => { if (err) done({ ok: false, error: 'SNMP v3 发送失败' }); });
+  });
+}
+/** v3 请求：引擎发现（Report 回带权威 engineID/boots/time）→ 认证/加密请求；时间窗不同步/引擎变更各重试一次 */
+async function v3Request(pduTag, host, v3cfg, oids, timeoutMs, port) {
+  const user = V3.normalizeV3User(v3cfg);
+  if (!user) return { ok: false, error: 'SNMP v3 用户配置无效（需用户名；认证需协议与口令）' };
+  const p = (port > 0 && port <= 65535) ? port : 161;
+  let eng = V3.v3EngineGet(host, p, user.user);
+  let retries = 0;
+  for (;;) {
+    if (!eng) {
+      // 引擎发现：noAuthNoPriv、空引擎 ID 的 GET（reportable），设备回 Report 携带权威引擎三元组
+      const d = V3.buildV3Message({ pduTag: 0xa0, oids: [V3.OID_USM_UNKNOWN_ENGINE_IDS], engineID: Buffer.alloc(0), boots: 0, time: 0, user: { user: '', level: 'noAuth' }, reportable: true, msgID: nextV3Rid(), rid: nextV3Rid() });
+      const r = await v3Transmit(d.msg, host, p, timeoutMs);
+      if (!r.ok) return r;
+      const pr = V3.parseV3Message(r.buf, { user: null });
+      if (!pr.ok) return { ok: false, error: 'SNMP v3 引擎发现失败：' + pr.reason };
+      if (!pr.engineID) return { ok: false, error: 'SNMP v3 引擎发现失败：设备未返回引擎 ID' };
+      eng = { engineID: pr.engineID, boots: pr.boots, time: pr.time };
+      V3.v3EngineSet(host, p, user.user, eng);
+    }
+    // RFC 3414 §2.2.3：本地引擎时间估计随墙钟推进（发现值 + 流逝秒数），避免每 150s 后
+    // 必吃一次 notInTimeWindow Report 重同步
+    const engNow = V3.v3EngineTime(eng);
+    const ridv = nextV3Rid();
+    const msgIdv = nextV3Rid();
+    const built = V3.buildV3Message({ pduTag, oids, engineID: Buffer.from(eng.engineID, 'hex'), boots: engNow.boots, time: engNow.time, user, reportable: true, msgID: msgIdv, rid: ridv });
+    const r = await v3Transmit(built.msg, host, p, timeoutMs);
+    if (!r.ok) return r;
+    const pr = V3.parseV3Message(r.buf, { user });
+    if (!pr.ok) {
+      // 设备重启（引擎 boots/time 重置）会让签名校验失败：强制重新发现一次
+      if (retries < 2 && /认证失败/.test(pr.reason || '')) { V3.v3EngineReset(host, p, user.user); eng = null; retries++; continue; }
+      return { ok: false, error: 'SNMP v3：' + (pr.reason || '请求失败') };
+    }
+    if (pr.engineID !== eng.engineID) return { ok: false, error: 'SNMP v3 引擎 ID 与发现结果不匹配' };
+    if (pr.pduTag === 0xa8 && pr.report) {
+      // Report 与本请求的绑定：按 header msgID（每请求随机，可防伪造 Report 污染引擎缓存）。
+      // 不能按 PDU request-id 严格校验——net-snmp 等 USM 层失败（无法解密 PDU）时 Report 的
+      // request-id 恒为 0（RFC 3412 §6.7 允许，真机 net-snmp 实测：authPriv + 未知用户即此形态），
+      // 严格校验会让所有 USM 错误（含 notInTimeWindow 重同步）对真实设备永远失败
+      const bound = (pr.msgID != null) ? pr.msgID === msgIdv : (pr.rid == null || pr.rid === ridv);
+      if (!bound) return { ok: false, error: 'SNMP v3 Report 与请求不匹配（msgID/request-id 不符）' };
+      if (pr.report.oid === V3.OID_USM_NOT_IN_TIME_WINDOWS && retries < 2) {
+        eng.boots = pr.boots; eng.time = pr.time; eng.at = Date.now(); V3.v3EngineSet(host, p, user.user, eng); retries++; continue; // 时间窗重同步
+      }
+      if (retries < 2) { V3.v3EngineReset(host, p, user.user); eng = null; retries++; continue; } // 其余 USM 错误：重发现一次再定论
+      return { ok: false, error: 'SNMP v3：' + V3.reportReason(pr.report) };
+    }
+    if (pr.pduTag !== 0xa2) return { ok: false, error: 'SNMP v3 响应类型异常' };
+    // 安全级别以本端配置为准，不信包内自报 flags：parseV3Message 的 wantAuth 由包内 flags 决定，
+    // 攻击者嗅探 rid/engineID 后抢答 flags=0 的明文响应即可伪造监控值（假接口 Down/假 CPU/假重启）。
+    // 与 Trap 接收侧同口径：本端用户要求认证时未验签包一律拒收，authPriv 时未解密包一律拒收。
+    if (user.level !== 'noAuth' && !pr.authenticated) return { ok: false, error: 'SNMP v3 响应未认证（安全级别不符）' };
+    if (user.level === 'authPriv' && !pr.decrypted) return { ok: false, error: 'SNMP v3 响应未加密（安全级别不符）' };
+    if (pr.rid != null && pr.rid !== ridv) return { ok: false, error: 'SNMP v3 响应 request-id 不匹配' };
+    return { ok: true, varbinds: pr.varbinds };
+  }
+}
+
+/** SNMP 请求目标：sysinfo 配 v3 时返回 v3 用户对象，否则返回 v2c 团体字（透传给 snmpGet/snmpWalk 系列的 target 形参） */
+function snmpTargetOf(job) {
+  const si = job.sysinfo || {};
+  if (si.version === 'v3' && si.v3User) {
+    return { user: si.v3User, authProto: si.v3AuthProto, authPass: si.v3AuthPass, privProto: si.v3PrivProto, privPass: si.v3PrivPass };
+  }
+  return si.community || 'public';
 }
 function snmpGet(host, community, oids, timeoutMs, port) { return snmpRequest(0xa0, host, community, oids, timeoutMs, port); }
 function snmpGetNext(host, community, oid, timeoutMs, port) { return snmpRequest(0xa1, host, community, [oid], timeoutMs, port); }
@@ -491,27 +646,51 @@ function runCompliance(text, rules) {
  *  桶内同刻多次探测以后到为准；供监控中心渲染可用率趋势。 */
 class UptimeStore {
   /** @param {string} filePath 落盘 JSON 路径（空串则不落盘，仅内存）
-   *  @param {object} [opts] {bucketMs=600000, keepMs=7天, maxKeys=200} */
+   *  @param {object} [opts] {bucketMs=600000, keepMs=7天, maxKeys=200, keepDays=400}
+   *  两级保留：10 分钟明细桶（keepMs，默认 7 天，供中断次数/MTTR 这类需要逐桶切分的指标）
+   *  + 按天汇总（keepDays，默认 400 天，供月度可用率这类长期 SLA 口径，体积可忽略）。 */
   constructor(filePath, opts) {
     opts = opts || {};
     this.file = typeof filePath === 'string' ? filePath : '';
     this.bucketMs = opts.bucketMs || 10 * 60 * 1000;
     this.keepMs = opts.keepMs || 7 * 24 * 60 * 60 * 1000;
+    this.keepDays = opts.keepDays || 400;
     this.maxKeys = opts.maxKeys || 200;
     this.map = new Map();   // key -> [[bucketTs, 0|1], ...]（按时间升序）
+    this.daily = new Map(); // key -> { 'YYYYMMDD': {up, down} }（按天汇总，长期保留）
+    this._last = new Map(); // key -> {bucket, ok}：同桶覆盖时同步修正当天汇总（否则日汇总会重复计数）
     this._dirty = false;
     this._load();
+  }
+  static dayKeyOf(ts) {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
   }
   _load() {
     if (!this.file) return;
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-        for (const [k, arr] of Object.entries(raw)) {
+      const series = (raw && typeof raw === 'object' && raw.v === 2 && raw.series && typeof raw.series === 'object') ? raw.series : raw;
+      const daily = (raw && typeof raw === 'object' && raw.v === 2 && raw.daily && typeof raw.daily === 'object') ? raw.daily : null;
+      if (series && typeof series === 'object' && !Array.isArray(series)) {
+        for (const [k, arr] of Object.entries(series)) {
           if (!Array.isArray(arr)) continue;
           const clean = arr.filter(e => Array.isArray(e) && e.length === 2 && Number.isFinite(e[0]))
             .map(e => [e[0], e[1] ? 1 : 0]).slice(-1024);
           if (clean.length) this.map.set(String(k).slice(0, 128), clean);
+        }
+      }
+      if (daily && !Array.isArray(daily)) {
+        for (const [k, days] of Object.entries(daily)) {
+          if (!days || typeof days !== 'object') continue;
+          const clean = {};
+          for (const [dk, v] of Object.entries(days)) {
+            if (!/^\d{8}$/.test(dk) || !v || typeof v !== 'object') continue;
+            const up = Math.max(0, parseInt(v.up, 10) || 0), down = Math.max(0, parseInt(v.down, 10) || 0);
+            if (up || down) clean[dk] = { up, down };
+          }
+          if (Object.keys(clean).length) this.daily.set(String(k).slice(0, 128), clean);
         }
       }
     } catch (e) { /* 无记录/损坏则从空开始 */ }
@@ -522,28 +701,54 @@ class UptimeStore {
     const ts = Number.isFinite(t) ? t : Date.now();
     const bucket = Math.floor(ts / this.bucketMs) * this.bucketMs;
     const arr = this.map.get(key) || [];
+    const val = ok ? 1 : 0;
     const last = arr[arr.length - 1];
-    if (last && last[0] === bucket) last[1] = ok ? 1 : 0; // 同桶覆盖：保留该时段最后一次探测结果
+    if (last && last[0] === bucket) last[1] = val; // 同桶覆盖：保留该时段最后一次探测结果
     else {
-      arr.push([bucket, ok ? 1 : 0]);
+      arr.push([bucket, val]);
       if (arr.length > 1100) arr.splice(0, arr.length - 1024); // 单键上限兜底（7 天 ≈ 1008 桶）
     }
     this.map.set(key, arr);
+    // 按天汇总：与明细桶同一套「同桶覆盖」语义，覆盖时先减旧值再加新值（否则日汇总重复计数）
+    const day = UptimeStore.dayKeyOf(bucket);
+    const days = this.daily.get(key) || {};
+    const cell = days[day] || { up: 0, down: 0 };
+    const prev = this._last.get(key);
+    if (prev && prev.bucket === bucket) {
+      if (prev.ok !== val) {
+        if (prev.ok) cell.up = Math.max(0, cell.up - 1); else cell.down = Math.max(0, cell.down - 1);
+        if (val) cell.up++; else cell.down++;
+      }
+    } else if (val) cell.up++;
+    else cell.down++;
+    days[day] = cell;
+    this.daily.set(key, days);
+    this._last.set(key, { bucket, ok: val });
     this._dirty = true;
     this._prune();
   }
   series(key) { return (this.map.get(String(key)) || []).slice(); }
+  /** 某键的按天汇总（key 省略则返回全部） */
+  dailyOf(key) {
+    if (key == null) {
+      const out = {};
+      for (const [k, days] of this.daily) out[k] = Object.assign({}, days);
+      return out;
+    }
+    return Object.assign({}, this.daily.get(String(key)) || {});
+  }
   snapshot() {
     const out = {};
     for (const [k, arr] of this.map) out[k] = arr;
     return out;
   }
-  /** 落盘（tmp+rename 原子写）。有变更才写；返回是否实际写入 */
+  /** 落盘（tmp+rename 原子写）。有变更才写；返回是否实际写入。
+   *  文件格式 v2：{v:2, series:{}, daily:{}}；读取兼容旧版扁平格式（旧文件无日汇总，累积后自然补齐）。 */
   flush() {
     if (!this.file || !this._dirty) return false;
     const tmp = this.file + '.tmp-' + process.pid;
     try {
-      fs.writeFileSync(tmp, JSON.stringify(this.snapshot()), 'utf8');
+      fs.writeFileSync(tmp, JSON.stringify({ v: 2, series: this.snapshot(), daily: this.dailyOf() }), 'utf8');
       fs.renameSync(tmp, this.file);
       this._dirty = false;
       return true;
@@ -555,6 +760,12 @@ class UptimeStore {
       while (arr.length && arr[0][0] < cutoff) arr.shift();
       if (!arr.length) this.map.delete(k);
     }
+    // 日汇总按天保留（长期 SLA 口径）：超期整日丢弃
+    const minDay = UptimeStore.dayKeyOf(Date.now() - this.keepDays * 24 * 60 * 60 * 1000);
+    for (const [k, days] of this.daily) {
+      for (const dk of Object.keys(days)) if (dk < minDay) delete days[dk];
+      if (!Object.keys(days).length) { this.daily.delete(k); this._last.delete(k); }
+    }
     // 键数超限：淘汰最近活动最旧的键
     while (this.map.size > this.maxKeys) {
       let oldestKey = null, oldestTs = Infinity;
@@ -564,6 +775,8 @@ class UptimeStore {
       }
       if (oldestKey === null) break;
       this.map.delete(oldestKey);
+      this.daily.delete(oldestKey);
+      this._last.delete(oldestKey);
     }
   }
 }
@@ -604,6 +817,8 @@ class MonitorManager extends EventEmitter {
     this.logBaseDir = logBaseDir;
     this.trustFile = trustFile;
     this.backupStore = opts.backupStore || null;
+    // 配置变更判定的易变行忽略规则提供者（宿主注入：返回规则字符串数组）。缺省不过滤。
+    this._ignoreRules = typeof opts.ignoreRules === 'function' ? opts.ignoreRules : null;
     this.regexLab = new RegexLab({ timeoutMs: 5000 }); // 用户正则的工作线程超时执行器（防灾难性回溯挂死主进程）
     this.jobs = new Map();       // key -> job
     this._bySid = new Map();     // sid -> key
@@ -613,6 +828,11 @@ class MonitorManager extends EventEmitter {
     shell.on('output', (sid, data) => this._onOutput(sid, data));
     shell.on('status', (sid, info) => this._onStatus(sid, info));
     shell.on('end', (sid, reason) => this._onEnd(sid, reason));
+  }
+
+  /** 更新易变行忽略规则提供者（宿主在设置变更后调用；规则用于「无变化不新增」与变更 diff） */
+  setIgnoreRules(fn) {
+    this._ignoreRules = typeof fn === 'function' ? fn : null;
   }
 
   /* ---------------- 指纹记录 ---------------- */
@@ -632,7 +852,12 @@ class MonitorManager extends EventEmitter {
     try {
       const obj = {};
       for (const [h, fp] of this.trusted) obj[h] = fp;
-      fs.writeFileSync(this.trustFile, JSON.stringify(obj, null, 2), 'utf8');
+      // tmp+rename 原子写（与 UptimeStore.flush/backup-store 同口径）：直接覆写在中途崩溃时产生
+      // 截断 JSON，重启后 _loadTrust 当「无记录」吞掉——整个 TOFU 指纹库被静默清空，指纹变化
+      // 拒连保护退化为重新首连，恰是攻击者可利用的窗口
+      const tmp = this.trustFile + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
+      fs.renameSync(tmp, this.trustFile);
     } catch (e) { /* 失败不中断监控 */ }
   }
 
@@ -651,8 +876,9 @@ class MonitorManager extends EventEmitter {
     const protocol = String(opts.protocol || 'ssh').toLowerCase();
     if (protocol !== 'ssh' && protocol !== 'telnet') return { ok: false, error: '不支持的协议：' + protocol };
     // host/username 会写进日志头与审计日志（shell.js）：剔除控制字符，防内嵌换行注入伪造审计行
+    // 另拒绝 '-' 开头：ICMP 探测把 host 作为 ping 最后一个参数直传 spawn，'-t' 等会被当作选项
     const host = String(opts.host || '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
-    if (!host || host.length > 256) return { ok: false, error: '请填写主机地址' };
+    if (!host || host.length > 256 || host[0] === '-') return { ok: false, error: '请填写主机地址' };
     let port = parseInt(opts.port, 10);
     if (!(port > 0)) port = protocol === 'telnet' ? DEFAULTS.telnetPort : DEFAULTS.port;
     if (port < 1 || port > 65535) return { ok: false, error: '端口无效' };
@@ -680,7 +906,9 @@ class MonitorManager extends EventEmitter {
     const cmds = Array.isArray(opts.commands) ? opts.commands : [];
     const commands = [];
     for (const c of cmds) {
-      const s = String(c == null ? '' : c).trim();
+      // 与 host/username 同口径剔除控制字符：命令会写进监控审计日志（_logCmd），中段换行能在
+      // 日志里插出一行可自带时间戳的伪造记录（该注入口此前只堵了 host/username）
+      const s = String(c == null ? '' : c).replace(/[\u0000-\u001f\u007f]/g, '').trim();
       if (!s) continue;
       if (commands.length >= 64) break;
       commands.push(s.length > 512 ? s.slice(0, 512) : s);
@@ -690,7 +918,7 @@ class MonitorManager extends EventEmitter {
     {
       const ocRaw = Array.isArray(opts.onConnect) ? opts.onConnect : String(opts.onConnect == null ? '' : opts.onConnect).split(/\r?\n/);
       for (const c of ocRaw) {
-        const s = String(c == null ? '' : c).trim();
+        const s = String(c == null ? '' : c).replace(/[\u0000-\u001f\u007f]/g, '').trim(); // 同口径：防日志行注入
         if (!s) continue;
         if (onConnectCmds.length >= 16) break;
         onConnectCmds.push(s.length > 512 ? s.slice(0, 512) : s);
@@ -730,6 +958,9 @@ class MonitorManager extends EventEmitter {
       pattern = pattern.trim();
       if (!pattern) continue;
       if (pattern.indexOf('#') >= 0) { const i = pattern.indexOf('#'); note = pattern.slice(i + 1).trim(); pattern = pattern.slice(0, i).trim(); }
+      if (!pattern) continue;
+      // 命中告警时 pattern 会被拼进监控日志与系统通知，中段换行同样能伪造日志行：先剔控制字符
+      pattern = pattern.replace(/[\u0000-\u001f\u007f]/g, '');
       if (!pattern) continue;
       if (pattern.length > 256) pattern = pattern.slice(0, 256);
       // 启发式拒绝嵌套量词（如 (a+)+ / (a?)+ / (a|aa)*）：执行期另有 RegexLab 工作线程超时兜底（非完备防线）
@@ -772,6 +1003,13 @@ class MonitorManager extends EventEmitter {
     // ---- SNMP 接口流量采集（ifTable walk）/ 重启检测（sysUpTime 骤减）/ CPU·内存采集（可配置 OID），独立于连接的 UDP 定时轮询 ----
     const sOpt = opts.sysinfo && typeof opts.sysinfo === 'object' ? opts.sysinfo : {};
     const sysinfo = { enabled: !!sOpt.enabled, community: (String(sOpt.community || 'public').trim().slice(0, 64)) || 'public', ifTable: !!sOpt.ifTable };
+    // SNMP v3（USM）：version 'v3' 时启用；认证/隐私协议白名单，口令长度钳制（密钥本地化输入）
+    sysinfo.version = String(sOpt.version) === 'v3' ? 'v3' : 'v2c';
+    sysinfo.v3User = String(sOpt.v3User || '').trim().slice(0, 32);
+    sysinfo.v3AuthProto = String(sOpt.v3AuthProto).toLowerCase() === 'md5' ? 'md5' : 'sha';
+    sysinfo.v3AuthPass = String(sOpt.v3AuthPass || '').slice(0, 128);
+    sysinfo.v3PrivProto = String(sOpt.v3PrivProto).toLowerCase() === 'des' ? 'des' : 'aes';
+    sysinfo.v3PrivPass = String(sOpt.v3PrivPass || '').slice(0, 128);
     let snmpIntervalSec = parseFloat(sOpt.intervalSec);
     if (!Number.isFinite(snmpIntervalSec)) snmpIntervalSec = 60;
     sysinfo.intervalSec = Math.max(30, Math.min(3600, snmpIntervalSec));
@@ -780,18 +1018,30 @@ class MonitorManager extends EventEmitter {
     sysinfo.snmpPort = (snmpPort > 0 && snmpPort <= 65535) ? snmpPort : 161;
     sysinfo.sysUpTime = !!sOpt.sysUpTime; // 重启检测：定时 GET sysUpTime，数值骤减 → reboot 事件
     // CPU/内存采集 OID（点分十进制白名单；GET 失败自动 GETNEXT 兜底表型 OID）。
-    // memFreeOid 留空 = memUsedOid 的值直接是百分比（华为/华三 entity-ext）；填写 = 按 used/(used+free) 计算（思科字节型）。
+    // 换算语义由 cpuMode/memMode 决定（见 cpuPctOf/memPctOf）：
+    //   cpuMode  direct  = OID 值即百分比；idle100 = 值是无负载占比（Linux UCD ssCpuIdle）
+    //   memMode  percent = memUsedOid 值即百分比；usedfree = used/(used+free)（思科字节型）；
+    //            totalavail = (总量−可用)/总量（Linux UCD memTotalReal/memAvailReal）
+    // 未显式给 mode 时按旧口径推导：有 memFreeOid 即 usedfree，否则 percent——老配置行为完全不变。
     const pfOpt = sOpt.perf && typeof sOpt.perf === 'object' ? sOpt.perf : {};
     const cleanOid = (v) => {
-      // OID 白名单：点分十进制（最多 20 段——企业 MIB 常见 12~15 段），总长 64 上限
-      const s = String(v == null ? '' : v).trim();
-      return (/^\d{1,10}(?:\.\d{1,10}){1,19}$/.test(s) && s.length <= 64) ? s : '';
+      // OID 白名单：点分十进制（最多 20 段——企业 MIB 常见 12~15 段），总长 64 上限；
+      // 容忍厂商文档常见的 .1.3.6.1 前导点/末尾点形态（此前会被静默清空导致 CPU/内存不采集）。
+      // 每段 ≤ 2^32-1：berOid 按 32 位位运算编码，超出段的值会被 ToUint32 静默截断成错误 OID
+      const s = String(v == null ? '' : v).trim().replace(/^\.+/, '').replace(/\.+$/, '');
+      return (/^\d{1,10}(?:\.\d{1,10}){1,19}$/.test(s) && s.length <= 64 && s.split('.').every(x => Number(x) <= 4294967295)) ? s : '';
     };
+    const cpuOid = cleanOid(pfOpt.cpuOid);
+    const memUsedOid = cleanOid(pfOpt.memUsedOid);
+    const memFreeOid = cleanOid(pfOpt.memFreeOid);
+    const cpuMode = String(pfOpt.cpuMode) === 'idle100' ? 'idle100' : 'direct';
+    let memMode = String(pfOpt.memMode || '');
+    if (MEM_MODES.indexOf(memMode) < 0) memMode = memFreeOid ? 'usedfree' : 'percent'; // 旧配置兼容
+    // 需要 free 的两种模式缺 freeOid 时退回 percent（否则永远算不出内存占用，静默空值）
+    if (memMode !== 'percent' && !memFreeOid) memMode = 'percent';
     sysinfo.perf = {
       enabled: !!pfOpt.enabled,
-      cpuOid: cleanOid(pfOpt.cpuOid),
-      memUsedOid: cleanOid(pfOpt.memUsedOid),
-      memFreeOid: cleanOid(pfOpt.memFreeOid)
+      cpuOid, memUsedOid, memFreeOid, cpuMode, memMode
     };
     // ---- 服务器指标采集（SSH，可选）：复用监控会话执行 df/free 等命令并解析数值，
     //      磁盘/内存超阈值告警（仅读取模式下禁用——与「只记录不写命令」语义冲突） ----
@@ -806,7 +1056,10 @@ class MonitorManager extends EventEmitter {
         if (metrics.commands.length >= 8) break;
         metrics.commands.push(s.length > 256 ? s.slice(0, 256) : s);
       }
-      if (metrics.enabled && !metrics.commands.length) metrics.commands = ['df -P', 'free -m', 'cat /proc/loadavg'];
+      // 默认命令固定 C locale：真机实测（Ubuntu 中文 locale）下 `free -m` 表头是「内存：/交换：」，
+      // 解析器只认 Mem:/Swap:，内存指标恒为空值——同一个命令在不同 locale 设备上结果不一致。
+      // LC_ALL=C 是 POSIX 通用写法，设备侧输出因此稳定（用户自定义命令不干预）
+      if (metrics.enabled && !metrics.commands.length) metrics.commands = ['LC_ALL=C df -P', 'LC_ALL=C free -m', 'cat /proc/loadavg'];
     }
     let mtInt = parseFloat(mtOpt.intervalSec);
     if (!Number.isFinite(mtInt)) mtInt = 300;
@@ -855,7 +1108,7 @@ class MonitorManager extends EventEmitter {
       probe: Object.assign({ enabled: false, type: 'tcp', intervalSec: 30 }, cfg.probe || {}),
       alerts: (cfg.alerts || []).map(a => ({ pattern: a.pattern, note: a.note, re: a.re })),
       backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 1000 }, cfg.backup || {}),
-      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60, sysUpTime: false, perf: { enabled: false, cpuOid: '', memUsedOid: '', memFreeOid: '' } }, cfg.sysinfo || {}),
+      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60, sysUpTime: false, version: 'v2c', v3User: '', v3AuthProto: 'sha', v3AuthPass: '', v3PrivProto: 'aes', v3PrivPass: '', perf: { enabled: false, cpuOid: '', memUsedOid: '', memFreeOid: '' } }, cfg.sysinfo || {}),
       metrics: Object.assign({ enabled: false, commands: [], intervalSec: 300, diskWarn: 80, diskCrit: 90, memWarn: 80, memCrit: 90 }, cfg.metrics || {}),
       metricHist: [],   // SSH 指标采样历史（[{ts, disks:[{mount,pct}], mem, swap, load}]，容量 IF_HIST_MAX）
       metricAlert: { disk: null, mem: null }, // 上次阈值级别（变化沿产生告警事件）
@@ -973,9 +1226,9 @@ class MonitorManager extends EventEmitter {
     if (job.stopping || !job.enabled) return { ok: false, error: '任务已停止' };
     // 复用监控会话的备份要求会话在线；独立连接模式内部自建会话，断线重连时也能立即备份
     if (job.backup.mode !== 'own' && job.state !== 'monitoring') return { ok: false, error: '监控会话未在线（当前：' + (job.statusText || job.state) + '）' };
-    job._bkResult = null;
-    await this._runBackup(job, job.gen);
-    const r = job._bkResult || {};
+    // 取 _runBackup 的返回值（各中止路径会带 error 的结果对象只放进返回值不写 _bkResult），
+    // 否则会话恰好断开时返回 {ok:true, saved:false, error:null}——UI 误报「命令无输出」
+    const r = (await this._runBackup(job, job.gen)) || job._bkResult || {};
     return { ok: true, saved: !!r.saved, skipped: !!r.skipped, name: r.name || null, error: r.error || null };
   }
 
@@ -1000,9 +1253,35 @@ class MonitorManager extends EventEmitter {
   /** 撤销某主机的信任指纹：后续连接按「首次连接」重新走 TOFU 信任流程 */
   trustRevoke(host) {
     host = String(host || '');
-    const removed = this.trusted.delete(host);
+    let removed = this.trusted.delete(host);
+    // 键可能带端口后缀（host:2222）：界面上「撤销某主机」未带端口时，连同该主机的各端口记录一并撤销
+    if (host.indexOf(':') < 0) {
+      for (const k of [...this.trusted.keys()]) {
+        if (k.startsWith(host + ':')) { this.trusted.delete(k); removed = true; }
+      }
+    }
     if (removed) this._saveTrust();
     return { ok: true, removed };
+  }
+
+  /** 无人值守采集（shell.runOneShot）的指纹裁决：与监控会话共用同一份信任库与同一套语义。
+   *  有记录且不一致 → 拒绝；无记录 → TOFU 记录后放行。返回 { ok, first }。
+   *  旧实现在 shell 侧无条件放行，等于「已钉扎主机的指纹变化被静默接受」，且攻击者指纹会被
+   *  渲染层反写成长期钉扎值——此后真实设备反而被拒。 */
+  verifyFingerprint(host, port, fp) {
+    const h = String(host == null ? '' : host).trim();
+    const f = String(fp == null ? '' : fp);
+    if (!h || !f) return { ok: false, error: '指纹信息不完整，已拒绝连接' };
+    const key = fpKeyOf(h, port);
+    const known = this.trusted.get(key);
+    if (known) {
+      // 指纹一致：放行（不重复写库）；变化：拒绝并回明确原因（由调用方转成会话失败）
+      if (known === f) return { ok: true, first: false };
+      return { ok: false, error: '主机指纹变化，可能遭到中间人攻击，已拒绝连接' };
+    }
+    this.trusted.set(key, f);
+    this._saveTrust();
+    return { ok: true, first: true };
   }
 
   /* ---------------- 拆除 ---------------- */
@@ -1017,6 +1296,8 @@ class MonitorManager extends EventEmitter {
     if (job.probeTimer) { clearTimeout(job.probeTimer); job.probeTimer = null; }
     if (job.backupTimer) { clearTimeout(job.backupTimer); job.backupTimer = null; }
     if (job._alertTimer) { clearTimeout(job._alertTimer); job._alertTimer = null; }
+    if (job._moreRetry) { clearTimeout(job._moreRetry); job._moreRetry = null; }
+    if (job._sysInfoTimer) { clearTimeout(job._sysInfoTimer); job._sysInfoTimer = null; }
     if (job.snmpTimer) { clearTimeout(job.snmpTimer); job.snmpTimer = null; }
     if (job.metricTimer) { clearTimeout(job.metricTimer); job.metricTimer = null; }
     if (job.httpTimer) { clearTimeout(job.httpTimer); job.httpTimer = null; }
@@ -1086,6 +1367,9 @@ class MonitorManager extends EventEmitter {
     try { if (fs.lstatSync(devDir).isSymbolicLink()) { job.logStream = null; return; } } catch (e) { /* 不存在则照常创建 */ }
     const dir = path.join(devDir, date);
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
+    // 日期目录与既有文件同样拒符号链接（与 config-backup 两级检查同口径：mkdir recursive 对
+    // 已存在的链接目录不会失败，append 打开会跟随链接把日志引到任意位置）
+    try { if (fs.lstatSync(dir).isSymbolicLink()) { job.logStream = null; return; } } catch (e) { /* ignore */ }
     // 文件名含主机地址：同一设备多个管理口各自独立日志，互不覆盖
     const safe = sanitizeFilename(job.name || job.deviceId);
     const safeHost = sanitizeFilename(job.host || 'unknown');
@@ -1105,6 +1389,7 @@ class MonitorManager extends EventEmitter {
     }
     job.logDate = date;
     job.logPath = path.join(dir, fname);
+    try { if (fs.lstatSync(job.logPath).isSymbolicLink()) { job.logStream = null; job.logPath = ''; return; } } catch (e) { /* 不存在则照常创建 */ }
     try { job.logStream = fs.createWriteStream(job.logPath, { flags: 'a', encoding: 'utf8' }); }
     catch (e) { job.logStream = null; }
     if (job.logStream) {
@@ -1118,6 +1403,12 @@ class MonitorManager extends EventEmitter {
   /** 滚动文件数封顶：目录内 .log 按 mtime 保留最新 keep 个，其余删除（lstat 拒符号链接） */
   _pruneLogFiles(dir, keep) {
     try {
+      // 目录 <设备>/<日期> 由同设备多管理口任务共享：删除命中另一任务正持有写流的文件时，
+      // Windows unlink 失败尚可（静默跳过），Linux 会删成功但句柄继续写已 unlink 的 inode，磁盘不释放
+      const active = new Set();
+      for (const j of this.jobs.values()) {
+        if (j.logPath && path.dirname(j.logPath) === dir) active.add(path.basename(j.logPath));
+      }
       const files = fs.readdirSync(dir)
         .map(n => {
           let st = null;
@@ -1126,7 +1417,7 @@ class MonitorManager extends EventEmitter {
         })
         .filter(Boolean)
         .sort((a, b) => b.t - a.t);
-      for (const f of files.slice(keep)) { try { fs.unlinkSync(path.join(dir, f.n)); } catch (e) { /* ignore */ } }
+      for (const f of files.slice(keep)) { if (active.has(f.n)) continue; try { fs.unlinkSync(path.join(dir, f.n)); } catch (e) { /* ignore */ } }
     } catch (e) { /* ignore */ }
   }
   _closeLog(job) {
@@ -1144,7 +1435,10 @@ class MonitorManager extends EventEmitter {
     }
     return out;
   }
-  _logLine(job, text) {
+  _logLine(job, text, preMasked) {
+    // 已拆除任务不再写日志：teardown 已关流并移出 jobs，迟到路径（采集/备份 await 期间恰好停止）
+    // 若放行会重开写流——句柄永不关闭泄漏，且已停任务仍写日志/发事件（对照 _fetchSysInfo/_probeOnce 均有守卫）
+    if (!job.enabled || job.stopping) return;
     // 写入前自查跨天滚动：仅读取/仅探测任务没有命令轮次（_runCycle/_runBackupShared 才调
     // _rollLogIfNeeded），不自查会一直往昨天的日期目录里追加
     if (!job.logStream || fmtDateDir() !== job.logDate) this._openLog(job);
@@ -1152,7 +1446,7 @@ class MonitorManager extends EventEmitter {
     // 单文件超过大小上限即滚动新文件（防高输出设备占满磁盘）
     if (job.logStream.bytesWritten > MAX_LOG_BYTES) this._openLog(job, true);
     if (!job.logStream) return;
-    try { job.logStream.write('[' + fmtTimestamp() + '] ' + this._maskSecrets(job, text) + '\n'); } catch (e) { /* ignore */ }
+    try { job.logStream.write('[' + fmtTimestamp() + '] ' + (preMasked ? text : this._maskSecrets(job, text)) + '\n'); } catch (e) { /* ignore */ }
   }
   _logCmd(job, cmd) {
     this._logLine(job, '>> ' + cmd);
@@ -1213,7 +1507,8 @@ class MonitorManager extends EventEmitter {
     }
     // SNMP 自动识别：每次会话建立后执行一次（延迟 2s 等设备就绪），结果经 sysinfo 事件回填
     if (job.sysinfo && job.sysinfo.enabled) {
-      setTimeout(() => this._fetchSysInfo(job, gen), 2000);
+      clearTimeout(job._sysInfoTimer);
+      job._sysInfoTimer = setTimeout(() => { job._sysInfoTimer = null; this._fetchSysInfo(job, gen); }, 2000);
     }
     // SSH 指标采集：会话建立后启动定时轮询（复用监控会话执行指标命令）
     if (job.metrics && job.metrics.enabled && !job.readOnly) {
@@ -1224,7 +1519,7 @@ class MonitorManager extends EventEmitter {
   /** SNMP v2c 识别：GET sysDescr/sysObjectID，启发式提取软件版本后广播 sysinfo 事件 */
   _fetchSysInfo(job, gen) {
     if (!job.enabled || job.stopping || gen !== job.gen || !job.sysinfo || !job.sysinfo.enabled) return;
-    snmpGet(job.host, job.sysinfo.community, [OID_SYSDESCR, OID_SYSOBJECT], 3000).then((r) => {
+    snmpGet(job.host, snmpTargetOf(job), [OID_SYSDESCR, OID_SYSOBJECT], 3000, job.sysinfo.snmpPort || 161).then((r) => {
       if (!job.enabled || job.stopping || gen !== job.gen || !r.ok) return;
       const map = {};
       for (const vb of (r.varbinds || [])) if (vb.oid) map[vb.oid] = vb.value;
@@ -1289,6 +1584,7 @@ class MonitorManager extends EventEmitter {
     } finally {
       job._cycleActive = false; // 中途退出（会话断开/停止）也必须释放，避免命令循环/备份永久等待
     }
+    if (!job.enabled || job.stopping || gen !== job.gen) return; // 命令序列期间任务拆除：迟到样本丢弃
     if (!disks.length && mem == null && load == null) return;
     const sample = { ts: Date.now(), disks: disks.slice(0, 32), mem, swap, load: load || null };
     job.metricHist.push(sample);
@@ -1387,21 +1683,22 @@ class MonitorManager extends EventEmitter {
   }
 
   async _collectIfTable(job) {
-    const host = job.host, community = job.sysinfo.community;
+    const host = job.host, target = snmpTargetOf(job);
     const port = job.sysinfo.snmpPort || 161;
     // 1. 接口名表（ifDescr walk 拿到全部 ifIndex）
-    const descr = await snmpWalk(OID_IF_DESCR, host, community, 3000, port);
+    const descr = await snmpWalk(OID_IF_DESCR, host, target, 3000, port);
     if (!descr.ok || !descr.varbinds.length) return;
     const ifs = new Map(); // ifIndex -> {i, n, oper, speed, inC, outC}
     for (const vb of descr.varbinds) {
       const idx = vb.oid.slice(OID_IF_DESCR.length + 1);
       if (!/^\d+$/.test(idx)) continue;
-      ifs.set(idx, { i: parseInt(idx, 10), n: String(vb.value == null ? '' : vb.value).slice(0, 64) });
+      // ifDescr 为设备返回的 OCTET STRING（设备可控）：剔控制字符，防内嵌换行污染事件时间线与 AI 日报
+      ifs.set(idx, { i: parseInt(idx, 10), n: String(vb.value == null ? '' : vb.value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 64) });
     }
     if (!ifs.size) return;
     // 2. 状态 / 速率 / 计数器（各列独立 walk，ifIndex 不在_descr 表的行忽略）
     const merge = async (root, fn) => {
-      const w = await snmpWalk(root, host, community, 3000, port);
+      const w = await snmpWalk(root, host, target, 3000, port);
       if (!w.ok) return;
       for (const vb of w.varbinds) {
         const idx = vb.oid.slice(root.length + 1);
@@ -1410,16 +1707,26 @@ class MonitorManager extends EventEmitter {
       }
     };
     await merge(OID_IF_OPER, (o, v) => { o.oper = v === 1 ? 'up' : (v === 2 ? 'down' : 'other'); });
+    await merge(OID_IF_HIGHSPEED, (o, v) => { o.high = Number(v) || 0; }); // Mbps，先取以备哨兵换算
     await merge(OID_IF_SPEED, (o, v) => { o.speed = Number(v) || 0; });
+    // 标称速率换算：ifSpeed 为 0 或哨兵 4294967295 时改用 ifHighSpeed×1e6。
+    // 注意 lo 之类接口可能只报 ifSpeed=10M 而 ifHighSpeed=0，故只在「不可用」时替换，不做无条件覆盖
+    for (const o of ifs.values()) {
+      // 哨兵判等、不可用判 >=：换算后的 10Gbps 是 1e10，比哨兵还大，不能再用「>= 哨兵」当不可用
+      const unusable = !(o.speed > 0) || o.speed >= IF_SPEED_SENTINEL;
+      if (unusable) o.speed = o.high > 0 ? o.high * 1e6 : 0; // 两个都取不到：宁可不显示，也不把哨兵当 4.29G
+    }
     // 64 位计数器优先（ifHCIn/OutOctets），设备不支持（走完无数据）时回退 32 位
-    let inCol = await snmpWalk(OID_IF_HCIN, host, community, 3000, port);
+    let inCol = await snmpWalk(OID_IF_HCIN, host, target, 3000, port);
     let inRoot = OID_IF_HCIN;
-    if (!inCol.ok || !inCol.varbinds.length) { inCol = await snmpWalk(OID_IF_IN32, host, community, 3000, port); inRoot = OID_IF_IN32; }
+    if (!inCol.ok || !inCol.varbinds.length) { inCol = await snmpWalk(OID_IF_IN32, host, target, 3000, port); inRoot = OID_IF_IN32; }
     if (inCol.ok) for (const vb of inCol.varbinds) { const o = ifs.get(vb.oid.slice(inRoot.length + 1)); if (o) o.inC = Number(vb.value); }
-    let outCol = await snmpWalk(OID_IF_HCOUT, host, community, 3000, port);
+    let outCol = await snmpWalk(OID_IF_HCOUT, host, target, 3000, port);
     let outRoot = OID_IF_HCOUT;
-    if (!outCol.ok || !outCol.varbinds.length) { outCol = await snmpWalk(OID_IF_OUT32, host, community, 3000, port); outRoot = OID_IF_OUT32; }
+    if (!outCol.ok || !outCol.varbinds.length) { outCol = await snmpWalk(OID_IF_OUT32, host, target, 3000, port); outRoot = OID_IF_OUT32; }
     if (outCol.ok) for (const vb of outCol.varbinds) { const o = ifs.get(vb.oid.slice(outRoot.length + 1)); if (o) o.outC = Number(vb.value); }
+    // 多列 walk 期间任务可能已被拆除：迟到样本不入历史、不写日志、不发事件（句柄/状态一致性）
+    if (!job.enabled || job.stopping) return;
 
     // 3. 组装采样并计算速率（与上次计数器差值）
     const now = Date.now();
@@ -1481,13 +1788,14 @@ class MonitorManager extends EventEmitter {
 
   /** SNMP 性能采集：sysUpTime（重启检测：数值骤减 5 分钟以上判为重启）+ CPU/内存（可配置 OID） */
   async _collectPerf(job) {
-    const host = job.host, community = job.sysinfo.community, port = job.sysinfo.snmpPort || 161;
+    const host = job.host, target = snmpTargetOf(job), port = job.sysinfo.snmpPort || 161;
     const perf = job.sysinfo.perf || {};
     const now = Date.now();
     const sample = { ts: now, up: null, cpu: null, mem: null };
     // sysUpTime（TimeTicks，1/100 秒）：骤减超过 5 分钟刻度视为设备重启（容忍采样抖动）
     if (job.sysinfo.sysUpTime) {
-      const r = await snmpGetValue(host, community, OID_SYSUPTIME, 3000, port);
+      const r = await snmpGetValue(host, target, OID_SYSUPTIME, 3000, port);
+      if (!job.enabled || job.stopping) return; // GET 期间任务拆除：迟到结果丢弃
       if (r.ok && Number.isFinite(Number(r.value))) {
         const up = Number(r.value);
         sample.up = up;
@@ -1499,31 +1807,29 @@ class MonitorManager extends EventEmitter {
         job.upPrev = up;
       }
     }
-    const clampPct = (v) => Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v * 10) / 10)) : null;
-    // CPU 利用率（%）
+    // 换算语义就地兜底推导：perf 可能未经 _validate（如直接构造的 job/旧配置），
+    // 缺 mode 时按「有 freeOid 即 usedfree，否则 percent」——与旧版本行为逐字一致
+    const cpuMode = perf.cpuMode === 'idle100' ? 'idle100' : 'direct';
+    const memMode = MEM_MODES.indexOf(perf.memMode) >= 0 ? perf.memMode : (perf.memFreeOid ? 'usedfree' : 'percent');
+    // CPU 利用率（%）：换算语义见 cpuPctOf（direct / idle100）
     if (perf.enabled && perf.cpuOid) {
-      const r = await snmpGetValue(host, community, perf.cpuOid, 3000, port);
-      if (r.ok) sample.cpu = clampPct(Number(r.value));
+      const r = await snmpGetValue(host, target, perf.cpuOid, 3000, port);
+      if (r.ok) sample.cpu = cpuPctOf(cpuMode, r.value);
     }
-    // 内存占用：memFreeOid 已配置 → used/(used+free)（思科字节型）；未配置 → memUsedOid 值即百分比（华为/华三）
+    // 内存占用：换算语义见 memPctOf（percent / usedfree / totalavail）
     if (perf.enabled && perf.memUsedOid) {
-      const ru = await snmpGetValue(host, community, perf.memUsedOid, 3000, port);
+      const ru = await snmpGetValue(host, target, perf.memUsedOid, 3000, port);
       if (ru.ok) {
-        const used = Number(ru.value);
-        if (Number.isFinite(used)) {
-          if (perf.memFreeOid) {
-            const rf = await snmpGetValue(host, community, perf.memFreeOid, 3000, port);
-            const free = rf.ok ? Number(rf.value) : NaN;
-            sample.mem = (Number.isFinite(free) && used + free > 0)
-              ? Math.round(used / (used + free) * 1000) / 10
-              : null;
-          } else {
-            sample.mem = clampPct(used);
-          }
+        if (memMode === 'percent') {
+          sample.mem = memPctOf('percent', ru.value);
+        } else if (perf.memFreeOid) {
+          const rf = await snmpGetValue(host, target, perf.memFreeOid, 3000, port);
+          sample.mem = memPctOf(memMode, ru.value, rf.ok ? rf.value : NaN);
         }
       }
     }
     if (sample.up == null && sample.cpu == null && sample.mem == null) return;
+    if (!job.enabled || job.stopping) return; // CPU/内存 GET 期间任务拆除：迟到样本丢弃
     job.perfHist.push(sample);
     if (job.perfHist.length > IF_HIST_MAX) job.perfHist.shift();
     this._logLine(job, 'SNMP 性能采集：' + [
@@ -1604,13 +1910,20 @@ class MonitorManager extends EventEmitter {
   _runOnConnect(job, gen) {
     if (!job.enabled || job.stopping || gen !== job.gen || job.state !== 'monitoring' || !job.sid) return;
     const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
+    // 占用命令互斥位：连接时命令常用于 screen-length 0 disable 等初始化，与周期循环/指标采集/
+    // 备份交叉下发会让首轮命令混入分页符或落错视图（对照 _runCycle/_runMetrics/_runBackup 均互斥）
+    job._cycleActive = true;
     (async () => {
-      await this._waitReady(job, gen, READY_TIMEOUT_MS); // 连接时命令同样等会话就绪
-      for (const cmd of job.onConnect) {
-        if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) return;
-        this._logCmd(job, cmd + '（连接时执行）');
-        try { this.shell.write(job.sid, cmd + eol); } catch (e) { /* ignore */ }
-        if (job.cmdDelayMs > 0) await sleep(job.cmdDelayMs);
+      try {
+        await this._waitReady(job, gen, READY_TIMEOUT_MS); // 连接时命令同样等会话就绪
+        for (const cmd of job.onConnect) {
+          if (!job.enabled || job.stopping || gen !== job.gen || !job.sid) return;
+          this._logCmd(job, cmd + '（连接时执行）');
+          try { this.shell.write(job.sid, cmd + eol); } catch (e) { /* ignore */ }
+          if (job.cmdDelayMs > 0) await sleep(job.cmdDelayMs);
+        }
+      } finally {
+        job._cycleActive = false;
       }
     })();
   }
@@ -1622,25 +1935,43 @@ class MonitorManager extends EventEmitter {
     // 不能因 logStream 降级为 null 就整体退出：就绪判定/告警匹配/备份捕获都在本函数里，
     // 日志 I/O 失败只该丢日志（_logLine 内部自愈重开），仅读取任务的输出处理不能跟着停摆
     if (!job) return;
-    let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '');
+    let text = String(data || '').replace(RE_ANSI_CSI, '').replace(RE_ANSI_CHARSET, '');
     // 去掉独立的回车（CRLF / CR 均归一为换行）
-    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    text = text.replace(RE_CRLF, '\n').replace(RE_CR, '\n');
     job.lineBuf += text;
     // 设备长时间不输出换行时强制断行，防行缓冲无界增长（主进程内存）
     if (job.lineBuf.length > MAX_LINEBUF_CHARS) {
-      const cut = job.lineBuf.slice(0, MAX_LINEBUF_CHARS).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+      const cut = job.lineBuf.slice(0, MAX_LINEBUF_CHARS).replace(RE_CTRL, '');
       if (cut) this._logLine(job, cut);
       job.lineBuf = job.lineBuf.slice(MAX_LINEBUF_CHARS);
     }
     const parts = job.lineBuf.split('\n');
     job.lineBuf = parts.pop(); // 保留半行
+    // 分页提示自动翻页（华为/H3C「  ---- More ----」/思科「--More--」）：未关分页的设备上，
+    // 会话内备份与周期命令输出会被截断在第一屏（真机实测：云路由 running-config 首屏即断）。
+    // 提示行不带换行、落在半行缓冲里——尾部恰为 More 标记时补一个空格继续（与 runOneShot/runDeploy
+    // 同口径）。节流窗口内的标记不能丢：真机整屏输出可短至 ~50ms，节流直接跳过会让设备静默等键而死锁
+    // （备份窗口随后关闭、内容拦腰截断）——安排一次性重试，窗口过后标记仍在则补发。
+    const sendMoreSpace = () => {
+      job._lastMoreAt = Date.now();
+      try { this.shell.write(job.sid, ' '); } catch (e) { /* 会话已断 */ }
+    };
+    if (RE_MORE.test(job.lineBuf.trim())) {
+      if (Date.now() - (job._lastMoreAt || 0) > 150) sendMoreSpace();
+      else if (!job._moreRetry) {
+        job._moreRetry = setTimeout(() => {
+          job._moreRetry = null;
+          if (job.enabled && !job.stopping && job.sid && RE_MORE.test(String(job.lineBuf || '').trim())) sendMoreSpace();
+        }, 160);
+      }
+    }
     const captured = [];
     for (const ln of parts) {
-      let t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+      let t = ln.replace(RE_CTRL, '');
       if (t) {
         // 凭据打码先行：日志、告警缓冲、备份捕获共用该行文本，恶意设备回显密码不得落到任何一处
         t = this._maskSecrets(job, t);
-        this._logLine(job, t);
+        this._logLine(job, t, true);
         if (!job._ready && PROMPT_RE.test(t.trim())) job._ready = true; // 会话就绪：收到命令提示符行（banner 期拼接的底层报文不触发）
         // 告警缓冲：周期循环、连接时执行命令、仅读取模式的设备主动输出，全部纳入关键字告警匹配。
         // 字节上限 + 丢最旧：行数上限挡不住「行数少但单行极长」的组合，join 前内存必须有界
@@ -1694,7 +2025,8 @@ class MonitorManager extends EventEmitter {
     // 事件携带的 host 优先：经跳板连接时目标与跳板各自独立确认，按归属主机放行/记录
     const host = String((info && info.host) || job.host);
     const fp = String(info.fp || '');
-    const known = this.trusted.get(host);
+    const key = fpKeyOf(host, info && info.port); // 键含端口：同 IP 不同端口是不同设备
+    const known = this.trusted.get(key);
     if (known) {
       if (known === fp) {
         this._logLine(job, '主机指纹一致，通过验证。');
@@ -1708,12 +2040,12 @@ class MonitorManager extends EventEmitter {
       }
     } else {
       this._logLine(job, '首次连接，已自动信任主机指纹 SHA256: ' + fp);
-      this.trusted.set(host, fp);
+      this.trusted.set(key, fp);
       this._saveTrust();
       // 首连自动信任属安全敏感事件：通知主进程弹出系统通知（后续指纹变化仍会拒连）
       this.emit('trust', { key: job.key, deviceId: job.deviceId, name: job.name, host, fp });
     }
-    try { this.shell.trustFingerprint(host, true); } catch (e) { /* ignore */ }
+    try { this.shell.trustFingerprint(host, true, 'monitor'); } catch (e) { /* ignore */ }
   }
 
   _onEnd(sid, reason) {
@@ -1760,9 +2092,12 @@ class MonitorManager extends EventEmitter {
       else { job.probeFailSince = null; if (job.statusText.indexOf('探测离线') >= 0) job.statusText = (job.readOnly ? '仅读取中：' : (job.commands.length ? '监控中：' : '仅探测中：')) + job.host + ':' + job.port + '（' + job.protocol.toUpperCase() + '）'; }
       if (changed) {
         this._logLine(job, ok ? '探测恢复：' + job.host + ':' + job.port + '（' + latency + 'ms）' : '警告：探测失败，' + job.host + ':' + job.port + ' 可能离线');
-        this.emit('probe', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok, latencyMs: latency, failSince: job.probeFailSince });
         this._emit(job);
       }
+      // 每次探测都上报（不只变化沿）：UptimeStore 在线率按周期采样分桶，只在变化沿发事件时
+      // 稳定在线设备整周只落 1 桶、闪断一次的设备算出 50% 在线率；通知/时间线仍由
+      // electron-main 的 lastProbeOk 边沿检测去重，渲染层状态更新幂等
+      this.emit('probe', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok, latencyMs: latency, failSince: job.probeFailSince });
       if (job.enabled && !job.stopping && job.state === 'monitoring') this._scheduleProbe(job);
     };
     if (job.probe.type === 'icmp') {
@@ -1798,13 +2133,15 @@ class MonitorManager extends EventEmitter {
       const lines = job._alertPending;
       job._alertPending = [];
       job._alertPendingChars = 0;
-      // 字节预算内从尾部保留（新输出更值得关注）：join 结果 ≤ MAX_ALERT_TEXT_CHARS，先算后拼
-      let total = 0, start = lines.length;
+      // 字节预算内从尾部保留（新输出更值得关注）：join 结果 ≤ MAX_ALERT_TEXT_CHARS，先算后拼。
+      // start 从 0 起步：预算内保留全部；仅当超出预算时才推进起点（丢最旧）——
+      // 此前 start 初始为 lines.length，预算未超时会 slice 出空数组导致关键字告警永不触发（实测发现）
+      let total = 0, start = 0;
       for (let i = lines.length - 1; i >= 0; i--) {
         total += lines[i].length + 1;
         if (total > MAX_ALERT_TEXT_CHARS) { start = i + 1; break; }
       }
-      const kept = start > 0 ? lines.slice(start) : lines;
+      const kept = lines.slice(start);
       const text = kept.join('\n');
       // 本轮命中的全部关键字（按配置顺序）；告警解除需所有关键字同时不再命中
       const hit = [];
@@ -1910,6 +2247,11 @@ class MonitorManager extends EventEmitter {
       try { this.shell.write(job.sid, cmd + eol); } catch (e) { job._backupCap = null; this._finishBackup(job, gen, { ok: false, error: '写入失败' }); return; }
       await sleep(job.backup.waitMs);
     }
+    // 分页仍在进行（半行缓冲尾部是 More 标记，_onOutput 已自动补空格翻页）：逐屏延长等待，
+    // 否则未关分页设备的多屏配置会被固定等待窗口拦腰截断（真机实测：云路由 running-config 约 8 屏）。上限 10 屏 × 500ms。
+    for (let i = 0; i < 10 && /^[\s-]*more[\s-]*$/i.test(String(job.lineBuf || '').trim()); i++) {
+      await sleep(500);
+    }
     await sleep(300); // 尾部输出缓冲
     const cap = job._backupCap;
     job._backupCap = null;
@@ -1940,6 +2282,11 @@ class MonitorManager extends EventEmitter {
       const fail = (err) => {
         // 连接超时/出错/指纹拒连时连接可能仍在建：主动关闭，防慢设备稍后连上时留下无人认领的会话
         try { this.shell.close(sid); } catch (e) { /* ignore */ }
+        // 必须清掉连接超时定时器：失败路径此前不清，15s 后定时器必然再调一次 fail，
+        // 于是同一轮失败被上报两次（弹两次通知），并把 backupLast.error 覆盖成与实际原因
+        // 无关的「备份连接超时」，排障方向被带偏
+        clearTimeout(connTimer);
+        if (settled) return;
         settle();
         this._finishBackup(job, gen, { ok: false, error: err });
       };
@@ -1956,14 +2303,17 @@ class MonitorManager extends EventEmitter {
           // 否则跳板先到时其指纹会被记到目标主机名下，后续连接全部「指纹变化」误拒
           const host = String((info && info.host) || job.host);
           const fp = String(info.fp || '');
-          const known = this.trusted.get(host);
-          if (known && known !== fp) { fail('备份连接：主机指纹变化，已拒绝连接'); return; }
+          const key = fpKeyOf(host, info && info.port); // 与监控会话同一份信任库、同一套键口径
+          const known = this.trusted.get(key);
+          // 指纹拒连路径须先摘除 status 监听：shell 是共享 EventEmitter，直接 return 会让
+          // 持有 job/sid 闭包的监听器残留累积（每次拒连泄漏一个）
+          if (known && known !== fp) { this.shell.removeListener('status', onStatus); fail('备份连接：主机指纹变化，已拒绝连接'); return; }
           if (!known) {
-            this.trusted.set(host, fp);
+            this.trusted.set(key, fp);
             this._saveTrust();
             this.emit('trust', { key: job.key, deviceId: job.deviceId, name: job.name, host, fp });
           }
-          try { this.shell.trustFingerprint(host, true); } catch (e) { /* ignore */ }
+          try { this.shell.trustFingerprint(host, true, 'monitor'); } catch (e) { /* ignore */ }
         } else if (info.state === 'error') {
           this.shell.removeListener('status', onStatus);
           fail(info.text || '备份连接失败');
@@ -1986,11 +2336,26 @@ class MonitorManager extends EventEmitter {
       let lineBuf = '';
       let lineChars = 0; // 独立备份输出字节上限：恶意服务端灌输出时按字节丢后续行（与 8MB 单份上限对齐）
       let ownReady = false; // 独立新会话的就绪标志（与监控会话 _ready 互不干扰）
+      // 备份会话中途断开检测：shell.write 对已断会话是静默 no-op，若无此检测，命令序列在设备
+      // 掉线后继续空转并把截断的输出当正常备份入库（对照复用会话路径的 !job.sid 存活检查）
+      let dead = false;
+      const onEnd = (sid2, reason) => {
+        if (sid2 !== sid) return;
+        dead = true;
+        this._finishBackup(job, gen, { ok: false, error: '备份连接中断：' + (reason || '连接已关闭') });
+      };
       const eol = job.protocol === 'telnet' ? '\r\n' : '\n';
       const onOut = (sid2, data) => {
         if (sid2 !== sid) return;
         let text = String(data || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\u001b[()][0-9A-B]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
         lineBuf += text;
+        // 恶意服务端持续灌不含换行的输出时行缓冲无界增长（就绪等待窗最长 15s + 命令执行窗）：
+        // 与 _onOutput 同口径按 256K 强制断行，断行段同样走凭据打码与字节上限
+        if (lineBuf.length > MAX_LINEBUF_CHARS) {
+          const cut = lineBuf.slice(0, MAX_LINEBUF_CHARS).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          if (cut && ownReady && lineChars + cut.length + 1 <= MAX_BACKUP_CAPTURE_CHARS) { lines.push(this._maskSecrets(job, cut)); lineChars += cut.length + 1; }
+          lineBuf = lineBuf.slice(MAX_LINEBUF_CHARS);
+        }
         const parts = lineBuf.split('\n');
         lineBuf = parts.pop(); // 半行留缓冲，等下个事件续拼成整行
         for (const ln of parts) {
@@ -2001,12 +2366,13 @@ class MonitorManager extends EventEmitter {
         }
       };
       this.shell.on('output', onOut);
+      this.shell.on('end', onEnd);
       (async () => {
         // 空行探测提示符（Telnet 自动登录中跳过，防空行落在登录提示上引发重印干扰应答）
         if (!(job.protocol === 'telnet' && job.password)) { try { this.shell.write(sid, '\r\n'); } catch (e) { /* ignore */ } }
         const t0 = Date.now();
         // 提示符常不带换行结尾（…\r\n> 截止于提示符）：半行残段同样参与就绪判定，否则白等满超时
-        while (!ownReady && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
+        while (!ownReady && !dead && !job.stopping && gen === job.gen && (Date.now() - t0) < READY_TIMEOUT_MS) {
           if (lineBuf && PROMPT_RE.test(lineBuf.trim())) { ownReady = true; break; }
           await sleep(200);
         }
@@ -2016,21 +2382,30 @@ class MonitorManager extends EventEmitter {
         lineChars = 0;
         lineBuf = '';
         for (const cmd of job.backup.commands) {
-          if (!job.enabled || job.stopping || gen !== job.gen) break;
+          if (dead || !job.enabled || job.stopping || gen !== job.gen) break;
           try { this.shell.write(sid, cmd + eol); } catch (e) { /* ignore */ }
           await sleep(job.backup.waitMs);
         }
         await sleep(400); // 尾部输出缓冲
-        // 尾部半行（末行无换行/收尾提示符）冲进结果（提示符行由 cleanBackupLines 剔除）
-        const tail = lineBuf.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+        // 尾部半行（末行无换行/收尾提示符）冲进结果（提示符行由 cleanBackupLines 剔除）：
+        // 同样过凭据打码——恶意设备把密码回显留在无换行结尾的尾段时不得明文落入备份文件
+        const tail = this._maskSecrets(job, lineBuf.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ''));
         if (tail.trim()) lines.push(tail);
         this.shell.removeListener('output', onOut);
+        this.shell.removeListener('end', onEnd);
         try { this.shell.close(sid); } catch (e) { /* ignore */ }
-        if (!job.enabled || job.stopping || gen !== job.gen) { resolveCmds(); return; }
+        // 会话已断：已收内容是截断的半份配置，不得当正常备份入库（_finishBackup 已带失败结果）
+        if (dead || !job.enabled || job.stopping || gen !== job.gen) { resolveCmds(); return; }
         // 过滤命令回显（含提示符前缀整行/残片）与提示符行：只保留命令执行后的输出内容
         this._saveBackup(job, gen, cleanBackupLines(lines, job.backup.commands).join('\n'));
         resolveCmds();
-      })().catch(() => resolveCmds());
+      })().catch(() => {
+        this.shell.removeListener('output', onOut);
+        this.shell.removeListener('end', onEnd);
+        // 兜底关会话：正常路径末尾已 close，异常 reject 路径若不关，连接会残留到设备侧超时
+        try { this.shell.close(sid); } catch (e) { /* ignore */ }
+        resolveCmds();
+      });
     });
   }
 
@@ -2045,16 +2420,19 @@ class MonitorManager extends EventEmitter {
       return;
     }
     const deviceKey = job.name || job.deviceId;
+    // 易变行忽略规则（时钟/运行时长/时间戳等）：由宿主注入的提供者给出，缺省不过滤
+    const ignoreRules = (() => { try { return typeof this._ignoreRules === 'function' ? (this._ignoreRules() || []) : []; } catch (e) { return []; } })();
     if (job.backup.skipIfSame) {
       const prevName = this.backupStore.latest(deviceKey, job.host);
       if (prevName) {
         const prev = this.backupStore.read(deviceKey, job.host, prevName);
-        if (prev.ok && prev.content === content) {
-          // 与上一份完全一致：不新增备份文件，仅刷新状态与广播
+        // 过滤后等价即视为无变化：否则时钟/运行时长这类噪声行会让「无变化不新增」彻底失效
+        if (prev.ok && sameAfterIgnore(prev.content, content, ignoreRules)) {
+          // 与上一份（忽略噪声行后）一致：不新增备份文件，仅刷新状态与广播
           job._bkResult = { saved: false, skipped: true, name: prevName };
           job.backupLast = { name: prevName, at: Date.now(), changed: false, same: true };
-          this._logLine(job, '配置备份：与上次一致，未新增备份文件（' + prevName + '）');
-          this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, skipped: true, changed: false, fileName: prevName, first: false });
+          this._logLine(job, '配置备份：与上次一致（已忽略 ' + ignoreRules.length + ' 条易变行规则），未新增备份文件（' + prevName + '）');
+          this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, skipped: true, changed: false, fileName: prevName, first: false, ignoredRules: ignoreRules.length });
           this._emit(job);
           return;
         }
@@ -2070,14 +2448,18 @@ class MonitorManager extends EventEmitter {
     }
     let diffInfo = null;
     if (r.prev) {
-      const d = this.backupStore.diff(job.name || job.deviceId, job.host, r.prev, r.name);
-      if (d.ok) diffInfo = { added: d.added, removed: d.removed, changed: d.changed };
+      // 变更判定走「过滤噪声行后」的 diff，并顺带产出摘要（事件与通知里能直接看到变了什么）
+      const prevRead = this.backupStore.read(deviceKey, job.host, r.prev);
+      const d = prevRead.ok
+        ? ConfigBackupStore.diffConfigText(prevRead.content, content, ignoreRules)
+        : this.backupStore.diff(deviceKey, job.host, r.prev, r.name);
+      if (d.ok) diffInfo = { added: d.added, removed: d.removed, changed: d.changed, summary: d.summary || '' };
     }
     const changed = diffInfo ? diffInfo.changed : true;
     job._bkResult = { saved: true, skipped: false, name: r.name, first: !!r.first, changed };
     job.backupLast = { name: r.name, at: Date.now(), changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null, first: !!r.first };
-    this._logLine(job, '配置备份已保存：' + r.name + '（' + content.split('\n').length + ' 行）' + (r.first ? '（首份）' : (diffInfo ? (changed ? '，与上次差异 +' + diffInfo.added + '/-' + diffInfo.removed + ' 行' : '，与上次一致') : '')));
-    this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, fileName: r.name, first: !!r.first, prev: r.prev, changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null });
+    this._logLine(job, '配置备份已保存：' + r.name + '（' + content.split('\n').length + ' 行）' + (r.first ? '（首份）' : (diffInfo ? (changed ? '，与上次差异 +' + diffInfo.added + '/-' + diffInfo.removed + ' 行' + (diffInfo.summary ? '：' + diffInfo.summary : '') : '，与上次一致') : '')));
+    this.emit('backup', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ok: true, fileName: r.name, first: !!r.first, prev: r.prev, changed, added: diffInfo ? diffInfo.added : null, removed: diffInfo ? diffInfo.removed : null, summary: (diffInfo && diffInfo.summary) || '', ignoredRules: ignoreRules.length });
     this._runCompliance(job, gen, content).catch(() => { /* 合规巡检失败不中断备份 */ });
   }
   /** 备份内容自动合规巡检（job.backup.compliance.enabled 时）：违规写入事件时间线并广播。
@@ -2144,5 +2526,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
 
