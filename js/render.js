@@ -56,6 +56,10 @@ class Renderer {
     this.linkLayer = el('g', { id: 'linkLayer' }, this.world);
     this.nodeLayer = el('g', { id: 'nodeLayer' }, this.world);
     this.textLayer = el('g', { id: 'textLayer' }, this.world);
+    // 交互手柄层（最顶）：节点手动缩放手柄。独立于 nodeLayer——setData 会清空 nodeLayer
+    this.uiLayer = el('g', { id: 'uiLayer' }, this.world);
+    this._rsHandle = el('rect', { class: 'node-resize-handle', display: 'none' }, this.uiLayer);
+    this._rsNodeId = null;
 
     this._bind();
     this.applyView();
@@ -544,6 +548,7 @@ class Renderer {
     }
     // 画布更新后回调（链路流量叠加等外部叠加层的重定位入口；异常不阻断渲染）
     if (typeof this.onAfterUpdate === 'function') { try { this.onAfterUpdate(); } catch (e) { /* ignore */ } }
+    this._updateResizeHandle();
   }
 
   /** 帧合并刷新：指针级高频路径（拖拽移动/滚轮缩放）用，同一帧内多次请求只做一次全量 update。
@@ -560,6 +565,7 @@ class Renderer {
     for (const [nid, g] of this.nodeEls) g.classList.toggle('selected', this.selIds.has(nid));
     for (const [lid, g] of this.linkEls) g.classList.toggle('selected', this.selLinkIds.has(lid));
     for (const [tid, g] of this.textEls) g.classList.toggle('selected', this.sel.kind === 'text' && this.sel.id === tid);
+    this._updateResizeHandle(); // 选中集变化即刷新缩放手柄（setData 清空选中后恢复选中时不走 update）
   }
 
   select(kind, id, opts) {
@@ -682,6 +688,12 @@ class Renderer {
       // 右键等非主键不启动任何拖拽/平移：Windows 的 contextmenu 在 mouseup 才触发，
       // 右键按下后稍有移动会把设备拖走并在菜单弹出前产生一次错误移动
       if (e.button !== 0) return;
+      // 节点缩放手柄（uiLayer 直挂 svg，不在任何 .node 组内）：优先于节点拖拽/画布平移拦截
+      if (e.target && e.target.classList && e.target.classList.contains('node-resize-handle')) {
+        e.preventDefault();
+        if (this.allowDrag) this._startNodeResize(e);
+        return;
+      }
       const target = e.target.closest ? e.target.closest('.node, .link, .ann, .region') : null;
       if (target) {
         const kind = target.classList.contains('node') ? 'node'
@@ -839,6 +851,80 @@ class Renderer {
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);
     svgElAdd(this.svg, 'pointercancel', cancel);
+  }
+
+  /* ---------- 节点手动缩放 ---------- */
+  /** 尺寸变化后重建单个节点 DOM（shape/图标/文字布局全部依赖 w/h）。
+   *  保持元素在 nodeLayer 中的次序与选中/高亮等运行时 class，拖拽缩放每帧调用 */
+  _rebuildNode(n) {
+    const old = this.nodeEls.get(n.id);
+    if (!old) { this._buildNode(n); return; }
+    const next = old.nextSibling;
+    old.remove();
+    this._buildNode(n); // append 到 nodeLayer 末尾
+    const g = this.nodeEls.get(n.id);
+    if (!g) return;
+    if (next) this.nodeLayer.insertBefore(g, next);
+    if (this.selIds.has(n.id)) g.classList.add('selected');
+    if (this.pathHl && this.pathHl.nodeIds && this.pathHl.nodeIds.includes(n.id)) g.classList.add('path-hl');
+    if (this.impactHl && this.impactHl.includes(n.id)) g.classList.add('impact-hl');
+  }
+
+  /** 手柄可见性与定位：仅「单选节点 + 允许拖拽」时显示在节点右下角。
+   *  尺寸取屏幕等效（除以 zoom），缩放画布时视觉大小稳定；update 与选中变化时刷新 */
+  _updateResizeHandle() {
+    const h = this._rsHandle;
+    if (!h) return;
+    const nid = (this.sel.kind === 'node' && this.selIds.size === 1) ? [...this.selIds][0] : null;
+    const n = nid ? this.nodes.find(x => x.id === nid) : null;
+    if (!n || !this.allowDrag) { h.setAttribute('display', 'none'); this._rsNodeId = null; return; }
+    const hs = 11 / this.zoom;
+    h.setAttribute('display', '');
+    h.setAttribute('x', (n.x + n.w - hs / 2).toFixed(1));
+    h.setAttribute('y', (n.y + n.h - hs / 2).toFixed(1));
+    h.setAttribute('width', hs);
+    h.setAttribute('height', hs);
+    h.setAttribute('rx', hs / 4);
+    this._rsNodeId = n.id;
+  }
+
+  _startNodeResize(e) {
+    const id = this._rsNodeId;
+    const n = id ? this.nodes.find(x => x.id === id) : null;
+    if (!n) return;
+    this.cb.onNodeResizeStart && this.cb.onNodeResizeStart(id);
+    const start = this.toWorld(e.clientX, e.clientY);
+    const o = { w: Number(n.w) > 0 ? Number(n.w) : U.NODE_W, h: Number(n.h) > 0 ? Number(n.h) : U.NODE_H };
+    let moved = false;
+    try { this.svg.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件无活动指针时忽略 */ }
+    const move = (ev) => {
+      const p = this.toWorld(ev.clientX, ev.clientY);
+      let w = o.w + (p.x - start.x), h = o.h + (p.y - start.y);
+      // Shift 等比：取宽高两侧中较大的缩放比例（向外扩优先），保证拖拽方向手感一致
+      if (ev.shiftKey && o.w > 0 && o.h > 0) {
+        const k = Math.max(w / o.w, h / o.h);
+        w = o.w * k; h = o.h * k;
+      }
+      // 下限与 sanitizeGraph 口径一致（40/24），上限防误拖出整屏巨框
+      w = U.clamp(Math.round(w), 40, 2000);
+      h = U.clamp(Math.round(h), 24, 2000);
+      if (w === n.w && h === n.h) return;
+      n.w = w; n.h = h;
+      n.sized = true; // 手动尺寸：此后改名/管理地址变化不再自动改写宽高
+      moved = true;
+      this._rebuildNode(n);
+      this.updateSoon(); // 链路端点按节点矩形边计算，须随尺寸刷新
+      this.cb.onNodeResize && this.cb.onNodeResize(id, w, h);
+    };
+    const finish = () => {
+      svgElRemove(this.svg, 'pointermove', move);
+      svgElRemove(this.svg, 'pointerup', finish);
+      svgElRemove(this.svg, 'pointercancel', finish);
+      if (moved) this.cb.onNodeResizeEnd && this.cb.onNodeResizeEnd(id, true);
+    };
+    svgElAdd(this.svg, 'pointermove', move);
+    svgElAdd(this.svg, 'pointerup', finish);
+    svgElAdd(this.svg, 'pointercancel', finish);
   }
 
   /* ---------- 区域整体拖动（含框内设备/文本框，几何包含按拖拽开始时判定） ---------- */

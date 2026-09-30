@@ -194,7 +194,7 @@ function recordsToGraph(records) {
   const applyMgmt = (n, val) => {
     if (!n) return;
     const ms = U.splitMgmts(val);
-    if (ms.length && !U.nodeMgmts(n).length) { U.setNodeMgmts(n, ms); n.h = U.nodeHeightFor(n); }
+    if (ms.length && !U.nodeMgmts(n).length) { U.setNodeMgmts(n, ms); if (!n.sized) n.h = U.nodeHeightFor(n); }
   };
   const applyVlans = (n, val) => {
     if (!n) return;

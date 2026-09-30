@@ -77,6 +77,13 @@ const renderer = new TopoRender($('#svg'), {
     state._dragPre = null;
     refreshPanel();
   },
+  // 节点手动缩放（右下角手柄）：与拖动同口径走 _dragPre 快照撤销
+  onNodeResizeStart(id) { state._dragPre = snapshot(); },
+  onNodeResizeEnd(id, moved) {
+    if (moved && state._dragPre) pushUndo(state._dragPre);
+    state._dragPre = null;
+    refreshPanel();
+  },
   onBgClick() { if (state.mode === 'normal') select(null, null); },
   onHover(e, kind, id) { showTooltip(e, kind, id); },
   onHoverOut() { hideTooltip(); },
@@ -3565,8 +3572,9 @@ function openRename() {
     const pad = Number(ov.querySelector('#rnPad').value || 0);
     pushUndo();
     U.renameNodes(nodes, { mode, prefix, suffix, start, pad });
-    // 名称变化 → 宽度自适应（保持中心不变）
+    // 名称变化 → 宽度自适应（保持中心不变；手动缩放过的节点保持用户尺寸）
     for (const n of nodes) {
+      if (n.sized) continue;
       const nw = U.nodeWidthForName(n.name);
       const dw = nw - n.w;
       if (dw) { n.w = nw; n.x -= dw / 2; }
@@ -5010,14 +5018,17 @@ function editNode(id) {
     onSubmit: (v) => {
       pushUndo(); // 变更前快照
       n.name = v.name.trim() || n.name;
-      // 名称变化 → 宽度自适应，保持中心不变
-      const nw = U.nodeWidthForName(n.name);
-      const dw = nw - n.w;
-      if (dw) { n.w = nw; n.x -= dw / 2; }
-      // 管理地址变化 → 高度自适应（保持中心不变）
+      // 管理地址仍须更新；宽高仅在未手动缩放时自适应（保持中心不变）
       U.setNodeMgmts(n, v.mgmts);
-      const nh = U.nodeHeightFor(n);
-      if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
+      if (!n.sized) {
+        // 名称变化 → 宽度自适应，保持中心不变
+        const nw = U.nodeWidthForName(n.name);
+        const dw = nw - n.w;
+        if (dw) { n.w = nw; n.x -= dw / 2; }
+        // 管理地址变化 → 高度自适应（保持中心不变）
+        const nh = U.nodeHeightFor(n);
+        if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
+      }
       n.type = v.type;
       n.vendor = v.vendor || '';
       n.icon = v.icon || '';
@@ -5265,6 +5276,7 @@ function batchEditNodes() {
         // 与单设备编辑同口径：过 normalizeWebUrl（自动补 http://、拒绝 javascript:/data: 等危险协议与限长）
         if (String(v.web).trim()) n.web = U.normalizeWebUrl(v.web) || '';
         if (String(v.note).trim()) n.note = String(v.note).trim();
+        if (n.sized) continue; // 手动缩放过：高度保持用户尺寸
         const nh = U.nodeHeightFor(n);
         if (nh !== n.h) { const dh = nh - n.h; n.h = nh; n.y -= dh / 2; }
       }
@@ -5757,6 +5769,24 @@ function confirmBox(message) {
 }
 
 /* ================= 右键菜单 ================= */
+/* 恢复自适应尺寸：清除手动缩放标志，按名称/管理地址重算宽高（中心保持不变） */
+function resetNodeSize(id) {
+  const n = state.nodes.find(x => x.id === id);
+  if (!n) return;
+  pushUndo();
+  const nw = U.nodeWidthForName(n.name), nh = U.nodeHeightFor(n);
+  n.x -= (nw - n.w) / 2; n.y -= (nh - n.h) / 2;
+  n.w = nw; n.h = nh; n.sized = false;
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
+  // setData 清空选中：恢复选中（与批量编辑同口径），否则后续 Delete/详情卡片作用于错误目标
+  renderer.selIds = new Set([id]);
+  renderer.sel = { kind: 'node', id };
+  renderer._syncSelClass();
+  state.sel = { kind: 'node', id };
+  refreshAll(); saveGraph();
+  toast(`已恢复「${n.name}」自适应尺寸`);
+}
+
 function openCtx(e, kind, id) {
   closeDrop();
   const menu = $('#ctx');
@@ -5775,6 +5805,8 @@ function openCtx(e, kind, id) {
       { sep: true },
       { ic: 'trash', label: '删除设备及连线', danger: true, act: () => deleteNode(id) }
     ];
+    // 手动缩放过的节点提供退出途径：清标志并按名称/管理地址重算宽高
+    if (n && n.sized) items.splice(2, 0, { ic: 'fit', label: '恢复自适应尺寸', act: () => resetNodeSize(id) });
     if (n) items.unshift({ head: `${n.name}（${U.getType(n.type).label}）` });
   } else if (kind === 'link') {
     const l = state.links.find(x => x.id === id);

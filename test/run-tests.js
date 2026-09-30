@@ -397,6 +397,10 @@ console.log('== 带宽单位解析 / 工程数据清洗 ==');
     [{ id: 't1', x: 'x', size: 0, color: 'red', bg: '#fff', align: 'up', text: 42 }]
   );
   ok(sg.nodes.length === 2 && sg.nodes[1].x === 0 && sg.nodes[1].w >= 40 && sg.nodes[1].type === 'other' && sg.nodes[1].name === 'R1' && sg.nodes[1].mgmt === '', '清洗节点缺失/畸形字段（坐标回退、宽度下限、类型回退）');
+  ok(sg.nodes[0].sized === false && sg.nodes[1].sized === false, '缺省节点为自适应尺寸（sized=false）');
+  const sgSized = U.sanitizeGraph([{ id: 'n3', name: 'R2', w: 500, h: 200, sized: true }, { id: 'n4', name: 'R3', w: 500, h: 200, sized: 'yes' }], [], []);
+  ok(sgSized.nodes[0].sized === true && sgSized.nodes[0].w === 500 && sgSized.nodes[0].h === 200, '手动缩放标志与宽高经清洗保留（不被自适应值覆盖）');
+  ok(sgSized.nodes[1].sized === false, 'sized 仅认严格布尔 true（字符串不置位）');
   ok(sg.links.length === 1 && sg.links[0].aIf === '1' && sg.links[0].aIp === '', '清洗连线字段为字符串');
   ok(sg.texts.length === 1 && sg.texts[0].x === 0 && sg.texts[0].size === 8 && sg.texts[0].color === '#1e293b' && sg.texts[0].bg === '' && sg.texts[0].align === 'left' && sg.texts[0].text === '42', '清洗文本框字段（颜色/对齐/字号回退）');
 }

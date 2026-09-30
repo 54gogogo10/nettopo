@@ -477,6 +477,10 @@ body:not(.panel-off) #panelOpen { display: none; }
 /* 框选 */
 .box-sel { fill: rgba(99,102,241,.12); stroke: #6366f1; stroke-width: 1.2; pointer-events: none; }
 
+/* 节点手动缩放手柄（单选节点右下角，屏幕等效尺寸随画布缩放折算） */
+.node-resize-handle { fill: #fbbf24; stroke: #ffffff; stroke-width: 1.5; cursor: nwse-resize; }
+.node-resize-handle:hover { fill: #f59e0b; }
+
 
 /* ============ 工具栏下拉菜单 ============ */
 #toolbar { overflow-x: auto; scrollbar-width: none; }

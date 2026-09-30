@@ -706,6 +706,8 @@ U.sanitizeGraph = (nodes, links, texts) => {
       x: coord(n.x, 0), y: coord(n.y, 0),
       // 宽高与坐标同口径双向钳制：只钳下限时 w:1e300 之类的畸形数据能通过清洗，画布/导出几何异常
       w: Math.max(Math.min(num(n.w, U.NODE_W), 1e5), 40), h: Math.max(Math.min(num(n.h, U.NODE_H), 1e5), 24),
+      // 手动缩放标志：置位后改名/管理地址变化不再自动改写宽高（右键「恢复自适应尺寸」可清除）
+      sized: n.sized === true,
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note).slice(0, 2000), web: U.normalizeWebUrl(n.web) || '',
       model: str(n.model).slice(0, 64), osver: str(n.osver).slice(0, 64), // 设备型号 / 软件版本（资产清单；SNMP 识别可自动回填版本）
       fields: U.cleanNodeFields(n.fields), // 自定义字段值（责任人/部门/资产编号/维保到期/机柜/U 位…）
