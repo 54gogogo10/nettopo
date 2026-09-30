@@ -276,6 +276,8 @@ function buildVSDX(graph, opts) {
     const cy = Y(n.y + n.h / 2);
     const w = n.w * scale, h = n.h * scale;
     const id = nodeShape.get(n.id);
+    // 手动缩放的节点：文字字号与图标宽度按 U.nodeContentScale 同步放大（与画布同口径）
+    const ck = U.nodeContentScale(n);
     // 设备图标：以 Foreign 图片形状叠加在设备图标区（左上 6px、宽 44px、垂直居中）。
     // 取图优先级同画布：设备级图标 n.icon > 类型上传图片；SVG 形态的 n.icon 由 app.js 上游光栅化兜底。
     const iconSrc = pickIconSrc(n.icon, t && t.img, imageParts, droppedIcons);
@@ -288,8 +290,8 @@ function buildVSDX(graph, opts) {
       imageParts.set(iconSrc, part);
     }
     if (part) {
-      const imgW = 44 * scale, imgH = (n.h - 12) * scale;
-      const pinX = (n.x - minX) * scale + 28 * scale; // 图标中心 x = 左边界 + 28px
+      const imgW = 44 * ck * scale, imgH = (n.h - 12) * scale;
+      const pinX = (n.x - minX) * scale + 28 * ck * scale; // 图标中心 x = 左边界 + (6+44/2)×k
       const pinY = cy; // 图标垂直居中
       const isid = sid++;
       shapes.push(`    <Shape ID='${isid}' Type='Foreign' LineStyle='0' FillStyle='0' TextStyle='0'>
@@ -365,7 +367,7 @@ function buildVSDX(graph, opts) {
         <Row IX='0'>
           ${cell('Font', 1)}
           ${cell('Color', '#FFFFFF')}
-          ${cell('Size', 0.1667)}
+          ${cell('Size', 0.1667 * ck)}
           ${cell('Style', 1)}
         </Row>
       </Section>

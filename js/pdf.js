@@ -135,13 +135,16 @@ function buildSvgImage(graph, opts) {
     const x = X(n.x), y = Y(n.y), w = n.w, h = n.h;
     parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="${esc(t.c1)}" stroke="${esc(t.stroke)}" stroke-width="1.5"/>`);
     const cx = x + w / 2, cy = y + h / 2;
+    // 手动缩放的节点：字号随 U.nodeContentScale 同步放大（与画布同一口径，导出观感一致）
+    const ck = U.nodeContentScale(n);
+    const fsNm = (13.5 * ck).toFixed(2), fsSub = (10 * ck).toFixed(2);
     // 管理地址判定与画布/VSDX 同口径走 nodeMgmts：mgmt 单字段为空而 mgmts 有值是合法数据
     const hasMgmt = U.nodeMgmts(n).length > 0;
     // 超长设备名截断：SVG text 无裁剪直接溢出绘制，200 字符名会压盖相邻设备（画布上有 _fitName，导出同口径收敛）
-    parts.push(`<text x="${cx}" y="${hasMgmt ? cy - 11 : cy - 4}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="13.5" font-weight="bold" fill="#ffffff" text-anchor="middle">${esc(U.truncate(n.name, 40))}</text>`);
-    parts.push(`<text x="${cx}" y="${hasMgmt ? cy + 5 : cy + 15}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.8)" text-anchor="middle">${esc(t.label)}</text>`);
+    parts.push(`<text x="${cx}" y="${hasMgmt ? cy - 11 * ck : cy - 4 * ck}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="${fsNm}" font-weight="bold" fill="#ffffff" text-anchor="middle">${esc(U.truncate(n.name, 40))}</text>`);
+    parts.push(`<text x="${cx}" y="${hasMgmt ? cy + 5 * ck : cy + 15 * ck}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="${fsSub}" fill="rgba(255,255,255,0.8)" text-anchor="middle">${esc(t.label)}</text>`);
     if (hasMgmt) {
-      parts.push(`<text x="${cx}" y="${cy + 19}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="10" fill="rgba(255,255,255,0.7)" text-anchor="middle">管理: ${esc(U.truncate(U.nodeMgmts(n).join(', '), 60))}</text>`);
+      parts.push(`<text x="${cx}" y="${cy + 19 * ck}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="${fsSub}" fill="rgba(255,255,255,0.7)" text-anchor="middle">管理: ${esc(U.truncate(U.nodeMgmts(n).join(', '), 60))}</text>`);
     }
   }
 

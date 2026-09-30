@@ -322,65 +322,83 @@ class Renderer {
     const iconKey = (n.icon && U.NODE_ICON_KEYS && U.NODE_ICON_KEYS.includes(n.icon)) ? n.icon : null;
     const iconImg = n.icon && !iconKey ? n.icon : (t.img || '');
     const nh = Number(n.h) > 0 ? Number(n.h) : U.NODE_H; // 兜底：旧工程可能缺 h
-    const isz = Math.max(24, Math.min(44, nh - 12)); // 方框边长（正方形）
+    // 手动缩放的节点：框内内容（图标/字号/行距/留白）按 U.nodeContentScale 同步缩放；
+    // k=1（未手动缩放）时所有取值与原自适应布局逐项相等，默认外观零变化
+    const k = U.nodeContentScale(n);
+    const isz = k === 1 ? Math.max(24, Math.min(44, nh - 12)) : Math.max(16, Math.max(24, Math.min(44, U.nodeHeightFor(n) - 12)) * k); // 方框边长（正方形）
     const dispW = isz, dispH = isz;
-    const ix = 6, iy = Math.max(0, (nh - dispH) / 2);
-    el('rect', { class: 'icon-chip', x: ix, y: iy, width: dispW, height: dispH, rx: 8, fill: 'rgba(255,255,255,.14)' }, body);
-    const tx = ix + dispW + 8; // 文字起点
+    const ix = 6 * k, iy = Math.max(0, (nh - dispH) / 2);
+    el('rect', { class: 'icon-chip', x: ix, y: iy, width: dispW, height: dispH, rx: 8 * k, fill: 'rgba(255,255,255,.14)' }, body);
+    const tx = ix + dispW + 8 * k; // 文字起点
     if (iconImg) {
       const cid = 'clip-' + n.id;
       const cp = el('clipPath', { id: cid }, body);
       // 裁剪区原点必须与图片一致（ix, iy），否则图片右下角被裁掉、内容偏左上
-      el('rect', { x: ix, y: iy, width: dispW, height: dispH, rx: 8 }, cp);
+      el('rect', { x: ix, y: iy, width: dispW, height: dispH, rx: 8 * k }, cp);
       const img = el('image', {
         href: iconImg, x: ix, y: iy, width: dispW, height: dispH,
         preserveAspectRatio: 'none', // 直接拉伸缩放填满方框
         'clip-path': `url(#${cid})`
       }, body);
       img.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', iconImg);
-      el('rect', { x: ix, y: iy, width: dispW, height: dispH, rx: 8, fill: 'none', stroke: 'rgba(255,255,255,.35)', 'stroke-width': 1 }, body);
+      el('rect', { x: ix, y: iy, width: dispW, height: dispH, rx: 8 * k, fill: 'none', stroke: 'rgba(255,255,255,.35)', 'stroke-width': 1 }, body);
     } else {
-      const ic = el('g', { transform: `translate(${ix + (dispH - 26) / 2} ${iy + (dispH - 26) / 2})` }, body);
+      const isv = 26 * k; // 内置图标矢量尺寸随内容缩放
+      const ic = el('g', { transform: `translate(${ix + (dispH - isv) / 2} ${iy + (dispH - isv) / 2})` }, body);
       ic.setAttribute('color', '#ffffff');
-      const sv = el('svg', { viewBox: '0 0 24 24', width: 26, height: 26 }, ic);
+      const sv = el('svg', { viewBox: '0 0 24 24', width: isv, height: isv }, ic);
       sv.innerHTML = U.ICONS[iconKey || t.key] || U.ICONS.other;
     }
-    // 名称 / 类型 / 管理地址（有管理地址时节点加高，多个地址分行显示）
+    // 名称 / 类型 / 管理地址（有管理地址时节点加高，多个地址分行显示）。
+    // 字号随 k 缩放须以 inline style 落（class 里的 font-size 优先级高于 SVG 属性）
+    const fsNm = 13.5 * k, fsTp = 10.5 * k, fsMg = 10 * k;
+    const stNm = k === 1 ? null : 'font-size:' + fsNm + 'px';
+    const stTp = k === 1 ? null : 'font-size:' + fsTp + 'px';
+    const stMg = k === 1 ? null : 'font-size:' + fsMg + 'px';
     const mgmts = U.nodeMgmts(n);
     const hasMgmt = mgmts.length > 0;
     if (hasMgmt) {
       const lines = Math.min(mgmts.length, 3);
       const shown = mgmts.slice(0, lines);
       if (mgmts.length > lines) shown[lines - 1] = '+' + (mgmts.length - lines + 1) + ' 个';
-      const y0 = n.h / 2 - 12 - (lines - 1) * 8;
-      el('text', { class: 'nm', x: tx, y: y0, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w, tx);
-      el('text', { class: 'tp', x: tx, y: y0 + 16, 'text-anchor': 'start' }, body).textContent = t.label;
+      const y0 = n.h / 2 - 12 * k - (lines - 1) * 8 * k;
+      const nm = el('text', { class: 'nm', x: tx, y: y0, 'text-anchor': 'start' }, body);
+      nm.textContent = this._fitName(n.name, n.w, tx, fsNm);
+      const tp = el('text', { class: 'tp', x: tx, y: y0 + 16 * k, 'text-anchor': 'start' }, body);
+      tp.textContent = t.label;
+      if (stNm) nm.setAttribute('style', stNm);
+      if (stTp) tp.setAttribute('style', stTp);
       shown.forEach((ip, i) => {
-        const mg = el('text', { class: 'mgmt', x: tx, y: y0 + 32 + i * 14, 'text-anchor': 'start' }, body);
+        const mg = el('text', { class: 'mgmt', x: tx, y: y0 + 32 * k + i * 14 * k, 'text-anchor': 'start' }, body);
         mg.textContent = '管理: ' + ip;
+        if (stMg) mg.setAttribute('style', stMg);
       });
     } else {
-      el('text', { class: 'nm', x: tx, y: n.h / 2 - 3, 'text-anchor': 'start' }, body).textContent = this._fitName(n.name, n.w, tx);
-      el('text', { class: 'tp', x: tx, y: n.h / 2 + 15, 'text-anchor': 'start' }, body).textContent = t.label;
+      const nm = el('text', { class: 'nm', x: tx, y: n.h / 2 - 3 * k, 'text-anchor': 'start' }, body);
+      nm.textContent = this._fitName(n.name, n.w, tx, fsNm);
+      const tp = el('text', { class: 'tp', x: tx, y: n.h / 2 + 15 * k, 'text-anchor': 'start' }, body);
+      tp.textContent = t.label;
+      if (stNm) nm.setAttribute('style', stNm);
+      if (stTp) tp.setAttribute('style', stTp);
     }
     // 标题提示
     el('title', {}, g).textContent = `${n.name}（${t.label}）`;
     this.nodeEls.set(n.id, g);
   }
 
-  _fitName(name, nodeW, tx) {
+  _fitName(name, nodeW, tx, size) {
     const start = Number(tx) > 0 ? Number(tx) : 60;
-    const avail = (nodeW || 160) - start - 18;
-    const size = 13.5;
+    const fs = Number(size) > 0 ? Number(size) : 13.5; // 字号随节点内容缩放（U.nodeContentScale）
+    const avail = (nodeW || 160) - start - 18 * (fs / 13.5); // 尾部留白同比例缩放
     const text = String(name);
-    if (U.measureText(text, size) <= avail) return text;
+    if (U.measureText(text, fs) <= avail) return text;
     // 从头消费「为腾出空间需删除的字符」，返回其余部分 + 省略号——此前误把被删除的头段
     // 当显示内容（长名溢出节点框数倍，略超宽却只剩一两个字符）
     let cut = 0;
-    let w = U.measureText(text, size);
+    let w = U.measureText(text, fs);
     for (const ch of text) {
-      if (w <= avail - 8) break;
-      w -= /[\u4e00-\u9fff\uff00-\uffef]/.test(ch) ? size : size * 0.56;
+      if (w <= avail - 8 * (fs / 13.5)) break;
+      w -= /[\u4e00-\u9fff\uff00-\uffef]/.test(ch) ? fs : fs * 0.56;
       cut += ch.length;
     }
     return text.slice(cut) + '…';

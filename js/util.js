@@ -4718,6 +4718,20 @@ U.nodeHeightFor = (n) => {
   return c ? U.NODE_H + Math.min(c, 3) * 16 : U.NODE_H;
 };
 
+/* 节点内容缩放系数：手动缩放（sized）后，框内图标/文字同步放大。
+ * 取宽、高两个方向缩放比的较小者（而非面积比）：内容需求随 k 线性增长，
+ * 框在两个方向的实际增长分别为 w/w0、h/h0，k ≤ 两者才能保证手动放大
+ * 绝不比自适应布局引入更多截断/溢出；钳制 [0.5, 4] 防极端框寸失真。
+ * 非 sized 恒为 1（默认外观不变）。画布渲染与 PNG/SVG/PDF/VSDX 导出共用本口径 */
+U.nodeContentScale = (n) => {
+  if (!n || n.sized !== true) return 1;
+  const w0 = U.nodeWidthForName(n.name), h0 = U.nodeHeightFor(n);
+  const w = Number(n.w) > 0 ? Number(n.w) : w0;
+  const h = Number(n.h) > 0 ? Number(n.h) : h0;
+  if (w0 <= 0 || h0 <= 0) return 1;
+  return U.clamp(Math.min(w / w0, h / h0), 0.5, 4);
+};
+
 /* 文本宽度估算（CJK ≈ 字号，ASCII ≈ 0.56×字号）。
  * 逐字符码点范围比较而非正则：update 每帧每链路标注都要调，正则对象分配是纯浪费 */
 U.measureText = (text, size) => {
