@@ -251,6 +251,7 @@ node test/smoke-underlay.js       # Electron 冒烟（底图：层级在设备�
 node test/smoke-eventack.js       # Electron 冒烟（事件确认：造事件→未确认徽标→备注弹窗确认→计数递减→撤销回退）
 node test/smoke-alertsound.js     # Electron 冒烟（告警等级与提示音：弹窗保存落盘与回显、分级发声/静音/门槛/等级改写、时间线等级徽标）
 node test/smoke-linkmon.js        # Electron 冒烟（链路连通性监测：批量生成任务 + 真发包探测回环地址判连通、画布着色与侧栏标记、不可达目标触发 link-down 与事件时间线、监控中心链路页签）
+node test/smoke-noderesize.js     # Electron 冒烟（节点方框手动缩放：单选手柄出现与定位、指针事件流拖拽改宽高并置 sized、框内图标/字号同步缩放、连线端点跟随、持久化、撤销、Shift 等比、右键恢复自适应且中心保持、多选手柄隐藏）
 node test/smoke-backup.js         # Electron 冒烟（备份管理：IPC 备份库 + 弹窗浏览/删除，需本机桌面环境）
 node test/smoke-monitor.js        # Electron 冒烟（设备监控采集/日志归档）
 node test/smoke-center.js         # Electron 冒烟（监控中心 / 配置变更事件 / 合规模板 / ZIP 导出 / 设备图标 / 托盘，需本机桌面环境）
