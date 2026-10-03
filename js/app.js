@@ -5466,6 +5466,102 @@ function toggleSubnets() {
   toast(state.showSubnets ? '已显示子网分组' : '已隐藏子网分组');
 }
 
+/* ================= 监控大屏模式 ================= */
+/* 值班室大屏：全屏隐藏工具界面，拓扑适应视图（多图纸自动轮播）、顶部页名 + 大字时钟 + 在线统计、
+ * 底部最近事件横向滚动；链路监测着色与设备状态徽标沿用画布当前状态。Esc 或按钮退出。
+ * 浏览器直接打开也可用（全屏 API 通用），监控数据仅桌面版有（无桥时统计与事件条显示降级文案）。 */
+let dashState = null;
+function openDashboard() {
+  if (dashState) return;
+  document.body.classList.add('dashboard');
+  const bar = document.createElement('div');
+  bar.id = 'dashBar';
+  bar.innerHTML = `
+    <div class="dash-left"><span class="dash-app">NetTopo 值班大屏</span><span id="dashPage"></span></div>
+    <div class="dash-clock" id="dashClock"></div>
+    <div class="dash-right">
+      <span id="dashStat" class="dash-stat"></span>
+      <button type="button" class="tb" id="dashExit" title="退出大屏（Esc）">退出大屏</button>
+    </div>`;
+  const feed = document.createElement('div');
+  feed.id = 'dashFeed';
+  feed.innerHTML = '<div class="dash-feed-inner" id="dashFeedInner"><span class="dash-feed-item">事件时间线加载中…</span></div>';
+  document.body.appendChild(bar);
+  document.body.appendChild(feed);
+  const pageEl = $('#dashPage'), clockEl = $('#dashClock'), statEl = $('#dashStat'), feedEl = $('#dashFeedInner');
+  const curPageName = () => {
+    const s = state.sheets[state.sheetIdx];
+    return s && s.name ? s.name : '当前图纸';
+  };
+  const tick = () => {
+    const d = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    clockEl.textContent = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} 周${'日一二三四五六'[d.getDay()]} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+    pageEl.textContent = curPageName() + `（${state.nodes.length} 台设备）`;
+  };
+  const refreshFeed = async () => {
+    if (!(window.topoMonitor && window.topoMonitor.overview)) {
+      statEl.textContent = '';
+      feedEl.innerHTML = '<span class="dash-feed-item">监控数据需桌面版（Electron）环境；拓扑视图照常展示</span>';
+      return;
+    }
+    try {
+      const r = await window.topoMonitor.overview();
+      if (!r || !r.ok) return;
+      const jobs = r.jobs || [];
+      const off = jobs.filter(j => j.probeOk === false).length;
+      const alert = jobs.filter(j => !!j.alert).length;
+      const linksDown = (r.links || []).filter(l => l.state === 'down').length;
+      statEl.innerHTML =
+        `<span class="${off ? 'ds-bad' : 'ds-ok'}">离线 ${off}</span>` +
+        `<span class="${alert ? 'ds-warn' : ''}">告警中 ${alert}</span>` +
+        `<span class="${linksDown ? 'ds-bad' : ''}">链路中断 ${linksDown}</span>` +
+        `<span>未确认事件 ${(r.unacked || 0)}</span>`;
+      const evs = (r.events || []).slice(0, 14);
+      feedEl.innerHTML = evs.length
+        ? evs.map(e => {
+          const lv = (e.level && alertLevelRank(e.level) >= 1) ? e.level : '';
+          const t = U.fmtDateTime(new Date(e.ts)).slice(11, 19);
+          return `<span class="dash-feed-item${lv ? ' lv-' + U.escHtml(lv) : ''}">${U.escHtml(t)}　${U.escHtml(e.name || e.deviceId || '?')}　${U.escHtml(String(e.detail || '').slice(0, 80))}</span>`;
+        }).join('<span class="dash-sep">◆</span>')
+        : '<span class="dash-feed-item">暂无事件</span>';
+    } catch (e) { /* 桥异常保持上一次内容 */ }
+  };
+  tick();
+  refreshFeed();
+  const clockTimer = setInterval(tick, 1000);
+  const feedTimer = setInterval(refreshFeed, 30000);
+  // 多图纸轮播：每 15 秒切下一张并适应视图（单页不轮播）；keepUndo 防大屏翻页把撤销栈清掉
+  const rotTimer = state.sheets.length > 1 ? setInterval(() => {
+    switchSheet((state.sheetIdx + 1) % state.sheets.length, { keepUndo: true });
+    renderer.fit();
+  }, 15000) : null;
+  const escHandler = (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); closeDashboard(); }
+  };
+  document.addEventListener('keydown', escHandler, true);
+  const exitBtn = $('#dashExit');
+  if (exitBtn) exitBtn.onclick = closeDashboard;
+  dashState = { clockTimer, feedTimer, rotTimer, escHandler };
+  // 进入全屏 + 布局变化后的重适配（全屏尺寸与窗口不同，svg 需按新视口取景）
+  try { document.documentElement.requestFullscreen().catch(() => { /* 浏览器拒绝全屏（如无手势）时仅铺满窗口 */ }); } catch (e) { /* ignore */ }
+  setTimeout(() => renderer.fit(), 350);
+}
+function closeDashboard() {
+  if (!dashState) return;
+  document.body.classList.remove('dashboard');
+  clearInterval(dashState.clockTimer);
+  clearInterval(dashState.feedTimer);
+  if (dashState.rotTimer) clearInterval(dashState.rotTimer);
+  document.removeEventListener('keydown', dashState.escHandler, true);
+  dashState = null;
+  const bar = $('#dashBar'), feed = $('#dashFeed');
+  if (bar) bar.remove();
+  if (feed) feed.remove();
+  if (document.fullscreenElement) { try { document.exitFullscreen().catch(() => { /* ignore */ }); } catch (e) { /* ignore */ } }
+  setTimeout(() => renderer.fit(), 350);
+}
+
 /* ================= 链路故障模拟 ================= */
 function toggleLinkDown(id) {
   pushUndo(); // 故障标记参与撤销（快照包含 downLinks）
@@ -6954,6 +7050,7 @@ function wire() {
     { ic: 'layers', label: '子网分组', active: state.showSubnets, act: toggleSubnets },
     { ic: 'image', label: state.underlay ? ('底图：' + (state.underlay.name || '已导入')) : '机房平面图底图…', act: () => openUnderlayPanel() },
     { sep: true },
+    { ic: 'pulse', label: '监控大屏模式（值班投屏）', act: openDashboard },
     { ic: 'undo', label: state.downLinks.size ? '清除故障标记（' + state.downLinks.size + '）' : '清除故障标记', act: clearDownLinks },
     { ic: 'close', label: '清除路径高亮', active: !!renderer.pathHl, act: clearPathHl }
   ]);
@@ -11302,6 +11399,111 @@ function openMonitorLogs(devicePreset) {
 }
 
 /* ================= 配置备份中心（自动备份的历史 + 对比差异） ================= */
+/* 配置 diff 行渲染（同设备两份备份对比与跨设备漂移对比共用；d 为主进程 diffConfigText/diffLines 结构） */
+function fmtBackupDiff(d) {
+  if (!d.ok) return '（对比失败：' + U.escHtml(d.error || '') + '）'; // 返回值可能经 innerHTML 渲染，内部也转义
+  if (!d.changed) return '两份备份内容一致';
+  const html = [];
+  for (const h of d.hunks) {
+    if (h.type === 'ctx') {
+      for (const ln of h.lines) html.push('<div class="dl-ctx"><span class="no">' + (ln.aNo || '') + '</span>' + U.escHtml(ln.text) + '</div>');
+    } else {
+      for (const ln of h.lines) {
+        const cls = ln.type === 'add' ? 'dl-add' : (ln.type === 'del' ? 'dl-del' : 'dl-ctx');
+        const no = ln.type === 'add' ? ln.bNo : (ln.type === 'del' ? ln.aNo : (ln.aNo || ''));
+        const mark = ln.type === 'add' ? '+' : (ln.type === 'del' ? '-' : ' ');
+        html.push('<div class="' + cls + '"><span class="no">' + (no || '') + '</span>' + mark + ' ' + U.escHtml(ln.text) + '</div>');
+      }
+    }
+  }
+  return html.join('');
+}
+
+/* ================= 跨设备配置对比（配置漂移检测） ================= */
+/* 两台设备各选一份备份做行级 diff（双机/堆叠成员、同批次接入交换机找配置漂移）。
+ *  与同设备对比同口径：主进程先按「易变行忽略规则」过滤噪声行再 diff（备份中心叠开） */
+function openConfigCrossDiff() {
+  if (!(window.topoConfigBackup && window.topoConfigBackup.diffCross)) { toast('跨设备对比需要桌面版（Electron）环境'); return; }
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal bk-dialog" role="dialog" style="width:960px;height:78vh">
+      <h3>跨设备配置对比（配置漂移）</h3>
+      <div class="m-sub">两台设备各选一份备份对比差异；已按「易变行忽略规则」过滤时钟/时间戳这类噪声行，界面看到的差异即真实配置差异</div>
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:10px 0">
+        <label style="flex:1;min-width:230px">设备 A<br><select id="cdDevA" style="width:100%"></select></label>
+        <label style="flex:1;min-width:230px">备份 A<br><select id="cdFileA" style="width:100%"></select></label>
+        <span style="padding:0 2px 20px;font-size:16px">⇄</span>
+        <label style="flex:1;min-width:230px">设备 B<br><select id="cdDevB" style="width:100%"></select></label>
+        <label style="flex:1;min-width:230px">备份 B<br><select id="cdFileB" style="width:100%"></select></label>
+        <button type="button" class="tb primary" id="cdGo" style="margin-bottom:2px">对比</button>
+      </div>
+      <div id="cdInfo" class="bk-diffinfo" style="margin:0 0 6px"></div>
+      <pre class="bk-content" id="cdOut" spellcheck="false">在上方选择两台设备（默认各取最近一份备份）后点「对比」。</pre>
+      <div style="text-align:right;margin-top:10px"><button type="button" class="tb primary" data-act="close">关闭</button></div>
+    </div>`;
+  const rootEl = $('#modalRoot');
+  rootEl.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const devA = ov.querySelector('#cdDevA'), devB = ov.querySelector('#cdDevB');
+  const fileA = ov.querySelector('#cdFileA'), fileB = ov.querySelector('#cdFileB');
+  const info = ov.querySelector('#cdInfo'), out = ov.querySelector('#cdOut');
+  // 设备列表项：device@host 作为一个选项（同一设备名多管理口会各自成项）；value 用索引，
+  // 设备名是用户自由文本、可能含 '@'，不能拿字符串拼拆当键
+  let hosts = [];
+  const opt = (v, label) => `<option value="${U.escHtml(v)}">${U.escHtml(label)}</option>`;
+  const hostOf = (devSel) => (devSel.value !== '' && hosts[+devSel.value]) || null;
+  const fillFiles = async (devSel, fileSel) => {
+    fileSel.innerHTML = '<option value="">（无备份）</option>';
+    const h = hostOf(devSel);
+    if (!h) return;
+    try {
+      const r = await window.topoConfigBackup.list(h.device, h.host);
+      const items = (r && r.ok && Array.isArray(r.items)) ? r.items.slice().sort((x, y) => y.time - x.time) : [];
+      fileSel.innerHTML = items.length
+        ? items.map(i => opt(i.name, i.name + (i.first ? '（首次）' : ''))).join('')
+        : '<option value="">（无备份）</option>';
+    } catch (e) { /* 网络桥异常时保留下拉占位 */ }
+  };
+  const loadHosts = async () => {
+    try {
+      const r = await window.topoConfigBackup.hosts();
+      hosts = (r && r.ok && Array.isArray(r.items)) ? r.items.filter(h => h.count > 0) : [];
+    } catch (e) { hosts = []; }
+    const html = hosts.length
+      ? hosts.map((h, i) => opt(String(i), h.device + '（' + h.host + ' · ' + h.count + ' 份）')).join('')
+      : '<option value="">（暂无有备份的设备）</option>';
+    devA.innerHTML = html; devB.innerHTML = html;
+    if (hosts.length >= 2) devB.selectedIndex = 1; // 默认选两台不同设备
+    await fillFiles(devA, fileA);
+    await fillFiles(devB, fileB);
+  };
+  devA.onchange = () => fillFiles(devA, fileA);
+  devB.onchange = () => fillFiles(devB, fileB);
+  ov.querySelector('#cdGo').onclick = async () => {
+    const ha = hostOf(devA), hb = hostOf(devB);
+    if (!ha || !hb) { toast('请选择两台有备份的设备'); return; }
+    if (ha === hb) { toast('请选择两台不同的设备'); return; }
+    if (!fileA.value || !fileB.value) { toast('所选设备没有可对比的备份'); return; }
+    out.textContent = '对比中…';
+    info.textContent = '';
+    try {
+      const d = await window.topoConfigBackup.diffCross(
+        { device: ha.device, host: ha.host, name: fileA.value },
+        { device: hb.device, host: hb.host, name: fileB.value });
+      if (!d || !d.ok) { out.textContent = '（对比失败：' + ((d && d.error) || '未知错误') + '）'; return; }
+      info.textContent = `${ha.device} / ${fileA.value}  ⇄  ${hb.device} / ${fileB.value}（+${d.added || 0}/-${d.removed || 0} 行`
+        + (d.ignoredRules ? '，已按 ' + d.ignoredRules + ' 条规则忽略易变行' : '') + '）'
+        + (d.summary ? '　变更摘要：' + d.summary : '');
+      out.innerHTML = d.changed ? fmtBackupDiff(d) : '<div class="bk-empty">两台设备在忽略易变行后配置完全一致（无漂移）。</div>';
+    } catch (e) { out.textContent = '（对比失败）'; }
+  };
+  loadHosts();
+}
+
 function openConfigBackups(devicePreset) {
   if (!window.topoConfigBackup) { toast('配置备份需要桌面版（Electron）环境'); return; }
   const root = $('#modalRoot');
@@ -11320,6 +11522,7 @@ function openConfigBackups(devicePreset) {
           <div class="bk-toolbar">
             <span id="bkDiffInfo" class="bk-diffinfo"></span>
             <button type="button" class="tb" id="bkDiff" disabled>对比选中（旧 → 新）</button>
+            <button type="button" class="tb" id="bkCross" title="两台设备各选一份备份对比差异（双机/堆叠成员、同批次接入交换机找配置漂移）">跨设备对比…</button>
             <button type="button" class="tb" id="bkDelete" disabled>删除选中</button>
             <button type="button" class="tb" id="bkComp">合规检查…</button>
             <button type="button" class="tb" id="bkAi">AI 解析…</button>
@@ -11371,24 +11574,6 @@ function openConfigBackups(devicePreset) {
       contentEl.textContent = r && r.ok ? r.content : ('（读取失败：' + ((r && r.error) || '未知错误') + '）');
       diffInfoEl.textContent = '查看 ' + name;
     } catch (e) { contentEl.textContent = '（读取失败）'; }
-  };
-  const fmtDiff = (d) => {
-    if (!d.ok) return '（对比失败：' + U.escHtml(d.error || '') + '）'; // 返回值可能经 innerHTML 渲染，内部也转义
-    if (!d.changed) return '两份备份内容一致';
-    const html = [];
-    for (const h of d.hunks) {
-      if (h.type === 'ctx') {
-        for (const ln of h.lines) html.push('<div class="dl-ctx"><span class="no">' + (ln.aNo || '') + '</span>' + U.escHtml(ln.text) + '</div>');
-      } else {
-        for (const ln of h.lines) {
-          const cls = ln.type === 'add' ? 'dl-add' : (ln.type === 'del' ? 'dl-del' : 'dl-ctx');
-          const no = ln.type === 'add' ? ln.bNo : (ln.type === 'del' ? ln.aNo : (ln.aNo || ''));
-          const mark = ln.type === 'add' ? '+' : (ln.type === 'del' ? '-' : ' ');
-          html.push('<div class="' + cls + '"><span class="no">' + (no || '') + '</span>' + mark + ' ' + U.escHtml(ln.text) + '</div>');
-        }
-      }
-    }
-    return html.join('');
   };
   const loadHosts = async () => {
     try {
@@ -11448,11 +11633,12 @@ function openConfigBackups(devicePreset) {
       diffInfoEl.textContent = '对比 ' + oldN + ' → ' + newN + '（+' + (d.added || 0) + '/-' + (d.removed || 0) + ' 行'
         + (d.ignoredRules ? '，已按 ' + d.ignoredRules + ' 条规则忽略易变行' : '') + '）';
       contentEl.innerHTML = d.changed
-        ? fmtDiff(d)
+        ? fmtBackupDiff(d)
         : '<div class="bk-empty">两份备份在忽略易变行后完全一致（时钟 / 运行时长这类噪声行不算变更）。</div>';
     } catch (e) { contentEl.textContent = '（对比失败）'; }
   };
   ov.querySelector('#bkComp').onclick = () => { close(); openComplianceCheck(); };
+  ov.querySelector('#bkCross').onclick = () => openConfigCrossDiff();
   ov.querySelector('#bkIgnores').onclick = () => openConfigIgnoreRules();
   ov.querySelector('#bkAi').onclick = () => {
     if (sel.size !== 1) { toast('请先勾选一份备份再进行 AI 解析'); return; }

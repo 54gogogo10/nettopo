@@ -150,6 +150,8 @@ contextBridge.exposeInMainWorld('topoConfigBackup', {
   read: (device, host, name) => ipcRenderer.invoke('backupcfg:read', { device, host, name }),
   remove: (device, host, name) => ipcRenderer.invoke('backupcfg:remove', { device, host, name }),
   diff: (device, host, a, b) => ipcRenderer.invoke('backupcfg:diff', { device, host, a, b }),
+  /* 跨设备配置漂移对比：a/b 各为 {device, host, name} */
+  diffCross: (a, b) => ipcRenderer.invoke('backupcfg:diff-cross', { a, b }),
   /* 配置变更判定的易变行忽略规则（时钟/运行时长等噪声行，避免「配置有变化」天天误报） */
   ignoreGet: () => ipcRenderer.invoke('backupcfg:ignore-get'),
   ignoreSet: (rules) => ipcRenderer.invoke('backupcfg:ignore-set', { rules }),

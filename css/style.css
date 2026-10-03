@@ -1308,3 +1308,48 @@ html[data-theme="dark"] #svg .region-title { stroke: rgba(2,6,23,.55); }
 .pitem .lk-badge { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 2px; display: inline-block; user-select: none; cursor: help; }
 .pitem .lk-badge.ok { background: #22c55e; }
 .pitem .lk-badge.down { background: #ef4444; animation: monPulse 1.6s ease-in-out infinite; }
+
+/* ============ 监控大屏模式（值班投屏，显示 ▾ 监控大屏模式） ============ */
+body.dashboard #toolbar,
+body.dashboard #panel,
+body.dashboard #panelOpen,
+body.dashboard footer,
+body.dashboard #sheetBar,
+body.dashboard #hintBar,
+body.dashboard #quickSearch { display: none !important; }
+/* 顶部信息条：半透明渐变叠在画布上（pointer-events none，仅退出按钮可点） */
+body.dashboard #dashBar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  padding: 14px 28px;
+  background: linear-gradient(180deg, rgba(2, 6, 23, .85), rgba(2, 6, 23, 0));
+  color: #f8fafc; pointer-events: none; user-select: none;
+}
+.dash-left { display: flex; align-items: baseline; gap: 14px; min-width: 0; }
+.dash-app { font-weight: 700; font-size: 15px; opacity: .85; }
+#dashPage { font-size: 15px; opacity: .9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dash-clock {
+  font: 700 30px/1.1 Consolas, 'Courier New', monospace; letter-spacing: 1px;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, .65); white-space: nowrap;
+}
+.dash-right { display: flex; align-items: center; gap: 14px; }
+.dash-stat { display: flex; gap: 16px; font-size: 14.5px; white-space: nowrap; }
+.dash-stat .ds-ok { color: #4ade80; }
+.dash-stat .ds-bad { color: #f87171; font-weight: 700; }
+.dash-stat .ds-warn { color: #fbbf24; font-weight: 700; }
+body.dashboard #dashExit { pointer-events: auto; opacity: .5; color: #e2e8f0; border-color: rgba(148, 163, 184, .4); background: rgba(15, 23, 42, .4); }
+body.dashboard #dashExit:hover { opacity: 1; }
+/* 底部事件滚动条：横向无缝滚动（内容复制两遍），悬停暂停便于细看 */
+body.dashboard #dashFeed {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 100;
+  padding: 20px 0 14px; overflow: hidden; white-space: nowrap; user-select: none;
+  background: linear-gradient(0deg, rgba(2, 6, 23, .88), rgba(2, 6, 23, 0));
+}
+.dash-feed-inner { display: inline-block; padding-left: 100%; animation: dash-marquee 60s linear infinite; }
+body.dashboard #dashFeed:hover .dash-feed-inner { animation-play-state: paused; }
+.dash-feed-item { color: #e2e8f0; font-size: 14px; margin: 0 6px; }
+.dash-feed-item.lv-warning { color: #fbbf24; }
+.dash-feed-item.lv-critical { color: #f87171; font-weight: 600; }
+.dash-feed-item.lv-emergency { color: #f87171; font-weight: 700; }
+.dash-sep { color: rgba(148, 163, 184, .55); font-size: 10px; margin: 0 12px; }
+@keyframes dash-marquee { from { transform: translateX(0); } to { transform: translateX(-100%); } }

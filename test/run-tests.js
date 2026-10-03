@@ -7803,6 +7803,24 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const realB = volatileB.replace('10.0.0.1', '10.0.0.9');
       ok(sameAfterIgnore(volatileA, realB, DEFAULT_IGNORE_RULES) === false, '真实配置改动仍然判定为变更（不误吞）');
 
+      // 跨设备漂移对比（配置备份中心「跨设备对比」）：同一库两台设备各自入库，读出后跨内容 diff
+      {
+        const tmpX = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-xdev-'));
+        const storeX = new ConfigBackupStore(path.join(tmpX, 'cfg'));
+        const cfgXA = 'sysname SW-POOL\ninterface GE0/0/1\n ip address 10.0.0.1 255.255.255.0\nsnmp-agent community read %@public';
+        const cfgXB = 'sysname SW-POOL\ninterface GE0/0/1\n ip address 10.0.0.2 255.255.255.0\nsnmp-agent community read %@public\nntp-service unicast-server 10.1.1.1';
+        ok(storeX.save('SW-A', '10.0.0.1', cfgXA).ok === true && storeX.save('SW-B', '10.0.0.2', cfgXB).ok === true, '跨设备：两台设备备份各自入库');
+        eq(storeX.hosts().items.length, 2, '跨设备：hosts 按设备隔离列出两台');
+        const raX = storeX.read('SW-A', '10.0.0.1', storeX.latest('SW-A', '10.0.0.1'));
+        const rbX = storeX.read('SW-B', '10.0.0.2', storeX.latest('SW-B', '10.0.0.2'));
+        const dX = ConfigBackupStore.diffConfigText(raX.content, rbX.content, DEFAULT_IGNORE_RULES);
+        ok(dX.ok === true && dX.changed === true, '跨设备：漂移判定为有变更');
+        ok(dX.added === 2 && dX.removed === 1, '跨设备：漂移行计数正确（改址 1 增 1 删 + 新增 ntp 行，实际 +' + dX.added + '/-' + dX.removed + '）');
+        ok(dX.summary.indexOf('ntp-service') >= 0, '跨设备：摘要含新增的 ntp 行（' + dX.summary + '）');
+        const dSame = ConfigBackupStore.diffConfigText(cfgXA, cfgXA, DEFAULT_IGNORE_RULES);
+        ok(dSame.changed === false, '跨设备：同批次同配置对比无漂移（对照）');
+      }
+
       const d1 = ConfigBackupStore.diffConfigText(volatileA, volatileB, DEFAULT_IGNORE_RULES);
       ok(d1.ok === true && d1.changed === false && d1.added === 0 && d1.removed === 0, '带规则的 diff：纯噪声差异 → 无变更');
       ok(d1.ignoredRules === DEFAULT_IGNORE_RULES.length, '带规则的 diff：回报生效的规则条数（' + d1.ignoredRules + '）');

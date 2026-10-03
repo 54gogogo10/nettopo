@@ -1773,6 +1773,18 @@ ipcMain.handle('backupcfg:diff', (e, p) => {
   if (!ra.ok || !rb.ok) return { ok: false, error: '读取备份失败：' + ((ra.error || rb.error) || '') };
   return ConfigBackupStore.diffConfigText(ra.content, rb.content, configIgnoreRules());
 });
+/* 跨设备对比（配置漂移）：两台设备各选一份备份，与同设备对比同口径走忽略规则 + 行级 diff */
+ipcMain.handle('backupcfg:diff-cross', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const A = backupCfgPath(p && p.a), B = backupCfgPath(p && p.b);
+  if (!A || !B) return { ok: false, error: '非法的设备/主机' };
+  const na = String((p && p.a && p.a.name) || ''), nb = String((p && p.b && p.b.name) || '');
+  if (!na || !nb) return { ok: false, error: '请为两台设备各选择一份备份' };
+  if (A.device === B.device && A.host === B.host && na === nb) return { ok: false, error: '请选择不同的备份' };
+  const ra = configBackup.read(A.device, A.host, na), rb = configBackup.read(B.device, B.host, nb);
+  if (!ra.ok || !rb.ok) return { ok: false, error: '读取备份失败：' + ((ra.error || rb.error) || '') };
+  return ConfigBackupStore.diffConfigText(ra.content, rb.content, configIgnoreRules());
+});
 ipcMain.handle('backupcfg:open', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
   try { require('fs').mkdirSync(configBackup.baseDir, { recursive: true }); } catch (err) { /* ignore */ }
