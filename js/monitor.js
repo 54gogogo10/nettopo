@@ -160,6 +160,71 @@ function memPctOf(mode, used, free) {
   return pct1(u);
 }
 
+/* ---- 环境传感器采集（ENTITY-SENSOR-MIB / RFC 3433，纯函数可单测） ----
+ * entPhySensorTable（1.3.6.1.2.1.99.1.1）一行一个传感器，类型/量纲/精度/读数分列：
+ *   .1 entPhySensorType（celsius=8 / watts=6 / rpm=10 / truthvalue=12 …）
+ *   .2 entPhySensorScale（units=9，milli=8 → ×10⁻³，kilo=12 → ×10³ …）
+ *   .3 entPhySensorPrecision（小数位数：值 462 + 精度 1 = 46.2）
+ *   .4 entPhySensorValue（实际值 = 读数 × 10^scale ÷ 10^precision）
+ * 走标准 MIB 而非厂家私有 OID：华为/华三/思科等实现程度不一，但 ENTITY-SENSOR 是
+ * RFC 标准，覆盖到就能同时拿到温度/风扇/功率三类读数；不支持的设备走自定义 OID。 */
+const OID_ENV_TYPE = '1.3.6.1.2.1.99.1.1.1.1';
+const OID_ENV_SCALE = '1.3.6.1.2.1.99.1.1.1.2';
+const OID_ENV_PREC = '1.3.6.1.2.1.99.1.1.1.3';
+const OID_ENV_VALUE = '1.3.6.1.2.1.99.1.1.1.4';
+const SENSOR_SCALE_EXP = { 1: -24, 2: -21, 3: -18, 4: -15, 5: -12, 6: -9, 7: -6, 8: -3, 9: 0, 10: 1, 11: 2, 12: 3, 13: 6, 14: 9, 15: 12, 16: 15, 17: 18, 18: 21, 19: 24 };
+/** 四列 walk 结果 → {temps:[{i,v}], fans:[…], watts:[…]}：按 OID 末段（entPhysicalIndex）对齐，
+ *  缺类型或读数非数值的行忽略；实际值 = 读数 × 10^scale ÷ 10^precision，温度保留 1 位小数 */
+function parseEnvSensors(typeCol, scaleCol, precCol, valueCol) {
+  const idxOf = (col, root) => {
+    const m = new Map();
+    for (const vb of ((col && col.ok && col.varbinds) || [])) {
+      if (typeof vb.oid !== 'string' || !vb.oid.startsWith(root + '.')) continue;
+      const idx = vb.oid.slice(root.length + 1);
+      if (!/^\d+$/.test(idx)) continue;
+      m.set(idx, vb.value);
+    }
+    return m;
+  };
+  const types = idxOf(typeCol, OID_ENV_TYPE);
+  const scales = idxOf(scaleCol, OID_ENV_SCALE);
+  const precs = idxOf(precCol, OID_ENV_PREC);
+  const values = idxOf(valueCol, OID_ENV_VALUE);
+  const out = { temps: [], fans: [], watts: [] };
+  const bucketOf = (t) => (t === 8 ? 'temps' : t === 10 ? 'fans' : t === 6 ? 'watts' : '');
+  for (const [idx, raw] of values) {
+    const t = Number(types.get(idx));
+    const bucket = bucketOf(t);
+    if (!bucket) continue;
+    const v = Number(raw);
+    if (!Number.isFinite(v)) continue;
+    const exp = SENSOR_SCALE_EXP[Number(scales.get(idx))] || 0;
+    const prec = Number(precs.get(idx));
+    const div = (Number.isFinite(prec) && prec > 0 && prec <= 18) ? Math.pow(10, prec) : 1;
+    const real = v * Math.pow(10, exp) / div;
+    out[bucket].push({ i: parseInt(idx, 10), v: bucket === 'temps' ? Math.round(real * 10) / 10 : Math.round(real) });
+  }
+  for (const k of ['temps', 'fans', 'watts']) out[k].sort((a, b) => a.i - b.i);
+  return out;
+}
+/** 环境阈值级别：温度取全部传感器最高值（warn/crit），风扇取最低转速低于下限（有转速传感器才算）。
+ *  返回 {temp:null|'warn'|'crit', fan:null|'warn', tempV, fanMinV} */
+function envLevels(sample, envCfg) {
+  const cfg = envCfg || {};
+  const temps = (sample && sample.temps) || [];
+  const fans = (sample && sample.fans) || [];
+  const tempV = temps.length ? Math.max.apply(null, temps.map(s => s.v)) : null;
+  const fanMinV = fans.length ? Math.min.apply(null, fans.map(s => s.v)) : null;
+  const lv = (pct, warn, crit) => (pct == null || !Number.isFinite(Number(pct))) ? null
+    : (pct >= crit ? 'crit' : pct >= warn ? 'warn' : null);
+  const fanMin = Number(cfg.fanMinRpm);
+  return {
+    temp: lv(tempV, cfg.tempWarn, cfg.tempCrit),
+    fan: (fanMin > 0 && fanMinV != null && fanMinV < fanMin) ? 'warn' : null,
+    tempV, fanMinV
+  };
+}
+
 const IF_HIST_MAX = 120;
 /** 计算速率（bps）：计数器差值 × 8 / 秒；计数器回绕/重置（负差）返回 null */
 function rateBps(curC, prevC, dtSec) {
@@ -1041,7 +1106,20 @@ class MonitorManager extends EventEmitter {
     if (memMode !== 'percent' && !memFreeOid) memMode = 'percent';
     sysinfo.perf = {
       enabled: !!pfOpt.enabled,
-      cpuOid, memUsedOid, memFreeOid, cpuMode, memMode
+      cpuOid, memUsedOid, memFreeOid, cpuMode, memMode,
+      env: (function () {
+        // 环境传感器采集（温度/风扇/功率）：standard 走 ENTITY-SENSOR-MIB 全表，custom GET 单个温度 OID
+        const e = pfOpt.env && typeof pfOpt.env === 'object' ? pfOpt.env : {};
+        const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : d; };
+        return {
+          enabled: !!e.enabled,
+          mode: e.mode === 'custom' ? 'custom' : 'standard',
+          tempOid: cleanOid(e.tempOid),
+          tempWarn: num(e.tempWarn, 55, 1, 120),
+          tempCrit: num(e.tempCrit, 65, 1, 150),
+          fanMinRpm: num(e.fanMinRpm, 0, 0, 1000000)
+        };
+      })()
     };
     // ---- 服务器指标采集（SSH，可选）：复用监控会话执行 df/free 等命令并解析数值，
     //      磁盘/内存超阈值告警（仅读取模式下禁用——与「只记录不写命令」语义冲突） ----
@@ -1112,6 +1190,7 @@ class MonitorManager extends EventEmitter {
       metrics: Object.assign({ enabled: false, commands: [], intervalSec: 300, diskWarn: 80, diskCrit: 90, memWarn: 80, memCrit: 90 }, cfg.metrics || {}),
       metricHist: [],   // SSH 指标采样历史（[{ts, disks:[{mount,pct}], mem, swap, load}]，容量 IF_HIST_MAX）
       metricAlert: { disk: null, mem: null }, // 上次阈值级别（变化沿产生告警事件）
+      envAlert: { temp: null, fan: null },    // 上次环境阈值级别（温度/风扇，变化沿产生告警事件）
       metricTimer: null, _metricBusy: false,
       httpProbe: Object.assign({ enabled: false, url: '', intervalSec: 300, alertDays: 14, keyword: '', timeoutMs: 8000 }, cfg.httpProbe || {}),
       httpHist: [],     // HTTP 探测历史（[{ts, ok, status, latency, certDays}]，容量 IF_HIST_MAX）
@@ -1149,9 +1228,9 @@ class MonitorManager extends EventEmitter {
     const job = this._newJob(cfg);
     this.jobs.set(cfg.key, job);
     this._emit(job);
-    // SNMP 轮询（接口流量 / 重启检测 / CPU·内存）：独立于 SSH/Telnet 连接的 UDP 定时轮询（任务级，重连不重启）
+    // SNMP 轮询（接口流量 / 重启检测 / CPU·内存 / 环境传感器）：独立于 SSH/Telnet 连接的 UDP 定时轮询（任务级，重连不重启）
     const si = cfg.sysinfo || {};
-    if (si.ifTable || si.sysUpTime || (si.perf && si.perf.enabled)) this._startSnmpPoll(job);
+    if (si.ifTable || si.sysUpTime || (si.perf && (si.perf.enabled || (si.perf.env && si.perf.env.enabled)))) this._startSnmpPoll(job);
     // HTTP 健康探测 / 证书到期：独立于 SSH/Telnet 会话的本机定时探测（任务级，重连不重启）
     if (cfg.httpProbe && cfg.httpProbe.enabled) {
       clearTimeout(job.httpTimer);
@@ -1194,13 +1273,14 @@ class MonitorManager extends EventEmitter {
         compliance: job.complianceLast ? { failed: job.complianceLast.failed, total: job.complianceLast.total, at: job.complianceLast.at } : null,
         ifTable: !!(job.sysinfo && job.sysinfo.ifTable),
         perf: !!(job.sysinfo && job.sysinfo.perf && job.sysinfo.perf.enabled),
+        env: !!(job.sysinfo && job.sysinfo.perf && job.sysinfo.perf.env && job.sysinfo.perf.env.enabled),
         upCheck: !!(job.sysinfo && job.sysinfo.sysUpTime),
         metrics: !!(job.metrics && job.metrics.enabled),
         lastMetric: job.metricHist.length ? job.metricHist[job.metricHist.length - 1] : null,
         httpProbe: !!(job.httpProbe && job.httpProbe.enabled),
         httpOk: job.httpOk,
         certDays: job.httpHist.length ? job.httpHist[job.httpHist.length - 1].certDays : null,
-        lastPerf: job.perfHist.length ? { ts: job.perfHist[job.perfHist.length - 1].ts, cpu: job.perfHist[job.perfHist.length - 1].cpu, mem: job.perfHist[job.perfHist.length - 1].mem, up: job.perfHist[job.perfHist.length - 1].up } : null
+        lastPerf: job.perfHist.length ? { ts: job.perfHist[job.perfHist.length - 1].ts, cpu: job.perfHist[job.perfHist.length - 1].cpu, mem: job.perfHist[job.perfHist.length - 1].mem, up: job.perfHist[job.perfHist.length - 1].up, temp: job.perfHist[job.perfHist.length - 1].temp, fanMin: job.perfHist[job.perfHist.length - 1].fanMin, watts: job.perfHist[job.perfHist.length - 1].watts } : null
       });
     }
     return out;
@@ -1664,7 +1744,8 @@ class MonitorManager extends EventEmitter {
   async _pollSnmp(job) {
     if (!job.enabled || job.stopping || !job.sysinfo) return;
     const wantIf = !!job.sysinfo.ifTable;
-    const wantPerf = !!job.sysinfo.sysUpTime || !!(job.sysinfo.perf && job.sysinfo.perf.enabled);
+    const perf = job.sysinfo.perf || {};
+    const wantPerf = !!job.sysinfo.sysUpTime || !!perf.enabled || !!(perf.env && perf.env.enabled);
     if (wantIf || wantPerf) {
       if (!job._snmpBusy) {
         job._snmpBusy = true;
@@ -1786,12 +1867,13 @@ class MonitorManager extends EventEmitter {
     };
   }
 
-  /** SNMP 性能采集：sysUpTime（重启检测：数值骤减 5 分钟以上判为重启）+ CPU/内存（可配置 OID） */
+  /** SNMP 性能采集：sysUpTime（重启检测：数值骤减 5 分钟以上判为重启）+ CPU/内存（可配置 OID）
+   *  + 环境传感器（温度/风扇/功率：standard 走 ENTITY-SENSOR-MIB 全表，custom GET 单个温度 OID） */
   async _collectPerf(job) {
     const host = job.host, target = snmpTargetOf(job), port = job.sysinfo.snmpPort || 161;
     const perf = job.sysinfo.perf || {};
     const now = Date.now();
-    const sample = { ts: now, up: null, cpu: null, mem: null };
+    const sample = { ts: now, up: null, cpu: null, mem: null, temp: null, fanMin: null, fanCount: 0, watts: null };
     // sysUpTime（TimeTicks，1/100 秒）：骤减超过 5 分钟刻度视为设备重启（容忍采样抖动）
     if (job.sysinfo.sysUpTime) {
       const r = await snmpGetValue(host, target, OID_SYSUPTIME, 3000, port);
@@ -1828,16 +1910,57 @@ class MonitorManager extends EventEmitter {
         }
       }
     }
-    if (sample.up == null && sample.cpu == null && sample.mem == null) return;
+    // 环境传感器（温度/风扇/功率）：阈值告警用最高温度与最低风扇转速；功率取瓦数传感器的合计（仅展示）
+    let envSensors = null;
+    if (perf.env && perf.env.enabled) {
+      if (perf.env.mode === 'custom' && perf.env.tempOid) {
+        const r = await snmpGetValue(host, target, perf.env.tempOid, 3000, port);
+        if (r.ok) {
+          const v = Number(r.value);
+          if (Number.isFinite(v)) {
+            sample.temp = Math.round(v * 10) / 10;
+            envSensors = { temps: [{ i: 0, v: sample.temp }], fans: [], watts: [] };
+          }
+        }
+      } else {
+        const tw = await snmpWalk(OID_ENV_TYPE, host, target, 3000, port);
+        const sw = await snmpWalk(OID_ENV_SCALE, host, target, 3000, port);
+        const pw = await snmpWalk(OID_ENV_PREC, host, target, 3000, port);
+        const vw = await snmpWalk(OID_ENV_VALUE, host, target, 3000, port);
+        if (vw.ok && vw.varbinds.length) {
+          envSensors = parseEnvSensors(tw, sw, pw, vw);
+          if (envSensors.temps.length) sample.temp = Math.max.apply(null, envSensors.temps.map(s => s.v));
+          if (envSensors.fans.length) { sample.fanMin = Math.min.apply(null, envSensors.fans.map(s => s.v)); sample.fanCount = envSensors.fans.length; }
+          if (envSensors.watts.length) sample.watts = envSensors.watts.reduce((a, s) => a + s.v, 0);
+        }
+      }
+    }
+    if (sample.up == null && sample.cpu == null && sample.mem == null && sample.temp == null && sample.fanMin == null && sample.watts == null) return;
     if (!job.enabled || job.stopping) return; // CPU/内存 GET 期间任务拆除：迟到样本丢弃
     job.perfHist.push(sample);
     if (job.perfHist.length > IF_HIST_MAX) job.perfHist.shift();
+    // 环境阈值告警（变化沿，与磁盘/内存指标告警同通道）：温度 warn/crit + 风扇低于下限
+    const envLv = envLevels(envSensors, perf.env);
+    const prevEnv = job.envAlert || { temp: null, fan: null };
+    const envChanged = envLv.temp !== prevEnv.temp || envLv.fan !== prevEnv.fan;
+    job.envAlert = { temp: envLv.temp, fan: envLv.fan };
     this._logLine(job, 'SNMP 性能采集：' + [
       sample.cpu != null ? 'CPU ' + sample.cpu + '%' : '',
       sample.mem != null ? '内存 ' + sample.mem + '%' : '',
+      sample.temp != null ? '温度 ' + sample.temp + '℃' : '',
+      sample.fanMin != null ? '风扇 ' + sample.fanMin + ' RPM×' + sample.fanCount : '',
+      sample.watts != null ? '功率 ' + sample.watts + 'W' : '',
       sample.up != null ? '运行 ' + fmtUptimeTicks(sample.up) : ''
     ].filter(Boolean).join('，'));
-    this.emit('perf', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ts: sample.ts, cpu: sample.cpu, mem: sample.mem, up: sample.up });
+    this.emit('perf', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ts: sample.ts, cpu: sample.cpu, mem: sample.mem, up: sample.up, temp: sample.temp, fanMin: sample.fanMin, fanCount: sample.fanCount, watts: sample.watts });
+    if (envChanged) {
+      const parts = [];
+      if (envLv.temp !== prevEnv.temp) parts.push('温度' + (envLv.temp ? '超阈值（' + envLv.temp + '）：' + envLv.tempV + '℃' : '告警解除'));
+      if (envLv.fan !== prevEnv.fan) parts.push('风扇' + (envLv.fan ? '低于下限（' + perf.env.fanMinRpm + ' RPM）：' + envLv.fanMinV + ' RPM' : '告警解除'));
+      const detail = parts.join('；');
+      this._logLine(job, '【环境' + ((envLv.temp || envLv.fan) ? '告警】' : '解除】') + detail);
+      this.emit('metric-alert', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ts: sample.ts, alerting: !!(envLv.temp || envLv.fan), temp: envLv.temp, fan: envLv.fan, detail });
+    }
   }
 
   /** 等待会话就绪（收到设备命令提示符行）。设备登录/初始化未完成时下发的命令会被吞；
@@ -2526,5 +2649,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, envLevels, parseEnvSensors, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT, OID_ENV_TYPE, OID_ENV_SCALE, OID_ENV_PREC, OID_ENV_VALUE };
 

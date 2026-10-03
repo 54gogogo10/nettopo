@@ -3612,6 +3612,25 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(rbWrap.manual.length === 1 && /外壳包装行/.test(rbWrap.manual[0].why), '回滚：外壳包装行列为人工项（不产出非法取反）');
       ok(rbWrap.lines.every(l => l.text.indexOf('no nt-cli') < 0), '回滚：可下发部分不含 `no nt-cli …` 这类非法命令');
       ok(/需人工确认 1 行/.test(rbWrap.text), '回滚：表头如实标注人工项数量');
+
+      // 恢复变更单（备份中心「恢复此备份」）：current（当前配置近似）→ target（所选备份）
+      const restoreTarget = 'sysname SW-POOL\nvlan 20\nvlan 30\ninterface Vlanif30\n ip address 10.0.30.1 255.255.255.0\n description TO-CORE\ninterface GE0/0/1\n port link-type trunk\nip route-static 0.0.0.0 0 10.0.0.1';
+      const restoreCurrent = 'sysname SW-POOL\nvlan 20\nvlan 99\nacl number 3001\n rule 5 permit ip\ninterface Vlanif30\n ip address 10.0.30.254 255.255.255.0\ninterface GE0/0/1\n port link-type access\n port default vlan 99\nip route-static 0.0.0.0 0 10.0.0.254';
+      const rr = U.buildRestoreChangeSet(restoreTarget, restoreCurrent, 'huawei');
+      ok(rr.ok === true && rr.del === 4 && rr.add === 5, '恢复：删除 4 行 / 恢复+覆盖 5 行（实际 ' + rr.del + '/' + rr.add + '）');
+      ok(rr.text.indexOf('undo vlan 99') >= 0 && rr.text.indexOf('undo acl number 3001') >= 0, '恢复：消失的顶层块取反删除');
+      ok(rr.text.indexOf(' rule 5 permit ip') < 0, '恢复：整块删除时子命令不再逐行取反（块级 undo 已覆盖）');
+      ok(rr.text.indexOf('interface GE0/0/1\nundo port default vlan 99') >= 0, '恢复：子命令取反先补块头（重新进入所在块）');
+      ok(rr.text.indexOf('undo ip address 10.0.30.254') < 0 && rr.text.indexOf('ip address 10.0.30.1 255.255.255.0') >= 0, '恢复：同块同键不同值走覆盖，不产出冗余 undo');
+      ok(rr.text.indexOf('ip route-static 0.0.0.0 0 10.0.0.1') >= 0, '恢复：覆盖式恢复新取值');
+      const rrSame = U.buildRestoreChangeSet(restoreTarget, restoreTarget, 'huawei');
+      ok(rrSame.ok === true && rrSame.text === '' && rrSame.add === 0 && rrSame.del === 0, '恢复：目标与当前一致 → 空变更单');
+      const rrCisco = U.buildRestoreChangeSet('vlan 20\nvlan 99', 'vlan 20\ninterface GigabitEthernet0/0/9\nvlan 99', 'cisco');
+      ok(rrCisco.del === 0 && rrCisco.add === 0 && rrCisco.manual.length === 1 && /no interface/.test(rrCisco.manual[0].why), '恢复：思科 interface 顶层行（target 已无该块）列为人工项，不产出可下发删除');
+      const rrBanner = U.buildRestoreChangeSet('banner motif\n welcome A\nvlan 20', 'banner motif\n welcome B\nvlan 20', 'huawei');
+      ok(rrBanner.manual.length === 1 && rrBanner.text.indexOf('undo welcome') < 0, '恢复：banner 自由文本块不自动求逆（列人工）');
+      const rrBig = U.buildRestoreChangeSet(Array.from({ length: 500 }, (_, i) => 'vlan ' + (i + 10)).join('\n'), 'vlan 1', 'huawei');
+      ok(rrBig.ok === false && /超过/.test(rrBig.error), '恢复：差异超 DEPLOY_MAX_LINES 拒绝并提示拆分（' + (rrBig.error || '').slice(0, 30) + '…）');
     }
 
     console.log('== 回归：配置变更下发——会话状态机 runDeploy（mock Telnet 设备） ==');
@@ -4159,6 +4178,49 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(/位置重叠/.test(U.buildRackSvg(ov2.racks[0], {})), '冲突在 SVG 中标注');
     }
 
+    // 接口流量周期报表（监控中心「接口流量」页「流量报表…」）
+    console.log('== 接口流量周期报表（TopN 聚合） ==');
+    {
+      const trHist = [
+        { ts: 1000, ifs: [{ i: 1, n: 'GE0/0/1', oper: 'up', in: null, out: null, speed: 1e9 }, { i: 2, n: 'GE0/0/2', oper: 'down', in: null, out: null, speed: 1e9 }] },
+        { ts: 2000, ifs: [{ i: 1, n: 'GE0/0/1', oper: 'up', in: 5e8, out: 3e8, speed: 1e9 }, { i: 2, n: 'GE0/0/2', oper: 'down', in: 0, out: 0, speed: 1e9 }] },
+        { ts: 3000, ifs: [{ i: 1, n: 'GE0/0/1', oper: 'up', in: 9e8, out: 2e8, speed: 1e9 }, { i: 2, n: 'GE0/0/2', oper: 'up', in: 0, out: 0, speed: 1e9 }] }
+      ];
+      const tr = U.ifTrafficReport(trHist, { topN: 10 });
+      ok(tr.ok === true && tr.sampleCount === 3 && tr.from === 1000 && tr.to === 3000, '流量报表：窗口与采样数');
+      const trIf1 = tr.ifaces.find(f => f.i === 1);
+      ok(trIf1.n === 'GE0/0/1' && trIf1.samples === 3 && trIf1.upPct === 100, '流量报表：接口名与在线率');
+      ok(trIf1.inAvg === 700000000 && trIf1.inMax === 9e8, '流量报表：收均值只计有效采样（null 不计入也不当 0）/收峰取最大（' + trIf1.inAvg + '）');
+      ok(trIf1.utilMax === 90, '流量报表：利用率峰值 = max(收,发)÷标称带宽（90%）');
+      ok(tr.ifaces[0].i === 1, '流量报表：按峰值总流量降序（GE0/0/1 置顶）');
+      const tr1 = U.ifTrafficReport(trHist, { topN: 1, sinceTs: 2500 });
+      ok(tr1.sampleCount === 1 && tr1.ifaces.length === 1 && tr1.ifaces[0].inAvg === 9e8, '流量报表：TopN 截断与 sinceTs 窗口过滤');
+      ok(U.ifTrafficReport([], {}).sampleCount === 0 && U.ifTrafficReport(null).ifaces.length === 0, '流量报表：空历史安全');
+      ok(U.ifTrafficReport(trHist, { topN: 0 }).ifaces.length === 10 || U.ifTrafficReport(trHist, { topN: 0 }).ifaces.length === 2, '流量报表：非法 TopN 回落默认 10');
+    }
+
+    // 巡检报告（一键生成：数据对象 → 自包含可打印 HTML）
+    console.log('== 巡检报告 HTML 生成 ==');
+    {
+      const ir = U.buildInspectionReport({
+        genAt: 1759500000000, appVersion: 'vTEST', project: '演示工程', sheets: 2, topo: { nodes: 12, links: 15 },
+        monitor: { total: 3, online: 2, offline: 1, alerting: 1, linksDown: 1, unacked: 2, jobs: [{ name: '核心SW', host: '10.0.0.1', state: 'monitoring', probeOk: true, alert: false, cpu: 23, mem: 56, temp: 46.5, backupAt: 1759400000000 }, { name: '出口AR', host: '10.0.0.2', state: 'monitoring', probeOk: false, alert: true }] },
+        sla: { summaryText: '99.98%', devices: 3, sampled: 2, rows: [{ name: '核心SW', host: '10.0.0.1', uptimePct: 99.99, outages: 1, downtimeMs: 300000 }] },
+        backups: { items: [{ device: '核心SW', host: '10.0.0.1', count: 12, lastAt: 1759400000000 }] },
+        racks: { racks: [{ name: 'A01', uHeight: 42, used: 8, free: 34, devices: 6, occupancy: 19 }], unplaced: ['防火墙'], conflicts: 0 },
+        events: [{ ts: 1759500000000, name: '出口AR', type: 'offline', level: 'critical', detail: '在线探测失败：超时' }]
+      });
+      ok(/^<!DOCTYPE html>/.test(ir.html) && ir.html.includes('</html>'), '巡检报告：产出完整自包含 HTML');
+      ok(ir.html.includes('网络巡检报告') && ir.html.includes('演示工程') && ir.html.includes('vTEST'), '巡检报告：标题/工程/版本元信息');
+      ok(ir.html.includes('46.5℃') && ir.html.includes('99.98%') && ir.html.includes('A01') && ir.html.includes('防火墙'), '巡检报告：监控/SLA/机柜/未上架数据呈现');
+      ok(ir.html.includes('在线探测失败：超时'), '巡检报告：事件详情（转义后原样呈现）');
+      ok(ir.html.indexOf('<script') < 0, '巡检报告：无脚本（自包含纯静态，可打印）');
+      ok(ir.css.indexOf('.ir-') >= 0 && ir.body.includes('ir-wrap'), '巡检报告：样式 .ir- 前缀 + body 片段（弹窗预览复用）');
+      const irEmpty = U.buildInspectionReport({ genAt: 1 });
+      ok(irEmpty.html.includes('（无数据）') || irEmpty.html.includes('需桌面版'), '巡检报告：空数据按降级文案呈现');
+      ok(!/undefined|NaN>/.test(irEmpty.html), '巡检报告：空数据无 undefined/NaN 泄漏');
+    }
+
     // 指纹记忆：键口径 + 撤销信任时的连带清理（避免「撤销后仍连不上」）
     console.log('== 回归：指纹记忆键与撤销连带清理（真机排障发现） ==');
     {
@@ -4328,6 +4390,29 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(metricLevels({ disks: [{ mount: '/', pct: 10 }], mem: 10 }, { diskWarn: 80, diskCrit: 90 }).disk === null, '阈值判定：未超阈为 null');
       ok(metricLevels(null, {}).disk === null && metricLevels({}, null).mem === null, '阈值判定：空样本安全');
 
+      // 环境传感器（ENTITY-SENSOR-MIB / RFC 3433）：四列 walk → 温度/风扇/功率 + 阈值级别
+      const { parseEnvSensors, envLevels, OID_ENV_TYPE, OID_ENV_SCALE, OID_ENV_PREC, OID_ENV_VALUE } = require('../js/monitor.js');
+      const envCol = (root, rows) => ({ ok: true, varbinds: rows.map(r => ({ oid: root + '.' + r[0], value: r[1] })) });
+      // idx1 温度 46.2℃（462, precision=1）/ idx2 风扇 5760rpm / idx3 功率 125W / idx4 电压（不在三类中，忽略）
+      const envMixed = parseEnvSensors(
+        envCol(OID_ENV_TYPE, [[1, 8], [2, 10], [3, 6], [4, 3]]),
+        envCol(OID_ENV_SCALE, [[1, 9], [2, 9], [3, 9], [4, 9]]),
+        envCol(OID_ENV_PREC, [[1, 1], [2, 0], [3, 0], [4, 0]]),
+        envCol(OID_ENV_VALUE, [[1, 462], [2, 5760], [3, 125], [4, 12000]]));
+      ok(envMixed.temps.length === 1 && envMixed.temps[0].v === 46.2, '环境解析：celsius=8 且按 precision 换算小数（462→46.2℃）');
+      ok(envMixed.fans.length === 1 && envMixed.fans[0].v === 5760, '环境解析：rpm=10');
+      ok(envMixed.watts.length === 1 && envMixed.watts[0].v === 125, '环境解析：watts=6');
+      const envMilli = parseEnvSensors(envCol(OID_ENV_TYPE, [[7, 8]]), envCol(OID_ENV_SCALE, [[7, 8]]), envCol(OID_ENV_PREC, [[7, 0]]), envCol(OID_ENV_VALUE, [[7, 12500]]));
+      ok(envMilli.temps[0].v === 12.5, '环境解析：scale=milli（10⁻³）换算（12500 milli℃ → 12.5℃）');
+      ok(parseEnvSensors(null, null, null, { ok: true, varbinds: [] }).temps.length === 0, '环境解析：空表安全');
+      const envLvOk = envLevels(envMixed, { tempWarn: 55, tempCrit: 65, fanMinRpm: 0 });
+      ok(envLvOk.temp === null && envLvOk.fan === null && envLvOk.tempV === 46.2 && envLvOk.fanMinV === 5760, '环境阈值：未超阈为 null（取最高温/最低转速）');
+      const envLvBad = envLevels(envMixed, { tempWarn: 40, tempCrit: 65, fanMinRpm: 6000 });
+      ok(envLvBad.temp === 'warn' && envLvBad.fan === 'warn', '环境阈值：温度 warn（≥warn）+ 风扇低于下限 warn');
+      const envLvCrit = envLevels({ temps: [{ i: 1, v: 70 }] }, { tempWarn: 55, tempCrit: 65, fanMinRpm: 0 });
+      ok(envLvCrit.temp === 'crit' && envLvCrit.fan === null, '环境阈值：温度 crit（≥crit 优先）');
+      ok(envLevels(null, {}).temp === null && envLevels({}, { fanMinRpm: 1000 }).fan === null, '环境阈值：空传感器安全');
+
       const mm = new MonitorManager(new EventEmitter(), '', '');
       const vOk = mm._validate({ key: 'd1@10.0.0.9', host: '10.0.0.9', commands: ['display version'], metrics: { enabled: true, command: 'df -P\nfree -m', intervalSec: 10, diskWarn: 70, diskCrit: 50 } });
       ok(vOk.ok && vOk.cfg.metrics.enabled && vOk.cfg.metrics.commands.length === 2, '指标配置：命令解析与启用');
@@ -4341,6 +4426,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         '指标默认命令固定 C locale（设备本地化输出不再把内存/磁盘指标解析成空值）');
       const vRo = mm._validate({ key: 'd1@10.0.0.9', host: '10.0.0.9', readOnly: true, probe: { enabled: true }, metrics: { enabled: true } });
       ok(vRo.ok && vRo.cfg.metrics.enabled === false, '指标配置：仅读取模式下禁用');
+      const vEnv = mm._validate({ key: 'd1@h', host: 'h', commands: ['x'], sysinfo: { perf: { enabled: false, env: { enabled: true, mode: 'custom', tempOid: '.1.3.6.1.4.1.2011.6.133.1.1.1.0', tempWarn: 200, fanMinRpm: -5 } } } });
+      ok(vEnv.ok && vEnv.cfg.sysinfo.perf.env.enabled && vEnv.cfg.sysinfo.perf.env.mode === 'custom' && vEnv.cfg.sysinfo.perf.env.tempOid === '1.3.6.1.4.1.2011.6.133.1.1.1.0', '环境配置：模式归一 + OID 白名单清洗（容忍前导点）');
+      ok(vEnv.cfg.sysinfo.perf.env.tempWarn === 120 && vEnv.cfg.sysinfo.perf.env.fanMinRpm === 0, '环境配置：阈值钳制（200→120、-5→0）');
       const vH = mm._validate({ key: 'd1@h', host: 'h', commands: ['x'], httpProbe: { enabled: true, url: 'https://1.2.3.4/status', intervalSec: 5, alertDays: 7, keyword: ' ok ' } });
       ok(vH.ok && vH.cfg.httpProbe.enabled && vH.cfg.httpProbe.url === 'https://1.2.3.4/status' && vH.cfg.httpProbe.intervalSec === 30 && vH.cfg.httpProbe.alertDays === 7 && vH.cfg.httpProbe.keyword === 'ok', 'HTTP 探测配置：解析与钳制');
       const vHbad = mm._validate({ key: 'd1@h', host: 'h', commands: ['x'], httpProbe: { enabled: true, url: 'ftp://x/' } });

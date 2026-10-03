@@ -1082,7 +1082,8 @@ async function deployBaselineOf(device, host) {
     return { text: String(rd.content || ''), name: ls.items[0].name, error: '' };
   } catch (e) { return { text: '', name: '', error: String((e && e.message) || e) }; }
 }
-function openConfigDeploy(presetNodeId) {
+function openConfigDeploy(presetNodeId, preset) {
+  preset = preset || {};
   if (!(window.topoDeploy && window.topoDeploy.run)) { toast('配置变更下发需要桌面版（Electron）环境'); return; }
   const cands = deployTargetsOf();
   if (!cands.length) { toast('当前没有配置管理地址的设备：先为设备填写管理地址'); return; }
@@ -1401,6 +1402,8 @@ function openConfigDeploy(presetNodeId) {
     onLoad: (plan) => { planEl.value = plan; lastResult = null; rollBtn.disabled = true; refreshPreview(); }
   });
 
+  // 预填变更集（备份中心「恢复此备份」入口）：先于首次 syncDevice，拉到基线后 refreshPreview 即用该内容预判
+  if (preset.plan) planEl.value = String(preset.plan);
   setTimeout(async () => { await syncDevice(); planEl.focus(); }, 60);
 }
 
@@ -6653,14 +6656,15 @@ function openHelp() {
       <li><b>输出关键字告警</b>：逐行正则匹配即告警（周期 / 连接时 / 仅读取输出均参与）；多关键字全部命中才显示、全部不再命中才解除，事件携带具体匹配行</li>
       <li><b>配置自动备份</b>：命令可多条、输出合并保存，连接方式可选复用监控连接或独立连接；首份显示「首次」；勾选<b>自动合规</b>后每次备份按合规模板自动扫描，违规进事件时间线并弹通知</li>
       <li><b>跨设备配置对比</b>：配置备份中心「跨设备对比…」选两台设备各一份备份做行级 diff——双机/堆叠成员、同批次接入交换机找配置漂移；与同设备对比同口径先过滤易变行，看到的差异即真实漂移</li>
-      <li><b>SNMP 采集组</b>：SNMP 识别（sysDescr 自动回填软件版本）、重启检测（sysUpTime 骤减判定）、CPU / 内存采集（OID 可配置，华为 / 思科厂家预设一键填充，GET 失败自动 GETNEXT）、接口流量（ifTable 每接口 UP/DOWN 与收发速率）；SNMP 安全模式可选 <b>v2c 团体字或 v3（USM）</b>——无认证无加密 / 仅认证（SHA-1 / MD5）/ 认证加密（AES-128 / DES）三档，引擎发现与时间窗自动同步，v3 口令经系统级加密保存</li>
+      <li><b>SNMP 采集组</b>：SNMP 识别（sysDescr 自动回填软件版本）、重启检测（sysUpTime 骤减判定）、CPU / 内存采集（OID 可配置，华为 / 思科厂家预设一键填充，GET 失败自动 GETNEXT）、<b>环境温度</b>（standard 走标准 ENTITY-SENSOR-MIB：温度 / 风扇 / 功率三类传感器全表；设备不支持时选 custom 填单个温度 OID；温度 warn/crit 双阈值与风扇转速下限告警，监控中心「性能」页看趋势）、接口流量（ifTable 每接口 UP/DOWN 与收发速率）；SNMP 安全模式可选 <b>v2c 团体字或 v3（USM）</b>——无认证无加密 / 仅认证（SHA-1 / MD5）/ 认证加密（AES-128 / DES）三档，引擎发现与时间窗自动同步，v3 口令经系统级加密保存</li>
       <li><b>服务器管理组</b>：磁盘 / 内存（SSH）——复用监控会话执行 df/free 等并解析数值，超告警 / 严重双阈值记事件并弹通知；HTTP 探测 / 证书——本机按间隔探测 HTTP(S)（2xx/3xx 且可选关键字判定），HTTPS 同时读证书剩余天数，低于阈值告警、续期自动解除</li>
       <li><b>轻量模式</b>：仅读取（不执行周期命令，其余能力保留）/ 仅探测（不填命令，只做在线探测保持连接）</li>
       <li>断线自动重连；正在监控的设备在<b>右侧设备列表显示状态标记</b>（绿在线 / 琥珀红异常）</li>
     </ul>
     <h4>⑫ 监控中心与告警（桌面版）</h4>
     <ul>
-      <li><b>监控中心…</b>（监控 ▾ 或右键设备）：聚合全部设备状态与统计、<b>近 7 天在线率</b>；「事件时间线 / 配置备份 / 接口流量 / 性能」标签页切换，点击设备名或管理地址可筛选时间线，事件带设备徽标、告警显示匹配内容；「导出巡检数据」一键导出指标与 HTTP / 证书历史 CSV</li>
+      <li><b>监控中心…</b>（监控 ▾ 或右键设备）：聚合全部设备状态与统计、<b>近 7 天在线率</b>；「事件时间线 / 配置备份 / 接口流量 / 性能」标签页切换，点击设备名或管理地址可筛选时间线，事件带设备徽标、告警显示匹配内容；接口流量页「<b>流量报表…</b>」按窗口聚合每接口收发均值 / 峰值与在线率（TopN 排序，可导出 CSV）；「导出巡检数据」一键导出指标与 HTTP / 证书历史 CSV</li>
+      <li><b>巡检报告（一键生成）…</b>（监控 ▾）：把拓扑概况、设备监控状态（含温度）、近 7 天可用性、配置备份概况、机柜占用与最近事件汇总成<b>自包含、可打印</b>的 HTML 报告——弹窗预览、系统打印（可另存 PDF）或下载 HTML；全部数据取自本机，不发往任何服务器</li>
       <li><b>监控日志…</b>：按设备 / 日期浏览，支持<b>全局跨文件搜索</b>，点击结果定位到对应行</li>
       <li><b>告警静默</b>：右键设备「告警静默 1 小时」快速静默；或在监控配置弹窗设每日<b>维护窗口</b>（支持跨午夜）——静默期内通知不弹、<b>事件时间线照常记录</b>，计划内重启不再刷屏</li>
       <li><b>告警等级与提示音…</b>（监控 ▾）：告警分<b>提示 / 警告 / 严重 / 紧急</b>四级，不同等级发出不同音型（本机合成，无需音频文件）；可设<b>最低发声等级</b>与<b>音量</b>，也可<b>整体关闭提示音</b>（关闭后系统通知一并静音，事件照常记录）；每种事件的等级可逐项改写，事件时间线按等级标注</li>
@@ -6675,6 +6679,7 @@ function openHelp() {
       <li><b>MAC/ARP 终端定位…</b>（监控 ▾）：输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置，可填备用账号），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮；接口名跨厂家规范化匹配（GE / Gi / GigabitEthernet 视为同一接口），下游未查询设备可一键续查</li>
       <li><b>批量巡检…</b>（监控 ▾）：勾选设备并发执行<b>只读白名单命令</b>（自动尝试 / 华为 / H3C / 思科 / 锐捷 / Linux 命令集：版本 / 时钟 / CPU / 内存 / 接口概览等），凭据取自各设备监控配置、可填备用账号；结果汇总可按设备查看输出、一键复制、<b>导出 CSV</b>——白名单拦截配置类命令，不会修改设备</li>
       <li><b>配置变更下发…</b>（监控 ▾）：把「生成设备配置」的产物或手写配置片段<b>安全地下发到设备</b>——整条链路「先看后做」：① 变更集解析 + 安全闸门（<b>重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝且不可覆盖</b>；删除与关闭类命令、可能中断管理连接的变更需分别勾选确认）② dry-run 预判（与最近一次配置备份逐行比对：新增 / 覆盖 / 删除 / 幂等，并提示「管理地址被改写」「关闭管理通道」等自断风险）③ 主进程在<b>一条会话内</b>完成：（可选）<b>前置命令</b>（部分设备如思科用户模式需先 <code>enable</code>）→ 强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停，兼容 FRR 的 <code>% [ZEBRA] Unknown command</code> 形式）→ 退出配置模式 → 可选保存配置 → 可选回采校验 ④ 失败时依前置备份<b>生成回滚变更单</b>（逐行求逆、逆序下发，回滚同样走 ①②③；<code>vtysh -c "…"</code> 这类外壳包装行列人工项）⑤ 每次下发落审计记录（<code>password</code>/<code>community</code> 等口令类内容<b>打码</b>后落盘），可回看 / 载入 / 导出 CSV</li>
+      <li><b>配置备份一键恢复</b>（备份中心「恢复此备份…」）：勾选一份历史备份，与最近一份备份自动生成<b>恢复变更单</b>——消失的配置行取反删除（<code>undo</code>/<code>no</code>）、缺失的行回填、同键不同值直接覆盖，块上下文自动补齐；思科 interface、banner 自由文本这类无法可靠求逆的行列「需人工」。确认后进入「配置变更下发」走同一套 dry-run → 强制前置备份 → 逐行下发的安全闸门，失败同样可生成回滚</li>
     </ul>
     <h4>⑭ 网络服务：TFTP / FTP / Syslog / Trap（桌面版）</h4>
     <p>「监控 ▾ 网络服务…」把本机变成一台内网运维服务器：</p>
@@ -7026,6 +7031,7 @@ function wire() {
     { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / 网段 / SNMP）…', act: () => openDiagTools() },
     { ic: 'grid', label: '二层拓扑推断（SNMP 转发表）…', act: () => openL2Infer() },
     { ic: 'pulse', label: '可用性报表（SLA）…', act: () => openSlaReport() },
+    { ic: 'doc', label: '巡检报告（一键生成）…', act: () => openInspectionReport() },
     { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
     { ic: 'grid', label: '批量巡检（只读命令）…', act: () => openBatchInspect() },
     { ic: 'terminal', label: '配置变更下发…', act: () => openConfigDeploy() },
@@ -7834,6 +7840,12 @@ function monitorRow(host, saved) {
     snmpMemFreeOid: typeof saved.snmpMemFreeOid === 'string' ? saved.snmpMemFreeOid : '',
     snmpCpuMode: saved.snmpCpuMode === 'idle100' ? 'idle100' : 'direct',
     snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(saved.snmpMemMode) >= 0 ? saved.snmpMemMode : '',
+    snmpEnvEnabled: !!saved.snmpEnvEnabled,
+    snmpEnvMode: saved.snmpEnvMode === 'custom' ? 'custom' : 'standard',
+    snmpEnvOid: typeof saved.snmpEnvOid === 'string' ? saved.snmpEnvOid : '',
+    snmpEnvTempWarn: saved.snmpEnvTempWarn != null ? saved.snmpEnvTempWarn : 55,
+    snmpEnvTempCrit: saved.snmpEnvTempCrit != null ? saved.snmpEnvTempCrit : 65,
+    snmpEnvFanMin: saved.snmpEnvFanMin != null ? saved.snmpEnvFanMin : 0,
     backupCommand: normCmds(saved.backupCommand, ['display current-configuration']),
     backupMode: saved.backupMode === 'own' ? 'own' : 'session',
     backupSkipSame: !!saved.backupSkipSame,
@@ -7900,6 +7912,12 @@ function normalizeMonitorHosts(cfg) {
         snmpMemFreeOid: typeof h.snmpMemFreeOid === 'string' ? h.snmpMemFreeOid.trim().slice(0, 64) : '',
         snmpCpuMode: h.snmpCpuMode === 'idle100' ? 'idle100' : 'direct',
         snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(h.snmpMemMode) >= 0 ? h.snmpMemMode : '',
+        snmpEnvEnabled: !!h.snmpEnvEnabled,
+        snmpEnvMode: h.snmpEnvMode === 'custom' ? 'custom' : 'standard',
+        snmpEnvOid: typeof h.snmpEnvOid === 'string' ? h.snmpEnvOid.trim().slice(0, 64) : '',
+        snmpEnvTempWarn: h.snmpEnvTempWarn != null ? h.snmpEnvTempWarn : 55,
+        snmpEnvTempCrit: h.snmpEnvTempCrit != null ? h.snmpEnvTempCrit : 65,
+        snmpEnvFanMin: h.snmpEnvFanMin != null ? h.snmpEnvFanMin : 0,
         backupCommand: normCmds(h.backupCommand, ['display current-configuration']),
         backupMode: h.backupMode === 'own' ? 'own' : 'session',
         backupSkipSame: !!h.backupSkipSame,
@@ -8051,7 +8069,7 @@ async function applyMonitor(id, cfg, enabled) {
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
           { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', snmpPort: r.snmpPort || '', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '', cpuMode: r.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: r.snmpMemMode || '' } } },
+        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', snmpPort: r.snmpPort || '', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '', cpuMode: r.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: r.snmpMemMode || '', env: { enabled: !!r.snmpEnvEnabled, mode: r.snmpEnvMode === 'custom' ? 'custom' : 'standard', tempOid: r.snmpEnvOid || '', tempWarn: r.snmpEnvTempWarn, tempCrit: r.snmpEnvTempCrit, fanMinRpm: r.snmpEnvFanMin } } } },
         { metrics: { enabled: !!r.metricsEnabled, command: r.metricsCommands, intervalSec: r.metricsIntervalSec, diskWarn: r.metricsDiskWarn, diskCrit: r.metricsDiskCrit, memWarn: r.metricsMemWarn, memCrit: r.metricsMemCrit } },
         { httpProbe: { enabled: !!r.httpEnabled, url: r.httpUrl, intervalSec: r.httpIntervalSec, alertDays: r.httpAlertDays, keyword: r.httpKeyword } }
         ));
@@ -8924,7 +8942,7 @@ async function reconcileMonitors() {
         { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
         // 与 applyMonitor 的完整载荷同口径：缺 sysUpTime/perf 会让重启检测与 CPU/内存采集
         // 在软件重启/恢复工程后静默失效（monitor 侧按缺省 false 处理）
-        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', snmpPort: row.snmpPort || '', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '', cpuMode: row.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: row.snmpMemMode || '' } } },
+        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', snmpPort: row.snmpPort || '', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '', cpuMode: row.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: row.snmpMemMode || '', env: { enabled: !!row.snmpEnvEnabled, mode: row.snmpEnvMode === 'custom' ? 'custom' : 'standard', tempOid: row.snmpEnvOid || '', tempWarn: row.snmpEnvTempWarn, tempCrit: row.snmpEnvTempCrit, fanMinRpm: row.snmpEnvFanMin } } } },
         { metrics: { enabled: !!row.metricsEnabled, command: row.metricsCommands, intervalSec: row.metricsIntervalSec, diskWarn: row.metricsDiskWarn, diskCrit: row.metricsDiskCrit, memWarn: row.metricsMemWarn, memCrit: row.metricsMemCrit } },
         { httpProbe: { enabled: !!row.httpEnabled, url: row.httpUrl, intervalSec: row.httpIntervalSec, alertDays: row.httpAlertDays, keyword: row.httpKeyword } }
       ));
@@ -9077,6 +9095,7 @@ function openMonitorConfig(id) {
         <label class="mh-si" title="按间隔经 SNMP v2c 采集接口状态与收发流量（ifTable，独立于连接的 UDP 轮询）：监控中心「接口流量」页查看趋势，接口 DOWN 记入事件时间线并弹通知"><input type="checkbox" class="mh-sift-cb"${r.snmpIfTable ? ' checked' : ''}/>接口流量</label>
         <label class="mh-si" title="按间隔 GET sysUpTime（TimeTicks），数值骤减判定为设备重启：记入事件时间线并弹通知（独立于 SSH/Telnet 连接）"><input type="checkbox" class="mh-si-up-cb"${r.snmpUpTime ? ' checked' : ''}/>重启检测</label>
         <label class="mh-si" title="按间隔 GET CPU/内存 OID（百分比型或字节型均可），监控中心「性能」页查看趋势"><input type="checkbox" class="mh-si-pf-cb"${r.snmpPerf ? ' checked' : ''}/>CPU/内存</label>
+        <label class="mh-si" title="按间隔采集环境传感器：standard 走标准 ENTITY-SENSOR-MIB（RFC 3433，温度/风扇/功率全表）；设备不支持时选 custom 填单个温度 OID。超阈值记入事件时间线并弹通知"><input type="checkbox" class="mh-si-env-cb"${r.snmpEnvEnabled ? ' checked' : ''}/>环境温度</label>
         <select class="mh-si-sec" title="SNMP 安全模式：v2c 团体字，或 v3 用户名（USM 认证/加密，口令在「v3 口令设置」中配置）">
           <option value="v2c"${r.snmpVersion === 'v3' ? '' : ' selected'}>v2c</option>
           <option value="v3"${r.snmpVersion === 'v3' ? ' selected' : ''}>v3</option>
@@ -9094,6 +9113,18 @@ function openMonitorConfig(id) {
           <input class="mh-si-mused" type="text" placeholder="内存 OID（量纲见右侧提示）" title="量纲由右侧「换算」提示决定：直接百分比 / 已用+空闲 / 总量+可用" value="${U.escHtml(r.snmpMemUsedOid || '')}" autocomplete="off" spellcheck="false"/>
           <input class="mh-si-mfree" type="text" placeholder="空闲/可用 OID（可选）" title="思科字节型填 Free、Linux UCD 填 memAvailReal；华为/华三百分比型留空" value="${U.escHtml(r.snmpMemFreeOid || '')}" autocomplete="off" spellcheck="false"/>
           <span class="mh-si-mode" title="CPU/内存换算方式（选厂家预设会自动带上；手动改 OID 时请确认量纲一致）">${U.escHtml(snmpModeLabel(r.snmpCpuMode, r.snmpMemMode, r.snmpMemFreeOid))}</span>
+        </div>
+        <div class="mh-env-wrap" hidden>
+          <select class="mh-si-env-mode" title="standard：走标准 ENTITY-SENSOR-MIB 全表（同时拿温度/风扇/功率）；custom：GET 单个温度 OID（设备不支持标准 MIB 时用）">
+            <option value="standard"${r.snmpEnvMode !== 'custom' ? ' selected' : ''}>标准 MIB（ENTITY-SENSOR）</option>
+            <option value="custom"${r.snmpEnvMode === 'custom' ? ' selected' : ''}>自定义温度 OID</option>
+          </select>
+          <input class="mh-si-env-oid" type="text" placeholder="温度 OID（custom 模式）" title="custom 模式的温度 GET OID（读数即摄氏度）；standard 模式忽略此框" value="${U.escHtml(r.snmpEnvOid || '')}" autocomplete="off" spellcheck="false"/>
+          <span class="mh-unit">温度阈值</span>
+          <input class="mh-si-env-tw" type="number" min="1" max="120" title="温度告警下限（℃）" value="${U.escHtml(r.snmpEnvTempWarn != null ? r.snmpEnvTempWarn : 55)}"/><span class="mh-unit">/</span>
+          <input class="mh-si-env-tc" type="number" min="1" max="150" title="严重告警下限（℃）" value="${U.escHtml(r.snmpEnvTempCrit != null ? r.snmpEnvTempCrit : 65)}"/><span class="mh-unit">℃</span>
+          <span class="mh-unit">风扇下限</span>
+          <input class="mh-si-env-fan" type="number" min="0" max="1000000" title="风扇转速告警下限（RPM，取最低转速传感器比对；0 = 不检测）" value="${U.escHtml(r.snmpEnvFanMin != null ? r.snmpEnvFanMin : 0)}"/><span class="mh-unit">RPM</span>
         </div>
         <div class="mh-sep">服务器指标采集（SSH）</div>
         <label class="mh-si" title="复用监控会话按间隔执行 df/free 等命令并解析数值：磁盘/内存超阈值时记入事件时间线并弹通知（仅读取模式下不执行）"><input type="checkbox" class="mh-mt-cb"${r.metricsEnabled ? ' checked' : ''}/>磁盘/内存</label>
@@ -9241,6 +9272,14 @@ function openMonitorConfig(id) {
     });
     // 空闲 OID 会改变换算语义（有 free 才谈得上 used+free / 总量−可用），输入即刷新提示
     rowEl.querySelector('.mh-si-mfree').addEventListener('input', syncModeHint);
+    // 环境采集折叠区：勾选展开；custom 模式才显示 OID 输入框
+    const envCb = rowEl.querySelector('.mh-si-env-cb');
+    const envWrap = rowEl.querySelector('.mh-env-wrap');
+    const envOid = rowEl.querySelector('.mh-si-env-oid');
+    const applyEnvUi = () => { envWrap.hidden = !envCb.checked; envOid.style.visibility = rowEl.querySelector('.mh-si-env-mode').value === 'custom' ? '' : 'hidden'; };
+    envCb.addEventListener('change', applyEnvUi);
+    rowEl.querySelector('.mh-si-env-mode').addEventListener('change', applyEnvUi);
+    applyEnvUi();
     // 服务器指标采集折叠区：勾选展开；Linux 预设一键填充
     const mtCb = rowEl.querySelector('.mh-mt-cb');
     const mtWrap = rowEl.querySelector('.mh-mt-wrap');
@@ -9335,6 +9374,12 @@ function openMonitorConfig(id) {
         snmpMemFreeOid: rowEl.querySelector('.mh-si-mfree').value.trim().slice(0, 64),
         snmpCpuMode: rowEl.dataset.cpuMode === 'idle100' ? 'idle100' : 'direct',
         snmpMemMode: ['percent', 'usedfree', 'totalavail'].indexOf(rowEl.dataset.memMode) >= 0 ? rowEl.dataset.memMode : '',
+        snmpEnvEnabled: rowEl.querySelector('.mh-si-env-cb').checked,
+        snmpEnvMode: rowEl.querySelector('.mh-si-env-mode').value === 'custom' ? 'custom' : 'standard',
+        snmpEnvOid: rowEl.querySelector('.mh-si-env-oid').value.trim().slice(0, 64),
+        snmpEnvTempWarn: Math.max(1, Math.min(120, parseInt(rowEl.querySelector('.mh-si-env-tw').value, 10) || 55)),
+        snmpEnvTempCrit: Math.max(1, Math.min(150, parseInt(rowEl.querySelector('.mh-si-env-tc').value, 10) || 65)),
+        snmpEnvFanMin: Math.max(0, Math.min(1000000, parseInt(rowEl.querySelector('.mh-si-env-fan').value, 10) || 0)),
         snmpCommunity: rowEl.querySelector('.mh-si-comm').value.trim().slice(0, 64),
         snmpPort: (() => { const v = parseInt(rowEl.querySelector('.mh-si-sp').value, 10); return (v > 0 && v <= 65535) ? String(v) : ''; })(),
         snmpVersion: rowEl.querySelector('.mh-si-sec').value === 'v3' ? 'v3' : 'v2c',
@@ -9821,6 +9866,104 @@ function buildSlaHtml(rep, meta) {
 <div class="note">口径说明：可用率 = 在线采样桶 ÷ 有效采样桶（按 10 分钟桶计数，非秒级探针统计）；中断时长 = 连续离线桶数 × 桶宽，最后一次中断按「至今」截断；同一桶内先失败后恢复只记该桶最后一次结果（桶内闪断不可见，这是探针采样粒度的固有限制）。${rep.summary.detailLimited ? '<br><b>注意：</b>本区间超出 10 分钟明细保留范围，可用率来自按天汇总。' : ''}${rep.summary.outageLimited ? '<br><b>注意：</b>标 * 的中断明细仅覆盖 10 分钟明细保留期内的部分（约近 ' + rep.detailKeepDays + ' 天），不等同于整段区间。' : ''}</div>
 </body></html>`;
 }
+/* ================= 巡检报告（一键生成：监控状态 + 可用性 + 备份 + 机柜 + 事件 → 可打印 HTML） ================= */
+function openInspectionReport() {
+  const root = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal" role="dialog" style="width:1000px;height:86vh;display:flex;flex-direction:column">
+      <h3>巡检报告（一键生成）</h3>
+      <div class="m-sub">汇总拓扑概况、设备监控状态、近 7 天可用性、配置备份概况、机柜占用与最近事件，生成<b>自包含、可打印</b>的 HTML 报告。全部数据取自本机，不发往任何服务器。</div>
+      <div id="irBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px"><div class="bk-empty">正在收集数据…</div></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="irPrint" disabled title="用系统打印机打印或另存为 PDF">打印…</button>
+        <button type="button" class="tb primary" id="irDownload" disabled>下载报告 HTML</button>
+        <span style="flex:1"></span>
+        <button type="button" class="tb" data-act="close">关闭</button>
+      </div>
+    </div>`;
+  root.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=close]').onclick = close;
+  const bodyEl = ov.querySelector('#irBody');
+  const downloadBtn = ov.querySelector('#irDownload'), printBtn = ov.querySelector('#irPrint');
+  let html = '';
+
+  const fmtTs = (t) => U.fmtDateTime(new Date(t));
+  (async () => {
+    // 并行收集（各桥独立，单个失败不影响其余章节——报告按降级文案如实呈现）
+    const [ovw, sla, bks] = await Promise.allSettled([
+      window.topoMonitor ? window.topoMonitor.overview() : Promise.resolve(null),
+      window.topoMonitor && window.topoMonitor.sla ? window.topoMonitor.sla({ range: 'last7' }) : Promise.resolve(null),
+      window.topoConfigBackup && window.topoConfigBackup.hosts ? window.topoConfigBackup.hosts() : Promise.resolve(null)
+    ]);
+    const o = ovw.status === 'fulfilled' ? ovw.value : null;
+    const jobs = (o && o.ok && Array.isArray(o.jobs)) ? o.jobs : [];
+    const slaRep = (sla.status === 'fulfilled' && sla.value && sla.value.ok) ? sla.value : null;
+    const bakItems = (bks.status === 'fulfilled' && bks.value && bks.value.ok) ? (bks.value.items || []) : [];
+    const report = U.buildInspectionReport({
+      genAt: Date.now(),
+      appVersion: U.APP_VERSION,
+      project: 'NetTopo 拓扑工程',
+      sheets: state.sheets.length,
+      topo: { nodes: state.nodes.length, links: state.links.length },
+      monitor: o && o.ok ? {
+        total: jobs.length,
+        online: jobs.filter(j => j.probeOk !== false && j.state === 'monitoring').length,
+        offline: jobs.filter(j => j.probeOk === false).length,
+        alerting: jobs.filter(j => !!j.alert).length,
+        linksDown: (o.links || []).filter(l => l.state === 'down').length,
+        unacked: o.unacked || 0,
+        jobs: jobs.map(j => ({
+          name: j.name || j.deviceId, host: j.host, state: j.state, probeOk: j.probeOk, alert: !!j.alert,
+          cpu: j.lastPerf ? j.lastPerf.cpu : null, mem: j.lastPerf ? j.lastPerf.mem : null,
+          temp: j.lastPerf ? j.lastPerf.temp : null, fanMin: j.lastPerf ? j.lastPerf.fanMin : null, watts: j.lastPerf ? j.lastPerf.watts : null,
+          backupAt: j.backup && j.backup.at ? j.backup.at : null
+        }))
+      } : null,
+      sla: slaRep ? {
+        summaryText: slaRep.summaryText, devices: slaRep.summary && slaRep.summary.devices, sampled: slaRep.summary && slaRep.summary.sampled,
+        rows: (slaRep.rows || []).map(r => ({ name: r.name, host: r.host, uptimePct: r.uptimePct, outages: r.outages, downtimeMs: r.downtimeMs }))
+      } : null,
+      backups: bks.status === 'fulfilled' ? { items: bakItems.map(b => ({ device: b.device, host: b.host, count: b.count, lastAt: b.lastAt })) } : null,
+      racks: (() => {
+        const rv = U.buildRackView(state.nodes, { rackField: 'rack', uField: 'uPos' });
+        return rv.racks.length || rv.unplaced.length ? {
+          racks: rv.racks.map(r => ({ name: r.name, uHeight: r.uHeight, used: r.used, free: r.free, devices: r.devices, occupancy: r.occupancy })),
+          unplaced: rv.unplaced.map(n => n.name), conflicts: rv.conflicts
+        } : null;
+      })(),
+      events: (o && o.ok && Array.isArray(o.events)) ? o.events.slice(0, 20).map(e => ({ ts: e.ts, name: e.name || e.deviceId, type: e.type, level: e.level, detail: e.detail })) : []
+    });
+    html = report.html;
+    bodyEl.innerHTML = '<style>' + report.css + '</style>' + report.body;
+    downloadBtn.disabled = false;
+    printBtn.disabled = false;
+  })().catch(() => { bodyEl.innerHTML = '<div class="bk-empty">数据收集失败：' + U.escHtml('请重试') + '</div>'; });
+
+  downloadBtn.onclick = () => {
+    if (!html) return;
+    U.download('巡检报告_' + U.fmtDate() + '.html', new Blob([html], { type: 'text/html;charset=utf-8' }));
+    toast('已导出巡检报告 HTML（自包含，可直接打开打印为 PDF）');
+  };
+  // 打印：把报告写入隐藏 iframe 后调 print——报告无脚本、CSP 同源安全（不走 window.open）
+  printBtn.onclick = () => {
+    if (!html) return;
+    const old = document.getElementById('irPrintFrame');
+    if (old) old.remove();
+    const f = document.createElement('iframe');
+    f.id = 'irPrintFrame';
+    f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+    document.body.appendChild(f);
+    f.onload = () => { try { f.contentWindow.print(); } catch (e) { /* 用户可改用下载后打印 */ } };
+    f.srcdoc = html;
+  };
+}
+
 async function openSlaReport() {
   if (!(window.topoMonitor && window.topoMonitor.sla)) { toast('可用性报表需要桌面版（Electron）环境'); return; }
   const root = $('#modalRoot');
@@ -10531,6 +10674,7 @@ function openMonitorCenter() {
       if (j.lastPerf && (j.lastPerf.cpu != null || j.lastPerf.mem != null)) {
         bits.push('CPU ' + (j.lastPerf.cpu == null ? '—' : j.lastPerf.cpu + '%') + ' / 内存 ' + (j.lastPerf.mem == null ? '—' : j.lastPerf.mem + '%'));
       }
+      if (j.lastPerf && j.lastPerf.temp != null) bits.push('温度 ' + j.lastPerf.temp + '℃' + (j.lastPerf.fanMin != null ? ' / 风扇 ' + j.lastPerf.fanMin + ' RPM' : ''));
       // SSH 指标与 HTTP 探测 / 证书（服务器管理采集项）
       if (j.metrics && j.lastMetric) {
         const lm = j.lastMetric;
@@ -10791,11 +10935,14 @@ function openMonitorCenter() {
     }
     el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
       + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · 采样间隔约 60 秒 · ↓入 ↑出（设备视角），接口 DOWN 记入事件时间线'
-      + (hist.length < 2 ? ' · 首次采样已就绪：收发速率与趋势线需第二次采样后显示' : '') + '</div>'
+      + (hist.length < 2 ? ' · 首次采样已就绪：收发速率与趋势线需第二次采样后显示' : '')
+      + '</div><div style="margin:4px 0"><button type="button" class="tb" id="mcIfReport" title="按窗口聚合各接口收发均值/峰值与在线率，TopN 排序，可导出 CSV（数据取本机保留的采样历史）">流量报表…</button></div>'
       + '<div class="mc-if-body">' + rowsHtml + '</div>';
     el.querySelectorAll('.mc-ifdev').forEach(ch => {
       ch.onclick = () => { curIfDev = ch.dataset.key; ifCache.delete(curIfDev); load(); };
     });
+    const repBtn = el.querySelector('#mcIfReport');
+    if (repBtn) repBtn.onclick = () => openIfTrafficReport(lastJobs, curIfDev);
   }
 
   /** 先按需拉取各采集设备的历史（IPC，缓存后复用），再渲染接口流量页 */
@@ -10813,6 +10960,87 @@ function openMonitorCenter() {
       } catch (e) { ifCache.set(j.key, []); }
     }
     if (document.body.contains(ov)) renderIfaces(lastJobs);
+  }
+
+  /* ---------- 接口流量周期报表（TopN 接口 + CSV 导出；聚合口径在 U.ifTrafficReport 纯函数） ---------- */
+  function openIfTrafficReport(jobs, presetKey) {
+    if (!(window.topoMonitor && window.topoMonitor.ifHistory)) { toast('接口流量报表需要桌面版（Electron）环境'); return; }
+    const cands = (jobs || []).filter(j => j.ifTable);
+    if (!cands.length) { toast('暂无接口流量采集：先在「设备监控」里勾选「接口流量」'); return; }
+    const root = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal" role="dialog" style="width:980px;height:78vh;display:flex;flex-direction:column">
+        <h3>接口流量周期报表</h3>
+        <div class="m-sub">按窗口聚合每接口收发均值 / 峰值与在线率，按峰值流量 TopN 排序。数据取本机保留的采样历史（约 120 点），窗口超出保留范围的部分自动按实际数据统计。</div>
+        <div class="frow" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:6px 0">
+          <div class="frow" style="margin:0"><label>设备</label><select id="trDev">${cands.map(c => '<option value="' + U.escHtml(c.key) + '"' + (c.key === presetKey ? ' selected' : '') + '>' + U.escHtml(c.name || c.deviceId) + '（' + U.escHtml(c.host) + '）</option>').join('')}</select></div>
+          <div class="frow" style="margin:0"><label>统计窗口</label>
+            <select id="trWin">
+              <option value="0">全部保留数据</option>
+              <option value="1">近 1 小时</option>
+              <option value="24" selected>近 24 小时</option>
+              <option value="168">近 7 天</option>
+            </select>
+          </div>
+          <div class="frow" style="margin:0"><label>TopN</label>
+            <select id="trTop"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option></select>
+          </div>
+          <button type="button" class="tb primary" id="trGo">生成</button>
+          <button type="button" class="tb" id="trCsv" disabled>导出 CSV</button>
+          <span class="m-sub" id="trHint" style="margin:0;flex:1"></span>
+        </div>
+        <div id="trBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"><div class="mc-empty">选择设备与窗口后点「生成」。</div></div>
+        <div class="m-actions"><span class="m-sub" style="margin:0;flex:1">口径：均值只计有效速率采样（首采样无差值不计入）；利用率峰值 = max(收,发) ÷ 标称带宽。</span><button type="button" class="tb primary" data-act="close">关闭</button></div>
+      </div>`;
+    root.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    ov.querySelector('[data-act=close]').onclick = close;
+    const devEl = ov.querySelector('#trDev'), winEl = ov.querySelector('#trWin'), topEl = ov.querySelector('#trTop');
+    const bodyEl = ov.querySelector('#trBody'), hintEl = ov.querySelector('#trHint'), csvBtn = ov.querySelector('#trCsv');
+    let lastRows = null;
+    const fmtPct = (v) => v == null ? '—' : v + '%';
+    const run = async () => {
+      const key = devEl.value;
+      const hours = parseInt(winEl.value, 10) || 0;
+      bodyEl.innerHTML = '<div class="mc-empty">统计中…</div>';
+      let hist = [];
+      try {
+        const r = await window.topoMonitor.ifHistory(key);
+        hist = (r && r.ok) ? (r.hist || []) : [];
+      } catch (e) { /* 桥异常按空数据处理 */ }
+      const sinceTs = hours ? Date.now() - hours * 3600 * 1000 : 0;
+      const rep = U.ifTrafficReport(hist, { topN: parseInt(topEl.value, 10) || 10, sinceTs });
+      if (!rep.sampleCount) {
+        bodyEl.innerHTML = '<div class="mc-empty">窗口内没有采样数据（接口流量刚开启或窗口内设备未监控）。</div>';
+        hintEl.textContent = ''; csvBtn.disabled = true; lastRows = null;
+        return;
+      }
+      hintEl.textContent = '采样 ' + rep.sampleCount + ' 点（' + (rep.from ? U.fmtDateTime(new Date(rep.from)) : '—') + ' ～ ' + (rep.to ? U.fmtDateTime(new Date(rep.to)) : '—') + '）'
+        + (hours ? ' · 窗口近 ' + (hours >= 24 ? (hours / 24) + ' 天' : hours + ' 小时') : '');
+      const rows = rep.ifaces.map(f => [
+        f.n, f.samples + '/' + (f.upPct == null ? '—' : f.upPct + '%'),
+        U.fmtBps(f.inAvg), U.fmtBps(f.inMax), U.fmtBps(f.outAvg), U.fmtBps(f.outMax),
+        U.fmtSpeed(f.speed), fmtPct(f.utilMax)
+      ]);
+      lastRows = rep.ifaces.map(f => [f.n, f.samples, f.upPct, f.inAvg, f.inMax, f.outAvg, f.outMax, f.speed, f.utilMax]);
+      bodyEl.innerHTML = '<div class="mc-if-head"><span>接口</span><span>采样/在线率</span><span>收均</span><span>收峰</span><span>发均</span><span>发峰</span><span>带宽</span><span>利用率峰值</span></div>'
+        + rows.map(r => '<div class="mc-if-row" style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr .8fr .9fr;gap:6px">'
+          + r.map((c, i) => '<span style="' + (i >= 2 && i <= 5 ? 'font-family:ui-monospace,Consolas,monospace' : '') + '">' + U.escHtml(c) + '</span>').join('') + '</div>').join('');
+      csvBtn.disabled = false;
+    };
+    ov.querySelector('#trGo').onclick = run;
+    csvBtn.onclick = () => {
+      if (!lastRows) return;
+      const head = ['接口', '采样数', '在线率%', '收均bps', '收峰bps', '发均bps', '发峰bps', '标称带宽bps', '利用率峰值%'];
+      U.download('接口流量报表_' + U.fmtDate() + '.csv', new Blob([U.buildCSV([head].concat(lastRows))], { type: 'text/csv;charset=utf-8' }));
+      toast('已导出接口流量报表 CSV（' + lastRows.length + ' 行）');
+    };
+    run();
   }
 
   /* ---------- 链路页（端到端链路连通性监测：任务状态 + 断点 + 逐段明细） ---------- */
@@ -10899,7 +11127,7 @@ function openMonitorCenter() {
     const cands = [];
     const seen = new Set();
     for (const j of (jobs || [])) {
-      if ((!j.perf && !j.upCheck && !j.metrics && !j.httpProbe) || seen.has(j.deviceId)) continue;
+      if ((!j.perf && !j.upCheck && !j.metrics && !j.httpProbe && !j.env) || seen.has(j.deviceId)) continue;
       seen.add(j.deviceId);
       cands.push(j);
     }
@@ -10931,9 +11159,17 @@ function openMonitorCenter() {
     } else {
       const showCpuMem = !!(lastJob.perf || (last && (last.cpu != null || last.mem != null)));
       const showUp = !!(lastJob.upCheck || (last && last.up != null));
+      const showEnv = !!(lastJob.env || (last && (last.temp != null || last.fanMin != null || last.watts != null)));
       if (showCpuMem) {
         rowsHtml += perfRow('CPU 利用率', gauge(last ? last.cpu : null), spark(hist.map(s => s.cpu), '#ef4444'));
         rowsHtml += perfRow('内存占用', gauge(last ? last.mem : null), spark(hist.map(s => s.mem), '#0ea5e9'));
+      }
+      if (showEnv) {
+        const tempV = last ? last.temp : null;
+        rowsHtml += perfRow('环境温度', tempV == null ? '<span class="t-mut">—</span>'
+          : '<b class="' + (tempV >= 65 ? 't-off' : tempV >= 55 ? 't-alert' : 't-ok') + '">' + U.escHtml(tempV) + '℃</b>', spark(hist.map(s => s.temp), '#f97316'));
+        if (last && last.fanMin != null) rowsHtml += perfRow('风扇转速（最低）', '<b class="t-ok">' + U.escHtml(last.fanMin) + ' RPM</b>' + (last.fanCount ? ' ×' + U.escHtml(last.fanCount) : ''), spark(hist.map(s => s.fanMin), '#64748b'));
+        if (last && last.watts != null) rowsHtml += perfRow('整机功率', '<b class="t-ok">' + U.escHtml(last.watts) + ' W</b>', spark(hist.map(s => s.watts), '#8b5cf6'));
       }
       if (showUp) {
         // 开机时长也给趋势：单调上升，重启会归零——一眼能看出「最近有没有重启过」
@@ -10969,7 +11205,7 @@ function openMonitorCenter() {
     }
     el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
       + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · CPU/内存为设备视角（≥75% 橙 / ≥90% 红），sysUpTime 骤减判定为设备重启并记入事件时间线；SSH 指标与 HTTP 探测来自「设备监控」勾选项，证书剩余天数低于阈值时告警'
-      + (lastJob.perf || (last && (last.cpu != null || last.mem != null)) ? '' : ' · <b>该设备未启用 CPU/内存采集</b>：在「监控 ▾ 设备监控（静默采集）」里勾选「CPU/内存」并填 OID（可选厂家预设）') + '</div>'
+      + (lastJob.perf || (last && (last.cpu != null || last.mem != null)) ? '' : (lastJob.env ? ' · 未启用 CPU/内存采集（环境温度已启用）' : ' · <b>该设备未启用 CPU/内存采集</b>：在「监控 ▾ 设备监控（静默采集）」里勾选「CPU/内存」并填 OID（可选厂家预设）')) + '</div>'
       + '<div class="mc-if-body">' + rowsHtml + '</div>';
     el.querySelectorAll('.mc-ifdev').forEach(ch => {
       ch.onclick = () => { curPerfDev = ch.dataset.pkey; perfCache.delete(curPerfDev); metricCache.delete(curPerfDev); httpCache.delete(curPerfDev); load(); };
@@ -10978,7 +11214,7 @@ function openMonitorCenter() {
   async function renderPerfAsync(jobs) {
     const seen = new Set();
     for (const j of (jobs || [])) {
-      if ((!j.perf && !j.upCheck && !j.metrics && !j.httpProbe) || seen.has(j.deviceId)) continue;
+      if ((!j.perf && !j.upCheck && !j.metrics && !j.httpProbe && !j.env) || seen.has(j.deviceId)) continue;
       seen.add(j.deviceId);
       if (!perfCache.has(j.key)) {
         try { const r = await bridge.perfHistory(j.key); perfCache.set(j.key, (r && r.ok) ? (r.hist || []) : []); }
@@ -11146,7 +11382,7 @@ function openMonitorCenter() {
     const off = window.topoMonitor.onPerf((info) => {
       if (!info || !info.key || !document.body.contains(ov)) return;
       const hist = perfCache.get(info.key) || [];
-      hist.push({ ts: info.ts, cpu: info.cpu, mem: info.mem, up: info.up });
+      hist.push({ ts: info.ts, cpu: info.cpu, mem: info.mem, up: info.up, temp: info.temp, fanMin: info.fanMin, fanCount: info.fanCount, watts: info.watts });
       while (hist.length > 120) hist.shift();
       perfCache.set(info.key, hist);
       if (curPerfDev === info.key) renderPerf(lastJobs);
@@ -11527,6 +11763,7 @@ function openConfigBackups(devicePreset) {
             <span id="bkDiffInfo" class="bk-diffinfo"></span>
             <button type="button" class="tb" id="bkDiff" disabled>对比选中（旧 → 新）</button>
             <button type="button" class="tb" id="bkCross" title="两台设备各选一份备份对比差异（双机/堆叠成员、同批次接入交换机找配置漂移）">跨设备对比…</button>
+            <button type="button" class="tb" id="bkRestore" title="勾选一份备份，与最近一份备份生成恢复变更单，进入「配置变更下发」走 dry-run → 强制前置备份 → 逐行下发">恢复此备份…</button>
             <button type="button" class="tb" id="bkDelete" disabled>删除选中</button>
             <button type="button" class="tb" id="bkComp">合规检查…</button>
             <button type="button" class="tb" id="bkAi">AI 解析…</button>
@@ -11553,6 +11790,7 @@ function openConfigBackups(devicePreset) {
   const contentEl = ov.querySelector('#bkContent');
   const diffBtn = ov.querySelector('#bkDiff');
   const delBtn = ov.querySelector('#bkDelete');
+  const restoreBtn = ov.querySelector('#bkRestore');
   const diffInfoEl = ov.querySelector('#bkDiffInfo');
 
   const renderFiles = () => {
@@ -11571,6 +11809,7 @@ function openConfigBackups(devicePreset) {
   const updateBtns = () => {
     diffBtn.disabled = sel.size !== 2;
     delBtn.disabled = sel.size !== 1;
+    restoreBtn.disabled = sel.size !== 1;
   };
   const viewFile = async (name) => {
     try {
@@ -11646,6 +11885,35 @@ function openConfigBackups(devicePreset) {
   };
   ov.querySelector('#bkComp').onclick = () => { close(); openComplianceCheck(); };
   ov.querySelector('#bkCross').onclick = () => openConfigCrossDiff();
+  // 恢复此备份：与最近一份备份（当前配置的近似）生成恢复变更单 → 进入「配置变更下发」走既有安全闸门
+  restoreBtn.onclick = async () => {
+    if (sel.size !== 1) return;
+    const name = [...sel][0];
+    const device = cur.device, host = cur.host;
+    if (!device || !host) { toast('请先在左侧选择一台设备'); return; }
+    try {
+      const ls = await window.topoConfigBackup.list(device, host);
+      const items = (ls && ls.ok && Array.isArray(ls.items)) ? ls.items : [];
+      if (!items.length) { toast('该设备没有配置备份'); return; }
+      if (name === items[0].name) { toast('所选备份已是最新一份（即当前配置记录）：无需恢复'); return; }
+      const [rd, rc] = await Promise.all([
+        window.topoConfigBackup.read(device, host, name),
+        window.topoConfigBackup.read(device, host, items[0].name)
+      ]);
+      if (!rd || !rd.ok || !rc || !rc.ok) { toast('读取备份失败：' + ((rd && rd.error) || (rc && rc.error) || '')); return; }
+      const node = state.nodes.find(n => String(n.name || n.id) === device && U.nodeMgmts(n).includes(host));
+      const vendor = (node && U.DEPLOY_VENDORS[node.vendor]) ? node.vendor : 'huawei';
+      const plan = U.buildRestoreChangeSet(String(rd.content || ''), String(rc.content || ''), vendor);
+      if (!plan.ok) { toast(plan.error || '生成恢复变更单失败'); return; }
+      if (!plan.text) { toast('与所选备份对比无差异，无需恢复'); return; }
+      const summary = '将为 ' + device + '（' + host + '）生成恢复变更单：删除 ' + plan.del + ' 行 / 恢复+覆盖 ' + plan.add + ' 行'
+        + (plan.manual.length ? ' / 需人工 ' + plan.manual.length + ' 行' : '')
+        + '。以最近一份备份（' + items[0].name + '）为当前配置的近似；进入「配置变更下发」后仍会先 dry-run 预判、强制前置备份，逐行失败即停。';
+      if (!(await confirmBox(summary))) return;
+      close();
+      openConfigDeploy(node ? node.id : '', { plan: plan.text });
+    } catch (e) { toast('生成恢复变更单失败'); }
+  };
   ov.querySelector('#bkIgnores').onclick = () => openConfigIgnoreRules();
   ov.querySelector('#bkAi').onclick = () => {
     if (sel.size !== 1) { toast('请先勾选一份备份再进行 AI 解析'); return; }
@@ -13055,6 +13323,7 @@ if (typeof globalThis !== 'undefined') {
     openCredManager,
     openTeamPackImport,
     openSlaReport,
+    openInspectionReport,
     openL2Infer,
     openUnderlayPanel,
     applyUnderlay,

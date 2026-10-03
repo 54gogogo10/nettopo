@@ -113,6 +113,56 @@ U.fmtDate = (d) => {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
 };
 
+/* ---------- 接口流量周期报表（纯函数，Node 测试可调用） ---------- */
+/** 接口流量采样历史 → 周期报表（TopN 接口）。
+ *  hist: [{ts, ifs:[{i, n, oper, in, out, speed}]}]（in/out 为 bps 速率，null = 首采样尚无差值）
+ *  opts: {topN(默认 10, 1~100), sinceTs(只统计该时刻之后的采样，默认 0 = 全部)}
+ *  返回 {ok, sampleCount, from, to, ifaces:[{i, n, samples, upSamples, upPct, inAvg, inMax, outAvg, outMax, utilMax, speed}]}
+ *  排序按峰值总流量（max(inMax,outMax)）降序；utilMax 为收发方向带宽利用率峰值百分比
+ *  （speed 取该接口最近一次非空标称值，无标称带宽则 null——不拿 1G 假设冒充）。 */
+U.ifTrafficReport = (hist, opts) => {
+  opts = opts || {};
+  const topNRaw = parseInt(opts.topN, 10);
+  const topN = (topNRaw >= 1 && topNRaw <= 100) ? topNRaw : 10;
+  const sinceTs = Number(opts.sinceTs) > 0 ? Number(opts.sinceTs) : 0;
+  const arr = (Array.isArray(hist) ? hist : []).filter(s => s && Number(s.ts) > 0 && (!sinceTs || Number(s.ts) >= sinceTs));
+  const byIf = new Map();
+  let from = 0, to = 0;
+  for (const sm of arr) {
+    const ts = Number(sm.ts);
+    if (!from || ts < from) from = ts;
+    if (ts > to) to = ts;
+    for (const f of (sm.ifs || [])) {
+      if (!f || !Number.isFinite(Number(f.i))) continue;
+      const k = Number(f.i);
+      let it = byIf.get(k);
+      if (!it) { it = { i: k, n: '', samples: 0, upSamples: 0, inSum: 0, inN: 0, inMax: null, outSum: 0, outN: 0, outMax: null, speed: 0 }; byIf.set(k, it); }
+      it.samples++;
+      if (f.oper === 'up') it.upSamples++;
+      if (f.n) it.n = String(f.n);                     // 接口名取最近一次非空（改名跟最新）
+      const spd = Number(f.speed);
+      if (Number.isFinite(spd) && spd > 0) it.speed = spd;
+      for (const dir of ['in', 'out']) {
+        if (f[dir] == null) continue;                  // 首采样无差值（null）：不计入均值/峰值，也不当 0
+        const v = Number(f[dir]);
+        if (!Number.isFinite(v) || v < 0) continue;
+        it[dir + 'Sum'] += v; it[dir + 'N']++;
+        if (it[dir + 'Max'] == null || v > it[dir + 'Max']) it[dir + 'Max'] = v;
+      }
+    }
+  }
+  const avg = (sum, n) => (n > 0 ? Math.round(sum / n) : null);
+  const ifaces = [...byIf.values()].map(it => ({
+    i: it.i, n: it.n || ('if' + it.i), samples: it.samples, upSamples: it.upSamples,
+    upPct: it.samples ? Math.round(it.upSamples / it.samples * 1000) / 10 : null,
+    inAvg: avg(it.inSum, it.inN), inMax: it.inMax,
+    outAvg: avg(it.outSum, it.outN), outMax: it.outMax,
+    speed: it.speed || null,
+    utilMax: (it.speed > 0) ? Math.round(Math.max(it.inMax || 0, it.outMax || 0) / it.speed * 1000) / 10 : null
+  })).sort((a, b) => Math.max(b.inMax || 0, b.outMax || 0) - Math.max(a.inMax || 0, a.outMax || 0)
+    || String(a.n).localeCompare(String(b.n), 'zh', { numeric: true }));
+  return { ok: true, sampleCount: arr.length, from, to, ifaces: ifaces.slice(0, topN) };
+};
 
 /* ---------- ZIP 打包（无压缩 STORE，UTF-8 文件名，供批量导出配置） ---------- */
 U.zipFiles = (files) => {
@@ -1259,6 +1309,107 @@ U.buildRackView = (nodes, opts) => {
   }
   racks.sort((a, b) => a.name.localeCompare(b.name, 'zh', { numeric: true }));
   return { racks, unplaced, conflicts, uHeight };
+};
+
+/* ---------- 巡检报告（纯函数，Node 测试可调用） ---------- */
+/** 巡检数据 → 自包含可打印 HTML。data 各段可选（对应桥不可用时传 null，报告显示降级文案）：
+ *  {genAt, appVersion, project, sheets, topo:{nodes,links},
+ *   monitor:{total,online,offline,alerting,unacked,linksDown,jobs:[{name,host,state,probeOk,alert,cpu,mem,temp,fanMin,watts,backupAt}]},
+ *   sla:{summaryText,devices,sampled,uptimePct,rows:[{name,host,uptimePct,outages,downtimeMs}]},
+ *   backups:{items:[{device,host,count,lastAt}]},
+ *   racks:{racks:[{name,uHeight,used,free,devices,occupancy}],unplaced:[names],conflicts},
+ *   events:[{ts,name,type,level,detail}]}
+ *  返回 {title, css, body, html}：html 为完整文档；css/body 供弹窗预览复用（样式全部 .ir- 前缀，不污染主界面） */
+U.buildInspectionReport = (data) => {
+  const d = data && typeof data === 'object' ? data : {};
+  const esc = U.escHtml;
+  const p2 = (n) => String(n).padStart(2, '0');
+  const fmtTs = (t) => { const x = new Date(t); return Number.isFinite(x.getTime()) ? x.getFullYear() + '-' + p2(x.getMonth() + 1) + '-' + p2(x.getDate()) + ' ' + p2(x.getHours()) + ':' + p2(x.getMinutes()) : '—'; };
+  const table = (head, rows, cls) => '<table' + (cls ? ' class="' + cls + '"' : '') + '><thead><tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>'
+    + (rows.length ? rows.map(r => '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>').join('') : '<tr><td colspan="' + head.length + '" class="ir-mut">（无数据）</td></tr>') + '</tbody></table>';
+  const sec = (t, inner) => '<h2>' + t + '</h2>' + inner;
+  const parts = [];
+  // 1. 拓扑概况
+  parts.push(sec('一、拓扑概况', '<div class="ir-cards">'
+    + '<div class="ir-card"><b>' + esc(d.topo ? d.topo.nodes : '—') + '</b><span>设备</span></div>'
+    + '<div class="ir-card"><b>' + esc(d.topo ? d.topo.links : '—') + '</b><span>连线</span></div>'
+    + '<div class="ir-card"><b>' + esc(d.sheets != null ? d.sheets : '—') + '</b><span>图纸</span></div>'
+    + '</div>'));
+  // 2. 设备监控状态
+  const mon = d.monitor;
+  parts.push(sec('二、设备监控状态', mon
+    ? '<div class="ir-cards">'
+      + '<div class="ir-card"><b>' + esc(mon.total) + '</b><span>监控任务</span></div>'
+      + '<div class="ir-card ok"><b>' + esc(mon.online) + '</b><span>在线</span></div>'
+      + '<div class="ir-card bad"><b>' + esc(mon.offline) + '</b><span>离线</span></div>'
+      + '<div class="ir-card warn"><b>' + esc(mon.alerting) + '</b><span>告警中</span></div>'
+      + '<div class="ir-card"><b>' + esc(mon.linksDown) + '</b><span>链路中断</span></div>'
+      + '<div class="ir-card"><b>' + esc(mon.unacked) + '</b><span>未确认事件</span></div>'
+      + '</div>'
+      + table(['设备', '主机', '状态', '在线', '告警', 'CPU', '内存', '温度', '最近备份'],
+        (mon.jobs || []).map(j => [
+          esc(j.name || j.deviceId || '—'), esc(j.host || '—'),
+          esc(j.state === 'monitoring' ? '监控中' : j.state === 'error' ? '连接失败' : j.state || '—'),
+          j.probeOk === false ? '<b class="ir-bad">离线</b>' : j.probeOk === true ? '<b class="ir-ok">在线</b>' : '—',
+          j.alert ? '<b class="ir-bad">命中</b>' : '—',
+          j.cpu != null ? esc(j.cpu) + '%' : '—',
+          j.mem != null ? esc(j.mem) + '%' : '—',
+          j.temp != null ? esc(j.temp) + '℃' : '—',
+          j.backupAt ? esc(fmtTs(j.backupAt)) : '—'
+        ]))
+    : '<div class="ir-mut">监控数据需桌面版（Electron）环境。</div>'));
+  // 3. 可用性（近 7 天）
+  const sla = d.sla;
+  parts.push(sec('三、可用性（近 7 天）', sla
+    ? '<div class="ir-mut">汇总可用率 <b>' + esc(sla.summaryText || '（区间内无采样）') + '</b>（有采样 ' + esc(sla.sampled) + '/' + esc(sla.devices) + ' 台）</div>'
+      + table(['设备', '管理地址', '可用率', '中断次数', '累计中断'],
+        (sla.rows || []).map(r => [
+          esc(r.name || '—'), esc(r.host || '—'),
+          r.uptimePct == null ? '（无采样）' : esc(r.uptimePct) + '%',
+          r.outages == null ? '（无明细）' : esc(r.outages),
+          r.downtimeMs == null ? '（无明细）' : esc(Math.round(r.downtimeMs / 60000)) + ' 分钟'
+        ]))
+    : '<div class="ir-mut">可用性数据需桌面版（Electron）环境。</div>'));
+  // 4. 配置备份概况
+  const bks = d.backups;
+  parts.push(sec('四、配置备份概况', bks
+    ? table(['设备', '管理地址', '备份数', '最近备份'],
+      (bks.items || []).map(b => [esc(b.device), esc(b.host), esc(b.count), b.lastAt ? esc(fmtTs(b.lastAt)) : '—']))
+    : '<div class="ir-mut">配置备份需桌面版（Electron）环境。</div>'));
+  // 5. 机柜占用
+  const rk = d.racks;
+  parts.push(sec('五、机柜占用', rk && rk.racks && rk.racks.length
+    ? (rk.conflicts ? '<div class="ir-bad">存在 ' + esc(rk.conflicts) + ' 处 U 位重叠，请到「编辑 ▾ 机柜视图」核对。</div>' : '')
+      + table(['机柜', '高度', '已用 U', '空闲 U', '设备数', '占用率'],
+        rk.racks.map(r => [esc(r.name), r.uHeight + 'U', r.used, r.free, r.devices, r.occupancy + '%']))
+      + (rk.unplaced && rk.unplaced.length ? '<div class="ir-mut">未上架（缺机柜或 U 位）：' + esc(rk.unplaced.join('、')) + '</div>' : '')
+    : '<div class="ir-mut">没有设备填写「机柜」+「U 位」自定义字段。</div>'));
+  // 6. 最近事件
+  parts.push(sec('六、最近事件（最新 20 条）', (d.events && d.events.length)
+    ? table(['时间', '设备', '类型', '等级', '详情'],
+      d.events.slice(0, 20).map(e => [esc(fmtTs(e.ts)), esc(e.name || e.deviceId || '—'), esc(e.type || '—'), esc(e.level || '—'), esc(String(e.detail || '').slice(0, 120))]))
+    : '<div class="ir-mut">暂无事件。</div>'));
+  const title = '网络巡检报告';
+  const css = [
+    'body{font:13px/1.7 "Microsoft YaHei",system-ui,sans-serif;color:#111;margin:26px}',
+    '.ir-wrap h1{font-size:20px;margin:0 0 4px}',
+    '.ir-wrap h2{font-size:15px;margin:22px 0 8px;border-bottom:2px solid #2563eb;padding-bottom:4px}',
+    '.ir-meta{color:#555;font-size:12px;margin-bottom:14px}',
+    'table{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}',
+    'th,td{border:1px solid #bbb;padding:5px 7px;text-align:left}',
+    'th{background:#f2f4f7} td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}',
+    '.ir-cards{display:flex;gap:10px;flex-wrap:wrap}',
+    '.ir-card{border:1px solid #d5dbe3;border-radius:6px;padding:8px 14px;min-width:86px;text-align:center}',
+    '.ir-card b{display:block;font-size:19px}',
+    '.ir-card span{color:#666;font-size:11px}',
+    '.ir-card.ok b{color:#15803d}.ir-card.bad b{color:#c00}.ir-card.warn b{color:#b45309}',
+    '.ir-ok{color:#15803d}.ir-bad{color:#c00}.ir-mut{color:#666;font-size:12px;margin-top:6px}',
+    '.ir-note{color:#666;font-size:11.5px;margin-top:16px;line-height:1.8;border-top:1px solid #ddd;padding-top:8px}'
+  ].join('\n');
+  const meta = '<div class="ir-meta">工程：' + esc(d.project || 'NetTopo 拓扑工程') + '　生成时间：' + esc(fmtTs(d.genAt)) + '　工具：' + esc(d.appVersion || '') + '</div>';
+  const body = '<div class="ir-wrap"><h1>' + title + '</h1>' + meta + parts.join('') + '<div class="ir-note">口径说明：在线/离线来自「设备监控」在线探测最近一次结果；CPU/内存/温度为 SNMP 采集最近一次采样（未启用采集显示 —）；可用率按在线探测 10 分钟桶统计（近 7 天），中断明细超出保留期时如实标注；机柜占用来自设备自定义字段「机柜」「U 位」。本报告由 NetTopo 一键生成，数据取自本机。</div></div>';
+  const html = '<!DOCTYPE html>\n<html lang="zh-CN"><head><meta charset="utf-8"/><title>' + title + ' ' + esc(fmtTs(d.genAt)) + '</title><style>\n' + css + '\n</style></head><body>\n' + body + '\n</body></html>';
+  return { title, css, body, html };
 };
 /** 机柜立面 SVG（自包含字符串，可直接保存/打印）：U1 在底部、按 U 位向上堆叠。
  *  opts: {uH(每 U 像素高，默认 22), width(默认 420), title} */
@@ -3381,6 +3532,100 @@ U.buildRollback = (lines, prevText, vendorKey) => {
   ].concat(manual.map(m => '#   [需人工] ' + m.line + ' —— ' + m.why));
   const text = head.join('\n') + '\n' + out.map(o => o.text).join('\n') + '\n';
   return { ok: true, error: null, text, lines: out, manual, reversible: out.filter(o => o.kind !== 'context').length };
+};
+
+/** 生成恢复变更单：把设备配置从 currentText（当前运行配置的近似，取最近一份备份）
+ *  恢复到 targetText（选中的备份内容）。与 buildRollback 同一套块上下文口径（cfgSplit）。
+ *  - 添加部分（target 原顺序）：current 缺失的行，子命令自动补块头
+ *  - 删除部分（current 顺序，先删后加）：target 没有的行取反（undo/no + 行），子命令自动补块头；
+ *    同块同键但值不同 → 归入添加部分做覆盖（不下发冗余 undo）；所在块整体消失 → 跳过子命令
+ *  - banner/header 等自由文本块的差异不自动求逆（内容行任意文本，undo 会产出垃圾），列 manual
+ *  - 思科/锐捷 interface 块无法 no 掉，列 manual（与 buildRollback 同口径）
+ *  返回 {ok, error, text, add, del, manual:[{line,why}]}；diff 超 DEPLOY_MAX_LINES 时 ok=false 提示拆分 */
+U.buildRestoreChangeSet = (targetText, currentText, vendorKey) => {
+  const v = U.deployVendor(vendorKey);
+  const target = U.cfgSplit(targetText || '');
+  const current = U.cfgSplit(currentText || '');
+  if (!target.length) return { ok: false, error: '所选备份内容为空，无法生成恢复变更单', text: '', add: 0, del: 0, manual: [] };
+  const topSet = new Set(current.filter(o => o.indent === 0).map(o => o.text.trim()));
+  const targetTop = new Set(target.filter(o => o.indent === 0).map(o => o.text.trim()));
+  const idx = (lines) => {
+    const topSet2 = new Set(lines.filter(o => o.indent === 0).map(o => o.text.trim()));
+    const byCtx = new Map();
+    for (const o of lines) {
+      if (o.indent === 0) continue;
+      if (!byCtx.has(o.ctx)) byCtx.set(o.ctx, []);
+      byCtx.get(o.ctx).push(o.text.trim());
+    }
+    return { topSet: topSet2, byCtx };
+  };
+  const curIdx = idx(current);
+  const tgtIdx = idx(target);
+  const out = [];
+  const manual = [];
+  const push = (text) => {
+    const last = out[out.length - 1];
+    if (last && last.text === text) return; // 连续重复（同块反复进入）去重
+    out.push(text);
+  };
+  // banner/header 等自由文本块的子命令行不自动求逆
+  const freeTextCtx = (ctx) => /^(banner|header)/i.test(String(ctx || '').trim());
+  const shellWrapRe = /^[^"']{0,60}\s-c\s+["'][^"']*["']/;
+  // ---- 删除部分：current 有而 target 没有的行（先删后加，undo 不依赖新块） ----
+  let del = 0;
+  for (const o of current) {
+    const t = o.text.trim();
+    const ctx = o.indent === 0 ? '' : o.ctx;
+    if (o.indent === 0) {
+      if (targetTop.has(t)) continue;
+      if (/^interface\b/i.test(t) && v.negate === 'no') {
+        manual.push({ line: t, why: '思科/锐捷无法用 no interface 删除接口，需人工处理' });
+        continue;
+      }
+      push(v.negate + ' ' + t); del++;
+    } else if (!targetTop.has(ctx)) {
+      continue;                            // 所在块整体被删：块级 undo 已覆盖
+    } else if (freeTextCtx(ctx)) {
+      if (!manual.some(m => m.line === ctx)) manual.push({ line: ctx, why: 'banner/header 自由文本块有差异：内容行无法自动求逆，请人工核对' });
+      continue;
+    } else if (shellWrapRe.test(t)) {
+      manual.push({ line: t, why: '外壳包装行（如 vtysh/nt-cli -c "…"）：无法自动求逆' });
+      continue;
+    } else {
+      if ((tgtIdx.byCtx.get(ctx) || []).includes(t)) continue;   // target 仍有同样一行
+      if ((tgtIdx.byCtx.get(ctx) || []).some(c => cfgBestMatch(
+        (tgtIdx.byCtx.get(ctx) || []).map(x => ({ raw: x, trim: x })), t))) continue; // 同键不同值 → 添加部分的覆盖行生效
+      push(ctx);
+      push(v.negate + ' ' + t); del++;
+    }
+  }
+  // ---- 添加部分：target 有而 current 没有的行（按 target 原顺序） ----
+  let add = 0;
+  for (const o of target) {
+    const t = o.text.trim();
+    const ctx = o.indent === 0 ? '' : o.ctx;
+    if (o.indent === 0) {
+      if (topSet.has(t)) continue;         // current 已有该块
+      push(t); add++;
+    } else if (freeTextCtx(ctx)) {
+      continue;                            // 自由文本块差异走 manual（删除部分已记）
+    } else if ((curIdx.byCtx.get(ctx) || []).includes(t)) {
+      continue;                            // current 已有同样一行
+    } else {
+      push(ctx);
+      push(o.text); add++;
+    }
+  }
+  if (out.length > U.DEPLOY_MAX_LINES) {
+    return { ok: false, error: '恢复差异达 ' + out.length + ' 行（超过 ' + U.DEPLOY_MAX_LINES + ' 行上限）：两份配置差异过大，请人工核对后按块拆分下发', text: '', add, del, manual };
+  }
+  const head = [
+    '# 恢复变更单（自动生成 · ' + v.label + '）',
+    '# 目标：把当前配置恢复到所选备份（删除 ' + del + ' 行 / 恢复+覆盖 ' + add + ' 行' + (manual.length ? ' / 需人工 ' + manual.length + ' 行' : '') + '）',
+    '# 注意：以「最近一份备份」为当前配置的近似——若开启自动备份则基本一致；下发时仍会先强制备份真实当前配置，失败可回滚'
+  ].concat(manual.map(m => '#   [需人工] ' + m.line + ' —— ' + m.why));
+  const text = (out.length || manual.length) ? (head.join('\n') + (out.length ? '\n' + out.join('\n') : '') + '\n') : '';
+  return { ok: true, error: null, text, add, del, manual };
 };
 
 /** 解析 ARP / MAC 地址表输出（多厂家混合文本，可一次粘贴多张表）：
