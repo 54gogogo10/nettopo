@@ -5518,13 +5518,13 @@ function openDashboard() {
         `<span class="${linksDown ? 'ds-bad' : ''}">链路中断 ${linksDown}</span>` +
         `<span>未确认事件 ${(r.unacked || 0)}</span>`;
       const evs = (r.events || []).slice(0, 14);
-      feedEl.innerHTML = evs.length
-        ? evs.map(e => {
-          const lv = (e.level && alertLevelRank(e.level) >= 1) ? e.level : '';
-          const t = U.fmtDateTime(new Date(e.ts)).slice(11, 19);
-          return `<span class="dash-feed-item${lv ? ' lv-' + U.escHtml(lv) : ''}">${U.escHtml(t)}　${U.escHtml(e.name || e.deviceId || '?')}　${U.escHtml(String(e.detail || '').slice(0, 80))}</span>`;
-        }).join('<span class="dash-sep">◆</span>')
-        : '<span class="dash-feed-item">暂无事件</span>';
+      const seg = evs.map(e => {
+        const lv = (e.level && alertLevelRank(e.level) >= 1) ? e.level : '';
+        const t = U.fmtDateTime(new Date(e.ts)).slice(11, 19);
+        return `<span class="dash-feed-item${lv ? ' lv-' + U.escHtml(lv) : ''}">${U.escHtml(t)}　${U.escHtml(e.name || e.deviceId || '?')}　${U.escHtml(String(e.detail || '').slice(0, 80))}</span>`;
+      }).join('<span class="dash-sep">◆</span>');
+      // 内容渲染两遍：单份事件在长屏上稀疏，复制拼接加密滚条；滚动位移取元素自身宽度（两份计），仍无缝循环
+      feedEl.innerHTML = evs.length ? seg + '<span class="dash-sep">◆</span>' + seg : '<span class="dash-feed-item">暂无事件</span>';
     } catch (e) { /* 桥异常保持上一次内容 */ }
   };
   tick();
@@ -11459,11 +11459,13 @@ function openConfigCrossDiff() {
   const opt = (v, label) => `<option value="${U.escHtml(v)}">${U.escHtml(label)}</option>`;
   const hostOf = (devSel) => (devSel.value !== '' && hosts[+devSel.value]) || null;
   const fillFiles = async (devSel, fileSel) => {
+    const my = (fileSel._seq = (fileSel._seq || 0) + 1); // 快速切换设备时，晚到的旧响应作废
     fileSel.innerHTML = '<option value="">（无备份）</option>';
     const h = hostOf(devSel);
     if (!h) return;
     try {
       const r = await window.topoConfigBackup.list(h.device, h.host);
+      if (my !== fileSel._seq) return;
       const items = (r && r.ok && Array.isArray(r.items)) ? r.items.slice().sort((x, y) => y.time - x.time) : [];
       fileSel.innerHTML = items.length
         ? items.map(i => opt(i.name, i.name + (i.first ? '（首次）' : ''))).join('')
@@ -11577,6 +11579,17 @@ function openConfigBackups(devicePreset) {
       diffInfoEl.textContent = '查看 ' + name;
     } catch (e) { contentEl.textContent = '（读取失败）'; }
   };
+  let filesSeq = 0; // 计数器放 loadHosts 外层：重绘重置会让连点主机的旧响应守卫失效
+  const loadFiles = async () => {
+    const my = ++filesSeq; // 快速连点两台主机时，晚到的旧 list 响应作废（否则 items 与 cur 各指一台，双击读文件必失败）
+    const r2 = await window.topoConfigBackup.list(cur.device, cur.host);
+    if (my !== filesSeq) return;
+    items = (r2 && r2.ok && r2.items) || [];
+    renderFiles();
+    updateBtns();
+    contentEl.textContent = '';
+    diffInfoEl.textContent = '';
+  };
   const loadHosts = async () => {
     try {
       const r = await window.topoConfigBackup.hosts();
@@ -11596,28 +11609,20 @@ function openConfigBackups(devicePreset) {
       } catch (e) { /* 忽略：监控桥不可用时仅展示已有备份 */ }
       hostEl.innerHTML = items2.map(h => `<div class="bk-host${h.device === cur.device && h.host === cur.host ? ' sel' : ''}" data-d="${U.escHtml(h.device)}" data-h="${U.escHtml(h.host)}"><span class="nm">${U.escHtml(h.device)}</span><span class="sub">${U.escHtml(h.host)} · ${h.pending ? '监控中' : h.count + ' 份'} · ${h.pending ? '尚未产生备份' : '最近 ' + U.fmtDateTime(new Date(h.lastAt))}</span></div>`).join('') || '<div class="bk-empty">暂无配置备份（开启监控的「自动备份」后自动生成）</div>';
       hostEl.querySelectorAll('.bk-host').forEach(el => {
-        el.onclick = async () => {
+        el.onclick = () => {
           cur.device = el.dataset.d;
           cur.host = el.dataset.h;
           sel.clear();
           loadHosts();
-          const r2 = await window.topoConfigBackup.list(cur.device, cur.host);
-          items = (r2 && r2.ok && r2.items) || [];
-          renderFiles();
-          updateBtns();
-          contentEl.textContent = '';
-          diffInfoEl.textContent = '';
+          loadFiles();
         };
       });
       if (devicePreset) {
         const hit = items2.find(h => h.device === String(devicePreset));
         if (hit) {
           cur.device = hit.device; cur.host = hit.host;
-          const r2 = await window.topoConfigBackup.list(cur.device, cur.host);
-          items = (r2 && r2.ok && r2.items) || [];
+          loadFiles();
           loadHosts(); // 重绘选中态
-          renderFiles();
-          updateBtns();
           return;
         }
       }
