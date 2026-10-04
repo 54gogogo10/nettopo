@@ -4253,6 +4253,39 @@ U.buildProtoTopology = (nodes, links, obs) => {
   };
 };
 
+/* ---------- 协议邻居持续监控（去抖状态机与配置清洗，纯函数；采集在渲染层经 runOneShot） ----------
+ * 与手动「三层邻居」面板同一套解析与匹配：面板是一次性采集，持续监控按间隔轮询并只在
+ * 状态类异常（邻居未建立 / 未达 Full）的 空↔非空 沿变化时记录事件时间线——unmatched/unplanned
+ * 是规划口径问题不是运行故障，不参与告警判定（面板里仍可见）。 */
+/** 去抖状态机：连续 2 轮异常才告警、连续 2 轮正常才恢复（与链路连通性监测默认阈值同惯例），
+ *  瞬时翻动（OSPF 邻接抖动一轮就恢复）不产生事件。st 为 null 时从零开始。
+ *  返回新状态 {alerting, failN, okN, edge}，edge ∈ null | 'alert' | 'clear'。 */
+U.protoWatchStep = (st, hasAnomaly) => {
+  const s = st && typeof st === 'object' ? st : {};
+  let alerting = !!s.alerting;
+  let failN = Number.isFinite(s.failN) ? Math.max(0, Math.min(999, Math.floor(s.failN))) : 0;
+  let okN = Number.isFinite(s.okN) ? Math.max(0, Math.min(999, Math.floor(s.okN))) : 0;
+  if (hasAnomaly) { failN++; okN = 0; } else { okN++; failN = 0; }
+  let edge = null;
+  if (!alerting && failN >= 2) { alerting = true; edge = 'alert'; }
+  else if (alerting && okN >= 2) { alerting = false; edge = 'clear'; }
+  return { alerting, failN, okN, edge };
+};
+/** 持续监控配置清洗（localStorage 持久化后再读回，坏数据逐字段回默认） */
+U.normalizeProtoWatch = (raw) => {
+  raw = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  let intervalMin = parseInt(raw.intervalMin, 10);
+  if (!Number.isFinite(intervalMin)) intervalMin = 5;
+  return {
+    enabled: !!raw.enabled,
+    intervalMin: Math.max(1, Math.min(1440, intervalMin)),
+    protoMode: raw.protoMode === 'ospf' || raw.protoMode === 'bgp' ? raw.protoMode : 'both',
+    vendor: ['auto', 'huawei', 'h3c', 'cisco', 'ruijie'].indexOf(raw.vendor) >= 0 ? raw.vendor : 'auto',
+    deviceIds: (Array.isArray(raw.deviceIds) ? raw.deviceIds : []).map(String).slice(0, 200),
+    credId: raw.credId != null ? String(raw.credId).slice(0, 64) : ''
+  };
+};
+
 /* ---------- 指纹记忆（TOFU）键与撤销连带清理 ---------- */
 /** 指纹记忆键：非默认端口带端口后缀（与 ssh known_hosts 口径一致，同 IP 不同端口互不挤掉） */
 U.fpKeyOf = (host, port) => 'topoShellFp:' + String(host == null ? '' : host)

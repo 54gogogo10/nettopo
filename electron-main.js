@@ -1632,19 +1632,21 @@ ipcMain.handle('deploy:open-folder', (e) => {
 });
 
 /* ---- 三层邻居（BGP/OSPF）异常留痕：采集是一次性的，异常写进监控事件时间线并弹通知 ----
- * 只接受「设备名 + 主机 + 明细」，不做任何采集（采集在渲染层经 shell:oneshot 完成）。 */
+ * 只接受「设备名 + 主机 + 明细」，不做任何采集（采集在渲染层经 shell:oneshot 完成）。
+ * clear=true 为持续监控的恢复事件（proto-clear），通知不再弹出打扰。 */
 ipcMain.handle('proto:record', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const clear = !!(p && p.clear);
   const items = (Array.isArray(p && p.items) ? p.items : []).slice(0, 50);
   let n = 0;
   for (const it of items) {
     const host = String((it && it.host) || '').slice(0, 120);
     const info = { key: 'proto:' + host, deviceId: String((it && it.deviceId) || ''), host, name: String((it && it.device) || '') .slice(0, 120) };
-    recordMonitorEvent(info, 'proto', String((it && it.detail) || '').slice(0, 300));
+    recordMonitorEvent(info, clear ? 'proto-clear' : 'proto', String((it && it.detail) || '').slice(0, 300));
     n++;
   }
   const first = items[0];
-  if (first && notifyEnabled()) {
+  if (!clear && first && notifyEnabled()) {
     notifyForDevice(String(first.deviceId || ''), '网络拓扑管理软件 · 三层邻居异常',
       String(first.device || first.host || '') + '：共 ' + items.length + ' 条邻居异常（详见事件时间线）', levelOf('proto'));
   }

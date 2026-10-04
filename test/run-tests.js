@@ -4129,6 +4129,32 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         { devId: 'r1', devName: 'R1', protocol: 'ospf', entries: [{ peer: '10.0.0.1', peerId: '10.0.0.1', ifn: '', state: 'Full' }] }
       ]);
       ok(pv3.adj[0].peerDevId === '' && pv3.stats.unmatched === 1, '自己认成自己的邻居 → 判为无法匹配（防自邻接噪声）');
+
+      // 持续监控去抖状态机：连续 2 轮异常才告警、连续 2 轮正常才恢复，瞬时翻动不产生事件
+      let st = null;
+      st = U.protoWatchStep(st, false);
+      ok(st.alerting === false && st.edge === null, '持续监控：初始正常轮不告警');
+      st = U.protoWatchStep(st, true);
+      ok(st.alerting === false && st.edge === null, '持续监控：第 1 轮异常不告警（去抖）');
+      st = U.protoWatchStep(st, true);
+      ok(st.alerting === true && st.edge === 'alert', '持续监控：连续第 2 轮异常 → 告警沿');
+      st = U.protoWatchStep(st, true);
+      ok(st.alerting === true && st.edge === null, '持续监控：告警持续期间不重复报');
+      st = U.protoWatchStep(st, false);
+      ok(st.alerting === true && st.edge === null, '持续监控：恢复 1 轮不解除（去抖）');
+      st = U.protoWatchStep(st, false);
+      ok(st.alerting === false && st.edge === 'clear', '持续监控：连续 2 轮正常 → 恢复沿');
+      // 瞬时抖动：单轮异常后立刻恢复，全程无沿
+      let st2 = null;
+      st2 = U.protoWatchStep(st2, false); st2 = U.protoWatchStep(st2, true); st2 = U.protoWatchStep(st2, false);
+      ok(st2.alerting === false && st2.edge === null, '持续监控：邻接抖动一轮即恢复不产生事件');
+      ok(U.protoWatchStep({ alerting: 'x', failN: -3, okN: 1e9 }, true).okN === 0, '持续监控：脏状态钳制安全');
+      // 配置清洗：坏数据逐字段回默认
+      const pwc = U.normalizeProtoWatch({ enabled: 1, intervalMin: 0, protoMode: 'zzz', vendor: 'zzz', deviceIds: ['a', 5], credId: 99 });
+      ok(pwc.enabled === true && pwc.intervalMin === 1 && pwc.protoMode === 'both' && pwc.vendor === 'auto', '持续监控配置：钳制与白名单回退');
+      eq(pwc.deviceIds.join(','), 'a,5', '持续监控配置：设备 id 列表保序转字符串');
+      eq(pwc.credId, '99', '持续监控配置：credId 转字符串');
+      ok(U.normalizeProtoWatch(null).enabled === false, '持续监控配置：空配置默认未开启');
     }
 
     // 设备自定义字段 + 机柜 U 位视图（纯逻辑）
@@ -8447,6 +8473,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(A.levelFor('backup-change'), 'info', '默认表：配置有变化为提示（不值得半夜响铃）');
       eq(A.levelFor('if-error'), 'warning', '默认表：接口错包超阈值为警告（劣化未中断）');
       eq(A.levelFor('if-error-clear'), 'info', '默认表：接口错包恢复为提示');
+      eq(A.levelFor('proto'), 'warning', '默认表：三层邻居异常为警告');
+      eq(A.levelFor('proto-clear'), 'info', '默认表：三层邻居恢复为提示');
       eq(A.levelFor('unknown-type'), 'warning', '默认表：未知事件类型回退警告');
       let evAllLeveled = true;
       for (const e of A.EVENT_TYPES) if (!A.isLevel(A.EVENT_LEVELS[e.type])) evAllLeveled = false;

@@ -1804,6 +1804,138 @@ function openTopoDiscovery() {
  * show ip ospf neighbor），解析邻接关系与状态，匹配到拓扑后在画布上叠加徽标（连线中点）+ 高亮；
  * 同时产出异常清单：状态非 Full/Established（邻居异常）、拓扑外邻居、规划外邻接。
  * 解析与匹配都在 util.js 的纯函数里（U.parseProtoNeighbors / U.buildProtoTopology，单测覆盖）。 */
+
+/** 一轮三层邻居采集（手动面板与持续监控共用）：chosen 为 deployTargetsOf 勾选项，
+ *  protos ['ospf','bgp']、vendor 厂家命令集、fbPatch 备用凭据（{credId} 或手填）。
+ *  stopFn 可选提前停止；onDone 每台回调（进度展示）。返回 {obs, errs}。 */
+async function protoRunCollect(chosen, protos, vendor, fbPatch, stopFn, onDone) {
+  // 一条会话内跑完所选协议的命令（去重关分页命令；runOneShot 上限 16 条）
+  const cmds = [];
+  for (const p of protos) for (const c of (U.PROTO_PRESETS[p][vendor] || U.PROTO_PRESETS[p].auto)) if (cmds.indexOf(c) < 0) cmds.push(c);
+  const obs = [];
+  const errs = [];
+  const CONC = 2;
+  for (let i = 0; i < chosen.length; i += CONC) {
+    if (stopFn && stopFn()) break;
+    await Promise.all(chosen.slice(i, i + CONC).map(async (c) => {
+      const host = c.cred ? c.cred.host : c.host;
+      if (!host) return;
+      const proto2 = c.cred ? c.cred.protocol : c.protocol;
+      const port = c.cred && c.cred.port ? c.cred.port : (proto2 === 'telnet' ? 23 : 22);
+      try {
+        const p = {
+          host, commands: cmds.slice(0, 16), waitMs: 800, cmdTimeoutMs: 8000
+        };
+        if (c.cred) {
+          p.protocol = proto2; p.port = port;
+          p.username = c.cred.username; p.password = c.cred.password;
+          p.privateKey = c.cred.authMode === 'key' ? c.cred.privateKey : '';
+          p.keyPassphrase = c.cred.keyPass || '';
+        } else if (fbPatch) {
+          Object.assign(p, fbPatch);
+        } else return;
+        p.expectFp = trustedFpOf(host, p.port || port);
+        const r = await window.topoShell.runOneShot(p);
+        if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || port, r.fingerprint.fp);
+        for (const p of protos) {
+          let best = null;
+          for (const o of (r.outputs || [])) {
+            const parsed = U.parseProtoNeighbors(o && o.text, p);
+            if (parsed.ok && parsed.entries.length && (!best || parsed.entries.length > best.entries.length)) best = parsed;
+          }
+          if (best) obs.push({ devId: c.node.id, devName: String(c.node.name || c.node.id), protocol: p, entries: best.entries, host });
+          else if (!r.ok) errs.push(c.node.name + '：' + (r.error || '连接失败'));
+        }
+      } catch (e) { errs.push(c.node.name + '：' + String((e && e.message) || e)); }
+      if (onDone) onDone();
+    }));
+  }
+  return { obs, errs };
+}
+
+/* ---- 协议邻居持续监控运行时（面板关闭后由主窗口定时器继续；托盘常驻时后台不中断） ---- */
+const PROTO_WATCH_KEY = 'nettopo.protoWatch';
+const protoWatch = { timer: null, running: false, st: null, cfg: null, lastAt: 0, lastSummary: '', lastErrs: 0 };
+/** 面板刷新回调（面板打开时注册，关闭时注销） */
+const protoWatchRefreshers = new Set();
+function protoWatchLoad() {
+  try { protoWatch.cfg = U.normalizeProtoWatch(JSON.parse(localStorage.getItem(PROTO_WATCH_KEY) || 'null')); }
+  catch (e) { protoWatch.cfg = U.normalizeProtoWatch(null); }
+  return protoWatch.cfg;
+}
+function protoWatchSave(cfg) {
+  protoWatch.cfg = U.normalizeProtoWatch(cfg);
+  try { localStorage.setItem(PROTO_WATCH_KEY, JSON.stringify(protoWatch.cfg)); } catch (e) { /* ignore */ }
+  return protoWatch.cfg;
+}
+/** 持续监控的目标设备（按存的 deviceId 映射回当前拓扑，设备被删的自然消失） */
+function protoWatchChosen() {
+  const ids = new Set(protoWatch.cfg.deviceIds);
+  return deployTargetsOf().filter(c => ids.has(c.node.id));
+}
+function protoWatchSchedule(delayMin) {
+  clearTimeout(protoWatch.timer);
+  protoWatch.timer = null;
+  if (!protoWatch.cfg || !protoWatch.cfg.enabled) return;
+  const min = delayMin != null ? delayMin : protoWatch.cfg.intervalMin;
+  protoWatch.timer = setTimeout(protoWatchTick, Math.max(0.25, min) * 60000);
+}
+/** 启动/重启持续监控（配置变更后调用）；浏览器版（无 runOneShot）不启动 */
+function protoWatchStart(firstDelayMin) {
+  clearTimeout(protoWatch.timer);
+  protoWatch.timer = null;
+  if (!protoWatch.cfg) protoWatchLoad();
+  if (!protoWatch.cfg.enabled) return;
+  if (!(window.topoShell && window.topoShell.runOneShot)) { protoWatch.cfg.enabled = false; protoWatchSave(protoWatch.cfg); return; }
+  protoWatchSchedule(firstDelayMin != null ? firstDelayMin : protoWatch.cfg.intervalMin);
+}
+function protoWatchStop() {
+  if (protoWatch.cfg) { protoWatch.cfg.enabled = false; protoWatchSave(protoWatch.cfg); }
+  clearTimeout(protoWatch.timer);
+  protoWatch.timer = null;
+  protoWatch.st = null; // 停止即复位去抖状态：重启后重新建立基线（首轮不告警）
+}
+async function protoWatchTick() {
+  protoWatch.timer = null;
+  if (!protoWatch.cfg || !protoWatch.cfg.enabled) return;
+  if (protoWatch.running) { protoWatchSchedule(1); return; }
+  const chosen = protoWatchChosen();
+  if (!chosen.length) { protoWatchSchedule(); return; }
+  protoWatch.running = true;
+  try {
+    const protos = protoWatch.cfg.protoMode === 'both' ? ['ospf', 'bgp'] : [protoWatch.cfg.protoMode];
+    const fbPatch = protoWatch.cfg.credId ? { credId: protoWatch.cfg.credId } : null;
+    const r = await protoRunCollect(chosen, protos, protoWatch.cfg.vendor, fbPatch, null, null);
+    const topo = U.buildProtoTopology(state.nodes, state.links, r.obs);
+    topo.hosts = r.obs.reduce((m, o) => { m[o.devId] = o.host || m[o.devId] || ''; return m; }, {});
+    // 只对状态类异常做告警判定：unmatched/unplanned 是规划口径问题（面板与 CSV 里仍可见），不该每轮响
+    const bad = topo.anomalies.filter(a => a.kind === 'state');
+    protoWatch.st = U.protoWatchStep(protoWatch.st, bad.length > 0);
+    protoWatch.lastAt = Date.now();
+    protoWatch.lastErrs = r.errs.length;
+    protoWatch.lastSummary = '邻接 ' + topo.stats.sessions + ' 条（正常 ' + topo.stats.ok + ' / 异常 ' + topo.stats.bad + '）'
+      + (r.errs.length ? ' · 采集失败 ' + r.errs.length + ' 台' : '');
+    if (protoWatch.st.edge === 'alert' && window.topoProto && window.topoProto.record) {
+      try {
+        await window.topoProto.record({
+          items: bad.map(a => ({ deviceId: a.devId, device: a.devName, host: topo.hosts[a.devId] || '', detail: a.detail }))
+        });
+      } catch (e) { /* 记录失败不阻断下一轮 */ }
+    } else if (protoWatch.st.edge === 'clear' && window.topoProto && window.topoProto.record) {
+      try {
+        await window.topoProto.record({
+          items: [{ deviceId: '', device: '持续监控', host: '', detail: '三层邻居状态类异常已全部恢复（连续 2 轮采集无异常）' }],
+          clear: true
+        });
+      } catch (e) { /* ignore */ }
+    }
+    for (const fn of protoWatchRefreshers) { try { fn(); } catch (e) { /* ignore */ } }
+  } finally {
+    protoWatch.running = false;
+    if (protoWatch.cfg && protoWatch.cfg.enabled) protoWatchSchedule();
+  }
+}
+
 function openProtoNeighbors() {
   if (!(window.topoShell && window.topoShell.runOneShot)) { toast('三层邻居采集需要桌面版（Electron）环境'); return; }
   const cands = deployTargetsOf();
@@ -1827,6 +1959,14 @@ function openProtoNeighbors() {
         <span id="pnHint" class="m-sub" style="margin:0;flex:1">采集范围：</span>
       </div>
       <div id="pnDevs" style="max-height:104px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
+      <div class="frow" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0 0;padding:6px 10px;border:1px dashed var(--border);border-radius:8px">
+        <b style="font-size:12.5px">持续监控</b>
+        <label style="display:flex;align-items:center;gap:4px;font-size:12.5px" title="按间隔自动轮询上面勾选的设备：状态类异常（邻居未建立/未达 Full）连续 2 轮才告警、连续 2 轮正常才恢复（记入事件时间线并弹通知）；面板关闭后继续，随本机保存恢复">间隔
+          <input id="pwInt" type="number" min="1" max="1440" style="width:58px" value="5"/> 分钟</label>
+        <button type="button" class="tb" id="pwGo">开启持续监控（按当前勾选）</button>
+        <button type="button" class="tb" id="pwStop" hidden>停止持续监控</button>
+        <span id="pwState" class="m-sub" style="margin:0;flex:1"></span>
+      </div>
       <div id="pnProg" class="m-sub" style="margin:6px 0 2px;min-height:18px">待开始。</div>
       <div id="pnRes" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px;min-height:140px"><div class="bk-empty">点「开始采集」后，邻接关系与异常清单汇总在这里。</div></div>
       <div class="m-actions">
@@ -1843,10 +1983,46 @@ function openProtoNeighbors() {
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
   let busy = false;
-  const close = () => { if (busy) { toast('采集进行中：请先点「停止」'); return; } ov.remove(); };
+  const close = () => { if (busy) { toast('采集进行中：请先点「停止」'); return; } protoWatchRefreshers.delete(refreshPw); ov.remove(); };
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
+
+  // 持续监控：按当前勾选设备/协议/厂家/凭据开启定时轮询（面板关闭后继续，随本机保存恢复）
+  const pwGo = ov.querySelector('#pwGo'), pwStopBtn = ov.querySelector('#pwStop'), pwStateEl = ov.querySelector('#pwState'), pwIntEl = ov.querySelector('#pwInt');
+  protoWatchLoad();
+  pwIntEl.value = String(protoWatch.cfg.intervalMin);
+  function refreshPw() {
+    const cfg = protoWatch.cfg || U.normalizeProtoWatch(null);
+    pwGo.hidden = !!cfg.enabled;
+    pwStopBtn.hidden = !cfg.enabled;
+    if (!cfg.enabled) { pwStateEl.textContent = '未开启'; return; }
+    const alive = protoWatchChosen().length;
+    pwStateEl.textContent = '运行中：' + alive + ' 台设备 · ' + (cfg.protoMode === 'both' ? 'OSPF+BGP' : cfg.protoMode.toUpperCase())
+      + ' · 每 ' + cfg.intervalMin + ' 分钟'
+      + (protoWatch.lastAt ? ' · 最近一轮：' + protoWatch.lastSummary + '（' + new Date(protoWatch.lastAt).toLocaleTimeString() + '）' : ' · 等待首轮采集')
+      + (protoWatch.st && protoWatch.st.alerting ? ' · 【告警中】' : '');
+  }
+  protoWatchRefreshers.add(refreshPw);
+  refreshPw();
+  pwGo.onclick = () => {
+    const chosen = [...devsEl.querySelectorAll('input[type=checkbox]')].filter(cb => cb.checked).map(cb => cands[+cb.dataset.idx]).filter(Boolean);
+    if (!chosen.length) { toast('持续监控需要先勾选至少一台设备'); return; }
+    const credId = (pnCred.patch() && pnCred.patch().credId) || '';
+    protoWatchSave({
+      enabled: true,
+      intervalMin: Math.max(1, Math.min(1440, parseInt(pwIntEl.value, 10) || 5)),
+      protoMode: protoEl.value,
+      vendor: vEl.value,
+      deviceIds: chosen.map(c => c.node.id),
+      credId: credId
+    });
+    protoWatch.st = null;
+    protoWatchStart(0.05); // 约 3 秒后首轮（建立基线，首轮不告警）
+    refreshPw();
+    toast('已开启三层邻居持续监控：' + chosen.length + ' 台设备，每 ' + protoWatch.cfg.intervalMin + ' 分钟一轮（面板关闭后继续）');
+  };
+  pwStopBtn.onclick = () => { protoWatchStop(); refreshPw(); toast('已停止三层邻居持续监控'); };
 
   const devsEl = ov.querySelector('#pnDevs'), protoEl = ov.querySelector('#pnProto'), vEl = ov.querySelector('#pnVendor');
   const allEl = ov.querySelector('#pnAll');
@@ -1904,54 +2080,17 @@ function openProtoNeighbors() {
     const mode = protoEl.value;
     const protos = mode === 'both' ? ['ospf', 'bgp'] : [mode];
     const vendor = vEl.value;
-    // 一条会话内跑完所选协议的命令（去重关分页命令；runOneShot 上限 16 条）
-    const cmds = [];
-    for (const p of protos) for (const c of (U.PROTO_PRESETS[p][vendor] || U.PROTO_PRESETS[p].auto)) if (cmds.indexOf(c) < 0) cmds.push(c);
     const fbPatch = pnCred.any() ? pnCred.patch() : null;
     running = true; stopFlag = false;
     goBtn.disabled = true; stopBtn.disabled = false; csvBtn.disabled = true; viewBtn.disabled = true; clearViewBtn.disabled = true; recBtn.disabled = true;
     proto = null;
-    const obs = [];
-    const errs = [];
     let done = 0;
-    const CONC = 2;
-    resEl.innerHTML = '<div class="bk-empty">采集中：' + chosen.length + ' 台设备（并发 ' + CONC + '）…</div>';
-    for (let i = 0; i < chosen.length; i += CONC) {
-      if (stopFlag) break;
-      await Promise.all(chosen.slice(i, i + CONC).map(async (c) => {
-        const host = c.cred ? c.cred.host : c.host;
-        if (!host) return;
-        const proto2 = c.cred ? c.cred.protocol : c.protocol;
-        const port = c.cred && c.cred.port ? c.cred.port : (proto2 === 'telnet' ? 23 : 22);
-        try {
-          const p = {
-            host, commands: cmds.slice(0, 16), waitMs: 800, cmdTimeoutMs: 8000
-          };
-          if (c.cred) {
-            p.protocol = proto2; p.port = port;
-            p.username = c.cred.username; p.password = c.cred.password;
-            p.privateKey = c.cred.authMode === 'key' ? c.cred.privateKey : '';
-            p.keyPassphrase = c.cred.keyPass || '';
-          } else if (fbPatch) {
-            Object.assign(p, fbPatch);
-          } else return;
-          p.expectFp = trustedFpOf(host, p.port || port);
-          const r = await window.topoShell.runOneShot(p);
-          if (r.fingerprint && r.fingerprint.fp) rememberTrustedFp(r.fingerprint.host || host, r.fingerprint.port || port, r.fingerprint.fp);
-          for (const p of protos) {
-            let best = null;
-            for (const o of (r.outputs || [])) {
-              const parsed = U.parseProtoNeighbors(o && o.text, p);
-              if (parsed.ok && parsed.entries.length && (!best || parsed.entries.length > best.entries.length)) best = parsed;
-            }
-            if (best) obs.push({ devId: c.node.id, devName: String(c.node.name || c.node.id), protocol: p, entries: best.entries, host });
-            else if (!r.ok) errs.push(c.node.name + '：' + (r.error || '连接失败'));
-          }
-        } catch (e) { errs.push(c.node.name + '：' + String((e && e.message) || e)); }
-        done++;
-        progEl.textContent = '采集进度 ' + done + ' / ' + chosen.length + ' 台…';
-      }));
-    }
+    resEl.innerHTML = '<div class="bk-empty">采集中：' + chosen.length + ' 台设备（并发 2）…</div>';
+    const r = await protoRunCollect(chosen, protos, vendor, fbPatch, () => stopFlag, () => {
+      done++;
+      progEl.textContent = '采集进度 ' + done + ' / ' + chosen.length + ' 台…';
+    });
+    const obs = r.obs, errs = r.errs;
     proto = U.buildProtoTopology(state.nodes, state.links, obs);
     proto.hosts = obs.reduce((m, o) => { m[o.devId] = o.host || m[o.devId] || ''; return m; }, {});
     running = false; stopFlag = false;
@@ -6378,7 +6517,8 @@ function restoreGraph() {
       syncMonitorStatus();  // 对齐主进程监控运行状态
       reconcileMonitors(); // 自启动已启用的监控
       reconcileLinkMon();  // 自启动链路连通性监测（任务持久化在 localStorage，不含凭据）
-    }).catch(() => { syncMonitorStatus(); reconcileMonitors(); reconcileLinkMon(); });
+      protoWatchStart();   // 自启动三层邻居持续监控（配置持久化在 localStorage，凭据按 credId 现解析）
+    }).catch(() => { syncMonitorStatus(); reconcileMonitors(); reconcileLinkMon(); protoWatchStart(); });
     return true;
   } catch (e) { return false; }
 }
@@ -6677,6 +6817,7 @@ function openHelp() {
     <h4>⑬ 诊断与终端定位（桌面版）</h4>
     <ul>
       <li><b>诊断工具箱…</b>（监控 ▾）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（v2c 团体字或 v3 USM 用户遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀）</li>
+      <li><b>三层邻居与协议视图…</b>（监控 ▾）：并发登录设备执行只读命令采集 <b>BGP / OSPF 邻接</b>（华为 <code>display ospf peer</code> / <code>display bgp peer</code>、思科 <code>show ip ospf neighbor</code> / <code>show ip bgp summary</code>），匹配到拓扑后在连线中点叠加状态徽标；异常清单区分<b>邻居状态异常</b>（未建立 / 未达 Full）、<b>拓扑外邻居</b>与<b>规划外邻接</b>，可导出 CSV、一键记入事件时间线。<b>持续监控</b>：按间隔自动轮询勾选设备，状态类异常<b>连续 2 轮才告警、连续 2 轮正常才恢复</b>（防邻接翻动刷屏），记入事件时间线并走分级通知；面板关闭后继续、随本机保存自动恢复，凭据走监控配置或凭据库档案</li>
       <li><b>MAC/ARP 终端定位…</b>（监控 ▾）：输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置，可填备用账号），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮；接口名跨厂家规范化匹配（GE / Gi / GigabitEthernet 视为同一接口），下游未查询设备可一键续查</li>
       <li><b>批量巡检…</b>（监控 ▾）：勾选设备并发执行<b>只读白名单命令</b>（自动尝试 / 华为 / H3C / 思科 / 锐捷 / Linux 命令集：版本 / 时钟 / CPU / 内存 / 接口概览等），凭据取自各设备监控配置、可填备用账号；结果汇总可按设备查看输出、一键复制、<b>导出 CSV</b>——白名单拦截配置类命令，不会修改设备</li>
       <li><b>配置变更下发…</b>（监控 ▾）：把「生成设备配置」的产物或手写配置片段<b>安全地下发到设备</b>——整条链路「先看后做」：① 变更集解析 + 安全闸门（<b>重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝且不可覆盖</b>；删除与关闭类命令、可能中断管理连接的变更需分别勾选确认）② dry-run 预判（与最近一次配置备份逐行比对：新增 / 覆盖 / 删除 / 幂等，并提示「管理地址被改写」「关闭管理通道」等自断风险）③ 主进程在<b>一条会话内</b>完成：（可选）<b>前置命令</b>（部分设备如思科用户模式需先 <code>enable</code>）→ 强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停，兼容 FRR 的 <code>% [ZEBRA] Unknown command</code> 形式）→ 退出配置模式 → 可选保存配置 → 可选回采校验 ④ 失败时依前置备份<b>生成回滚变更单</b>（逐行求逆、逆序下发，回滚同样走 ①②③；<code>vtysh -c "…"</code> 这类外壳包装行列人工项）⑤ 每次下发落审计记录（<code>password</code>/<code>community</code> 等口令类内容<b>打码</b>后落盘），可回看 / 载入 / 导出 CSV</li>
@@ -10908,7 +11049,7 @@ function openMonitorCenter() {
     backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️',
     'if-down': '🔻', 'if-up': '🔺', 'if-error': '⚠️', 'if-error-clear': '☑️', reboot: '🔄',
     metric: '📈', 'metric-clear': '📉', 'http-fail': '🌐', 'http-ok': '🌐', cert: '🔐', 'cert-clear': '🔓',
-    trap: '📨', 'syslog-alert': '📋', deploy: '🚀', 'deploy-error': '💥', proto: '🔗',
+    trap: '📨', 'syslog-alert': '📋', deploy: '🚀', 'deploy-error': '💥', proto: '🔗', 'proto-clear': '🔗',
     'link-down': '🔌', 'link-up': '🔗'
   }[t] || '•');
   const evTypeLabel = {
@@ -10916,7 +11057,7 @@ function openMonitorCenter() {
     backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规',
     'if-down': '接口离线', 'if-up': '接口恢复', 'if-error': '接口错包', 'if-error-clear': '错包恢复', reboot: '设备重启',
     metric: '指标告警', 'metric-clear': '指标恢复', 'http-fail': 'HTTP 失败', 'http-ok': 'HTTP 恢复', cert: '证书告警', 'cert-clear': '证书恢复',
-    trap: 'SNMP Trap', 'syslog-alert': 'Syslog 告警', deploy: '配置下发', 'deploy-error': '下发失败', proto: '三层邻居',
+    trap: 'SNMP Trap', 'syslog-alert': 'Syslog 告警', deploy: '配置下发', 'deploy-error': '下发失败', proto: '三层邻居', 'proto-clear': '三层邻居恢复',
     'link-down': '链路中断', 'link-up': '链路恢复'
   };
   // 事件时间线筛选：null = 全部；curDev = 设备；curHost = 具体管理地址

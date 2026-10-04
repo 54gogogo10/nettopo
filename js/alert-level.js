@@ -53,7 +53,8 @@ const EVENT_LEVELS = {
   'syslog-alert': 'warning',   // 按日志级别由 levelFromSyslogSeverity 细调
   'deploy-error': 'critical',
   deploy: 'info',
-  proto: 'warning',            // BGP/OSPF 邻居异常
+  proto: 'warning',            // BGP/OSPF 邻居异常（持续监控去抖后的状态沿）
+  'proto-clear': 'info',
   'link-down': 'critical',     // 端到端链路/路径中断（连通性监测）
   'link-up': 'info',           // 链路恢复
   trust: 'warning',            // 首次信任主机指纹（安全敏感）
@@ -87,6 +88,7 @@ const EVENT_TYPES = [
   { type: 'syslog-alert', label: 'Syslog 告警' },
   { type: 'deploy-error', label: '配置下发失败' },
   { type: 'proto', label: '三层邻居异常' },
+  { type: 'proto-clear', label: '三层邻居恢复' },
   { type: 'link-down', label: '链路中断' },
   { type: 'link-up', label: '链路恢复' },
   { type: 'trust', label: '首次信任主机指纹' },
