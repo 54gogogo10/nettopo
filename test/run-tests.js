@@ -8507,6 +8507,93 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!!globalThis.TopoAlertLevel && globalThis.TopoAlertLevel.LEVELS.length === 4, '双形态导出：挂载 globalThis.TopoAlertLevel（渲染层可用）');
     }
 
+    /* ================= 告警外发 Webhook（js/webhook-notify.js） ================= */
+    {
+      const WHN = require('../js/webhook-notify.js');
+      // 配置归一化：URL 校验 / 格式白名单 / 钳制 / 脏数据逐字段回默认
+      const c0 = WHN.normalizeWebhookCfg(null);
+      eq(c0.enabled, false, '外发：默认未启用');
+      eq(c0.format, 'generic', '外发：默认通用 JSON');
+      eq(c0.minLevel, 'warning', '外发：默认最低等级警告');
+      eq(c0.cooldownSec, 10, '外发：默认冷却 10 秒');
+      const c1 = WHN.normalizeWebhookCfg({ enabled: true, url: 'https://qyapi.weixin.qq.com/hook?key=x', format: 'wecom', minLevel: 'critical', cooldownSec: 99999, timeoutSec: 0 });
+      eq(c1.enabled, true, '外发：合法地址可启用');
+      eq(c1.format, 'wecom', '外发：格式白名单透传');
+      eq(c1.minLevel, 'critical', '外发：最低等级透传');
+      eq(c1.cooldownSec, 3600, '外发：冷却上限钳制 3600');
+      eq(c1.timeoutSec, 1, '外发：超时下限钳制 1 秒');
+      eq(WHN.normalizeWebhookCfg({ enabled: true, url: 'ftp://x', format: 'bogus', minLevel: 'zzz' }).enabled, false, '外发：非 http(s) 地址不启用');
+      eq(WHN.normalizeWebhookCfg({ enabled: true, url: 'https://a', format: 'bogus' }).format, 'generic', '外发：未知格式回退通用');
+      eq(WHN.normalizeWebhookCfg({ enabled: 1, url: 'https://a', secret: { bad: 1 } }).secret, '', '外发：非字符串密钥清空');
+      // 消息构造：四种格式 payload 结构 + 钉钉/飞书加签字段
+      const msg = { title: '网络拓扑管理软件 · 设备离线', body: '核心R1（10.0.0.1）探测失败', level: 'emergency', ts: 1700000000000 };
+      const g = WHN.buildDispatch({ url: 'https://hook.example/x', format: 'generic' }, msg);
+      eq(g.payload.source, 'NetTopo', '通用：payload 带 source');
+      eq(g.payload.level, 'emergency', '通用：payload 带等级');
+      eq(g.payload.title, '设备离线', '通用：标题剥离本软件前缀');
+      eq(g.url, 'https://hook.example/x', '通用：URL 原样');
+      const w = WHN.buildDispatch({ url: 'https://qyapi.weixin.qq.com/hook?key=x', format: 'wecom' }, msg);
+      eq(w.payload.msgtype, 'text', '企业微信：msgtype=text');
+      ok(w.payload.text.content.indexOf('核心R1') >= 0 && w.payload.text.content.indexOf('网络拓扑管理软件') < 0, '企业微信：正文含设备信息且不含软件前缀');
+      ok(w.payload.text.content.indexOf('[紧急]') >= 0, '企业微信：文本尾部带等级名');
+      const d = WHN.buildDispatch({ url: 'https://oapi.dingtalk.com/robot/send?access_token=t', format: 'dingtalk', secret: 'SEC123' }, msg);
+      eq(d.payload.msgtype, 'text', '钉钉：msgtype=text');
+      ok(d.url.indexOf('timestamp=1700000000000') > 0 && d.url.indexOf('&sign=') > 0, '钉钉：加签拼到 URL（timestamp+sign）');
+      const d2 = WHN.buildDispatch({ url: 'https://oapi.dingtalk.com/robot/send?access_token=t', format: 'dingtalk' }, msg);
+      eq(d2.url, 'https://oapi.dingtalk.com/robot/send?access_token=t', '钉钉：未配置密钥不改 URL');
+      const f = WHN.buildDispatch({ url: 'https://open.feishu.cn/hook/x', format: 'feishu', secret: 'SEC456' }, msg);
+      eq(f.payload.msg_type, 'text', '飞书：msg_type=text');
+      eq(f.payload.timestamp, '1700000000', '飞书：加签带秒级 timestamp');
+      ok(/^[A-Za-z0-9+/]{43}=$/.test(f.payload.sign), '飞书：sign 为 base64(HMAC-SHA256)（44 字符）');
+      // 签名确定性：同输入同输出、不同 ts 不同签名
+      eq(WHN.dingtalkSign('SEC', 1000), WHN.dingtalkSign('SEC', 1000), '签名：钉钉确定性');
+      ok(WHN.dingtalkSign('SEC', 1000) !== WHN.dingtalkSign('SEC', 2000), '签名：钉钉随时间变化');
+      ok(WHN.feishuSign('SEC', 1000) !== WHN.feishuSign('SEC', 2000), '签名：飞书随时间变化');
+      // postJson：本地 HTTP 假接收端（收包断言 + 2xx/5xx/坏地址三分支）
+      const http = require('http');
+      const got = [];
+      const srv = http.createServer((req, res) => {
+        let n = 0; const chunks = [];
+        req.on('data', (c) => { chunks.push(c); n += c.length; });
+        req.on('end', () => {
+          got.push({ url: req.url, ct: req.headers['content-type'], body: Buffer.concat(chunks).toString('utf8') });
+          if (req.url.indexOf('fail') >= 0) { res.writeHead(500); res.end('boom'); return; }
+          res.writeHead(200); res.end('ok');
+        });
+      });
+      await new Promise((res) => srv.listen(0, '127.0.0.1', res));
+      const wport = srv.address().port;
+      const pr1 = await WHN.postJson('http://127.0.0.1:' + wport + '/hook', { a: 1 }, 3000);
+      eq(pr1.ok, true, 'postJson：2xx 判成功');
+      eq(got[0].ct, 'application/json', 'postJson：Content-Type 为 JSON');
+      eq(JSON.parse(got[0].body).a, 1, 'postJson：JSON 正文到达接收端');
+      const pr2 = await WHN.postJson('http://127.0.0.1:' + wport + '/fail', { a: 1 }, 3000);
+      eq(pr2.ok, false, 'postJson：5xx 判失败');
+      ok(String(pr2.error).indexOf('500') >= 0, 'postJson：失败原因带状态码');
+      const pr3 = await WHN.postJson('http://127.0.0.1:1/nope', { a: 1 }, 1500);
+      eq(pr3.ok, false, 'postJson：连接失败如实返回');
+      // WebhookSender：等级过滤 + 冷却 + notify 端到端送达
+      const logs = [];
+      const sender = new WHN.WebhookSender({
+        loadCfg: () => ({ enabled: true, url: 'http://127.0.0.1:' + wport + '/hook', format: 'generic', minLevel: 'critical', cooldownSec: 3600, timeoutSec: 3 }),
+        log: (m) => logs.push(m)
+      });
+      eq(sender.shouldSend(sender.cfg(), 'emergency'), true, '调度：紧急 ≥ 最低等级（严重）外发');
+      eq(sender.shouldSend(sender.cfg(), 'warning'), false, '调度：警告低于最低等级不外发');
+      sender.notify('网络拓扑管理软件 · 设备离线', 'SW1 探测失败', 'critical'); // 触发发送（冷却窗口开启）
+      sender.notify('网络拓扑管理软件 · 接口错包告警', 'GE0/0/1 错包', 'emergency'); // 冷却期内 → 丢弃
+      await new Promise((r) => setTimeout(r, 300));
+      const hookGot = () => got.filter(x => x.url === '/hook'); // /fail 是 5xx 探测用例，不计入外发
+      eq(hookGot().length, 2, '调度：冷却期内第二条不重复外发（首条 + 之前的 postJson 探测）');
+      eq(JSON.parse(hookGot()[1].body).title, '设备离线', '调度：外发正文剥离软件前缀');
+      sender.notify('x', 'y', 'info'); // 等级不足 → 不发
+      await new Promise((r) => setTimeout(r, 150));
+      eq(hookGot().length, 2, '调度：低于最低等级的外发被过滤');
+      const tr = await sender.test();
+      eq(tr.ok, true, '测试：绕过冷却与等级直发成功');
+      srv.close();
+    }
+
     /* ================= 端到端链路连通性监测：路径与判定（js/link-path.js） ================= */
     {
       const L = require('../js/link-path.js');

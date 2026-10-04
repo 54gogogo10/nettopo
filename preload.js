@@ -79,6 +79,9 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   /* 告警等级与分级提示音：等级覆盖表与声音开关存主进程 settings.json；发声由渲染层合成 WebAudio */
   setSound: (sound) => ipcRenderer.invoke('monitor:set-settings', { sound }),
   setAlertLevels: (levels) => ipcRenderer.invoke('monitor:set-settings', { levels }),
+  /* 告警外发（Webhook）：配置存主进程 settings.json（secret 密文落盘，界面只见「已设置」）；测试即时发送 */
+  setWebhook: (webhook) => ipcRenderer.invoke('monitor:set-settings', { webhook }),
+  webhookTest: (p) => ipcRenderer.invoke('monitor:webhook-test', p),
   onAlertSound: sub('monitor:alert-sound'),
   setTray: (enabled) => ipcRenderer.invoke('monitor:tray', { enabled }),
   testClose: () => ipcRenderer.invoke('monitor:test-close'),

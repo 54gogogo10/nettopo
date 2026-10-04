@@ -6668,6 +6668,7 @@ function openHelp() {
       <li><b>监控日志…</b>：按设备 / 日期浏览，支持<b>全局跨文件搜索</b>，点击结果定位到对应行</li>
       <li><b>告警静默</b>：右键设备「告警静默 1 小时」快速静默；或在监控配置弹窗设每日<b>维护窗口</b>（支持跨午夜）——静默期内通知不弹、<b>事件时间线照常记录</b>，计划内重启不再刷屏</li>
       <li><b>告警等级与提示音…</b>（监控 ▾）：告警分<b>提示 / 警告 / 严重 / 紧急</b>四级，不同等级发出不同音型（本机合成，无需音频文件）；可设<b>最低发声等级</b>与<b>音量</b>，也可<b>整体关闭提示音</b>（关闭后系统通知一并静音，事件照常记录）；每种事件的等级可逐项改写，事件时间线按等级标注</li>
+      <li><b>告警外发（Webhook）…</b>（监控 ▾）：把告警转发到<b>企业微信 / 钉钉 / 飞书群机器人</b>或自建接收端（通用 JSON），人不在电脑前手机也能收到；与系统通知同源同等级，可设<b>最低外发等级</b>与冷却间隔；钉钉/飞书加签密钥经系统加密落盘、界面只见「已设置」，弹窗内可「发送测试」验证连通</li>
       <li><b>链路连通性监测…</b>（监控 ▾）：把<b>链路本身</b>当监测对象——「为全部连线生成」给每条连线建「两端接口 IP 互探」任务；「＋ 端到端路径监测」指定起止设备后<b>沿拓扑自动选路并逐段探测</b>，断在哪一段是测出来的。探测可选<b>本机</b>（零配置，本机逐跳 ICMP/TCP）或<b>设备侧</b>（从每段起点设备执行 ping，复用监控/凭据库凭据，各厂家语法已内置）；结论连通/中断/未知，中断与恢复记入事件时间线并按<b>分级告警</b>通知。画布连线按结论着色（连通绿 / 中断红虚线闪烁 / 未知灰，可关），侧栏设备带链路标记（方形小点），监控中心新增「<b>链路</b>」页签看逐段明细与断点。解析不出结论时保持原状态不误报；默认「首轮探测只建基线」，避免本机天生不可达的地址刷屏</li>
       <li><b>拓扑状态叠加</b>（监控 ▾）：节点右上角状态圆点实时刷新（绿=在线 / 红=离线·告警 / 橙=连接中）</li>
       <li><b>链路流量叠加</b>（监控 ▾）：连线中点徽标显示实时利用率（绿 &lt;50% / 橙 &lt;80% / 红 ≥80%，接口 DOWN 灰显）——数据取各设备「接口流量」SNMP 采集的收发速率，按跨厂家规范化接口名对齐连线两端，悬浮查看收发速率与采样时间</li>
@@ -7010,6 +7011,7 @@ function wire() {
       if (selId) openMonitorConfig(selId); else toast('请先选中一台设备，或右键设备进入');
     } },
     { ic: 'bell', label: '告警等级与提示音…', act: openAlertSoundConfig },
+    { ic: 'bell', label: '告警外发（Webhook）…', act: openWebhookConfig },
     { ic: 'link', label: '链路连通性监测…', act: openLinkMonitor },
     { ic: 'link', label: (linkOverlayOn() ? '✓ ' : '') + '链路状态叠加（连线着色）', act: () => {
       const on = !linkOverlayOn();
@@ -8331,6 +8333,99 @@ function openAlertSoundConfig() {
     toast(sound.enabled
       ? '已保存：' + alertLevelName(sound.minLevel) + '及以上告警发声，音量 ' + Math.round(sound.volume * 100) + '%'
       : '已保存：告警提示音已关闭（事件与系统通知照常，通知本身也静音）');
+  };
+}
+
+/** 「告警外发（Webhook）…」：把告警转发到企业微信/钉钉/飞书群机器人或自建接收端——人离开电脑也能收到。
+ *  与系统通知同源同等级（挂在 notifyUser 出口），受「最低外发等级」与冷却约束；secret 密文落盘、
+ *  界面只见「已设置」；发送失败尽力而为（事件时间线仍有全量记录）。 */
+function openWebhookConfig() {
+  const bridge = monitorBridge();
+  if (!bridge || !bridge.getSettings || !bridge.setWebhook) { toast('告警外发需要桌面版（Electron）环境'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  const levels = alertLevelList();
+  const lvOptions = (cur) => levels.map(lv => '<option value="' + U.escHtml(lv) + '"' + (lv === cur ? ' selected' : '') + '>' + U.escHtml(alertLevelName(lv)) + '</option>').join('');
+  const fmtOptions = (cur) => ['generic', 'wecom', 'dingtalk', 'feishu'].map(f =>
+    '<option value="' + f + '"' + (f === cur ? ' selected' : '') + '>'
+    + ({ generic: '通用 JSON（自建接收端）', wecom: '企业微信群机器人', dingtalk: '钉钉群机器人（可选加签）', feishu: '飞书群机器人（可选签名）' }[f]) + '</option>').join('');
+  ov.innerHTML = `
+    <div class="modal ws-dialog" role="dialog" style="width:600px">
+      <h3>告警外发（Webhook）</h3>
+      <div class="m-sub">把告警转发到 <b>企业微信 / 钉钉 / 飞书群机器人</b>或自建接收端——手机上即可收到，人不在电脑前也不漏。与系统通知<b>同源同等级</b>：低于最低外发等级的告警不外发；冷却期内的新告警不重复外发（事件时间线均有全量记录）。地址与密钥仅保存在本机（密钥加密落盘）。</div>
+      <div class="frow" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <label class="as-ck" title="开启后按最低外发等级转发告警"><input id="whEnabled" type="checkbox"/>启用告警外发</label>
+        <label class="as-ck">最低外发等级 <select id="whMin">${lvOptions('critical')}</select></label>
+        <label class="as-ck" title="两次外发的最小间隔：防极端刷屏（依赖抑制已归并下游离线，通常无需调大）">冷却 <input id="whCd" type="number" min="0" max="3600" style="width:64px" value="10"/> 秒</label>
+      </div>
+      <div class="frow"><label>消息格式</label><select id="whFmt" style="flex:1">${fmtOptions('generic')}</select></div>
+      <div class="frow"><label>Webhook 地址</label><input id="whUrl" type="text" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…" style="flex:1" autocomplete="off" spellcheck="false"/></div>
+      <div class="frow"><label>加签密钥</label><input id="whSecret" type="password" placeholder="（钉钉/飞书加签密钥，可选）" style="flex:1" autocomplete="new-password"/>
+        <button type="button" class="tb" id="whSecretClear" hidden style="padding:2px 8px;font-size:11px" title="移除已保存的加签密钥">移除</button>
+        <span id="whSecretState" class="t-mut" style="white-space:nowrap"></span></div>
+      <div class="m-sub">钉钉机器人安全设置选「加签」、飞书选「签名校验」时填密钥；企业微信与通用 JSON 留空。密钥经系统加密保存在本机，界面上不再回显。</div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="whTest" title="按当前弹窗里填写的地址/格式/密钥立即发一条测试消息（无需先保存）">发送测试</button>
+        <button type="button" class="tb" data-act="cancel">取消</button>
+        <button type="button" class="tb primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  let savedHasSecret = false, clearSecret = false;
+  bridge.getSettings().then((r) => {
+    if (!r || !r.ok || !document.body.contains(ov)) return;
+    const w = r.webhook || {};
+    ov.querySelector('#whEnabled').checked = !!w.enabled;
+    ov.querySelector('#whMin').value = w.minLevel || 'critical';
+    ov.querySelector('#whCd').value = String(w.cooldownSec != null ? w.cooldownSec : 10);
+    ov.querySelector('#whFmt').value = w.format || 'generic';
+    ov.querySelector('#whUrl').value = w.url || '';
+    savedHasSecret = !!w.hasSecret;
+    ov.querySelector('#whSecretState').textContent = savedHasSecret ? '已设置（输入框留空保存则保持不变）' : '';
+    ov.querySelector('#whSecretClear').hidden = !savedHasSecret;
+  }).catch(() => { /* 读取失败按默认展示 */ });
+  ov.querySelector('#whSecretClear').onclick = () => {
+    clearSecret = true;
+    ov.querySelector('#whSecretClear').hidden = true;
+    ov.querySelector('#whSecretState').textContent = '保存后将移除已设置的密钥';
+  };
+  ov.querySelector('#whTest').onclick = async () => {
+    if (!bridge.webhookTest) { toast('当前版本主进程不支持测试发送'); return; }
+    const btn = ov.querySelector('#whTest');
+    btn.disabled = true; btn.textContent = '发送中…';
+    try {
+      const r = await bridge.webhookTest({
+        url: ov.querySelector('#whUrl').value.trim(),
+        format: ov.querySelector('#whFmt').value,
+        secret: ov.querySelector('#whSecret').value
+      });
+      toast(r && r.ok ? '测试消息已发出：接收端返回成功（2xx）' : '测试失败：' + ((r && r.error) || '未知错误'));
+    } catch (e) { toast('测试失败：' + String((e && e.message) || e)); }
+    btn.disabled = false; btn.textContent = '发送测试';
+  };
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  ov.querySelector('[data-act=save]').onclick = async () => {
+    const url = ov.querySelector('#whUrl').value.trim();
+    if (ov.querySelector('#whEnabled').checked && !/^https?:\/\/./i.test(url)) { toast('启用外发需填写有效的 http(s) Webhook 地址'); return; }
+    const secretInput = ov.querySelector('#whSecret').value;
+    const webhook = {
+      enabled: ov.querySelector('#whEnabled').checked,
+      url: url,
+      format: ov.querySelector('#whFmt').value,
+      minLevel: ov.querySelector('#whMin').value,
+      cooldownSec: Math.max(0, Math.min(3600, parseInt(ov.querySelector('#whCd').value, 10) || 10))
+    };
+    // secret 三态：有输入 → 提交明文（落盘前主进程加密）；留空且已设置 → 不提交（保持不变）；点过「移除」→ 提交空串
+    if (secretInput) webhook.secret = secretInput;
+    else if (clearSecret) webhook.secret = '';
+    try { await bridge.setWebhook(webhook); } catch (e) { toast('保存失败：' + String((e && e.message) || e)); return; }
+    close();
+    toast(webhook.enabled ? '已保存：' + alertLevelName(webhook.minLevel) + '及以上告警将外发到 Webhook' : '已保存：告警外发已关闭');
   };
 }
 

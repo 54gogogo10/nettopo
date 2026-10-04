@@ -11,6 +11,7 @@ const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-back
 const { CredentialStore } = require('./js/credential-store.js');
 const { AlertDeps } = require('./js/alert-deps.js');
 const AL = require('./js/alert-level.js');
+const { WebhookSender, normalizeWebhookCfg } = require('./js/webhook-notify.js');
 const { LinkMonitor } = require('./js/link-monitor.js');
 const LP = require('./js/link-path.js');
 const { applyAck, clearAck, unackedCount } = require('./js/event-ack.js');
@@ -263,6 +264,18 @@ function alertSoundSettings() { return AL.normalizeSoundSettings(loadAppSettings
 /** 事件类型 → 当前生效等级（用户覆盖优先，其次默认表） */
 function levelOf(type) { return AL.levelFor(type, alertLevelOverrides()); }
 
+/* ---- 告警外发（Webhook，js/webhook-notify.js）：挂在 notifyUser 上与系统通知同源；
+ *   secret 经 safeStorage 密文落盘（settings.json webhookNotify.secret），渲染层只见「已设置」 ---- */
+const webhookSender = new WebhookSender({
+  loadCfg: () => {
+    const saved = loadAppSettings().webhookNotify;
+    if (!saved || typeof saved !== 'object') return saved;
+    // 落盘的 secret 是 safeStorage 密文（enc1: 前缀），外发前解密成明文——密文算签名必错；明文只在主进程内存
+    return Object.assign({}, saved, { secret: decryptSecretValue(String(saved.secret || '')) });
+  },
+  log: (msg) => { try { console.log('[webhook] ' + msg); } catch (e) { /* ignore */ } }
+});
+
 /** 设备告警的系统通知统一出口：静默期内（手动静默 / 维护窗口）不弹通知，事件时间线照常记录。
  *  level 省略时按事件默认等级；告警等级与提示音见 js/alert-level.js */
 function notifyForDevice(deviceId, title, body, level) {
@@ -421,6 +434,8 @@ function sendMonitor(channel, info) {
 function notifyUser(title, body, level) {
   // 分级提示音先发（与系统通知是否可用无关）：渲染层合成的音型才算「按等级发声」
   emitAlertSound(level);
+  // 告警外发（Webhook）：与系统通知同源同等级，受「最低外发等级」与冷却约束；尽力而为不阻断
+  webhookSender.notify(title, body, level);
   try {
     if (!Notification.isSupported()) return;
     // silent 恒为 true：提示音一律由本软件按等级合成——既避免与系统提示音叠加成两声，
@@ -1256,12 +1271,15 @@ ipcMain.handle('monitor:alert-deps', (e) => monitorGuard(e)
 /* 监控/告警全局设置：通知开关、托盘常驻、告警等级覆盖表（alertLevels）与分级提示音（alertSound）。
  * 渲染层的「设备监控」与「告警等级与提示音…」共用这一对接口（settings.json 单点持久化） */
 function monitorSettingsView() {
+  const wh = normalizeWebhookCfg(loadAppSettings().webhookNotify);
   return {
     ok: true,
     notify: loadAppSettings().monitorNotify !== false,
     tray: trayEnabled(),
     sound: alertSoundSettings(),
-    levels: alertLevelOverrides()
+    levels: alertLevelOverrides(),
+    // secret 不回明文：只告诉渲染层「已设置」，修改走 set-settings 的 webhook.secret（空串=清除）
+    webhook: { enabled: wh.enabled, url: wh.url, format: wh.format, minLevel: wh.minLevel, cooldownSec: wh.cooldownSec, timeoutSec: wh.timeoutSec, hasSecret: !!wh.secret }
   };
 }
 ipcMain.handle('monitor:get-settings', (e) => monitorGuard(e) ? monitorSettingsView() : { ok: false, error: 'forbidden' });
@@ -1280,8 +1298,45 @@ ipcMain.handle('monitor:set-settings', (e, p) => {
     s.alertLevels = AL.normalizeOverrides(p.levels);
     dirty = true;
   }
+  // 告警外发（Webhook）：字段合并（局部更新不重置未提交字段）；secret 三态——undefined 不动、
+  // 空串清除、非空加密落盘（加密不可用时如实保留明文，与网络服务口令同口径）
+  if (p && p.webhook && typeof p.webhook === 'object' && !Array.isArray(p.webhook)) {
+    const w = p.webhook;
+    const cur = normalizeWebhookCfg(s.webhookNotify);
+    const next = normalizeWebhookCfg({
+      enabled: w.enabled != null ? !!w.enabled : cur.enabled,
+      url: w.url != null ? String(w.url) : cur.url,
+      format: w.format != null ? String(w.format) : cur.format,
+      minLevel: w.minLevel != null ? String(w.minLevel) : cur.minLevel,
+      cooldownSec: w.cooldownSec != null ? w.cooldownSec : cur.cooldownSec,
+      timeoutSec: w.timeoutSec != null ? w.timeoutSec : cur.timeoutSec
+    });
+    if (w.secret === '') next.secret = '';
+    else if (typeof w.secret === 'string' && w.secret) next.secret = encryptSecretValue(w.secret);
+    else next.secret = (s.webhookNotify && s.webhookNotify.secret) || '';
+    s.webhookNotify = next;
+    dirty = true;
+  }
   if (dirty) saveAppSettings();
   return monitorSettingsView();
+});
+/* 告警外发测试：按当前已保存配置（或入参覆盖，便于保存前先试）发一条测试消息 */
+ipcMain.handle('monitor:webhook-test', async (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const saved = loadAppSettings().webhookNotify || {};
+  const override = (p && typeof p === 'object' && !Array.isArray(p)) ? p : {};
+  // secret 优先用入参明文（保存前试发）；否则解密落盘密文——密文直接当 secret 算签名必错
+  const secret = (typeof override.secret === 'string' && override.secret)
+    ? override.secret : decryptSecretValue(String(saved.secret || ''));
+  const base = normalizeWebhookCfg(saved);
+  const sender = new WebhookSender({
+    loadCfg: () => normalizeWebhookCfg(Object.assign({}, base, {
+      url: override.url != null ? String(override.url) : base.url,
+      format: override.format != null ? String(override.format) : base.format,
+      secret: secret
+    }))
+  });
+  return sender.test();
 });
 /* 端到端链路连通性监测：任务载荷由渲染层（js/link-path.js）算好，主进程只调度探测并回推结果。
  * 状态与历史只存内存——链路任务是「运行态」，重启后由渲染层按工程配置重新下发（与监控任务同口径）。 */
