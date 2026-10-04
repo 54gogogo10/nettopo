@@ -2,7 +2,7 @@
 
 > **纯本地运行 · 零安装 · 零后端** —— 从连线关系表或设备邻居表一键生成拓扑，画布编辑与校验，导出 PDF / 图片 / Visio / Excel 交付；桌面版进一步提供 Web Shell、设备静默监控、配置备份与合规基线检查、告警体系与 AI 解析。**全部数据仅保存在本机。**
 
-`当前版本 v20261004a` · `单元测试 2394 项` · `Windows / Linux` · `Electron + 原生 SVG（无打包器）` · `浏览器打开 index.html 同样可用`
+`当前版本 v20261004a` · `单元测试 2427 项` · `Windows / Linux` · `Electron + 原生 SVG（无打包器）` · `浏览器打开 index.html 同样可用`
 
 ---
 
@@ -30,7 +30,7 @@
 | 📤 **导入与交付** | PDF / PNG / SVG / **Visio（VSDX）** / Excel · 交互式拓扑 HTML · 资产清单 / IP 规划 / 设计报告 · 厂商配置生成 · 拓扑自动发现 |
 | 📡 **监控与运维** | Web Shell（SSH/Telnet 多标签 + SFTP + AI 助手）· 设备静默监控（探测 / 关键字 / SNMP / **环境温度**）· 配置备份 / 漂移对比 / **一键恢复** · 变更下发与回滚 · 合规基线检查 |
 | 🔔 **告警体系** | 告警依赖抑制 · 静默 / 维护窗口 · 四级分级提示音 · **告警外发（Webhook 到企业微信/钉钉/飞书）** · 端到端链路连通性监测 · 事件确认留痕 · SLA 报表 · **巡检报告一键生成** |
-| 🧰 **内置服务与 AI** | TFTP / FTP / Syslog / SNMP Trap 服务器 · 诊断工具箱 · 批量巡检 · MAC/ARP 终端定位 · AI 解析与巡检日报 |
+| 🧰 **内置服务与 AI** | TFTP / FTP / Syslog / SNMP Trap 服务器 · **NetFlow/IPFIX 流量收集** · 诊断工具箱 · 批量巡检 · MAC/ARP 终端定位 · AI 解析与巡检日报 |
 
 ---
 
@@ -163,11 +163,12 @@
 - **跨设备配置漂移对比**：配置备份中心「跨设备对比…」两台设备各选一份备份做行级 diff（双机/堆叠成员、同批次接入交换机找漂移），与同设备对比同口径走易变行忽略规则——界面看到的差异就是真实配置差异
 - **配置合规基线检查**：对备份库最新配置执行本地规则扫描（纯本机）。内置 **5 套基线模板**（等保通用 11 条 / 最小基线 / 华为 VRP / 思科 IOS / 接入层交换机）按需加载，也可把当前规则**另存为多套自定义模板**；规则按「时间同步 / 日志审计 / 认证与授权 / 服务与协议 / 路由与网关」五组分组，逐行正则（必须存在 / 禁止出现），禁止类自动排除 `undo`/`no` 关闭命令与 `stelnet` 误命中；违规定位到具体配置行，结果一键导出报告（Excel/CSV）；监控「自动合规」在每次备份后按当前规则集自动扫描
   - **团队基线包**：「导出基线包…」把当前规则集 + 自定义合规模板 + 自定义配置模板打包成带 `format`/`formatVersion` 的 JSON 发给同事；「导入基线包…」支持**合并**（同名模板/同 id 规则覆盖，其余保留）或**整体替换**，导入前逐项白名单清洗——**坏正则丢弃并如实计数**（不会让整包失效）、模板键走原型污染白名单（`__proto__`/`constructor` 一律丢弃）、超过 512KB 与包版本高于本机支持的直接拒绝，解析预览里能看到「将导入什么、丢弃了什么」
-- **内置网络服务（TFTP / FTP / Syslog / Trap）**：「监控 ▾ 网络服务…」把本机变成内网运维服务器：
+- **内置网络服务（TFTP / FTP / Syslog / Trap / NetFlow）**：「监控 ▾ 网络服务…」把本机变成内网运维服务器：
   - **TFTP / FTP**：接收设备主动推送的配置文件（思科 `copy running-config tftp://`、华为/H3C `tftp … put`；FTP 支持账号密码 / 被动与主动模式），文件**按来源 IP 分目录**落盘、收到弹通知，可查看 / 删除并**一键导入配置备份库**（自动按来源 IP 匹配拓扑设备，进入备份中心 / 对比 / 合规检查体系）
   - **Syslog**（UDP，可选 TCP）：收集设备日志（`info-center loghost` / `logging host` 指向本机），按来源主机 / 日期归档，实时滚动 + 级别/来源过滤 + 关键字检索历史，超限自动限速丢弃并计数；可配置**日志告警**（级别阈值如 err 及以上 / 自定义关键字，命中弹系统通知并记入监控事件时间线——受该设备静默/维护窗口约束，同主机同规则 5 分钟冷却防刷屏，命中的日志行实时视图红色高亮，规则热更新不重启）
   - **SNMP Trap 接收**（UDP）：接收设备主动上报的告警（`snmp-agent target-host trap …` / `snmp-server host …` 指向本机）——支持 SNMP v1 / v2c / **v3** 三种格式（零依赖手写 BER 解析；v3 按面板配置的 USM 用户验签并解密，未知用户/验签失败丢弃计数），标准 Trap 中文名识别（接口 Down/Up、冷/热启动、认证失败等）、企业自定义 Trap 保留完整 OID、InformRequest 按协议回 GetResponse 应答；来源 IP 匹配到拓扑设备的标准 Trap 弹系统通知并记入事件时间线，全部 Trap 按来源 / 日期归档
-  - 面板展示本机地址与各厂家命令示例（点击复制），端口可改（默认 69 / 21 / 514 / 162，Linux 特权端口需 root），启用状态随设置自动恢复
+  - **NetFlow / IPFIX 收集**（UDP，默认 9995）：接收设备导出的流量记录（`ip netstream export host` / `ip flow-export destination` / softflowd 指向本机）——回答「这条链路上的流量到底是谁发给谁」：现有「接口流量」采集只有接口级速率（ifTable），这里是**会话级视图**。支持 **NetFlow v5**（固定布局）、**v9 与 IPFIX v10**（模板流 + 数据流，零依赖手写字节布局解析；模板按「来源 + sourceId + 模板 Id」缓存，模板未到或对不上整段丢弃并如实计数）；面板「NetFlow 流量」页 **会话 TopN**（五元组聚合按流量降序，持续累计）与**明细流记录**两种视图切换，支持关键字过滤（地址 / 端口 / 协议 / 来源）与 **CSV 导出**；流数据在内存保留（明细 5000 条 + 会话聚合上限，超限淘汰最旧），不落盘、重启即清；防洪水限速（包/秒可配，超出丢弃计数）
+  - 面板展示本机地址与各厂家命令示例（点击复制），端口可改（默认 69 / 21 / 514 / 162 / 9995，Linux 特权端口需 root），启用状态随设置自动恢复
 - **AI 解析（LLM）**：「AI ▾」接入 **OpenAI 兼容接口**与 **Anthropic Claude 协议**的大模型服务：
   - AI 设置内置**知名供应商预设下拉**（OpenAI / Anthropic Claude / DeepSeek / 智谱 GLM / 通义千问 / Kimi / 硅基流动 / OpenRouter / Ollama 本地 / 自定义），选中自动填充地址与模型名（均可手改）；填好地址与 Key 后可**一键拉取该服务支持的模型列表**，在输入框下拉中直接选择
   - 用大模型解读**设备配置备份**与**设备日志**——配置输出「设备概况 / 接口与 IP / 路由交换 / 安全配置 / 风险与弱配置 / 优化建议」固定分节报告，日志输出「概况 / 级别统计 / 关键事件 / 异常迹象 / 根因推测」；**流式输出**实时呈现、可随时停止，支持附加要求（如「重点检查 ACL」）
@@ -292,7 +293,7 @@
 | 配置变更下发 | 「监控 ▾ 配置变更下发…」：安全闸门 → dry-run → 强制前置备份 → 逐行下发 → 回滚单 → 审计 |
 | 配置合规检查 | 「监控 ▾ 配置合规检查…」或备份中心「合规检查…」：模板选择 + 规则管理 + 扫描备份库 |
 | 团队基线包 | 合规检查面板「导出/导入基线包…」：规则集 + 模板打包 JSON，合并/整体替换，坏正则丢弃计数 |
-| 网络服务 | 「监控 ▾ 网络服务…」：TFTP/FTP 收配置（可导入备份库）、Syslog 收日志、SNMP Trap 收告警 |
+| 网络服务 | 「监控 ▾ 网络服务…」：TFTP/FTP 收配置（可导入备份库）、Syslog 收日志、SNMP Trap 收告警、**NetFlow/IPFIX 收流量（会话 TopN + 明细 + CSV）** |
 | 诊断工具箱 | 「监控 ▾ 诊断工具箱…」：Ping / 路由跟踪 / TCP 端口扫描 / DNS / 网段存活扫描 / SNMP Walk |
 | 批量巡检 | 「监控 ▾ 批量巡检（只读命令）…」：并发执行厂家只读命令集，结果查看 / 导出 CSV |
 | AI 解析 | 「AI ▾ 解析设备配置 / 解析设备日志…」：OpenAI 兼容 / Claude 协议 LLM 解析，供应商预设 + 流式输出 + 分析记录；合规「AI 修复建议」；「AI 设置…」配置服务商/地址/Key/模型 |
@@ -369,6 +370,7 @@ nettopo/
 │   ├── svc-ftp.js       # 内置 FTP 服务器（RFC959 子集：认证/PASV·PORT/STOR·RETR，主进程，纯 Node）
 │   ├── svc-syslog.js    # 内置 Syslog 服务器（UDP/TCP、RFC3164/5424 解析、按主机日期归档，主进程，纯 Node）
 │   ├── svc-trap.js      # 内置 SNMP Trap 接收器（v1/v2c 手写 BER 解析、标准 Trap 命名、按来源归档，主进程，纯 Node）
+│   ├── svc-netflow.js   # 内置 NetFlow/IPFIX 收集器（v5/v9/IPFIX 解析、明细环形+会话聚合 TopN、限速，主进程，纯 Node）
 │   ├── net-services.js  # 网络服务管理器（三服务启停/文件编目/导入备份库，主进程，纯 Node）
 │   ├── ai-llm.js        # AI 解析（OpenAI 兼容 LLM 调用/SSE 流式/提示词/截断/分析记录库，主进程，纯 Node）
 │   ├── shell-ui.js    # Web Shell 窗口标签/终端逻辑
@@ -379,7 +381,7 @@ nettopo/
 └── test/              # 单元测试、无头浏览器 e2e、Electron 冒烟、真机集成测试、VDX 校验样例
 ```
 
-> `js/shell.js`、`js/monitor.js`、`js/config-backup.js`、`js/config-deploy.js`、`js/credential-store.js`、`js/alert-deps.js`、`js/alert-level.js`、`js/webhook-notify.js`（告警外发 Webhook：企业微信/钉钉/飞书消息构造与 HMAC 加签、等级过滤与冷却调度）、`js/link-path.js`、`js/link-monitor.js`、`js/l2-topo.js`、`js/sla-report.js`、`js/event-ack.js`、`js/snmp-v3.js`、`js/backup-store.js`、`js/svc-tftp.js`、`js/svc-ftp.js`、`js/svc-syslog.js`、`js/svc-trap.js`、`js/net-services.js`、`js/maintenance.js`、`js/diag.js`、`js/log-search.js`、`js/regex-lab.js`、`js/ai-llm.js`、`js/updater.js` 为**主进程纯 Node 模块**（不依赖 Electron），可在 Node 测试中直接调用，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
+> `js/shell.js`、`js/monitor.js`、`js/config-backup.js`、`js/config-deploy.js`、`js/credential-store.js`、`js/alert-deps.js`、`js/alert-level.js`、`js/webhook-notify.js`（告警外发 Webhook：企业微信/钉钉/飞书消息构造与 HMAC 加签、等级过滤与冷却调度）、`js/link-path.js`、`js/link-monitor.js`、`js/l2-topo.js`、`js/sla-report.js`、`js/event-ack.js`、`js/snmp-v3.js`、`js/backup-store.js`、`js/svc-tftp.js`、`js/svc-ftp.js`、`js/svc-syslog.js`、`js/svc-trap.js`、`js/svc-netflow.js`、`js/net-services.js`、`js/maintenance.js`、`js/diag.js`、`js/log-search.js`、`js/regex-lab.js`、`js/ai-llm.js`、`js/updater.js` 为**主进程纯 Node 模块**（不依赖 Electron），可在 Node 测试中直接调用，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
 
 ---
 
@@ -387,7 +389,7 @@ nettopo/
 
 ```bash
 npm start                          # 开发运行（Electron）
-node test/run-tests.js             # 2394 项单元测试（纯 Node，改动后必跑且须全绿）
+node test/run-tests.js             # 2427 项单元测试（纯 Node，改动后必跑且须全绿）
 cd test && npm i && node e2e.js    # 无头 Chrome 端到端集成测试（需本机 Chrome）
 node test/gen-e2e.js               # index.html 结构变化后再生 e2e 挂具 test/e2e.html
 NETTOPO_LAB_HOST=<实验机IP> node test/live.js      # 真机集成测试（未设变量则打印说明并跳过）
@@ -398,7 +400,7 @@ node bump-version.js --dry-run     # 预览版本变化不写入
 python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备用格式）
 ```
 
-**单元测试覆盖**（2394 项）：导出结构（VSDX/VDX/PDF）· Web Shell 会话 · 多管理口 · 数据清洗 · 布局 · 加载防重合 · 性能 · 回归 · 路径 · 单点故障 · 网段分析 · 链路聚合 · 邻居表解析 · 接口总表 · 备份库 · 子网计算 · 快速搜索 · 区域容器 · SNMP ifTable/性能采集与响应校验 · 合规模板 · 内置网络服务 TFTP/FTP/Syslog 协议级客户端与导入备份 · AI LLM（地址/提示词/SSE/历史库/模型列表/OpenAI 与 Claude 双协议本地假服务全链路/Shell AI 命令生成）· IP 地址管理 · 会话录像解析 · SFTP 文件管理 · SSH 指标采集解析与阈值 · HTTP 探测与证书到期 · GBK 编码解码 · 连接书签 · 告警静默与维护窗口 · 诊断工具箱 · 巡检数据导出 · 日报每日调度 · 标签恢复与命令面板 · MAC·ARP 表解析与终端定位 · 接口名跨厂家规范化 · 一次性命令执行 runOneShot · 网段存活扫描 · SNMP Trap v1·v2c 解析与接收器 · SNMP v3 USM 密钥本地化·三档安全·mock 代理全链路 · Syslog 日志告警规则 · 链路流量叠加 · 批量巡检只读白名单 · 统一凭据库 · 告警依赖抑制 · 配置变更易变行忽略规则与漂移摘要 · 团队基线包 · 可用性 SLA 报表 · 二层拓扑推断 · 底图清洗与导出取景 · 交互式 HTML 导出 · 事件确认 · 告警等级 · 链路连通性监测 · 节点手动缩放 · 跨设备配置漂移对比 · **环境传感器**（ENTITY-SENSOR 四列解析·precision/scale 换算·温度风扇阈值·配置归一钳制）· **恢复变更单**（块级删除与子命令补块头·同键覆盖不冗余 undo·思科 interface 与 banner 人工项）· **接口流量周期报表**（均值只计有效采样·峰值·在线率·TopN）· **接口错包监控**（错包速率差值口径·回绕 null·阈值 0 语义·变化沿告警与恢复·mock agent 端到端）· **告警外发 Webhook**（配置归一化·四格式 payload 与钉钉/飞书加签·本地假接收端 postJson 三分支·等级过滤与冷却调度）· **三层邻居持续监控**（去抖状态机连续 2 轮告警/恢复·瞬时翻动无事件·配置清洗钳制）· **巡检报告**（自包含 HTML·无脚本·空数据降级）
+**单元测试覆盖**（2427 项）：导出结构（VSDX/VDX/PDF）· Web Shell 会话 · 多管理口 · 数据清洗 · 布局 · 加载防重合 · 性能 · 回归 · 路径 · 单点故障 · 网段分析 · 链路聚合 · 邻居表解析 · 接口总表 · 备份库 · 子网计算 · 快速搜索 · 区域容器 · SNMP ifTable/性能采集与响应校验 · 合规模板 · 内置网络服务 TFTP/FTP/Syslog 协议级客户端与导入备份 · AI LLM（地址/提示词/SSE/历史库/模型列表/OpenAI 与 Claude 双协议本地假服务全链路/Shell AI 命令生成）· IP 地址管理 · 会话录像解析 · SFTP 文件管理 · SSH 指标采集解析与阈值 · HTTP 探测与证书到期 · GBK 编码解码 · 连接书签 · 告警静默与维护窗口 · 诊断工具箱 · 巡检数据导出 · 日报每日调度 · 标签恢复与命令面板 · MAC·ARP 表解析与终端定位 · 接口名跨厂家规范化 · 一次性命令执行 runOneShot · 网段存活扫描 · SNMP Trap v1·v2c 解析与接收器 · SNMP v3 USM 密钥本地化·三档安全·mock 代理全链路 · Syslog 日志告警规则 · 链路流量叠加 · 批量巡检只读白名单 · 统一凭据库 · 告警依赖抑制 · 配置变更易变行忽略规则与漂移摘要 · 团队基线包 · 可用性 SLA 报表 · 二层拓扑推断 · 底图清洗与导出取景 · 交互式 HTML 导出 · 事件确认 · 告警等级 · 链路连通性监测 · 节点手动缩放 · 跨设备配置漂移对比 · **环境传感器**（ENTITY-SENSOR 四列解析·precision/scale 换算·温度风扇阈值·配置归一钳制）· **恢复变更单**（块级删除与子命令补块头·同键覆盖不冗余 undo·思科 interface 与 banner 人工项）· **接口流量周期报表**（均值只计有效采样·峰值·在线率·TopN）· **接口错包监控**（错包速率差值口径·回绕 null·阈值 0 语义·变化沿告警与恢复·mock agent 端到端）· **告警外发 Webhook**（配置归一化·四格式 payload 与钉钉/飞书加签·本地假接收端 postJson 三分支·等级过滤与冷却调度）· **三层邻居持续监控**（去抖状态机连续 2 轮告警/恢复·瞬时翻动无事件·配置清洗钳制）· **NetFlow/IPFIX 收集器**（v5 字段映射与时长·v9 模板缓存按来源+sourceId 隔离·IPFIX v10·畸形包安全·UDP 端到端 tail/会话聚合/过滤/清空·限速丢弃计数·net-services 配置钳制）· **巡检报告**（自包含 HTML·无脚本·空数据降级）
 
 **e2e 覆盖**：画布编辑/拖拽撤销、删除级联与多步撤销重做、CSV/Excel 导入、保存工程与 CSV 导出内容断言、邻居表导入、接口总表、网段分析、单点故障/故障影响、聚合组校验豁免、快速搜索、多图纸、主题切换、浏览器降级，以及跨模块集成回合（CSV 导出→导入往返、保存→打开全量往返、连线弹窗↔接口总表双向一致、校验↔修复联动、多图纸×撤销不串页、类型配色↔导出 SVG 一致等）。
 

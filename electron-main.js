@@ -1925,6 +1925,11 @@ ipcMain.handle('netsvc:file-delete', (e, p) => monitorGuard(e) ? netSvc.deleteFi
 ipcMain.handle('netsvc:import', (e, p) => monitorGuard(e) ? netSvc.importBackup(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:syslog-tail', (e, p) => monitorGuard(e) ? netSvc.syslogTail(p && p.since) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:trap-tail', (e, p) => monitorGuard(e) ? netSvc.trapTail(p && p.since) : { ok: false, error: 'forbidden' });
+/* NetFlow / IPFIX 收集：明细增量 / 会话 TopN / 过滤查询 / 清空（数据在内存，重启即清） */
+ipcMain.handle('netsvc:netflow-tail', (e, p) => monitorGuard(e) ? netSvc.netflowTail(p && p.since) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:netflow-sessions', (e, p) => monitorGuard(e) ? netSvc.netflowSessions(p && p.topN) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:netflow-flows', (e, p) => monitorGuard(e) ? netSvc.netflowFlows(p) : { ok: false, error: 'forbidden' });
+ipcMain.handle('netsvc:netflow-clear', (e) => monitorGuard(e) ? netSvc.netflowClear() : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:syslog-search', (e, p) => monitorGuard(e) ? netSvc.syslogSearch(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:open-folder', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };

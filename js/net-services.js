@@ -16,6 +16,7 @@ const { TftpServer } = require('./svc-tftp.js');
 const { FtpServer } = require('./svc-ftp.js');
 const { SyslogServer, normalizeAlertRules } = require('./svc-syslog.js');
 const { TrapServer } = require('./svc-trap.js');
+const { NetflowServer } = require('./svc-netflow.js');
 
 const READ_CAP = 2 * 1024 * 1024;   // 单文件预览上限
 const LIST_CAP = 300;               // 文件列表条数上限
@@ -26,7 +27,8 @@ function defaultConfig() {
     tftp: { enabled: false, port: 69 },
     ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true },
     syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } },
-    trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } }
+    trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } },
+    netflow: { enabled: false, port: 9995, maxPps: 500 }
   };
 }
 
@@ -101,6 +103,12 @@ function normalizeConfig(cfg) {
     privProto: String(tv.privProto).toLowerCase() === 'des' ? 'des' : 'aes',
     privPass: cleanCred(tv.privPass, '')
   };
+  const nf = cfg.netflow && typeof cfg.netflow === 'object' ? cfg.netflow : {};
+  out.netflow.enabled = clampB(nf.enabled, dft.netflow.enabled);
+  out.netflow.port = clampPort(nf.port, dft.netflow.port);
+  let pps = Math.floor(Number(nf.maxPps));
+  if (!Number.isFinite(pps)) pps = dft.netflow.maxPps;
+  out.netflow.maxPps = Math.max(1, Math.min(100000, pps));
   return out;
 }
 
@@ -116,15 +124,17 @@ class NetServices extends EventEmitter {
     this.syslogDir = path.join(this.baseDir, 'syslog');
     this.trapDir = path.join(this.baseDir, 'trap');
     this.cfg = defaultConfig();
-    this.applied = { tftp: null, ftp: null, syslog: null, trap: null }; // 各服务当前生效参数（判断是否需要重启）
+    this.applied = { tftp: null, ftp: null, syslog: null, trap: null, netflow: null }; // 各服务当前生效参数（判断是否需要重启）
     this.tftp = new TftpServer({ rootDir: this.tftpDir });
     this.ftp = new FtpServer({ rootDir: this.ftpDir });
     this.syslog = new SyslogServer({ baseDir: this.syslogDir });
     this.trap = new TrapServer({ baseDir: this.trapDir });
+    this.netflow = new NetflowServer({});
     this.tftp.on('file', (info) => this.emit('file', info));
     this.ftp.on('file', (info) => this.emit('file', info));
     this.syslog.on('alert', (a) => this.emit('syslog-alert', a));
     this.trap.on('trap', (t) => this.emit('trap', t));
+    this.netflow.on('flows', (f) => this.emit('netflow-flows', f));
   }
 
   getConfig() { return JSON.parse(JSON.stringify(this.cfg)); }
@@ -194,6 +204,19 @@ class NetServices extends EventEmitter {
         this.applied.trap = (r && r.ok) ? { port: n.trap.port, v3sig } : null;
       }
     }
+    // NetFlow/IPFIX：端口或限速变化或启停才重启（流数据在内存，重启即清——面板有说明）
+    if (!n.netflow.enabled) {
+      if (this.applied.netflow) { await this.netflow.stop(); this.applied.netflow = null; }
+    } else {
+      const sig = n.netflow.port + '|' + n.netflow.maxPps;
+      if (!this.applied.netflow || this.applied.netflow.sig !== sig) {
+        await this.netflow.stop();
+        this.netflow = new NetflowServer({ maxPps: n.netflow.maxPps });
+        this.netflow.on('flows', (f) => this.emit('netflow-flows', f));
+        const r = await this.netflow.start(n.netflow.port);
+        this.applied.netflow = (r && r.ok) ? { port: n.netflow.port, sig } : null;
+      }
+    }
     this.emit('status', this.status());
     return this.status();
   }
@@ -204,13 +227,14 @@ class NetServices extends EventEmitter {
       tftp: Object.assign({ enabled: this.cfg.tftp.enabled, cfgPort: this.cfg.tftp.port }, ts),
       ftp: Object.assign({ enabled: this.cfg.ftp.enabled, cfgPort: this.cfg.ftp.port }, fs2),
       syslog: Object.assign({ enabled: this.cfg.syslog.enabled, cfgPort: this.cfg.syslog.port }, ss),
-      trap: Object.assign({ enabled: this.cfg.trap.enabled, cfgPort: this.cfg.trap.port }, trs)
+      trap: Object.assign({ enabled: this.cfg.trap.enabled, cfgPort: this.cfg.trap.port }, trs),
+      netflow: Object.assign({ enabled: this.cfg.netflow.enabled, cfgPort: this.cfg.netflow.port, maxPps: this.cfg.netflow.maxPps }, this.netflow.status())
     };
   }
 
   async stopAll() {
-    await Promise.all([this.tftp.stop(), this.ftp.stop(), this.syslog.stop(), this.trap.stop()]);
-    this.applied = { tftp: null, ftp: null, syslog: null, trap: null };
+    await Promise.all([this.tftp.stop(), this.ftp.stop(), this.syslog.stop(), this.trap.stop(), this.netflow.stop()]);
+    this.applied = { tftp: null, ftp: null, syslog: null, trap: null, netflow: null };
     this.emit('status', this.status());
   }
 
@@ -325,6 +349,10 @@ class NetServices extends EventEmitter {
   syslogTail(sinceSeq) { return this.syslog.tail(sinceSeq); }
   syslogSearch(q) { return this.syslog.search(q || {}); }
   trapTail(sinceSeq) { return this.trap.tail(sinceSeq); }
+  netflowTail(sinceSeq) { return this.netflow.tail(sinceSeq); }
+  netflowSessions(topN) { return this.netflow.sessions(topN); }
+  netflowFlows(f) { return this.netflow.flows(f || {}); }
+  netflowClear() { return this.netflow.clear(); }
 }
 
 module.exports = { NetServices, defaultConfig, normalizeConfig };

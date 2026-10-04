@@ -6823,13 +6823,14 @@ function openHelp() {
       <li><b>配置变更下发…</b>（监控 ▾）：把「生成设备配置」的产物或手写配置片段<b>安全地下发到设备</b>——整条链路「先看后做」：① 变更集解析 + 安全闸门（<b>重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝且不可覆盖</b>；删除与关闭类命令、可能中断管理连接的变更需分别勾选确认）② dry-run 预判（与最近一次配置备份逐行比对：新增 / 覆盖 / 删除 / 幂等，并提示「管理地址被改写」「关闭管理通道」等自断风险）③ 主进程在<b>一条会话内</b>完成：（可选）<b>前置命令</b>（部分设备如思科用户模式需先 <code>enable</code>）→ 强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停，兼容 FRR 的 <code>% [ZEBRA] Unknown command</code> 形式）→ 退出配置模式 → 可选保存配置 → 可选回采校验 ④ 失败时依前置备份<b>生成回滚变更单</b>（逐行求逆、逆序下发，回滚同样走 ①②③；<code>vtysh -c "…"</code> 这类外壳包装行列人工项）⑤ 每次下发落审计记录（<code>password</code>/<code>community</code> 等口令类内容<b>打码</b>后落盘），可回看 / 载入 / 导出 CSV</li>
       <li><b>配置备份一键恢复</b>（备份中心「恢复此备份…」）：勾选一份历史备份，与最近一份备份自动生成<b>恢复变更单</b>——消失的配置行取反删除（<code>undo</code>/<code>no</code>）、缺失的行回填、同键不同值直接覆盖，块上下文自动补齐；思科 interface、banner 自由文本这类无法可靠求逆的行列「需人工」。确认后进入「配置变更下发」走同一套 dry-run → 强制前置备份 → 逐行下发的安全闸门，失败同样可生成回滚</li>
     </ul>
-    <h4>⑭ 网络服务：TFTP / FTP / Syslog / Trap（桌面版）</h4>
+    <h4>⑭ 网络服务：TFTP / FTP / Syslog / Trap / NetFlow（桌面版）</h4>
     <p>「监控 ▾ 网络服务…」把本机变成一台内网运维服务器：</p>
     <ul>
       <li><b>TFTP / FTP 服务器</b>：接收设备主动推送的配置文件（思科 <b>copy running-config tftp://本机地址/文件名</b>、华为/H3C <b>tftp 本机地址 put vrpcfg.zip</b>；FTP 需在面板配置账号），文件<b>按来源 IP 分目录</b>落盘、收到弹通知，可查看 / 删除并<b>一键导入配置备份库</b>（按来源 IP 自动匹配拓扑设备，进入备份 / 对比 / 合规体系）</li>
       <li><b>Syslog 服务器</b>（UDP 可选 TCP）：收集设备日志（<b>info-center loghost</b> / <b>logging host</b> 指向本机），按来源主机 / 日期归档，实时滚动、级别与来源过滤、关键字检索历史；可配置<b>日志告警</b>（级别阈值如 err 及以上、或自定义关键字），命中弹系统通知并记入事件时间线（受设备静默 / 维护窗口约束，同主机同规则 5 分钟冷却防刷屏），命中的日志行实时视图红色高亮</li>
       <li><b>SNMP Trap 接收</b>（UDP）：设备把 trap 目标指向本机（<b>snmp-agent target-host trap address …</b> / <b>snmp-server host …</b>）后接收主动告警——支持 SNMP v1 / v2c / <b>v3</b>（v3 按面板配置的 USM 用户验签并解密），标准 Trap 识别（接口 Down/Up、冷/热启动、认证失败等，中文名显示）、企业自定义 Trap 保留完整 OID、InformRequest 按协议回应答；来源 IP 匹配到拓扑设备的标准 Trap <b>弹系统通知</b>（受该设备静默 / 维护窗口约束）并记入事件时间线，全部按来源 / 日期归档可回查</li>
-      <li>端口默认 69 / 21 / 514 / 162（可改，Linux 特权端口需 root）；面板展示本机地址与各厂家命令示例（点击复制），服务随设置自动启停</li>
+      <li><b>NetFlow / IPFIX 收集</b>（UDP，默认 9995）：设备把流量记录导出到本机（华为/H3C <b>ip netstream export host</b>、思科 <b>ip flow-export destination</b>、Linux softflowd）后，在「NetFlow 流量」页看<b>会话 TopN</b>（五元组聚合按流量降序）与<b>明细流记录</b>——回答「这条链路上的流量是谁发给谁」（接口流量采集只有接口级速率，这里是会话级）；支持 v5 / v9 / IPFIX 三种格式、关键字过滤与 CSV 导出；数据在内存保留（不落盘、重启即清），超限限速丢弃并计数</li>
+      <li>端口默认 69 / 21 / 514 / 162 / 9995（可改，Linux 特权端口需 root）；面板展示本机地址与各厂家命令示例（点击复制），服务随设置自动启停</li>
     </ul>
     <h4>⑮ 配置合规基线检查（桌面版）</h4>
     <ul>
@@ -12251,8 +12252,8 @@ function openNetServices() {
   ov.className = 'overlay';
   ov.innerHTML = `
     <div class="modal nsv-dialog" role="dialog" style="width:1100px;height:86vh">
-      <h3>网络服务（TFTP / FTP / Syslog / Trap）</h3>
-      <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）、<b>向本机发送 syslog 日志</b>并<b>把 SNMP Trap 告警上报到本机</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
+      <h3>网络服务（TFTP / FTP / Syslog / Trap / NetFlow）</h3>
+      <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）、<b>向本机发送 syslog 日志</b>、<b>把 SNMP Trap 告警上报到本机</b>、<b>把 NetFlow / IPFIX 流量记录导出到本机</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
       <div class="nsv-top">
         <div class="nsv-cards">
           <div class="nsv-card">
@@ -12307,6 +12308,13 @@ function openNetServices() {
               </div>
             </div>
           </div>
+          <div class="nsv-card">
+            <div class="nsv-card-h"><label class="nsv-sw"><input type="checkbox" id="nsvNfOn"/>启用</label><b>NetFlow / IPFIX 收集</b><span class="nsv-dot" id="nsvNfDot"></span></div>
+            <div class="nsv-st" id="nsvNfSt"></div>
+            <div class="nsv-row"><label>端口</label><input type="number" id="nsvNfPort" min="1" max="65535"/><span class="nsv-hint">常用 9995（UDP）</span></div>
+            <div class="nsv-row"><label>限速</label><input type="number" id="nsvNfPps" min="1" max="100000"/><span class="nsv-hint">包/秒，超出丢弃</span></div>
+            <div class="nsv-note">接收设备导出的流量记录（v5 / v9 / IPFIX）：回答「这条链路上的流量是谁发给谁」——接口流量采集只有接口级速率，这里是会话级视图。流数据在内存保留（明细 5000 条 + 会话聚合），重启即清；不落盘。</div>
+          </div>
         </div>
         <div class="nsv-aside">
           <div class="nsv-h">本机地址（设备侧指向）</div>
@@ -12320,6 +12328,7 @@ function openNetServices() {
         <button type="button" class="mc-tab on" data-pane="files">接收文件（TFTP / FTP）</button>
         <button type="button" class="mc-tab" data-pane="syslog">Syslog 日志</button>
         <button type="button" class="mc-tab" data-pane="trap">SNMP Trap</button>
+        <button type="button" class="mc-tab" data-pane="netflow">NetFlow 流量</button>
         <span class="nsv-tabs-sp"></span>
         <button type="button" class="tb nsv-mini-btn" data-act="openfiles">打开文件目录</button>
         <button type="button" class="tb nsv-mini-btn" data-act="opensys">打开日志目录</button>
@@ -12349,6 +12358,18 @@ function openNetServices() {
           <span class="nsv-logcnt" id="nsvTrapCnt"></span>
         </div>
         <div class="nsv-log" id="nsvTrapList"></div>
+      </div>
+      <div class="nsv-pane" data-pane="netflow" hidden>
+        <div class="nsv-logbar">
+          <label class="nsv-mini"><input type="checkbox" id="nsvNfModeSess" checked/>会话 TopN（按流量排序）</label>
+          <input type="text" id="nsvNfKw" placeholder="过滤：地址 / 端口 / 协议 / 来源…" style="min-width:180px"/>
+          <label class="nsv-mini"><input type="checkbox" id="nsvNfPause"/>暂停刷新</label>
+          <span class="nsv-tabs-sp"></span>
+          <button type="button" class="tb nsv-mini-btn" id="nsvNfCsv">导出 CSV</button>
+          <button type="button" class="tb nsv-mini-btn" id="nsvNfClear">清空</button>
+          <span class="nsv-logcnt" id="nsvNfCnt"></span>
+        </div>
+        <div class="nsv-log" id="nsvNfList"></div>
       </div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="defaults">恢复默认</button>
@@ -12387,6 +12408,13 @@ function openNetServices() {
       ? ('运行中 :' + st.trap.port + '（UDP）' + (st.trap.rxPackets ? ' · 已收 ' + st.trap.rxPackets + ' 包' : '')
         + (st.trap.communityGuard ? ' · 团体字白名单' + (st.trap.communityReject ? '（已拒 ' + st.trap.communityReject + '）' : '') : ''))
       : (st.trap.error ? '错误：' + st.trap.error : '已停止');
+    if (st.netflow) {
+      dotFor(ov.querySelector('#nsvNfDot'), st.netflow);
+      const nfs = st.netflow.stats || {};
+      ov.querySelector('#nsvNfSt').textContent = st.netflow.running
+        ? ('运行中 :' + st.netflow.port + '（UDP）' + (nfs.flows ? ' · 已收 ' + nfs.flows + ' 条流记录' : '') + (nfs.badPkts ? ' · 畸形包 ' + nfs.badPkts : ''))
+        : (st.netflow.error ? '错误：' + st.netflow.error : '已停止');
+    }
     ov.querySelector('#nsvLogCnt').textContent = (st.syslog.rxMsgs
       ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : ''))
       : '') + (st.syslog.alerts ? (st.syslog.rxMsgs ? ' · ' : '') + '告警 ' + st.syslog.alerts + ' 条' : '');
@@ -12417,6 +12445,10 @@ function openNetServices() {
     ov.querySelector('#nsvTrapV3AK').value = tv3.authPass || '';
     ov.querySelector('#nsvTrapV3PP').value = tv3.privProto === 'des' ? 'des' : 'aes';
     ov.querySelector('#nsvTrapV3PK').value = tv3.privPass || '';
+    const nf = cfg.netflow || {};
+    ov.querySelector('#nsvNfOn').checked = !!nf.enabled;
+    ov.querySelector('#nsvNfPort').value = nf.port || 9995;
+    ov.querySelector('#nsvNfPps').value = nf.maxPps || 500;
   }
   function readForm() {
     const pasv = String(ov.querySelector('#nsvFtpPasv').value || '').match(/^(\d+)\s*-\s*(\d+)$/);
@@ -12453,6 +12485,11 @@ function openNetServices() {
           privProto: ov.querySelector('#nsvTrapV3PP').value,
           privPass: ov.querySelector('#nsvTrapV3PK').value
         }
+      },
+      netflow: {
+        enabled: ov.querySelector('#nsvNfOn').checked,
+        port: parseInt(ov.querySelector('#nsvNfPort').value, 10) || 9995,
+        maxPps: Math.max(1, Math.min(100000, parseInt(ov.querySelector('#nsvNfPps').value, 10) || 500))
       }
     };
   }
@@ -12511,7 +12548,16 @@ function openNetServices() {
       'snmp-agent trap enable',
       '# H3C 同华为；思科：',
       'snmp-server host ' + ip + ' ' + comm,
-      'snmp-server enable traps'
+      'snmp-server enable traps',
+      '',
+      '# NetFlow / IPFIX 导出到本机（端口 ' + (parseInt(ov.querySelector('#nsvNfPort').value, 10) || 9995) + '）',
+      '# 华为 / H3C（NetStream，接口视图下采样）：',
+      'ip netstream export host ' + ip + ' ' + (parseInt(ov.querySelector('#nsvNfPort').value, 10) || 9995),
+      'ip netstream export version 9',
+      '# 思科（接口视图 ip flow ingress / egress）：',
+      'ip flow-export destination ' + ip + ' ' + (parseInt(ov.querySelector('#nsvNfPort').value, 10) || 9995),
+      'ip flow-export version 9',
+      '# Linux 主机可用 softflowd / fprobe 导出'
     ].join('\n');
   }
   ov.querySelector('[data-act=apply]').onclick = async () => {
@@ -12536,7 +12582,7 @@ function openNetServices() {
           toast('FTP 默认口令已由服务端替换为随机口令，请更新设备侧的 copy 命令');
         }
         const parts = [];
-        for (const [k, nm] of [['tftp', 'TFTP'], ['ftp', 'FTP'], ['syslog', 'Syslog'], ['trap', 'Trap']]) {
+        for (const [k, nm] of [['tftp', 'TFTP'], ['ftp', 'FTP'], ['syslog', 'Syslog'], ['trap', 'Trap'], ['netflow', 'NetFlow']]) {
           const s = r.status[k];
           parts.push(nm + (s.error ? '错误' : (s.running ? ':' + s.port : '已停止')));
         }
@@ -12546,7 +12592,7 @@ function openNetServices() {
     btn.disabled = false;
   };
   ov.querySelector('[data-act=defaults]').onclick = async () => {
-    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } }, trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } } });
+    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } }, trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } }, netflow: { enabled: false, port: 9995, maxPps: 500 } });
     ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
     toast('已恢复默认值（尚未保存，请点「保存并应用」）');
   };
@@ -12739,6 +12785,82 @@ function openNetServices() {
     if (stick || replaceAll) trapEl.scrollTop = trapEl.scrollHeight;
   }
 
+  /* ---------- NetFlow / IPFIX 流量视图（会话 TopN ⇄ 明细流记录） ---------- */
+  const nfEl = ov.querySelector('#nsvNfList');
+  const nfProtoName = (p) => ({ 1: 'ICMP', 6: 'TCP', 17: 'UDP', 47: 'GRE', 89: 'OSPF' }[p] || String(p));
+  function nfRender(rows, isSess) {
+    if (!rows.length) {
+      nfEl.innerHTML = '<div class="nsv-empty">尚未收到流记录：在设备上配置 NetStream / NetFlow 导出指向本机（命令示例见右侧），流量记录会出现在这里</div>';
+      return;
+    }
+    if (isSess) {
+      nfEl.innerHTML = '<div class="nsv-lg s-srchhead">会话聚合（' + rows.length + ' 条，按流量降序；持续累计中，清空后重新统计）</div>' +
+        rows.map(s => '<div class="nsv-lg">' +
+          '<span class="m"><b>' + U.escHtml(s.src) + '</b> ⇢ <b>' + U.escHtml(s.dst) + '</b> · ' + U.escHtml(s.proto)
+            + (s.proto === 'TCP' || s.proto === 'UDP' || s.proto === 'SCTP' ? ' ' + (s.sport || '?') + '→' + (s.dport || '?') : '')
+            + ' · ' + U.fmtSize(s.bytes) + ' / ' + s.pkts + ' 包 ×' + s.flows + ' 批</span>' +
+          '<span class="h" title="来源设备（exporter）">' + U.escHtml(s.exporter || '-') + '</span></div>').join('');
+    } else {
+      nfEl.innerHTML = '<div class="nsv-lg s-srchhead">最近流记录（明细，最多显示 300 条）</div>' +
+        rows.map(f => '<div class="nsv-lg">' +
+          '<span class="t">' + pad2s(new Date(f.ts).getHours()) + ':' + pad2s(new Date(f.ts).getMinutes()) + ':' + pad2s(new Date(f.ts).getSeconds()) + '</span>' +
+          '<span class="sev">v' + U.escHtml(f.version) + '</span>' +
+          '<span class="m"><b>' + U.escHtml(f.src || '?') + '</b> ⇢ <b>' + U.escHtml(f.dst || '?') + '</b> · ' + nfProtoName(f.proto)
+            + ' ' + (f.sport || '?') + '→' + (f.dport || '?') + ' · ' + U.fmtSize(f.bytes) + ' / ' + (f.pkts != null ? f.pkts + ' 包' : '?')
+            + (f.durMs != null ? ' · ' + (f.durMs / 1000).toFixed(1) + 's' : '') + '</span>' +
+          '<span class="h" title="来源设备（exporter）">' + U.escHtml(f.exporter || '-') + '</span></div>').join('');
+    }
+    nfEl.scrollTop = 0;
+  }
+  let nfPaused = false;
+  ov.querySelector('#nsvNfPause').addEventListener('change', (e) => { nfPaused = e.target.checked; });
+  async function refreshNetflow() {
+    if (nfPaused) return;
+    const kw = String(ov.querySelector('#nsvNfKw').value || '').trim().toLowerCase();
+    const sessMode = ov.querySelector('#nsvNfModeSess').checked;
+    try {
+      const cnt = ov.querySelector('#nsvNfCnt');
+      let rows = [];
+      if (sessMode) {
+        const r = await window.topoNetSvc.netflowSessions(50);
+        if (!r || !r.ok || !ov.isConnected) return;
+        rows = (r.items || []).filter(s => !kw || (s.src + ' ' + s.dst + ' ' + s.proto + ' ' + s.sport + ' ' + s.dport + ' ' + s.exporter).toLowerCase().includes(kw));
+        if (cnt) cnt.textContent = '会话 ' + r.total + ' 个';
+      } else {
+        const r = await window.topoNetSvc.netflowFlows({ kw });
+        if (!r || !r.ok || !ov.isConnected) return;
+        rows = r.items || [];
+        if (cnt) cnt.textContent = '显示 ' + rows.length + ' 条';
+      }
+      nfRender(rows, sessMode);
+    } catch (e) { /* ignore */ }
+  }
+  ov.querySelector('#nsvNfKw').addEventListener('input', () => refreshNetflow());
+  ov.querySelector('#nsvNfModeSess').addEventListener('change', () => refreshNetflow());
+  ov.querySelector('#nsvNfClear').onclick = async () => {
+    try {
+      const r = await window.topoNetSvc.netflowClear();
+      if (r && r.ok) { refreshNetflow(); toast('已清空流记录与会话统计'); }
+    } catch (e) { toast('清空失败'); }
+  };
+  ov.querySelector('#nsvNfCsv').onclick = async () => {
+    const sessMode = ov.querySelector('#nsvNfModeSess').checked;
+    try {
+      if (sessMode) {
+        const r = await window.topoNetSvc.netflowSessions(200);
+        const rows = [['源地址', '目的地址', '协议', '源端口', '目的端口', '字节数', '包数', '流批次', '首见', '末见', '来源设备']];
+        for (const s of (r && r.items) || []) rows.push([s.src, s.dst, s.proto, s.sport, s.dport, s.bytes, s.pkts, s.flows, new Date(s.first).toLocaleString(), new Date(s.last).toLocaleString(), s.exporter]);
+        U.download('NetFlow会话_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+      } else {
+        const r = await window.topoNetSvc.netflowFlows({});
+        const rows = [['时间', '版本', '源地址', '目的地址', '协议', '源端口', '目的端口', '字节数', '包数', '持续秒', '入接口', '出接口', '来源设备']];
+        for (const f of (r && r.items) || []) rows.push([new Date(f.ts).toLocaleString(), 'v' + f.version, f.src, f.dst, nfProtoName(f.proto), f.sport, f.dport, f.bytes, f.pkts, f.durMs != null ? (f.durMs / 1000).toFixed(1) : '', f.inIf != null ? f.inIf : '', f.outIf != null ? f.outIf : '', f.exporter]);
+        U.download('NetFlow流记录_' + U.fmtDate() + '.csv', new Blob([U.buildCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+      }
+      toast('已导出 CSV');
+    } catch (e) { toast('导出失败'); }
+  };
+
   /* ---------- 标签切换 / 轮询 / 实时事件 ---------- */
   ov.querySelectorAll('.nsv-tabs .mc-tab').forEach(tab => {
     tab.onclick = () => {
@@ -12746,6 +12868,7 @@ function openNetServices() {
       ov.querySelectorAll('.nsv-pane').forEach(p => { p.hidden = p.dataset.pane !== tab.dataset.pane; });
       if (tab.dataset.pane === 'syslog') refreshTail(true);
       else if (tab.dataset.pane === 'trap') refreshTrapTail(true);
+      else if (tab.dataset.pane === 'netflow') refreshNetflow();
       else loadFiles();
     };
   });
@@ -12762,6 +12885,7 @@ function openNetServices() {
     window.topoNetSvc.getConfig().then((r) => { if (r && r.ok && ov.isConnected) { st = r.status; renderStatus(); } }).catch(() => {});
     refreshTail(false);
     refreshTrapTail(false);
+    if (!ov.querySelector('.nsv-pane[data-pane=netflow]').hidden) refreshNetflow();
   }, 2500);
 
   loadCfg();

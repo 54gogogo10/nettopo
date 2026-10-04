@@ -8622,6 +8622,153 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       srv.close();
     }
 
+    /* ================= NetFlow / IPFIX 收集器（js/svc-netflow.js + net-services 集成） ================= */
+    {
+      const dgram = require('dgram');
+      const { NetflowServer, parseNetflowPacket } = require('../js/svc-netflow.js');
+      const { normalizeConfig } = require('../js/net-services.js');
+      // —— 包构造器 ——
+      const ipBytes = (s) => s.split('.').map(Number);
+      function v5Packet(flows) {
+        const buf = Buffer.alloc(24 + flows.length * 48);
+        buf.writeUInt16BE(5, 0); buf.writeUInt16BE(flows.length, 2);
+        buf.writeUInt32BE(Math.floor(Date.now() / 1000), 8);
+        flows.forEach((f, i) => {
+          const o = 24 + i * 48;
+          ipBytes(f.src).forEach((x, k) => { buf[o + k] = x; });
+          ipBytes(f.dst).forEach((x, k) => { buf[o + 4 + k] = x; });
+          buf.writeUInt16BE(f.inIf || 1, o + 12); buf.writeUInt16BE(f.outIf || 2, o + 14);
+          buf.writeUInt32BE(f.pkts, o + 16); buf.writeUInt32BE(f.bytes, o + 20);
+          buf.writeUInt32BE(f.first || 0, o + 24); buf.writeUInt32BE(f.last || 1000, o + 28);
+          buf.writeUInt16BE(f.sport, o + 32); buf.writeUInt16BE(f.dport, o + 34);
+          buf[o + 38] = f.proto;
+        });
+        return buf;
+      }
+      const V9_FIELDS = [[8, 4], [12, 4], [7, 2], [11, 2], [4, 1], [1, 4], [2, 4], [22, 4], [21, 4]]; // 29B/记录
+      const V9_REC_LEN = 29;
+      function tmplPacket(version, tplFsId, sourceId, tplId) {
+        const body = Buffer.alloc(4 + V9_FIELDS.length * 4);
+        body.writeUInt16BE(tplId, 0); body.writeUInt16BE(V9_FIELDS.length, 2);
+        V9_FIELDS.forEach(([t, l], i) => { body.writeUInt16BE(t, 4 + i * 4); body.writeUInt16BE(l, 6 + i * 4); });
+        const fs = Buffer.alloc(4 + body.length);
+        fs.writeUInt16BE(tplFsId, 0); fs.writeUInt16BE(fs.length, 2); body.copy(fs, 4);
+        const hdrLen = version === 10 ? 16 : 20;
+        const pkt = Buffer.alloc(hdrLen + fs.length);
+        pkt.writeUInt16BE(version, 0); pkt.writeUInt16BE(1, 2);
+        pkt.writeUInt32BE(Math.floor(Date.now() / 1000), version === 10 ? 4 : 8);
+        pkt.writeUInt32BE(sourceId, version === 10 ? 12 : 16);
+        fs.copy(pkt, hdrLen);
+        return pkt;
+      }
+      function dataPacket(version, sourceId, tplId, recs) {
+        const dataBody = Buffer.alloc(recs.length * V9_REC_LEN);
+        recs.forEach((r, i) => {
+          const o = i * V9_REC_LEN;
+          ipBytes(r.src).forEach((x, k) => { dataBody[o + k] = x; });
+          ipBytes(r.dst).forEach((x, k) => { dataBody[o + 4 + k] = x; });
+          dataBody.writeUInt16BE(r.sport, o + 8); dataBody.writeUInt16BE(r.dport, o + 10);
+          dataBody[o + 12] = r.proto;
+          dataBody.writeUInt32BE(r.bytes, o + 13); dataBody.writeUInt32BE(r.pkts, o + 17);
+          dataBody.writeUInt32BE(r.first || 0, o + 21); dataBody.writeUInt32BE(r.last || 500, o + 25);
+        });
+        const fs = Buffer.alloc(4 + dataBody.length);
+        fs.writeUInt16BE(tplId, 0); fs.writeUInt16BE(fs.length, 2); dataBody.copy(fs, 4);
+        const hdrLen = version === 10 ? 16 : 20;
+        const pkt = Buffer.alloc(hdrLen + fs.length);
+        pkt.writeUInt16BE(version, 0); pkt.writeUInt16BE(recs.length, 2);
+        pkt.writeUInt32BE(Math.floor(Date.now() / 1000), version === 10 ? 4 : 8);
+        pkt.writeUInt32BE(sourceId, version === 10 ? 12 : 16);
+        fs.copy(pkt, hdrLen);
+        return pkt;
+      }
+      // —— v5 解析 ——
+      const r5 = parseNetflowPacket(v5Packet([
+        { src: '10.0.0.1', dst: '10.0.0.2', sport: 1234, dport: 443, proto: 6, pkts: 100, bytes: 50000, first: 0, last: 2500 },
+        { src: '10.0.0.3', dst: '8.8.8.8', sport: 0, dport: 0, proto: 1, pkts: 2, bytes: 168, first: 100, last: 100 }
+      ]), '192.168.1.1', new Map());
+      ok(r5.ok && r5.version === 5 && r5.records.length === 2, 'NetFlow v5：2 条记录解析');
+      const f0 = r5.records[0];
+      eq(f0.src + '>' + f0.dst, '10.0.0.1>10.0.0.2', 'v5：源/目的地址');
+      eq(f0.sport + '/' + f0.dport, '1234/443', 'v5：端口');
+      eq(f0.proto, 6, 'v5：协议号 TCP');
+      eq(f0.bytes, 50000, 'v5：字节数');
+      eq(f0.durMs, 2500, 'v5：持续时间 = last − first（毫秒）');
+      eq(r5.records[1].proto, 1, 'v5：ICMP 记录');
+      // —— v9：模板先到才可解 ——
+      const tmpl = new Map();
+      const rNoT = parseNetflowPacket(dataPacket(9, 7, 256, [{ src: '10.0.0.1', dst: '10.0.0.2', sport: 80, dport: 51000, proto: 6, bytes: 9000, pkts: 10 }]), '192.168.1.1', tmpl);
+      eq(rNoT.records.length, 0, 'NetFlow v9：模板未到时数据流丢弃并计数');
+      ok(rNoT.dropped >= 1, 'NetFlow v9：丢弃计数如实');
+      const rT = parseNetflowPacket(tmplPacket(9, 0, 7, 256), '192.168.1.1', tmpl);
+      ok(rT.ok && rT.templates.length === 1, 'NetFlow v9：模板 FlowSet 解析并缓存');
+      const rD = parseNetflowPacket(dataPacket(9, 7, 256, [{ src: '10.0.0.1', dst: '10.0.0.2', sport: 80, dport: 51000, proto: 6, bytes: 9000, pkts: 10, first: 0, last: 500 }]), '192.168.1.1', tmpl);
+      eq(rD.records.length, 1, 'NetFlow v9：按模板展开数据记录');
+      const v9f = rD.records[0];
+      eq(v9f.src + '>' + v9f.dst, '10.0.0.1>10.0.0.2', 'v9：字段映射（源/目的）');
+      eq(v9f.bytes, 9000, 'v9：IN_BYTES 映射');
+      eq(v9f.durMs, 500, 'v9：FIRST/LAST_SWITCHED 差值');
+      // 不同 sourceId 的模板互不串用
+      const rD2 = parseNetflowPacket(dataPacket(9, 8, 256, [{ src: '10.0.0.1', dst: '10.0.0.2', sport: 80, dport: 51000, proto: 6, bytes: 9000, pkts: 10 }]), '192.168.1.1', tmpl);
+      eq(rD2.records.length, 0, 'v9：模板按 来源+sourceId+模板Id 隔离（不同 sourceId 不共用）');
+      // —— IPFIX v10：模板 FlowSet id=2 ——
+      const tmpl10 = new Map();
+      parseNetflowPacket(tmplPacket(10, 2, 3, 256), '192.168.1.2', tmpl10);
+      const r10 = parseNetflowPacket(dataPacket(10, 3, 256, [{ src: '172.16.0.5', dst: '172.16.0.9', sport: 22, dport: 40000, proto: 6, bytes: 777, pkts: 7 }]), '192.168.1.2', tmpl10);
+      eq(r10.records.length, 1, 'IPFIX v10：模板+数据解析');
+      eq(r10.records[0].dport, 40000, 'IPFIX：字段映射');
+      // —— 畸形包安全 ——
+      ok(parseNetflowPacket(Buffer.from([1, 2]), 'x', new Map()).ok === false, '畸形：短包拒绝');
+      ok(parseNetflowPacket(Buffer.from([0, 3, 0, 1, 0, 0, 0, 0, 0, 0]), 'x', new Map()).ok === false, '畸形：不支持的版本');
+      const rBad = parseNetflowPacket((() => { const b = v5Packet([{ src: '10.0.0.1', dst: '10.0.0.2', sport: 1, dport: 2, proto: 17, pkts: 1, bytes: 60 }]); b.writeUInt16BE(999, 2); return b.subarray(0, 60); })(), 'x', new Map());
+      ok(rBad.ok && rBad.records.length === 0, '畸形：count 与实际长度不符按可解析条数（0 条）不抛错');
+      // —— 服务器端到端（UDP 回环）——
+      const srv2 = new NetflowServer({ maxPps: 1000 });
+      const sr = await srv2.start(0);
+      ok(sr.ok && sr.port > 0, '服务器：回环随机端口启动');
+      const cli = dgram.createSocket('udp4');
+      const sendP = (buf) => new Promise((res) => cli.send(buf, srv2.port, '127.0.0.1', res));
+      // v9 全流程：模板包 + 数据包
+      await sendP(tmplPacket(9, 0, 42, 1024));
+      await sendP(dataPacket(9, 42, 1024, [
+        { src: '10.1.1.1', dst: '10.2.2.2', sport: 4444, dport: 80, proto: 6, bytes: 10000, pkts: 20, first: 0, last: 400 },
+        { src: '10.1.1.1', dst: '10.2.2.2', sport: 4444, dport: 80, proto: 6, bytes: 5000, pkts: 10, first: 0, last: 400 }
+      ]));
+      await sendP(v5Packet([{ src: '10.1.1.1', dst: '10.2.2.2', sport: 4444, dport: 80, proto: 6, pkts: 5, bytes: 2500 }]));
+      await new Promise((r) => setTimeout(r, 250));
+      const tail = srv2.tail(0);
+      eq(tail.items.length, 3, '端到端：tail 返回 3 条明细（v9×2 + v5×1）');
+      ok(tail.items[0].exporter === '127.0.0.1' && tail.items[0].version === 9, '端到端：明细带来源与版本');
+      const sess = srv2.sessions(10);
+      eq(sess.items.length, 1, '端到端：五元组聚合为 1 个会话（三批合并）');
+      eq(sess.items[0].bytes, 17500, '端到端：会话字节数累计（10000+5000+2500）');
+      eq(sess.items[0].flows, 3, '端到端：会话流批数累计');
+      const flt = srv2.flows({ kw: '10.2.2.2' });
+      eq(flt.items.length, 3, '端到端：关键字过滤命中全部');
+      eq(srv2.flows({ kw: '999.1.1.1' }).items.length, 0, '端到端：无命中返回空');
+      srv2.clear();
+      eq(srv2.tail(0).items.length, 0 && srv2.sessions(5).total, '端到端：清空后明细与统计复位');
+      // 限速：maxPps=1 时同秒第二个包被丢弃
+      const srv3 = new NetflowServer({ maxPps: 1 });
+      await srv3.start(0);
+      const c3 = dgram.createSocket('udp4');
+      const p = v5Packet([{ src: '10.0.0.1', dst: '10.0.0.2', sport: 1, dport: 2, proto: 17, pkts: 1, bytes: 60 }]);
+      c3.send(p, srv3.port, '127.0.0.1');
+      c3.send(p, srv3.port, '127.0.0.1');
+      c3.send(p, srv3.port, '127.0.0.1');
+      await new Promise((r) => setTimeout(r, 200));
+      eq(srv3.status().stats.rateLimited, 2, '限速：超限包丢弃并计数');
+      c3.close();
+      await srv3.stop();
+      // NetServices 集成：配置归一化 + 启停
+      const nc = normalizeConfig({ netflow: { enabled: true, port: 10995, maxPps: 999999 } });
+      ok(nc.netflow.enabled === true && nc.netflow.port === 10995, 'net-services：NetFlow 配置透传');
+      eq(nc.netflow.maxPps, 100000, 'net-services：限速上限钳制 100000');
+      eq(normalizeConfig({}).netflow.port, 9995, 'net-services：默认端口 9995');
+      cli.close();
+      await srv2.stop();
+    }
+
     /* ================= 端到端链路连通性监测：路径与判定（js/link-path.js） ================= */
     {
       const L = require('../js/link-path.js');
