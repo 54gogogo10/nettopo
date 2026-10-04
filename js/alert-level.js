@@ -36,6 +36,8 @@ const EVENT_LEVELS = {
   'alert-clear': 'info',
   'if-down': 'critical',       // 接口离线（SNMP linkDown/ifOperStatus）
   'if-up': 'info',
+  'if-error': 'warning',       // 接口错包速率超阈值（链路质量劣化早期信号，未中断）
+  'if-error-clear': 'info',
   metric: 'warning',           // 磁盘/内存/负载超阈值
   'metric-clear': 'info',
   'http-fail': 'critical',     // HTTP 健康探测失败
@@ -69,6 +71,8 @@ const EVENT_TYPES = [
   { type: 'alert-clear', label: '关键字告警解除' },
   { type: 'if-down', label: '接口离线' },
   { type: 'if-up', label: '接口恢复' },
+  { type: 'if-error', label: '接口错包超阈值' },
+  { type: 'if-error-clear', label: '接口错包恢复' },
   { type: 'metric', label: '指标超阈值' },
   { type: 'metric-clear', label: '指标恢复' },
   { type: 'http-fail', label: 'HTTP 探测失败' },

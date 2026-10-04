@@ -129,6 +129,11 @@ const OID_IF_IN32 = '1.3.6.1.2.1.2.2.1.10';
 const OID_IF_OUT32 = '1.3.6.1.2.1.2.2.1.16';
 const OID_IF_HCIN = '1.3.6.1.2.1.31.1.1.1.6';
 const OID_IF_HCOUT = '1.3.6.1.2.1.31.1.1.1.7';
+/* 错包计数器（32 位 Counter，MIB-2 无 64 位 HC 版本）：ifInErrors 含 CRC 校验失败等收方向错包，
+ * ifOutErrors 为发方向。累计值须做差值速率才能反映「正在劣化」——光模块老化/线缆接触不良在
+ * 收发速率上完全不可见，错包速率是唯一早期信号 */
+const OID_IF_INERR = '1.3.6.1.2.1.2.2.1.14';
+const OID_IF_OUTERR = '1.3.6.1.2.1.2.2.1.20';
 /* 接口流量历史容量（每次采样一条；默认 60s 间隔约覆盖 2 小时） */
 /* ---- CPU/内存利用率换算（纯函数，按厂商预设的 mode 选择语义；可单测） ----
  * 各厂商 SNMP 给出的量纲并不一致，这里把差异收敛到 mode 上（预设表见 js/util.js 的 U.SNMP_VENDORS）：
@@ -232,6 +237,29 @@ function rateBps(curC, prevC, dtSec) {
   const delta = curC - prevC;
   if (delta < 0) return null; // 32 位计数器回绕或设备重启
   return Math.round(delta * 8 / dtSec);
+}
+/** 错包速率（个/秒）：计数器差值 / 秒（与 rateBps 同口径，不乘 8）；回绕/重置（负差）返回 null */
+function errRatePps(curC, prevC, dtSec) {
+  if (!Number.isFinite(curC) || !Number.isFinite(prevC) || !(dtSec > 0)) return null;
+  const delta = curC - prevC;
+  if (delta < 0) return null;
+  return Math.round(delta / dtSec);
+}
+/** 采样中错包速率超阈值的接口列表：[{n, eIn, eOut}]。
+ *  判据刻意保守：入/出任一方向速率 ≥ max(阈值,1) 才算——阈值填 0 表示「出现任何错包即告警」，
+ *  但速率为 0（计数器不再增长的历史错包）一律不判；两个方向都无数据（设备不实现 ifErrors 列）
+ *  的接口不判，宁可不报也不把「没有数据」当「没有错包」。 */
+function ifErrOver(ifs, threshold) {
+  const th = Math.max(1, Math.round(Number(threshold) || 0));
+  const out = [];
+  for (const s of (Array.isArray(ifs) ? ifs : [])) {
+    if (!s || typeof s.n !== 'string') continue;
+    const eIn = Number(s.eIn), eOut = Number(s.eOut);
+    const hIn = Number.isFinite(eIn) && eIn > 0 && eIn >= th;
+    const hOut = Number.isFinite(eOut) && eOut > 0 && eOut >= th;
+    if (hIn || hOut) out.push({ n: s.n, eIn: hIn ? eIn : 0, eOut: hOut ? eOut : 0 });
+  }
+  return out;
 }
 function berLen(n) {
   if (n < 128) return Buffer.from([n]);
@@ -1068,6 +1096,11 @@ class MonitorManager extends EventEmitter {
     // ---- SNMP 接口流量采集（ifTable walk）/ 重启检测（sysUpTime 骤减）/ CPU·内存采集（可配置 OID），独立于连接的 UDP 定时轮询 ----
     const sOpt = opts.sysinfo && typeof opts.sysinfo === 'object' ? opts.sysinfo : {};
     const sysinfo = { enabled: !!sOpt.enabled, community: (String(sOpt.community || 'public').trim().slice(0, 64)) || 'public', ifTable: !!sOpt.ifTable };
+    // 错包监控（ifInErrors/ifOutErrors 速率阈值告警）：依赖「接口流量」采集（共享 ifIndex/接口名表），
+    // 未开 ifTable 时静默不启用——单独开错包没有意义，差值基线也建立在同一轮 walk 上
+    sysinfo.ifErrors = !!sOpt.ifErrors && !!sOpt.ifTable;
+    let ifErrRate = parseFloat(sOpt.ifErrRate);
+    sysinfo.ifErrRate = Number.isFinite(ifErrRate) ? Math.max(0, Math.min(1000000, Math.round(ifErrRate))) : 10;
     // SNMP v3（USM）：version 'v3' 时启用；认证/隐私协议白名单，口令长度钳制（密钥本地化输入）
     sysinfo.version = String(sOpt.version) === 'v3' ? 'v3' : 'v2c';
     sysinfo.v3User = String(sOpt.v3User || '').trim().slice(0, 32);
@@ -1186,7 +1219,7 @@ class MonitorManager extends EventEmitter {
       probe: Object.assign({ enabled: false, type: 'tcp', intervalSec: 30 }, cfg.probe || {}),
       alerts: (cfg.alerts || []).map(a => ({ pattern: a.pattern, note: a.note, re: a.re })),
       backup: Object.assign({ enabled: false, commands: ['display current-configuration'], mode: 'session', skipIfSame: false, intervalSec: 3600, waitMs: 1000 }, cfg.backup || {}),
-      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, intervalSec: 60, sysUpTime: false, version: 'v2c', v3User: '', v3AuthProto: 'sha', v3AuthPass: '', v3PrivProto: 'aes', v3PrivPass: '', perf: { enabled: false, cpuOid: '', memUsedOid: '', memFreeOid: '' } }, cfg.sysinfo || {}),
+      sysinfo: Object.assign({ enabled: false, community: 'public', ifTable: false, ifErrors: false, ifErrRate: 10, intervalSec: 60, sysUpTime: false, version: 'v2c', v3User: '', v3AuthProto: 'sha', v3AuthPass: '', v3PrivProto: 'aes', v3PrivPass: '', perf: { enabled: false, cpuOid: '', memUsedOid: '', memFreeOid: '' } }, cfg.sysinfo || {}),
       metrics: Object.assign({ enabled: false, commands: [], intervalSec: 300, diskWarn: 80, diskCrit: 90, memWarn: 80, memCrit: 90 }, cfg.metrics || {}),
       metricHist: [],   // SSH 指标采样历史（[{ts, disks:[{mount,pct}], mem, swap, load}]，容量 IF_HIST_MAX）
       metricAlert: { disk: null, mem: null }, // 上次阈值级别（变化沿产生告警事件）
@@ -1197,9 +1230,10 @@ class MonitorManager extends EventEmitter {
       httpOk: null,     // 上次探测结果（在线状态沿判定在 electron-main）
       certAlerted: null, // 上次证书到期告警状态（变化沿产生事件）
       httpTimer: null,
-      ifHist: [],       // 接口流量采样历史（[{ts, ifs:[{i,n,oper,in,out,speed}]}]，容量 IF_HIST_MAX）
-      ifPrev: null,     // 上次采样的计数器（算速率用）{ts, map: ifIndex -> {inC, outC}}
+      ifHist: [],       // 接口流量采样历史（[{ts, ifs:[{i,n,oper,in,out,eIn,eOut,speed}]}]，容量 IF_HIST_MAX）
+      ifPrev: null,     // 上次采样的计数器（算速率用）{ts, map: ifIndex -> {inC, outC, eInC, eOutC}}
       ifOperPrev: {},   // 上次采样的接口状态（ifIndex -> up/down/other），状态变化时发事件
+      ifErrAlert: false, // 上次错包告警状态（超阈值接口集合 空↔非空 变化沿产生事件）
       upPrev: null,     // 上次 sysUpTime 采样（TimeTicks，1/100 秒；骤减 → 重启事件）
       perfHist: [],     // CPU/内存/sysUpTime 采样历史（[{ts, up, cpu, mem}]，容量 IF_HIST_MAX）
       snmpTimer: null, _snmpBusy: false,
@@ -1272,6 +1306,7 @@ class MonitorManager extends EventEmitter {
         backupEnabled: !!job.backup.enabled, backupMode: job.backup.mode,
         compliance: job.complianceLast ? { failed: job.complianceLast.failed, total: job.complianceLast.total, at: job.complianceLast.at } : null,
         ifTable: !!(job.sysinfo && job.sysinfo.ifTable),
+        ifErrors: !!(job.sysinfo && job.sysinfo.ifErrors),
         perf: !!(job.sysinfo && job.sysinfo.perf && job.sysinfo.perf.enabled),
         env: !!(job.sysinfo && job.sysinfo.perf && job.sysinfo.perf.env && job.sysinfo.perf.env.enabled),
         upCheck: !!(job.sysinfo && job.sysinfo.sysUpTime),
@@ -1806,6 +1841,11 @@ class MonitorManager extends EventEmitter {
     let outRoot = OID_IF_HCOUT;
     if (!outCol.ok || !outCol.varbinds.length) { outCol = await snmpWalk(OID_IF_OUT32, host, target, 3000, port); outRoot = OID_IF_OUT32; }
     if (outCol.ok) for (const vb of outCol.varbinds) { const o = ifs.get(vb.oid.slice(outRoot.length + 1)); if (o) o.outC = Number(vb.value); }
+    // 错包计数器（可选，依赖「接口流量」开关）：两列独立 walk，缺列的接口错包速率为 null（不告警）
+    if (job.sysinfo.ifErrors) {
+      await merge(OID_IF_INERR, (o, v) => { o.eInC = Number(v); });
+      await merge(OID_IF_OUTERR, (o, v) => { o.eOutC = Number(v); });
+    }
     // 多列 walk 期间任务可能已被拆除：迟到样本不入历史、不写日志、不发事件（句柄/状态一致性）
     if (!job.enabled || job.stopping) return;
 
@@ -1821,6 +1861,7 @@ class MonitorManager extends EventEmitter {
           const dt = (now - job.ifPrev.ts) / 1000;
           s.in = rateBps(o.inC, p.inC, dt);
           s.out = rateBps(o.outC, p.outC, dt);
+          if (job.sysinfo.ifErrors) { s.eIn = errRatePps(o.eInC, p.eInC, dt); s.eOut = errRatePps(o.eOutC, p.eOutC, dt); }
         }
       }
       sample.ifs.push(s);
@@ -1828,7 +1869,7 @@ class MonitorManager extends EventEmitter {
     sample.ifs.sort((a, b) => a.i - b.i);
     job.ifPrev = {
       ts: now,
-      map: new Map([...ifs.values()].filter(o => o.inC != null || o.outC != null).map(o => [o.i, { inC: o.inC, outC: o.outC }]))
+      map: new Map([...ifs.values()].filter(o => o.inC != null || o.outC != null || o.eInC != null || o.eOutC != null).map(o => [o.i, { inC: o.inC, outC: o.outC, eInC: o.eInC, eOutC: o.eOutC }]))
     };
     job.ifHist.push(sample);
     if (job.ifHist.length > IF_HIST_MAX) job.ifHist.shift();
@@ -1847,6 +1888,20 @@ class MonitorManager extends EventEmitter {
     });
     if (changes.length) {
       this.emit('ifstatus', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, changes });
+    }
+    // 5. 错包阈值告警（变化沿）：超阈值接口集合 空↔非空 翻转时告警/解除；集合内容变化但状态未
+    //    翻转不重复报（新增劣化接口在恢复后的下一轮告警里可见）。首采样无速率（null）不判。
+    if (job.sysinfo.ifErrors) {
+      const over = ifErrOver(sample.ifs, job.sysinfo.ifErrRate);
+      const alerting = over.length > 0;
+      if (alerting !== job.ifErrAlert) {
+        job.ifErrAlert = alerting;
+        const detail = alerting
+          ? '接口错包超阈值（≥' + job.sysinfo.ifErrRate + ' 个/秒）：' + over.map(x => x.n + '（入 ' + x.eIn + ' / 出 ' + x.eOut + ' 个/秒）').join('、')
+          : '接口错包告警解除';
+        this._logLine(job, '【错包' + (alerting ? '告警】' : '解除】') + detail);
+        this.emit('if-error', { key: job.key, deviceId: job.deviceId, name: job.name, host: job.host, ts: sample.ts, alerting, threshold: job.sysinfo.ifErrRate, ifs: over.slice(0, 16), detail });
+      }
     }
   }
 
@@ -2649,5 +2704,5 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, envLevels, parseEnvSensors, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT, OID_ENV_TYPE, OID_ENV_SCALE, OID_ENV_PREC, OID_ENV_VALUE };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, errRatePps, ifErrOver, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, envLevels, parseEnvSensors, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT, OID_IF_INERR, OID_IF_OUTERR, OID_ENV_TYPE, OID_ENV_SCALE, OID_ENV_PREC, OID_ENV_VALUE };
 

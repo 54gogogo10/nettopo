@@ -4857,17 +4857,34 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const os = require('os');
       const dgram = require('dgram');
       const {
-        MonitorManager, snmpWalk, rateBps,
-        OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_HCIN, OID_IF_HCOUT
+        MonitorManager, snmpWalk, rateBps, errRatePps, ifErrOver,
+        OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_HCIN, OID_IF_HCOUT, OID_IF_INERR, OID_IF_OUTERR
       } = require('../js/monitor.js');
       // 速率计算
       eq(rateBps(12500000, 10000000, 10), 2000000, '速率 = Δ计数×8/Δ秒');
       eq(rateBps(1000, 2000, 10), null, '计数器回绕（负差）返回 null');
       eq(rateBps(1000, 1000, 0), null, 'dt=0 返回 null');
       eq(rateBps(null, 1000, 10), null, '缺计数返回 null');
+      // 错包速率（个/秒，不乘 8）
+      eq(errRatePps(1100, 1000, 10), 10, '错包速率 = Δ计数/Δ秒');
+      eq(errRatePps(1000, 2000, 10), null, '错包计数器回绕返回 null');
+      eq(errRatePps(null, 1000, 10), null, '错包缺计数返回 null');
+      // 超阈值接口判定：>0 且 ≥max(阈值,1)；两向均无数据不判（没有数据 ≠ 没有错包）
+      const overs = ifErrOver([
+        { n: 'GE1', eIn: 51, eOut: 0 }, { n: 'GE2', eIn: 0, eOut: 49 }, { n: 'GE3', eIn: null, eOut: null }, { n: 'GE4', eIn: 0, eOut: 0 }
+      ], 50);
+      eq(overs.length, 1, '仅入向 51 超阈值 50 的接口入选（49 不达、null 不判、0 不判）');
+      eq(overs[0].n, 'GE1', '超阈值接口携带接口名');
+      eq(overs[0].eIn, 51, '携带入向速率');
+      eq(overs[0].eOut, 0, '未超方向计 0');
+      eq(ifErrOver([{ n: 'GE1', eIn: 1, eOut: 0 }], 0).length, 1, '阈值 0 = 出现任何错包即告警');
+      eq(ifErrOver([{ n: 'GE1', eIn: 0, eOut: 0 }], 0).length, 0, '阈值 0 时速率 0（计数器不再增长的历史错包）不告警');
+      eq(ifErrOver(null, 10).length, 0, '空采样安全');
       // mock SNMP agent：3 个接口的 ifTable 子树（GETNEXT 遍历）
       const counters = { 1: 10000000, 2: 20000000, 3: 30000000 };
       const outCounters = { 1: 5000000, 2: 8000000, 3: 9000000 };
+      const errCounters = { 1: 1000, 2: 0, 3: 200000 }; // 历史累计错包（首采样基线）
+      const errOutCounters = { 1: 500, 2: 0, 3: 0 };
       let operMap = { 1: 1, 2: 2, 3: 1 }; // if2 初始 down，用于状态变化事件
       const tree = {};
       for (const i of [1, 2, 3]) {
@@ -4876,14 +4893,24 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         tree[OID_IF_OPER + '.' + i] = { tag: 0x02, val: null }; // 运行时填充（可翻转）
         tree[OID_IF_HCIN + '.' + i] = { tag: 0x46, val: null }; // Counter64（测试 64 位解析路径）
         tree[OID_IF_HCOUT + '.' + i] = { tag: 0x46, val: null };
+        tree[OID_IF_INERR + '.' + i] = { tag: 0x41, val: null }; // Counter32（错包，运行时填充）
+        tree[OID_IF_OUTERR + '.' + i] = { tag: 0x41, val: null };
       }
       const fillDyn = () => {
         for (const i of [1, 2, 3]) {
           tree[OID_IF_OPER + '.' + i].val = [operMap[i]];
           tree[OID_IF_HCIN + '.' + i].val = u64Bytes(counters[i]);
           tree[OID_IF_HCOUT + '.' + i].val = u64Bytes(outCounters[i]);
+          tree[OID_IF_INERR + '.' + i].val = u32err(errCounters[i]);
+          tree[OID_IF_OUTERR + '.' + i].val = u32err(errOutCounters[i]);
         }
       };
+      function u32err(n) {
+        const out = [];
+        let v = n;
+        do { out.unshift(v & 0xff); v = Math.floor(v / 256); } while (v);
+        return out.length ? out : [0];
+      }
       function u64Bytes(n) {
         const out = [];
         let v = n;
@@ -4964,14 +4991,22 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const vcfg = mm._validate({ key: 'dev1@127.0.0.1', host: '127.0.0.1', commands: ['display version'], sysinfo: { ifTable: true, intervalSec: 5 } });
       eq(vcfg.cfg.sysinfo.intervalSec, 30, '采集间隔下限钳制 30 秒');
       eq(vcfg.cfg.sysinfo.ifTable, true, 'ifTable 开关透传');
-      const traffics = [], statuses = [];
+      // 错包配置校验：依赖 ifTable；阈值钳制与非法值回默认
+      const vcfgErr = mm._validate({ key: 'dev1@127.0.0.1', host: '127.0.0.1', commands: ['display version'], sysinfo: { ifTable: true, ifErrors: true, ifErrRate: 2000000 } });
+      eq(vcfgErr.cfg.sysinfo.ifErrors, true, '错包开关透传');
+      eq(vcfgErr.cfg.sysinfo.ifErrRate, 1000000, '错包阈值上限钳制 1000000');
+      const vcfgErr2 = mm._validate({ key: 'dev1@127.0.0.1', host: '127.0.0.1', commands: ['display version'], sysinfo: { ifTable: false, ifErrors: true, ifErrRate: 'abc' } });
+      eq(vcfgErr2.cfg.sysinfo.ifErrors, false, '未开接口流量时错包监控不启用（共享接口表）');
+      eq(vcfgErr2.cfg.sysinfo.ifErrRate, 10, '非法阈值回默认 10');
+      const traffics = [], statuses = [], errEvents = [];
       mm.on('iftraffic', (info) => traffics.push(info));
       mm.on('ifstatus', (info) => statuses.push(info));
+      mm.on('if-error', (info) => errEvents.push(info));
       const rs = mm.start({
         key: 'dev1@127.0.0.1', deviceId: 'dev1', name: '核心R1',
         protocol: 'ssh', host: '127.0.0.1', port: 22,
         commands: ['display version'], password: 'p1',
-        sysinfo: { ifTable: true, community: 'c', intervalSec: 30, snmpPort: port }
+        sysinfo: { ifTable: true, ifErrors: true, ifErrRate: 50, community: 'c', intervalSec: 30, snmpPort: port }
       });
       ok(rs.ok === true, '接口流量任务启动成功');
       const job = mm.jobs.get('dev1@127.0.0.1');
@@ -5000,6 +5035,22 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(statuses[0].changes[0].name, 'GE0/0/2', '状态事件携带接口名');
       eq(statuses[0].changes[0].from + '>' + statuses[0].changes[0].to, 'down>up', '状态变化方向 down→up');
       ok(job.ifHist.length <= 120, '历史容量上限 120');
+      // 错包监控端到端：首采样基线（历史累计错包不算）→ 第二轮增长超阈值告警 → 第三轮停止增长恢复
+      eq(errEvents.length, 0, '首两轮采样（错包计数未增长）不产生告警事件');
+      eq(traffics[1].ifs[0].eIn, 0, '错包计数无增长时速率为 0');
+      await sleep(1050);
+      errCounters[1] += 100; errOutCounters[1] += 0; // 入向 ~95 个/秒 ≥ 阈值 50
+      await mm._pollSnmp(job);
+      eq(errEvents.length, 1, '错包速率超阈值产生 if-error 事件');
+      eq(errEvents[0].alerting, true, '事件为告警方向');
+      eq(errEvents[0].threshold, 50, '事件携带阈值');
+      ok(String(errEvents[0].detail).indexOf('GE0/0/1') >= 0, '事件详情含接口名');
+      const errSmp = job.ifHist[job.ifHist.length - 1].ifs.find(x => x.i === 1);
+      ok(errSmp.eIn >= 50 && errSmp.eIn <= 200, '采样记录入向错包速率（' + errSmp.eIn + ' 个/秒）');
+      await sleep(1050);
+      await mm._pollSnmp(job); // 计数器不再增长（历史错包不再累计）
+      eq(errEvents.length, 2, '错包停止增长产生恢复事件');
+      eq(errEvents[1].alerting, false, '事件为恢复方向');
       mm.stopAll(); // 清理 snmp 定时器
       agent.close();
       rmTmp(tmpIf);
@@ -8394,6 +8445,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(A.levelFor('alert'), 'critical', '默认表：输出关键字告警为严重');
       eq(A.levelFor('recovery'), 'info', '默认表：设备恢复为提示');
       eq(A.levelFor('backup-change'), 'info', '默认表：配置有变化为提示（不值得半夜响铃）');
+      eq(A.levelFor('if-error'), 'warning', '默认表：接口错包超阈值为警告（劣化未中断）');
+      eq(A.levelFor('if-error-clear'), 'info', '默认表：接口错包恢复为提示');
       eq(A.levelFor('unknown-type'), 'warning', '默认表：未知事件类型回退警告');
       let evAllLeveled = true;
       for (const e of A.EVENT_TYPES) if (!A.isLevel(A.EVENT_LEVELS[e.type])) evAllLeveled = false;

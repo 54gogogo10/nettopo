@@ -6656,7 +6656,7 @@ function openHelp() {
       <li><b>输出关键字告警</b>：逐行正则匹配即告警（周期 / 连接时 / 仅读取输出均参与）；多关键字全部命中才显示、全部不再命中才解除，事件携带具体匹配行</li>
       <li><b>配置自动备份</b>：命令可多条、输出合并保存，连接方式可选复用监控连接或独立连接；首份显示「首次」；勾选<b>自动合规</b>后每次备份按合规模板自动扫描，违规进事件时间线并弹通知</li>
       <li><b>跨设备配置对比</b>：配置备份中心「跨设备对比…」选两台设备各一份备份做行级 diff——双机/堆叠成员、同批次接入交换机找配置漂移；与同设备对比同口径先过滤易变行，看到的差异即真实漂移</li>
-      <li><b>SNMP 采集组</b>：SNMP 识别（sysDescr 自动回填软件版本）、重启检测（sysUpTime 骤减判定）、CPU / 内存采集（OID 可配置，华为 / 思科厂家预设一键填充，GET 失败自动 GETNEXT）、<b>环境温度</b>（standard 走标准 ENTITY-SENSOR-MIB：温度 / 风扇 / 功率三类传感器全表；设备不支持时选 custom 填单个温度 OID；温度 warn/crit 双阈值与风扇转速下限告警，监控中心「性能」页看趋势）、接口流量（ifTable 每接口 UP/DOWN 与收发速率）；SNMP 安全模式可选 <b>v2c 团体字或 v3（USM）</b>——无认证无加密 / 仅认证（SHA-1 / MD5）/ 认证加密（AES-128 / DES）三档，引擎发现与时间窗自动同步，v3 口令经系统级加密保存</li>
+      <li><b>SNMP 采集组</b>：SNMP 识别（sysDescr 自动回填软件版本）、重启检测（sysUpTime 骤减判定）、CPU / 内存采集（OID 可配置，华为 / 思科厂家预设一键填充，GET 失败自动 GETNEXT）、<b>环境温度</b>（standard 走标准 ENTITY-SENSOR-MIB：温度 / 风扇 / 功率三类传感器全表；设备不支持时选 custom 填单个温度 OID；温度 warn/crit 双阈值与风扇转速下限告警，监控中心「性能」页看趋势）、接口流量（ifTable 每接口 UP/DOWN 与收发速率）、<b>错包监控</b>（随接口流量采集 ifInErrors/ifOutErrors 并算速率：光模块老化 / 线缆接触不良在收发速率上不可见，错包速率是唯一早期信号；超阈值记入事件时间线，监控中心「接口流量」页错包列非零标红置顶）；SNMP 安全模式可选 <b>v2c 团体字或 v3（USM）</b>——无认证无加密 / 仅认证（SHA-1 / MD5）/ 认证加密（AES-128 / DES）三档，引擎发现与时间窗自动同步，v3 口令经系统级加密保存</li>
       <li><b>服务器管理组</b>：磁盘 / 内存（SSH）——复用监控会话执行 df/free 等并解析数值，超告警 / 严重双阈值记事件并弹通知；HTTP 探测 / 证书——本机按间隔探测 HTTP(S)（2xx/3xx 且可选关键字判定），HTTPS 同时读证书剩余天数，低于阈值告警、续期自动解除</li>
       <li><b>轻量模式</b>：仅读取（不执行周期命令，其余能力保留）/ 仅探测（不填命令，只做在线探测保持连接）</li>
       <li>断线自动重连；正在监控的设备在<b>右侧设备列表显示状态标记</b>（绿在线 / 琥珀红异常）</li>
@@ -7833,6 +7833,8 @@ function monitorRow(host, saved) {
     snmpV3PrivProto: saved.snmpV3PrivProto === 'des' ? 'des' : 'aes',
     snmpV3PrivPass: typeof saved.snmpV3PrivPass === 'string' ? saved.snmpV3PrivPass : '',
     snmpIfTable: !!saved.snmpIfTable,
+    snmpIfErrors: !!saved.snmpIfErrors,
+    snmpIfErrRate: saved.snmpIfErrRate != null ? saved.snmpIfErrRate : 10,
     snmpUpTime: !!saved.snmpUpTime,
     snmpPerf: !!saved.snmpPerf,
     snmpCpuOid: typeof saved.snmpCpuOid === 'string' ? saved.snmpCpuOid : '',
@@ -7905,6 +7907,8 @@ function normalizeMonitorHosts(cfg) {
         snmpV3PrivProto: h.snmpV3PrivProto === 'des' ? 'des' : 'aes',
         snmpV3PrivPass: typeof h.snmpV3PrivPass === 'string' ? h.snmpV3PrivPass.slice(0, 128) : '',
         snmpIfTable: !!h.snmpIfTable,
+        snmpIfErrors: !!h.snmpIfErrors,
+        snmpIfErrRate: (n => Number.isFinite(n) ? Math.min(1000000, Math.max(0, Math.round(n))) : 10)(parseFloat(h.snmpIfErrRate)),
         snmpUpTime: !!h.snmpUpTime,
         snmpPerf: !!h.snmpPerf,
         snmpCpuOid: typeof h.snmpCpuOid === 'string' ? h.snmpCpuOid.trim().slice(0, 64) : '',
@@ -8069,7 +8073,7 @@ async function applyMonitor(id, cfg, enabled) {
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
           { backup: { enabled: r.backupEnabled, command: r.backupCommand, mode: r.backupMode, skipIfSame: !!r.backupSkipSame, intervalSec: r.backupIntervalSec, waitMs: Math.round((r.backupWaitSec || 1) * 1000), compliance: { enabled: !!r.complianceEnabled, rules: currentComplianceRules() } } },
-        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', snmpPort: r.snmpPort || '', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '', cpuMode: r.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: r.snmpMemMode || '', env: { enabled: !!r.snmpEnvEnabled, mode: r.snmpEnvMode === 'custom' ? 'custom' : 'standard', tempOid: r.snmpEnvOid || '', tempWarn: r.snmpEnvTempWarn, tempCrit: r.snmpEnvTempCrit, fanMinRpm: r.snmpEnvFanMin } } } },
+        { sysinfo: { enabled: !!r.snmpEnabled, version: r.snmpVersion === 'v3' ? 'v3' : 'v2c', community: r.snmpCommunity || 'public', snmpPort: r.snmpPort || '', v3User: r.snmpV3User || '', v3AuthProto: r.snmpV3AuthProto || 'sha', v3AuthPass: r.snmpV3AuthPass || '', v3PrivProto: r.snmpV3PrivProto || 'aes', v3PrivPass: r.snmpV3PrivPass || '', ifTable: !!r.snmpIfTable, ifErrors: !!r.snmpIfErrors, ifErrRate: r.snmpIfErrRate != null ? r.snmpIfErrRate : 10, sysUpTime: !!r.snmpUpTime, perf: { enabled: !!r.snmpPerf, cpuOid: r.snmpCpuOid || '', memUsedOid: r.snmpMemUsedOid || '', memFreeOid: r.snmpMemFreeOid || '', cpuMode: r.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: r.snmpMemMode || '', env: { enabled: !!r.snmpEnvEnabled, mode: r.snmpEnvMode === 'custom' ? 'custom' : 'standard', tempOid: r.snmpEnvOid || '', tempWarn: r.snmpEnvTempWarn, tempCrit: r.snmpEnvTempCrit, fanMinRpm: r.snmpEnvFanMin } } } },
         { metrics: { enabled: !!r.metricsEnabled, command: r.metricsCommands, intervalSec: r.metricsIntervalSec, diskWarn: r.metricsDiskWarn, diskCrit: r.metricsDiskCrit, memWarn: r.metricsMemWarn, memCrit: r.metricsMemCrit } },
         { httpProbe: { enabled: !!r.httpEnabled, url: r.httpUrl, intervalSec: r.httpIntervalSec, alertDays: r.httpAlertDays, keyword: r.httpKeyword } }
         ));
@@ -8942,7 +8946,7 @@ async function reconcileMonitors() {
         { backup: { enabled: row.backupEnabled, command: row.backupCommand, mode: row.backupMode, skipIfSame: !!row.backupSkipSame, intervalSec: row.backupIntervalSec, waitMs: Math.round((row.backupWaitSec || 1) * 1000), compliance: { enabled: !!row.complianceEnabled, rules: currentComplianceRules() } } },
         // 与 applyMonitor 的完整载荷同口径：缺 sysUpTime/perf 会让重启检测与 CPU/内存采集
         // 在软件重启/恢复工程后静默失效（monitor 侧按缺省 false 处理）
-        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', snmpPort: row.snmpPort || '', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '', cpuMode: row.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: row.snmpMemMode || '', env: { enabled: !!row.snmpEnvEnabled, mode: row.snmpEnvMode === 'custom' ? 'custom' : 'standard', tempOid: row.snmpEnvOid || '', tempWarn: row.snmpEnvTempWarn, tempCrit: row.snmpEnvTempCrit, fanMinRpm: row.snmpEnvFanMin } } } },
+        { sysinfo: { enabled: !!row.snmpEnabled, version: row.snmpVersion === 'v3' ? 'v3' : 'v2c', community: row.snmpCommunity || 'public', snmpPort: row.snmpPort || '', v3User: row.snmpV3User || '', v3AuthProto: row.snmpV3AuthProto || 'sha', v3AuthPass: row.snmpV3AuthPass || '', v3PrivProto: row.snmpV3PrivProto || 'aes', v3PrivPass: row.snmpV3PrivPass || '', ifTable: !!row.snmpIfTable, ifErrors: !!row.snmpIfErrors, ifErrRate: row.snmpIfErrRate != null ? row.snmpIfErrRate : 10, sysUpTime: !!row.snmpUpTime, perf: { enabled: !!row.snmpPerf, cpuOid: row.snmpCpuOid || '', memUsedOid: row.snmpMemUsedOid || '', memFreeOid: row.snmpMemFreeOid || '', cpuMode: row.snmpCpuMode === 'idle100' ? 'idle100' : 'direct', memMode: row.snmpMemMode || '', env: { enabled: !!row.snmpEnvEnabled, mode: row.snmpEnvMode === 'custom' ? 'custom' : 'standard', tempOid: row.snmpEnvOid || '', tempWarn: row.snmpEnvTempWarn, tempCrit: row.snmpEnvTempCrit, fanMinRpm: row.snmpEnvFanMin } } } },
         { metrics: { enabled: !!row.metricsEnabled, command: row.metricsCommands, intervalSec: row.metricsIntervalSec, diskWarn: row.metricsDiskWarn, diskCrit: row.metricsDiskCrit, memWarn: row.metricsMemWarn, memCrit: row.metricsMemCrit } },
         { httpProbe: { enabled: !!row.httpEnabled, url: row.httpUrl, intervalSec: row.httpIntervalSec, alertDays: row.httpAlertDays, keyword: row.httpKeyword } }
       ));
@@ -9093,6 +9097,7 @@ function openMonitorConfig(id) {
         <div class="mh-sep">SNMP 采集</div>
         <label class="mh-si" title="每次会话建立后经 SNMP v2c 读取 sysDescr/sysObjectID，自动回填设备「软件版本」（只读操作）"><input type="checkbox" class="mh-si-cb"${r.snmpEnabled ? ' checked' : ''}/>SNMP 识别</label>
         <label class="mh-si" title="按间隔经 SNMP v2c 采集接口状态与收发流量（ifTable，独立于连接的 UDP 轮询）：监控中心「接口流量」页查看趋势，接口 DOWN 记入事件时间线并弹通知"><input type="checkbox" class="mh-sift-cb"${r.snmpIfTable ? ' checked' : ''}/>接口流量</label>
+        <label class="mh-si" title="随接口流量一并采集 ifInErrors/ifOutErrors 错包计数器并计算速率：光模块老化、线缆接触不良在收发速率上不可见，错包速率是唯一早期信号；超阈值记入事件时间线并弹通知（需勾选「接口流量」）"><input type="checkbox" class="mh-si-iferr-cb"${(r.snmpIfErrors && r.snmpIfTable) ? ' checked' : ''}/>错包监控</label>
         <label class="mh-si" title="按间隔 GET sysUpTime（TimeTicks），数值骤减判定为设备重启：记入事件时间线并弹通知（独立于 SSH/Telnet 连接）"><input type="checkbox" class="mh-si-up-cb"${r.snmpUpTime ? ' checked' : ''}/>重启检测</label>
         <label class="mh-si" title="按间隔 GET CPU/内存 OID（百分比型或字节型均可），监控中心「性能」页查看趋势"><input type="checkbox" class="mh-si-pf-cb"${r.snmpPerf ? ' checked' : ''}/>CPU/内存</label>
         <label class="mh-si" title="按间隔采集环境传感器：standard 走标准 ENTITY-SENSOR-MIB（RFC 3433，温度/风扇/功率全表）；设备不支持时选 custom 填单个温度 OID。超阈值记入事件时间线并弹通知"><input type="checkbox" class="mh-si-env-cb"${r.snmpEnvEnabled ? ' checked' : ''}/>环境温度</label>
@@ -9125,6 +9130,10 @@ function openMonitorConfig(id) {
           <input class="mh-si-env-tc" type="number" min="1" max="150" title="严重告警下限（℃）" value="${U.escHtml(r.snmpEnvTempCrit != null ? r.snmpEnvTempCrit : 65)}"/><span class="mh-unit">℃</span>
           <span class="mh-unit">风扇下限</span>
           <input class="mh-si-env-fan" type="number" min="0" max="1000000" title="风扇转速告警下限（RPM，取最低转速传感器比对；0 = 不检测）" value="${U.escHtml(r.snmpEnvFanMin != null ? r.snmpEnvFanMin : 0)}"/><span class="mh-unit">RPM</span>
+        </div>
+        <div class="mh-iferr-wrap" hidden>
+          <span class="mh-unit">告警阈值</span>
+          <input class="mh-si-iferr-th" type="number" min="0" max="1000000" title="接口错包速率告警阈值（个/秒，入/出任一方向超过即告警；0 = 出现任何错包即告警）" value="${U.escHtml(r.snmpIfErrRate != null ? r.snmpIfErrRate : 10)}"/><span class="mh-unit">个/秒（持续增长的错包计数器才计速率；计数器不再增长的历史错包不告警）</span>
         </div>
         <div class="mh-sep">服务器指标采集（SSH）</div>
         <label class="mh-si" title="复用监控会话按间隔执行 df/free 等命令并解析数值：磁盘/内存超阈值时记入事件时间线并弹通知（仅读取模式下不执行）"><input type="checkbox" class="mh-mt-cb"${r.metricsEnabled ? ' checked' : ''}/>磁盘/内存</label>
@@ -9280,6 +9289,16 @@ function openMonitorConfig(id) {
     envCb.addEventListener('change', applyEnvUi);
     rowEl.querySelector('.mh-si-env-mode').addEventListener('change', applyEnvUi);
     applyEnvUi();
+    // 错包监控折叠区：勾选「错包监控」展开阈值；「接口流量」未勾时联动勾上（错包采集依赖 ifTable 轮询）
+    const ifErrCb = rowEl.querySelector('.mh-si-iferr-cb');
+    const ifErrWrap = rowEl.querySelector('.mh-iferr-wrap');
+    const ifTcb = rowEl.querySelector('.mh-sift-cb');
+    const applyIfErrUi = (byUser) => {
+      ifErrWrap.hidden = !ifErrCb.checked;
+      if (byUser && ifErrCb.checked && !ifTcb.checked) { ifTcb.checked = true; toast('已联动勾选「接口流量」：错包监控随接口采集一并 walk（共享接口表）'); }
+    };
+    ifErrCb.addEventListener('change', () => applyIfErrUi(true));
+    applyIfErrUi(false);
     // 服务器指标采集折叠区：勾选展开；Linux 预设一键填充
     const mtCb = rowEl.querySelector('.mh-mt-cb');
     const mtWrap = rowEl.querySelector('.mh-mt-wrap');
@@ -9367,6 +9386,9 @@ function openMonitorConfig(id) {
         complianceEnabled: rowEl.querySelector('.mh-cmp-cb').checked,
         snmpEnabled: rowEl.querySelector('.mh-si-cb').checked,
         snmpIfTable: rowEl.querySelector('.mh-sift-cb').checked,
+        snmpIfErrors: rowEl.querySelector('.mh-si-iferr-cb').checked && rowEl.querySelector('.mh-sift-cb').checked,
+        // 0 是合法阈值（出现任何错包即告警），只有空输入/非数值才回默认 10——不能用 || 兜底
+        snmpIfErrRate: (() => { const v = parseInt(rowEl.querySelector('.mh-si-iferr-th').value, 10); return Number.isFinite(v) ? Math.max(0, Math.min(1000000, v)) : 10; })(),
         snmpUpTime: rowEl.querySelector('.mh-si-up-cb').checked,
         snmpPerf: rowEl.querySelector('.mh-si-pf-cb').checked,
         snmpCpuOid: rowEl.querySelector('.mh-si-cpu').value.trim().slice(0, 64),
@@ -10789,7 +10811,7 @@ function openMonitorCenter() {
   const evIcon = (t) => ({
     offline: '🔴', recovery: '🟢', alert: '🟠', 'alert-clear': '⚪',
     backup: '📦', 'backup-change': '📦', 'backup-error': '❌', compliance: '🛡️',
-    'if-down': '🔻', 'if-up': '🔺', reboot: '🔄',
+    'if-down': '🔻', 'if-up': '🔺', 'if-error': '⚠️', 'if-error-clear': '☑️', reboot: '🔄',
     metric: '📈', 'metric-clear': '📉', 'http-fail': '🌐', 'http-ok': '🌐', cert: '🔐', 'cert-clear': '🔓',
     trap: '📨', 'syslog-alert': '📋', deploy: '🚀', 'deploy-error': '💥', proto: '🔗',
     'link-down': '🔌', 'link-up': '🔗'
@@ -10797,7 +10819,7 @@ function openMonitorCenter() {
   const evTypeLabel = {
     offline: '离线', recovery: '恢复', alert: '告警', 'alert-clear': '解除',
     backup: '备份', 'backup-change': '配置变化', 'backup-error': '备份失败', compliance: '合规',
-    'if-down': '接口离线', 'if-up': '接口恢复', reboot: '设备重启',
+    'if-down': '接口离线', 'if-up': '接口恢复', 'if-error': '接口错包', 'if-error-clear': '错包恢复', reboot: '设备重启',
     metric: '指标告警', 'metric-clear': '指标恢复', 'http-fail': 'HTTP 失败', 'http-ok': 'HTTP 恢复', cert: '证书告警', 'cert-clear': '证书恢复',
     trap: 'SNMP Trap', 'syslog-alert': 'Syslog 告警', deploy: '配置下发', 'deploy-error': '下发失败', proto: '三层邻居',
     'link-down': '链路中断', 'link-up': '链路恢复'
@@ -10895,12 +10917,13 @@ function openMonitorCenter() {
     const hist = ifCache.get(cur.key) || [];
     const last = hist[hist.length - 1];
     let rowsHtml = '';
+    const hasErr = !!cur.ifErrors; // 任务开启了错包监控才显示错包列（否则整列都是「—」纯占位）
     if (!last || !last.ifs || !last.ifs.length) {
       rowsHtml = '<div class="mc-empty">正在等待第一次采样（SNMP 轮询约每 60 秒一次）…</div>';
     } else {
       // 只有 ≥2 次采样才有趋势可看：否则趋势列会白占最宽的 flex 并把接口名挤成「e...」
       const showSpark = hist.length >= 2;
-      // 排序：down 接口置顶，其余按当前收发流量降序
+      // 排序：down 接口置顶，其次错包非零（劣化链路最需要被看到），其余按当前收发流量降序
       const rows = last.ifs.map(s => {
         const series = hist.map(sm => {
           const f = (sm.ifs || []).find(x => x.i === s.i);
@@ -10910,6 +10933,8 @@ function openMonitorCenter() {
       }).sort((a, b) => {
         const ad = a.s.oper === 'down' ? 0 : 1, bd = b.s.oper === 'down' ? 0 : 1;
         if (ad !== bd) return ad - bd;
+        const ae = ((a.s.eIn || 0) + (a.s.eOut || 0)) > 0 ? 0 : 1, be = ((b.s.eIn || 0) + (b.s.eOut || 0)) > 0 ? 0 : 1;
+        if (ae !== be) return ae - be;
         const at = (a.s.out || 0) + (a.s.in || 0), bt = (b.s.out || 0) + (b.s.in || 0);
         return bt - at;
       });
@@ -10922,19 +10947,26 @@ function openMonitorCenter() {
         const rate = (arrow, v) => '<span class="mc-if-rate' + (v == null ? ' mc-none' : '') + '"'
           + (v == null ? ' title="首次采样只建立计数器基线，收发速率需第二次采样后才有值"' : '') + '>'
           + arrow + ' ' + fmtBps(v) + '</span>';
+        // 错包速率（个/秒）：非零标红置顶提示；两向都缺数据（设备不实现 ifErrors 列）弱化显示
+        const errCell = (s.eIn == null && s.eOut == null)
+          ? '<span class="mc-if-rate mc-none" title="设备未返回 ifInErrors/ifOutErrors（或首采样无差值）">— </span>'
+          : '<span class="mc-if-rate' + ((s.eIn || 0) + (s.eOut || 0) > 0 ? ' t-off' : '') + '"'
+            + ' title="错包速率（个/秒，入/出）：非零提示链路质量劣化（CRC 校验失败 / 光模块 / 线缆接触）">↓' + (s.eIn || 0) + ' ↑' + (s.eOut || 0) + '</span>';
         return '<div class="mc-if-row">'
           + '<span class="mc-if-nm" title="' + U.escHtml(s.n) + '">' + U.escHtml(s.n) + '</span>'
           + '<span class="mc-if-op">' + oper + '</span>'
           + rate('↓', s.in) + rate('↑', s.out)
+          + (hasErr ? errCell : '')
           + '<span class="mc-if-spd" title="标称带宽（ifSpeed；≥4.29Gbps 链路按 ifHighSpeed 换算）">' + fmtSpeed(s.speed) + util + '</span>'
           + (showSpark ? '<span class="mc-if-spark">' + spark(series.map(f => f && f.in), '#0ea5e9') + spark(series.map(f => f && f.out), '#f59e0b') + '</span>' : '')
           + '</div>';
       }).join('');
-      rowsHtml = '<div class="mc-if-head"><span>接口</span><span>状态</span><span>入流量</span><span>出流量</span><span>带宽</span>'
+      rowsHtml = '<div class="mc-if-head"><span>接口</span><span>状态</span><span>入流量</span><span>出流量</span>' + (hasErr ? '<span>错包/秒</span>' : '') + '<span>带宽</span>'
         + (showSpark ? '<span>近 ' + hist.length + ' 次采样</span>' : '') + '</div>' + rowsHtml;
     }
     el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
       + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · 采样间隔约 60 秒 · ↓入 ↑出（设备视角），接口 DOWN 记入事件时间线'
+      + (hasErr ? ' · 错包列为入/出方向速率（个/秒），非零接口置顶标红' : '')
       + (hist.length < 2 ? ' · 首次采样已就绪：收发速率与趋势线需第二次采样后显示' : '')
       + '</div><div style="margin:4px 0"><button type="button" class="tb" id="mcIfReport" title="按窗口聚合各接口收发均值/峰值与在线率，TopN 排序，可导出 CSV（数据取本机保留的采样历史）">流量报表…</button></div>'
       + '<div class="mc-if-body">' + rowsHtml + '</div>';

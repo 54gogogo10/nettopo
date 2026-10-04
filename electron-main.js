@@ -577,6 +577,14 @@ monitor.on('ifstatus', (info) => {
     }
   }
 });
+// 接口错包告警（ifInErrors/ifOutErrors 速率超阈值）：变化沿记入时间线并弹通知（与指标告警同口径）
+monitor.on('if-error', (info) => {
+  sendMonitor('monitor:if-error', info);
+  recordMonitorEvent(info, info.alerting ? 'if-error' : 'if-error-clear', info.detail || (info.alerting ? '接口错包超阈值' : '接口错包告警解除'));
+  if (info.alerting && notifyEnabled()) {
+    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 接口错包告警', info.name + '（' + info.host + '）' + (info.detail || ''), levelOf('if-error'));
+  }
+});
 // SSH 指标采样（df/free/loadavg）：实时推送主窗口；阈值告警变化沿记入时间线并弹通知
 monitor.on('metric', (info) => sendMonitor('monitor:metric', info));
 monitor.on('metric-alert', (info) => {
