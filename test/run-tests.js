@@ -6471,7 +6471,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       fs.writeFileSync(vfSha, require('crypto').createHash('sha256').update('tampered').digest('hex') + '\n');
       ok((await U2.verifySha256File(vfFile, vfSha)).ok === false, '升级校验：内容被篡改拒绝');
       ok((await U2.verifySha256File(vfFile, path.join(vfDir, 'missing.sha256'))).ok === false, '升级校验：清单缺失拒绝');
-      fs.rmSync(vfDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      rmTmp(vfDir);
       // psQuote：单引号翻倍（路径进 PowerShell 命令行）
       eq(U2.psQuote("D:\\a'b\\c.exe"), "'D:\\a''b\\c.exe'", '升级 psQuote：单引号转义');
       // 辅助脚本拼装：快路径（改名换入）与慢路径（退出后换入，便携版启动器锁映像 EBUSY 的降级）。
@@ -7190,7 +7190,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const { normalizeConfig: normalizeNetSvc2 } = require('../js/net-services.js');
       const A2 = require('../js/ai-llm.js');
       const r2d = path.join(root, 'test', '_r2_reg');
-      fs.rmSync(r2d, { recursive: true, force: true });
+      rmTmp(r2d);
       fs.mkdirSync(r2d, { recursive: true });
       // 本块独立的作用域：外层的 waitUntil 定义在别的块里，这里自带一个（语义相同）
       const waitUntil = async (fn, ms = 2000, step = 50) => {
@@ -7345,14 +7345,14 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         c2.destroy();
         await fsrvA.stop();
       }
-      fs.rmSync(r2d, { recursive: true, force: true });
+      rmTmp(r2d);
     }
     // ================= 第三轮审计修复回归（H1 / M9 / L17） ================= 
     {
       const { SyslogServer } = require('../js/svc-syslog.js');
       const { TrapServer } = require('../js/svc-trap.js');
       const capBase = path.join(root, 'test', '_r3_cap');
-      fs.rmSync(capBase, { recursive: true, force: true });
+      rmTmp(capBase);
       // H1：主机目录封顶必须能回收名额——旧实现「满员即永久丢弃」会让一次伪造 HOST 冲刷之后
       // 所有真实设备的落盘归档长期静默失效，且重启/清理都无法自愈
       const sCap = new SyslogServer({ baseDir: path.join(capBase, 's'), maxPerSec: 100000, hostDirReclaimMs: 60000 });
@@ -7405,7 +7405,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       tCap._writeEntry({ ts: Date.now(), host: 'REAL-T', version: 'v2c', community: 'c', uptime: '1', trap: '1.2.3', oid: '1.2.3', msg: 'real' });
       ok(fs.existsSync(path.join(capBase, 't', 'REAL-T')), 'H1：Trap 来源目录封顶后真实来源仍能落盘');
       await tCap.stop();
-      fs.rmSync(capBase, { recursive: true, force: true });
+      rmTmp(capBase);
 
       // L17：导出转义必须有「真对抗」用例——旧断言 ok(xml.includes('GE0/0/1') === false)
       // 的夹具里根本没有该字符串，把三套导出器的转义整体换成恒等函数仍然全绿，等于没有护栏
@@ -7428,7 +7428,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const V3 = require('../js/snmp-v3.js');
       const { RegexLab } = require('../js/regex-lab.js');
       const r3dir = path.join(root, 'test', '_r3b');
-      fs.rmSync(r3dir, { recursive: true, force: true });
+      rmTmp(r3dir);
       fs.mkdirSync(r3dir, { recursive: true });
 
       // ---- L11 残留：Release 同挂新旧便携版时不得挑中旧包（旧实现取「第一个 -portable.exe」） ----
@@ -7518,7 +7518,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const relOpen = (vsdxTxt.match(/<Relationships[ >]/g) || []).length;
       const relClose = (vsdxTxt.match(/<\/Relationships>/g) || []).length;
       ok(relOpen >= 1 && relOpen === relClose, 'L9：VSDX 各 .rels 部件都有 <Relationships> 根且开关成对（旧实现 page1.xml.rels 无根，OPC 非法）');
-      fs.rmSync(r3dir, { recursive: true, force: true });
+      rmTmp(r3dir);
     }
     // ================= 厂商 SNMP 参数预设 + 换算语义（本轮新增） ================= 
     {
