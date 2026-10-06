@@ -97,9 +97,13 @@ function normalizeConfig(cfg) {
   out.trap.community = String(tr.community == null ? '' : tr.community).split(/[,，;；\n]+/)
     .map(x => cleanCred(x, '')).filter(Boolean).slice(0, 16).join(',');
   const tv = tr.v3 && typeof tr.v3 === 'object' ? tr.v3 : {};
+  // 认证算法白名单（与 snmp-v3.js 的 AUTH_ALGOS 同集合；本模块不 require 该模块以免多一层依赖，
+  // 故此处独立列一份）：未知值一律回落 SHA-1（旧口径）
+  const V3_AUTH_PROTOS = ['md5', 'sha', 'sha2-224', 'sha2-256', 'sha2-384', 'sha2-512'];
+  const tvAuth = String(tv.authProto).toLowerCase();
   out.trap.v3 = {
     user: cleanCred(tv.user, ''),
-    authProto: String(tv.authProto).toLowerCase() === 'md5' ? 'md5' : 'sha',
+    authProto: V3_AUTH_PROTOS.indexOf(tvAuth) >= 0 ? tvAuth : 'sha',
     authPass: cleanCred(tv.authPass, ''),
     privProto: String(tv.privProto).toLowerCase() === 'des' ? 'des' : 'aes',
     privPass: cleanCred(tv.privPass, '')

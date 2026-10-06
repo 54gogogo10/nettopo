@@ -1326,14 +1326,27 @@ class ShellManager extends EventEmitter {
       // 一旦出现，**必须立刻停止登录自动化**：后续的 `Please enter old/new password:` 会被登录状态机
       // 当成登录提示而重发登录口令，最后以「Telnet 认证失败：密码被设备拒绝」误报并断开会话——
       // 真机实测（192.168.50.102）：交互式应答 y 之后正是被自家状态机打断，人工根本无法完成改密。
-      // 处理：无人值守（监控/采集/下发，带 unattended:true）→ 中止并如实报原因；
-      //       交互式（Web Shell）→ 只停止接管，把对话框留给用户（不代答 Y/N，那是替用户改设备口令）。
-      if (/(?:initial\s+password|password\s+needs?\s+to\s+be\s+changed|must\s+be\s+changed|Continue\?\s*\[Y\/N\])/i.test(loginBuf)) {
+      // 注意**只停止接管、不擅自断链**：`Continue? [Y/N]` 这个通用形态在登录后 30s 窗口内也可能来自
+      // 普通确认提示（真机实测：`snmp-agent sys-info version v2c` 回显 "This protocol is insecure…
+      // Continue? [Y/N]"、save 的保存确认等），那时该由上层（下发管道的 CONFIRM_RE / 保存自动应答）
+      // 或人处理——只有**明确是"初始口令必须改"**这种无人值守办不到的事才中止并如实报原因。
+      const pwdDialog = /(?:initial\s+password|password\s+needs?\s+to\s+be\s+changed|must\s+be\s+changed)/i.test(loginBuf);
+      if (pwdDialog || /Continue\?\s*\[Y\/N\]/i.test(loginBuf)) {
         loginPhase = 3;
-        if (o.unattended) {
+        if (pwdDialog && o.unattended) {
           loginFail('设备要求先修改初始口令（' + String(o.host) + '）：请在设备本地/SSH/Web 首次登录改密后再采集（无人值守不代改口令）');
         }
         return;
+      }
+      // **登录成功判据**：口令已提交（phase 2）后出现命令行提示符即可认定登录完成，立刻停止接管。
+      // 没有这条判据时状态机会一直盯到 30s 超窗，期间登录后任何以 `…Password:` 结尾的交互提示
+      // （真机实测：`snmp-agent usm-user v3 X authentication-mode sha2-256` 会弹
+      //  `Enter Password:` / `Confirm Password:`）都被当成登录提示重发登录口令，最后以
+      // 「Telnet 认证失败：密码被设备拒绝」断链——Web Shell 里人工配置口令同样会被打断。
+      // 只取最后一行判定，避免 banner 里的 `>`/`]` 之类误判（提示符形态与 monitor/runOneShot 同口径）。
+      if (loginPhase === 2) {
+        const lastLine = (loginBuf.split(/\r?\n/).filter(x => x.trim()).pop() || '').trim();
+        if (lastLine && /^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/.test(lastLine)) { loginPhase = 3; return; }
       }
       // 提示符后的尾随空白只认空格/制表符：登录提示总是行内等待输入，永不被 \r\n 收尾。
       // 华为 VRP 真机会在收下口令后单独回包一个 \r\n 换行，若尾随 \s 也匹配，滑窗尾串

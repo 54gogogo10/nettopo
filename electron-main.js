@@ -1529,7 +1529,7 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
     if (!v3user) return { ok: false, error: 'SNMP v3 需填写用户名' };
     target = {
       user: v3user,
-      authProto: String((p && p.v3AuthProto) || 'sha').toLowerCase() === 'md5' ? 'md5' : 'sha',
+      authProto: (() => { const p = String((p && p.v3AuthProto) || 'sha').toLowerCase(); return p === 'md5' ? 'md5' : (/^sha2-(224|256|384|512)$/.test(p) ? p : 'sha'); })(),
       authPass: String((p && p.v3AuthPass) || '').slice(0, 128),
       privProto: String((p && p.v3PrivProto) || 'aes').toLowerCase() === 'des' ? 'des' : 'aes',
       privPass: String((p && p.v3PrivPass) || '').slice(0, 128)

@@ -698,6 +698,19 @@ U.SNMP_VENDORS = [
 
 /** 按企业号取该条厂商定义；找不到返回 null */
 U.snmpVendorByEnterprise = (n) => U.SNMP_VENDORS.find(v => v.enterprise === Number(n)) || null;
+/** SNMP v3 认证协议选项（与 js/snmp-v3.js 的 AUTH_ALGOS 同集合）：
+ *  新固件普遍禁用弱算法——真机实测华为 S6700（YunShan OS V600R025C10SPC500）对 v2c 与 SHA-1 都回
+ *  `Error: This algorithm is insecure … install feature-software WEAKEA`，只有 SHA-2 档免装弱加密特性。
+ *  故 SHA-2 放前面并按「推荐」标注；弱算法保留（兼容老设备）但注明新固件可能需要放开。 */
+U.V3_AUTH_OPTIONS = [
+  { v: 'sha2-256', label: 'SHA-2 256（推荐，新固件默认档）' },
+  { v: 'sha2-512', label: 'SHA-2 512' },
+  { v: 'sha2-384', label: 'SHA-2 384' },
+  { v: 'sha2-224', label: 'SHA-2 224' },
+  { v: 'sha', label: 'SHA-1（弱，新固件可能要求装 WEAKEA）' },
+  { v: 'md5', label: 'MD5（弱，新固件可能要求装 WEAKEA）' }
+];
+U.V3_AUTH_PROTOS = U.V3_AUTH_OPTIONS.map(o => o.v);
 /** 按 key 取厂商定义 */
 U.snmpVendorByKey = (k) => U.SNMP_VENDORS.find(v => v.key === String(k || '')) || null;
 

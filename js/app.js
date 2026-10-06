@@ -8036,7 +8036,7 @@ function monitorRow(host, saved) {
     snmpPort: saved.snmpPort != null ? String(saved.snmpPort) : '',
     snmpVersion: saved.snmpVersion === 'v3' ? 'v3' : 'v2c',
     snmpV3User: typeof saved.snmpV3User === 'string' ? saved.snmpV3User : '',
-    snmpV3AuthProto: saved.snmpV3AuthProto === 'md5' ? 'md5' : 'sha',
+    snmpV3AuthProto: U.V3_AUTH_PROTOS.indexOf(saved.snmpV3AuthProto) >= 0 ? saved.snmpV3AuthProto : 'sha',
     snmpV3AuthPass: typeof saved.snmpV3AuthPass === 'string' ? saved.snmpV3AuthPass : '',
     snmpV3PrivProto: saved.snmpV3PrivProto === 'des' ? 'des' : 'aes',
     snmpV3PrivPass: typeof saved.snmpV3PrivPass === 'string' ? saved.snmpV3PrivPass : '',
@@ -8110,7 +8110,7 @@ function normalizeMonitorHosts(cfg) {
         snmpPort: h.snmpPort != null ? String(h.snmpPort).slice(0, 6) : '',
         snmpVersion: h.snmpVersion === 'v3' ? 'v3' : 'v2c',
         snmpV3User: typeof h.snmpV3User === 'string' ? h.snmpV3User.trim().slice(0, 32) : '',
-        snmpV3AuthProto: h.snmpV3AuthProto === 'md5' ? 'md5' : 'sha',
+        snmpV3AuthProto: U.V3_AUTH_PROTOS.indexOf(h.snmpV3AuthProto) >= 0 ? h.snmpV3AuthProto : 'sha',
         snmpV3AuthPass: typeof h.snmpV3AuthPass === 'string' ? h.snmpV3AuthPass.slice(0, 128) : '',
         snmpV3PrivProto: h.snmpV3PrivProto === 'des' ? 'des' : 'aes',
         snmpV3PrivPass: typeof h.snmpV3PrivPass === 'string' ? h.snmpV3PrivPass.slice(0, 128) : '',
@@ -8176,7 +8176,7 @@ function openSnmpV3SecretDialog(init, onDone) {
       <h3>SNMP v3 口令设置（USM）</h3>
       <div class="m-sub">认证与加密口令经系统级加密后随监控配置保存在本机。设备侧 snmp-agent usm-user 需使用同一组协议与口令。</div>
       <div class="frow"><label>认证协议</label>
-        <select id="sv3ap"><option value="sha"${init.authProto === 'sha' ? ' selected' : ''}>SHA-1</option><option value="md5"${init.authProto === 'md5' ? ' selected' : ''}>MD5</option></select>
+        <select id="sv3ap">${U.V3_AUTH_OPTIONS.map(o => '<option value="' + o.v + '"' + (init.authProto === o.v ? ' selected' : '') + '>' + o.label + '</option>').join('')}</select>
       </div>
       <div class="frow"><label>认证口令</label><input id="sv3ak" type="password" value="${U.escHtml(init.authPass || '')}" autocomplete="new-password"/></div>
       <div class="frow"><label>加密协议</label>
@@ -9484,7 +9484,7 @@ function openMonitorConfig(id) {
     applySec();
     v3Btn.onclick = () => {
       openSnmpV3SecretDialog({
-        authProto: rowEl.dataset.v3AuthProto === 'md5' ? 'md5' : 'sha',
+        authProto: U.V3_AUTH_PROTOS.indexOf(rowEl.dataset.v3AuthProto) >= 0 ? rowEl.dataset.v3AuthProto : 'sha',
         authPass: rowEl.dataset.v3AuthPass || '',
         privProto: rowEl.dataset.v3PrivProto === 'des' ? 'des' : 'aes',
         privPass: rowEl.dataset.v3PrivPass || ''
@@ -9707,7 +9707,7 @@ function openMonitorConfig(id) {
         snmpPort: (() => { const v = parseInt(rowEl.querySelector('.mh-si-sp').value, 10); return (v > 0 && v <= 65535) ? String(v) : ''; })(),
         snmpVersion: rowEl.querySelector('.mh-si-sec').value === 'v3' ? 'v3' : 'v2c',
         snmpV3User: rowEl.querySelector('.mh-si-v3user').value.trim().slice(0, 32),
-        snmpV3AuthProto: rowEl.dataset.v3AuthProto === 'md5' ? 'md5' : 'sha',
+        snmpV3AuthProto: U.V3_AUTH_PROTOS.indexOf(rowEl.dataset.v3AuthProto) >= 0 ? rowEl.dataset.v3AuthProto : 'sha',
         snmpV3AuthPass: rowEl.dataset.v3AuthPass || '',
         snmpV3PrivProto: rowEl.dataset.v3PrivProto === 'des' ? 'des' : 'aes',
         snmpV3PrivPass: rowEl.dataset.v3PrivPass || '',
@@ -12366,7 +12366,7 @@ function openNetServices() {
               <div style="font-size:11px;color:var(--muted);margin-bottom:3px">SNMP v3 接收用户（USM，可选：v3 Trap 按此验签并解密）</div>
               <div class="nsv-row"><label>用户名</label><input type="text" id="nsvTrapV3User" maxlength="32" autocomplete="off" spellcheck="false"/></div>
               <div class="nsv-row"><label>认证</label>
-                <select id="nsvTrapV3AP"><option value="sha">SHA-1</option><option value="md5">MD5</option></select>
+                <select id="nsvTrapV3AP">${U.V3_AUTH_OPTIONS.map(o => '<option value="' + o.v + '">' + o.label + '</option>').join('')}</select>
                 <input type="password" id="nsvTrapV3AK" placeholder="认证口令" autocomplete="new-password" style="flex:1;min-width:90px"/>
               </div>
               <div class="nsv-row"><label>加密</label>
@@ -12508,7 +12508,7 @@ function openNetServices() {
     ov.querySelector('#nsvTrapCommunity').value = cfg.trap.community || '';
     const tv3 = (cfg.trap && cfg.trap.v3) || {};
     ov.querySelector('#nsvTrapV3User').value = tv3.user || '';
-    ov.querySelector('#nsvTrapV3AP').value = tv3.authProto === 'md5' ? 'md5' : 'sha';
+    ov.querySelector('#nsvTrapV3AP').value = U.V3_AUTH_PROTOS.indexOf(tv3.authProto) >= 0 ? tv3.authProto : 'sha';
     ov.querySelector('#nsvTrapV3AK').value = tv3.authPass || '';
     ov.querySelector('#nsvTrapV3PP').value = tv3.privProto === 'des' ? 'des' : 'aes';
     ov.querySelector('#nsvTrapV3PK').value = tv3.privPass || '';

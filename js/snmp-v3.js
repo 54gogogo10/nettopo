@@ -126,11 +126,11 @@ const _kdfBaseCache = new Map();
 const _KDF_BASE_CACHE_MAX = 16;
 const MAX_ENGINE_ID_LEN = 64;   // engineID 上限：超限直接拒（防超长密钥与缓存键膨胀；RFC 3414 建议 5..32，取更宽松的 64 保互操作）
 
-/** 口令 → 本地化密钥 Kul（RFC 3414 A.1）：
+/** 口令 → 本地化密钥 Kul（RFC 3414 A.1；SHA-2 档同样按 RFC 7860 §7.1 用该哈希做本地化）：
  *  口令按 UTF-8 反复填充至恰好 1MB，逐 64 字节块迭代 x = H(x‖chunk)（x0 = H(空串)），
- *  Kul = H(x‖engineID‖x)。algo: 'md5' | 'sha'（SHA-1），输出 16 / 20 字节。 */
+ *  Kul = H(x‖engineID‖x)。algo 取 AUTH_ALGOS 的键（md5 / sha / sha2-224/256/384/512）。 */
 function passwordToKey(password, engineID, algo) {
-  const hashName = String(algo) === 'sha' ? 'sha1' : 'md5';
+  const hashName = authAlgoInfo(algo).hash;
   const pwd = Buffer.from(String(password == null ? '' : password), 'utf8');
   if (!pwd.length) throw new Error('SNMP v3 口令为空');
   const eid = Buffer.isBuffer(engineID) ? engineID : Buffer.from(String(engineID || ''), 'hex');
@@ -159,11 +159,12 @@ function passwordToKey(password, engineID, algo) {
   return kul;
 }
 
-/** 整包 HMAC 签名：msg 中 authParams 12 字节置零后计算，取前 96 位 */
+/** 整包 HMAC 签名：msg 中 authParams 置零后计算，按 RFC 3414 / RFC 7860 截断
+ *  （MD5/SHA-1 → 12 字节；SHA-224 → 16、SHA-256 → 24、SHA-384 → 32、SHA-512 → 48） */
 function authDigest(msg, authKey, algo) {
-  const hashName = String(algo) === 'sha' ? 'sha1' : 'md5';
-  const mac = crypto.createHmac(hashName, authKey).update(msg).digest();
-  return mac.subarray(0, 12);
+  const info = authAlgoInfo(algo);
+  const mac = crypto.createHmac(info.hash, authKey).update(msg).digest();
+  return mac.subarray(0, info.mac);
 }
 
 /** CBC-DES 加密（RFC 3414 8.1.1.1）：key = Kul 前 8 字节，IV = salt ⊕ boots‖time，数据补齐 8 字节倍数 */
@@ -196,13 +197,32 @@ function decryptAES(kul, iv16, data) {
 }
 
 /* ---------------- v3 用户归一化 ---------------- */
-/** 归一化 v3 用户配置：{user, authProto:'md5'|'sha', authPass, privProto:'des'|'aes', privPass}
+/** USM 认证算法表（RFC 3414 + RFC 7860）：key → { hash: Node 哈希名, mac: HMAC 摘要截断字节数 }。
+ *  RFC 7860 §7.3 的截断长度：SHA-224→16、SHA-256→24、SHA-384→32、SHA-512→48 字节；
+ *  弱算法 MD5/SHA-1 仍保留（老设备只认它们），但**新固件普遍禁用弱算法**——
+ *  真机实测：华为 S6700（YunShan OS V600R025C10SPC500）对 v2c 与 SHA-1 都回
+ *  `Error: This algorithm is insecure. To use it, please execute "install feature-software WEAKEA"`，
+ *  只有 SHA-2 档免装弱加密特性；此前应用只支持 MD5/SHA-1，等于在这类设备上 SNMP 完全不可用。 */
+const AUTH_ALGOS = {
+  md5: { hash: 'md5', mac: 12 },
+  sha: { hash: 'sha1', mac: 12 },
+  'sha2-224': { hash: 'sha224', mac: 16 },
+  'sha2-256': { hash: 'sha256', mac: 24 },
+  'sha2-384': { hash: 'sha384', mac: 32 },
+  'sha2-512': { hash: 'sha512', mac: 48 }
+};
+/** 取认证算法信息（未知一律回落 SHA-1，与旧口径一致） */
+function authAlgoInfo(algo) {
+  return AUTH_ALGOS[String(algo || '').toLowerCase()] || AUTH_ALGOS.sha;
+}
+/** 归一化 v3 用户配置：{user, authProto:'md5'|'sha'|'sha2-256'…, authPass, privProto:'des'|'aes', privPass}
  *  → { user, level: noAuth|auth|authPriv, authProto, authPass, privProto, privPass } 或 null */
 function normalizeV3User(v) {
   v = v && typeof v === 'object' ? v : {};
   const user = String(v.user || '').trim().slice(0, 32);
   if (!user) return null;
-  const authProto = String(v.authProto).toLowerCase() === 'sha' ? 'sha' : (String(v.authProto).toLowerCase() === 'md5' ? 'md5' : '');
+  const ap = String(v.authProto || '').toLowerCase();
+  const authProto = Object.prototype.hasOwnProperty.call(AUTH_ALGOS, ap) ? ap : '';
   const authPass = String(v.authPass || '');
   const privProto = String(v.privProto).toLowerCase() === 'aes' ? 'aes' : (String(v.privProto).toLowerCase() === 'des' ? 'des' : '');
   const privPass = String(v.privPass || '');
@@ -215,8 +235,7 @@ function normalizeV3User(v) {
 /** 构造 SNMPv3 请求消息。
  *  opts: { msgID, pduTag(0xa0 GET/0xa1 GetNext), oids, engineID(Buffer|hex串), boots, time,
  *          user: normalizeV3User 结果, saltCounter(可注入,测试用) }
- *  返回 { msg: Buffer, authParamsOffset（供测试/校验）, scoped } */
-function buildV3Message(opts) {
+ *  返回 { msg: Buffer, authParamsOffset（供测试/校验）, scoped } */function buildV3Message(opts) {
   opts = opts || {};
   const user = opts.user || { user: '', level: 'noAuth' };
   const engineID = Buffer.isBuffer(opts.engineID) ? opts.engineID : Buffer.from(String(opts.engineID || ''), 'hex');
@@ -240,7 +259,7 @@ function buildV3Message(opts) {
   }
   const usmBody = Buffer.concat([
     berOct(engineID), berInt(boots >>> 0), berInt(time >>> 0),
-    berOct(user.user), berOct(Buffer.alloc(12)),
+    berOct(user.user), berOct(Buffer.alloc(user.level === 'noAuth' ? 12 : authAlgoInfo(user.authProto).mac)),
     user.level === 'authPriv' ? berOct(privSalt) : berOct(Buffer.alloc(0))
   ]);
   // RFC 3414：msgSecurityParameters 是 OCTET STRING，内容为 USMSecurityParametersFields
@@ -314,7 +333,8 @@ function buildV3Message(opts) {
       c = t.next;
     }
     const authT = ufields[4]; // authParams OCTET STRING
-    if (authT && authT.body.length === 12) {
+    const macLen = authAlgoInfo(user.authProto).mac;
+    if (authT && authT.body.length === macLen) {
       const kul = passwordToKey(user.authPass, engineID, user.authProto);
       const digest = authDigest(msg, kul, user.authProto);
       const off = root.start + root.hs + usmT.start + usmT.hs +
@@ -430,13 +450,14 @@ function parseV3Message(buf, opts) {
     if (wantAuth) {
       const u = opts.user;
       if (!u || !u.authProto) return { ok: false, reason: 'v3 认证包无法校验（用户 ' + userName + ' 未配置认证密钥）' };
-      if (authParams.length !== 12) return { ok: false, reason: 'authParams 长度异常' };
+      const alg = authAlgoInfo(u.authProto);
+      if (authParams.length !== alg.mac) return { ok: false, reason: 'authParams 长度异常（' + authParams.length + ' 字节，' + u.authProto + ' 应为 ' + alg.mac + ' 字节）' };
       const kul = passwordToKey(u.authPass, Buffer.from(engineID, 'hex'), u.authProto);
       const masked = Buffer.from(buf);
       const off = root.start + root.hs + usmT.start + usmT.hs +
         (usmInner && usmInner.tag === 0x30 ? usmInner.start + usmInner.hs : 0) +
         uf[4].start + uf[4].hs;
-      masked.fill(0, off, off + 12); // authParams 置零后重算整包 HMAC（RFC 3414 7.2.4）
+      masked.fill(0, off, off + alg.mac); // authParams 置零后重算整包 HMAC（RFC 3414 7.2.4）
       const expect = authDigest(masked, kul, u.authProto);
       const got = Buffer.from(authParams);
       if (expect.length !== got.length || !crypto.timingSafeEqual(expect, got)) return { ok: false, reason: 'v3 认证失败（签名不匹配，认证密码或算法不符）' };
@@ -553,7 +574,7 @@ function v3EngineTime(st) {
 
 module.exports = {
   passwordToKey, authDigest, encryptDES, decryptDES, encryptAES, decryptAES, desAvailable,
-  normalizeV3User, buildV3Message, parseV3Message, reportReason,
+  normalizeV3User, buildV3Message, parseV3Message, reportReason, AUTH_ALGOS, authAlgoInfo,
   berTlv, berInt, berOct, berOid, tlvWalk, decodeOid, decodeValue, readUInt,
   v3EngineReset, v3EngineGet, v3EngineSet, v3EngineTime,
   OID_USM_UNKNOWN_ENGINE_IDS, OID_USM_NOT_IN_TIME_WINDOWS, OID_USM_UNKNOWN_USER_NAMES, OID_USM_WRONG_DIGESTS, OID_USM_DECRYPTION_ERRORS

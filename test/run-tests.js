@@ -2254,6 +2254,81 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       for (const s of socks2) s.destroy();
       await Promise.race([new Promise((res) => srv2.close(res)), new Promise((res) => setTimeout(res, 1000))]);
     }
+    // 无人值守不得被**通用**确认提示误伤（真机回归）：华为回显
+    // `Error: This protocol is insecure. To use it, please execute … Continue? [Y/N]` 与 save 的保存
+    // 确认都带 [Y/N]，它们该由下发管道的 CONFIRM_RE / 保存自动应答处理，而不是被登录状态机当成
+    // 「初始口令必须改」而断链（真机实测：那条 SNMP 命令的提示曾把整次下发误报成初始口令问题）
+    {
+      const socks3 = new Set();
+      let phase3 = 0;
+      const srv3 = net.createServer((sock) => {
+        socks3.add(sock);
+        sock.on('close', () => socks3.delete(sock));
+        sock.on('error', () => {});
+        sock.write('Warning: Telnet is not a secure protocol.\r\n\r\nUsername:');
+        sock.on('data', (d) => {
+          const t = d.toString('latin1');
+          if (phase3 === 0) { phase3 = 1; sock.write('\r\nPassword:'); return; }
+          if (phase3 === 1) { phase3 = 2; sock.write('\r\n<HUAWEI>'); return; }
+          // 登录已完成后，普通命令回显里带 [Y/N] 的确认提示
+          if (t.includes('snmp-agent')) sock.write('\r\nError: This protocol is insecure. Continue? [Y/N]:');
+        });
+      });
+      await new Promise((res) => srv3.listen(0, '127.0.0.1', res));
+      const mgrY = new ShellManager();
+      const errsY = [];
+      mgrY.on('status', (id, s) => { if (s && s.state === 'error') errsY.push(s.text); });
+      const rY = mgrY.connect({ protocol: 'telnet', host: '127.0.0.1', port: srv3.address().port, username: 'netadmin', password: 'pw', autoLogin: true, unattended: true, timeout: 5000 });
+      await new Promise((res) => setTimeout(res, 1200));
+      mgrY.write(rY.id, 'snmp-agent sys-info version v2c\r\n');
+      await new Promise((res) => setTimeout(res, 1200));
+      const alive = await new Promise((res) => { mgrY.on('end', () => res(false)); setTimeout(() => res(true), 800); });
+      ok(alive, '通用确认提示（[Y/N]）不使无人值守会话断链（交给上层 CONFIRM_RE 处理）');
+      ok(!errsY.some(t => /初始口令/.test(t)), '通用确认提示不再被误报为「要求先修改初始口令」：' + JSON.stringify(errsY[0] || ''));
+      mgrY.closeAll();
+      for (const s of socks3) s.destroy();
+      await Promise.race([new Promise((res) => srv3.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+    }
+    // 登录成功后必须立刻结束登录接管（真机回归）：华为 `snmp-agent usm-user v3 X authentication-mode sha2-256`
+    // 会弹 `Enter Password:` / `Confirm Password:`；状态机若还在盯（30s 窗口内），会把它们当成登录提示
+    // 重发登录口令并以「Telnet 认证失败：密码被设备拒绝」断链——Web Shell 里人工配置口令同样被打断
+    {
+      const socks4 = new Set();
+      let phase4 = 0, afterPrompt = [];
+      const srv4 = net.createServer((sock) => {
+        socks4.add(sock);
+        sock.on('close', () => socks4.delete(sock));
+        sock.on('error', () => {});
+        sock.write('Warning: Telnet is not a secure protocol.\r\n\r\nUsername:');
+        sock.on('data', (d) => {
+          const t = d.toString('latin1');
+          if (phase4 === 0) { phase4 = 1; sock.write('\r\nPassword:'); return; }
+          if (phase4 === 1) { phase4 = 2; sock.write('\r\n<HUAWEI>'); return; }   // 登录成功：提示符出现
+          afterPrompt.push(t.trim());
+          if (t.includes('authentication-mode')) sock.write('\r\nPlease configure the authentication password (8-255)\r\nEnter Password:');
+          else if (afterPrompt.length && /Auth@x/.test(t)) sock.write('\r\nConfirm Password:');
+          else if (/Auth@x/.test(t)) sock.write('\r\n[HUAWEI]');
+        });
+      });
+      await new Promise((res) => srv4.listen(0, '127.0.0.1', res));
+      const mgrZ = new ShellManager();
+      const errsZ = [];
+      mgrZ.on('status', (id, s) => { if (s && s.state === 'error') errsZ.push(s.text); });
+      const rZ = mgrZ.connect({ protocol: 'telnet', host: '127.0.0.1', port: srv4.address().port, username: 'netadmin', password: 'loginpw', autoLogin: true, unattended: true, timeout: 5000 });
+      await new Promise((res) => setTimeout(res, 600));
+      // 登录已完成：命令触发设备的口令对话框；状态机不得插手
+      mgrZ.write(rZ.id, 'snmp-agent usm-user v3 x authentication-mode sha2-256\r\n');
+      await new Promise((res) => setTimeout(res, 800));
+      mgrZ.write(rZ.id, 'Auth@x\r\n');
+      await new Promise((res) => setTimeout(res, 800));
+      const aliveZ = await new Promise((res) => { mgrZ.on('end', () => res(false)); setTimeout(() => res(true), 600); });
+      ok(aliveZ, '登录后设备口令对话框不使会话断链（登录接管已在提示符处结束）');
+      ok(!errsZ.some(t => /认证失败|初始口令/.test(t)), '登录后口令对话框不再被误报为认证失败/初始口令：' + JSON.stringify(errsZ[0] || ''));
+      ok(!afterPrompt.some(x => x === 'loginpw'), '登录口令不会被重发进命令输出的口令对话框（实际收到：' + JSON.stringify(afterPrompt.slice(0, 3)) + '）');
+      mgrZ.closeAll();
+      for (const s of socks4) s.destroy();
+      await Promise.race([new Promise((res) => srv4.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+    }
     for (const s of initSocks) s.destroy();
     await Promise.race([new Promise((res) => initServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
   }
@@ -6053,6 +6128,29 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(V3.normalizeV3User({ user: 'u', authProto: 'md5', authPass: 'p' }).level === 'auth', 'v3 用户归一：认证 → auth');
       ok(V3.normalizeV3User({ user: 'u', authProto: 'sha', authPass: 'p', privProto: 'aes', privPass: 'x' }).level === 'authPriv', 'v3 用户归一：认证+加密 → authPriv');
       ok(V3.normalizeV3User({ user: '   ' }) === null, 'v3 用户归一：空用户名拒绝');
+      // ---- SHA-2 认证档（RFC 7860）：真机回归——华为 S6700（YunShan OS V600R025）对 v2c 与 SHA-1 都回
+      //      `Error: This algorithm is insecure … install feature-software WEAKEA`，只允许 SHA-2；
+      //      此前只支持 MD5/SHA-1 ⇒ 在这类设备上 SNMP 完全不可用。此处固化档位、截断长度与往返。
+      {
+        ok(V3.AUTH_ALGOS['sha2-256'].hash === 'sha256' && V3.AUTH_ALGOS['sha2-256'].mac === 24, 'SHA-2 档位：sha2-256 → HMAC-SHA-256 截断 24 字节（RFC 7860 §7.3）');
+        const lens = { 'md5': 12, 'sha': 12, 'sha2-224': 16, 'sha2-256': 24, 'sha2-384': 32, 'sha2-512': 48 };
+        const badLen = Object.keys(lens).filter(k => V3.authDigest(Buffer.from('abc'), Buffer.alloc(32, 7), k).length !== lens[k]);
+        ok(badLen.length === 0, 'SHA-2 档位：六种算法的 authParams 截断长度全部正确' + (badLen.length ? '（不符：' + badLen.join(',') + '）' : ''));
+        ok(V3.normalizeV3User({ user: 'u', authProto: 'sha2-256', authPass: 'p' }).authProto === 'sha2-256', 'v3 用户归一：接受 sha2-256');
+        ok(V3.normalizeV3User({ user: 'u', authProto: 'sha2-999', authPass: 'p' }).level === 'noAuth', 'v3 用户归一：未知算法回落 noAuth（不静默用错算法）');
+        // 渲染层档位表与主进程实现必须同集合：加档位只改数据表也不会漏改（否则界面选了却发不出去）
+        const uiSet = U.V3_AUTH_PROTOS.slice().sort().join(',');
+        const coreSet = Object.keys(V3.AUTH_ALGOS).sort().join(',');
+        eq(uiSet, coreSet, 'SNMP v3 档位表：渲染层 U.V3_AUTH_PROTOS 与 snmp-v3 AUTH_ALGOS 逐项一致');
+        const eng2 = Buffer.from('80001f8804e8c1d3b8a1b2c3', 'hex');
+        const u256 = V3.normalizeV3User({ user: 's256', authProto: 'sha2-256', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' });
+        const b256 = V3.buildV3Message({ pduTag: 0xa0, oids: ['1.3.6.1.2.1.1.1.0'], engineID: eng2, boots: 5, time: 60000, user: u256, reportable: true, saltCounter: 0x99 });
+        const p256 = V3.parseV3Message(b256.msg, { user: u256 });
+        ok(p256.ok && p256.authenticated && p256.decrypted, 'v3 authPriv SHA-2 256 + AES：构建→解析往返（验签+解密）');
+        ok(V3.parseV3Message(b256.msg, { user: V3.normalizeV3User({ user: 's256', authProto: 'sha2-256', authPass: 'WRONG', privProto: 'aes', privPass: 'PrivKey456' }) }).ok === false, 'v3 SHA-2 256：错误认证口令拒绝');
+        const t256 = Buffer.from(b256.msg); t256[t256.length - 5] ^= 1;
+        ok(V3.parseV3Message(t256, { user: u256 }).ok === false, 'v3 SHA-2 256：篡改检测');
+      }
       // 三档消息构建/解析 + 篡改与错误口令
       const engineID = Buffer.from('80001f8804e8c1d3b8a1b2c3', 'hex');
       const uAP = V3.normalizeV3User({ user: 'ops', authProto: 'sha', authPass: 'AuthKey123', privProto: 'aes', privPass: 'PrivKey456' });
@@ -6376,7 +6474,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       return await freeUdpPort();
     };
     let tPort = 0, fPort = 0, sPort = 0, trPort = 0, st1 = null;
-    for (let i = 0; i < 6; i++) {
+    // 端口绑定可能被系统/其它进程瞬时拒绝（Windows 实测：syslog 的 TCP 监听偶发
+    // `listen EACCES 0.0.0.0:<port>`——UDP 与 TCP 的「排除端口区间」在 Windows 上是分开维护的，
+    // 探测通过后到真正绑定之间仍可能被占用）。换端口重试即可，重试次数给足以免误报红。
+    for (let i = 0; i < 24; i++) {
       tPort = await freeUdpPort(); fPort = await freeTcpPort(); sPort = await freeSyslogPort(); trPort = await freeUdpPort();
       st1 = await mgr.applyConfig({
         tftp: { enabled: true, port: tPort },

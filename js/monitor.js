@@ -1107,7 +1107,8 @@ class MonitorManager extends EventEmitter {
     // SNMP v3（USM）：version 'v3' 时启用；认证/隐私协议白名单，口令长度钳制（密钥本地化输入）
     sysinfo.version = String(sOpt.version) === 'v3' ? 'v3' : 'v2c';
     sysinfo.v3User = String(sOpt.v3User || '').trim().slice(0, 32);
-    sysinfo.v3AuthProto = String(sOpt.v3AuthProto).toLowerCase() === 'md5' ? 'md5' : 'sha';
+    sysinfo.v3AuthProto = String(sOpt.v3AuthProto).toLowerCase() === 'md5' ? 'md5'
+      : (/^sha2-(224|256|384|512)$/.test(String(sOpt.v3AuthProto).toLowerCase()) ? String(sOpt.v3AuthProto).toLowerCase() : 'sha');
     sysinfo.v3AuthPass = String(sOpt.v3AuthPass || '').slice(0, 128);
     sysinfo.v3PrivProto = String(sOpt.v3PrivProto).toLowerCase() === 'des' ? 'des' : 'aes';
     sysinfo.v3PrivPass = String(sOpt.v3PrivPass || '').slice(0, 128);
