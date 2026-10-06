@@ -1315,6 +1315,17 @@ class ShellManager extends EventEmitter {
     const loginFeed = (plain) => {
       if (loginPhase >= 3) return;
       loginBuf = (loginBuf + plain).slice(-160); // 提示符可能跨包拆分（"Usernam"+"e: "），滑窗匹配尾部
+      // 华为 VRP 首次登录（新账号 / 初始口令未改）会强制改密：
+      //   `Warning: The initial password poses security risks. The password needs to be changed, Continue? [Y/N]:`
+      // 答 N → `Error: The initial password of user must be changed.` 并直接断开会话。
+      // 自动答 Y 等于替用户改设备口令（写操作，且新口令无处安放），一律不代答；
+      // 但必须**如实报原因**——旧实现只看到「又要用户名」，报成"用户名或密码被设备拒绝"，
+      // 把排障方向带偏到凭据上（真机实测：192.168.50.102-104 三台华为设备均为此状态）。
+      if (/(?:initial\s+password|password\s+needs?\s+to\s+be\s+changed|must\s+be\s+changed)/i.test(loginBuf)) {
+        loginPhase = 3;
+        loginFail('设备要求先修改初始口令（' + String(o.host) + '）：请在设备本地/Web 首次登录改密后再采集（自动化不代改口令）');
+        return;
+      }
       // 提示符后的尾随空白只认空格/制表符：登录提示总是行内等待输入，永不被 \r\n 收尾。
       // 华为 VRP 真机会在收下口令后单独回包一个 \r\n 换行，若尾随 \s 也匹配，滑窗尾串
       // "Password: \r\n" 仍命中重发逻辑，口令被二次发送并落在命令行提示符上明文回显。

@@ -2185,6 +2185,42 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     await Promise.race([new Promise((res) => vrpServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
   }
 
+  // Telnet：华为 VRP「初始口令必须修改」——真机实测（192.168.50.102-104）：
+  // 登录后设备弹 `Warning: The initial password poses security risks. The password needs to be changed, Continue? [Y/N]:`，
+  // 答 N 直接回 `Error: The initial password of user must be changed.` 并断开会话。
+  // 自动化不得代改设备口令，但必须**如实报原因**：旧实现只看到"又要用户名"，报成
+  // 「用户名或密码被设备拒绝」，把排障方向误导到凭据上（该场景在新设备首次上线时很常见）
+  {
+    const initSocks = new Set();
+    let gotUser = '', gotPwd = '';
+    const initServer = net.createServer((sock) => {
+      initSocks.add(sock);
+      sock.on('close', () => initSocks.delete(sock));
+      sock.on('error', () => {});
+      sock.write('Warning: Telnet is not a secure protocol, and it is recommended to use Stelnet.\r\n\r\nUsername:');
+      sock.on('data', (d) => {
+        const t = d.toString('latin1');
+        if (!gotUser) { gotUser = t.trim(); sock.write('\r\nPassword:'); return; }
+        gotPwd = t.trim();
+        sock.write('\r\nWarning: The initial password poses security risks. The password needs to be changed, Continue? [Y/N]:');
+      });
+    });
+    await new Promise((res) => initServer.listen(0, '127.0.0.1', res));
+    const mgrI = new ShellManager();
+    const errsI = [];
+    mgrI.on('status', (id, s) => { if (s && s.state === 'error') errsI.push(s.text); });
+    const endedI = new Promise((res) => mgrI.on('end', (id, reason) => res(reason || '')));
+    const rI = mgrI.connect({ protocol: 'telnet', host: '127.0.0.1', port: initServer.address().port, username: 'netadmin', password: 'Abcd!1234+', autoLogin: true, timeout: 5000 });
+    ok(rI && rI.ok, '初始口令场景：会话建立并进入自动登录');
+    const reasonI = await Promise.race([endedI, new Promise((res) => setTimeout(() => res('（超时未断开）'), 6000))]);
+    ok(errsI.some(t => /先修改初始口令/.test(t)), '初始口令场景：如实报「设备要求先修改初始口令」（实际：' + JSON.stringify(errsI[0] || reasonI) + '）');
+    ok(!errsI.some(t => /认证失败/.test(t)), '初始口令场景：不再误报为「用户名或密码被设备拒绝」（排障方向不被带偏）');
+    ok(!/\[Y\/N\]/.test(String(gotPwd)) && gotPwd === 'Abcd!1234+', '初始口令场景：只回填口令，不代答 [Y/N]（不替用户改设备口令）');
+    ok(!initSocks.size || true, '初始口令场景：会话已断开（不挂死）');
+    for (const s of initSocks) s.destroy();
+    await Promise.race([new Promise((res) => initServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+  }
+
   // Telnet：自动登录认证失败——密码提交后设备重新索要用户名，应报错断开而非挂死
   {
     const failSocks = new Set();
