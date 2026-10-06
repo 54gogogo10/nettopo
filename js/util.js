@@ -57,7 +57,11 @@ U.escHtml = (s) => String(s == null ? '' : s)
 U.escXml = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/\n/g, '&#10;').replace(/\r/g, '')
-  .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ''); // XML 1.0 非法控制字符剔除，防导出文件被 Visio 拒开
+  // XML 1.0 非法字符剔除，防导出文件被 Visio / lxml 判非良构而拒开整包：
+  // 控制字符 + U+FFFE/U+FFFF（CSV 里塞一个 \uFFFF 就能让 .vsdx/.vdx 报废）。
+  // 注意：**不能**整段剔除 \uD800-\uDFFF——那会把正常 emoji 的代理对两半都删掉；
+  // 落单代理项已由下游 TextEncoder / Buffer 的 UTF-8 编码替换为 U+FFFD，无需在此处理。
+  .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, '');
 
 U.truncate = (s, n) => {
   s = String(s == null ? '' : s).trim();
@@ -3223,8 +3227,48 @@ U.deployVendor = (key) => U.DEPLOY_VENDORS[key] || U.DEPLOY_VENDORS.huawei;
 U.DEPLOY_MAX_LINES = 200;      // 单次变更集行数上限（与 shell.runDeploy 的硬上限一致）
 U.DEPLOY_MAX_LINE_LEN = 256;   // 单行字符上限（同上）
 
+/** 危险命令比对前的**分段归一化**：把一行变更拆成若干「待逐段比对」的命令片段。
+ *  背景：禁止清单原先按整行行首锚定（`/^reload\b/`），而变更集是在**配置模式内**逐行下发的，
+ *  于是这些写法都能绕过：`do reload`（思科/H3C 在配置模式执行 exec 命令）、`sudo reboot`
+ *  （FRR / Linux 设备是产品自己支持的写法，见 README 的 sudo vtysh 包装）、`x; reload`、
+ *  `/sbin/reboot`、`` `reboot` ``。
+ *  处理：去引号 → 按 ; && || | 切段 → 反复剥离 do/sudo/vtysh/nt-cli 包装与 -c 类选项
+ *        → 剥首尾标点 → 纯路径（无空格的 `a/b` 形态）额外取末段文件名。
+ *  调用方对**每个**片段逐一比对禁止/告警清单，因此清单里的正则仍按片段行首锚定。
+ *  边界：这是「提高绕过门槛」的口径归一，不是 shell 解析器——`busybox reboot` 这类组合仍不拦，
+ *  真正的兜底是主进程 shell.js 的同名实现与设备侧权限。 */
+U.deploySegments = (line) => {
+  const out = [];
+  const src = String(line == null ? '' : line).trim();
+  if (!src) return out;
+  for (let seg of src.replace(/["']/g, ' ').split(/;|&&|\|\||\|/)) {
+    seg = String(seg).trim();
+    if (!seg) continue;
+    let prev = '', guard = 0;
+    while (prev !== seg && guard++ < 8) {
+      prev = seg;
+      seg = seg.replace(/^(?:sudo|do|vtysh|nt-cli)\b\s*/i, '')        // 包装命令（可能叠加）
+        .replace(/^(?:-[A-Za-z]|--[A-Za-z][A-Za-z-]*)\s*/, '')      // -c / --command
+        .replace(/^[^A-Za-z0-9/._-]+/, '')                          // $( ` ( { 等前缀
+        .replace(/[^A-Za-z0-9/._-]+$/, '')                          // ) ` } 等后缀
+        .trim();
+    }
+    if (!seg) continue;
+    out.push(seg);
+    // 纯路径（无空格）额外取末段：/sbin/reboot → reboot（含空格的说明文字不取，
+    // 否则 `description 见 /etc/format.cfg` 会被误判成 format）
+    if (!/\s/.test(seg) && /\//.test(seg)) {
+      const base = seg.replace(/^.*\//, '');
+      if (base && base !== seg) out.push(base);
+    }
+  }
+  return out;
+};
+
 /** 绝对禁止下发的命令：重启 / 擦除 / 格式化 / 恢复出厂 / 删文件等不可逆动作。
- *  命中即整批拒绝且**不可覆盖**——本功能的语义是「配置变更」，不是设备维护或清空。 */
+ *  命中即整批拒绝且**不可覆盖**——本功能的语义是「配置变更」，不是设备维护或清空。
+ *  注：正则按 `U.deploySegments` 拆出的**片段**行首比对（不再按整行行首），故 `do reload`
+ *  这类包装写法同样命中。 */
 U.DEPLOY_FORBIDDEN = [
   { re: /^reload\b/i, why: '重启设备' },
   { re: /^reboot\b/i, why: '重启设备' },
@@ -3386,20 +3430,32 @@ U.parseChangeSet = (text, opts) => {
 };
 
 /** 安全闸门：硬禁止命中即拒绝（不可覆盖）；告警类由调用方确认后放行。
- *  返回 {ok, error, hard:[{i,line,why}], warn:[{i,line,why}]} */
+ *  逐**片段**比对（U.deploySegments）——`do reload`、`sudo reboot`、`x; reload` 这类包装
+ *  不能靠行首形态绕过禁止清单。
+ *  返回 {ok, error, hard:[{i,line,why,segment}], warn:[{i,line,why,segment}]} */
 U.checkChangeSet = (lines) => {
   const arr = Array.isArray(lines) ? lines : [];
   const hard = [], warn = [];
   arr.forEach((ln, i) => {
     const t = String(ln && ln.text != null ? ln.text : (ln == null ? '' : ln)).trim();
     if (!t) return;
-    const h = U.DEPLOY_FORBIDDEN.find(r => r.re.test(t));
-    if (h) { hard.push({ i, line: t, why: h.why }); return; }
-    const w = U.DEPLOY_WARN.find(r => r.re.test(t));
-    if (w) { warn.push({ i, line: t, why: w.why }); return; }
-    if (/^(undo|no)\s+/i.test(t) && U.DEPLOY_MGMT_RE.test(t)) warn.push({ i, line: t, why: '可能关闭本机管理通道（SSH/Telnet/SNMP/HTTP）' });
+    const segs = U.deploySegments(t);
+    let h = null, hs = '';
+    for (const s of segs) { const r = U.DEPLOY_FORBIDDEN.find(x => x.re.test(s)); if (r) { h = r; hs = s; break; } }
+    if (h) { hard.push({ i, line: t, why: h.why, segment: hs }); return; }
+    let w = null, ws = '';
+    for (const s of segs) {
+      const r = U.DEPLOY_WARN.find(x => x.re.test(s));
+      if (r) { w = r; ws = s; break; }
+      if (/^(undo|no)\s+/i.test(s) && U.DEPLOY_MGMT_RE.test(s)) { w = { why: '可能关闭本机管理通道（SSH/Telnet/SNMP/HTTP）' }; ws = s; break; }
+    }
+    if (w) { warn.push({ i, line: t, why: w.why, segment: ws }); return; }
   });
-  if (hard.length) return { ok: false, error: '含禁止下发的命令：' + hard[0].line + '（' + hard[0].why + '）', hard, warn };
+  if (hard.length) {
+    const h0 = hard[0];
+    const seg = (h0.segment && h0.segment !== h0.line) ? '；命中片段 ' + h0.segment : '';
+    return { ok: false, error: '含禁止下发的命令：' + h0.line + '（' + h0.why + seg + '）', hard, warn };
+  }
   return { ok: true, error: null, hard, warn };
 };
 
@@ -3432,11 +3488,12 @@ U.deployPreview = (lines, prevText, vendorKey, mgmtIp) => {
     if (/^(save|write(?:\s+memory)?|copy\s+running-config\s+startup-config)\b/i.test(t)) persist = true;
     const neg = /^(undo|no)\s+(.+)$/i.exec(t);
     let kind, note = '';
+    let riskWhy = '';
     if (neg) {
       kind = 'remove';
       note = '删除/关闭：' + neg[2];
-      if (hasIp(neg[2])) why.push('删除含管理地址的行：' + t);
-      else if (U.DEPLOY_MGMT_RE.test(neg[2])) why.push('关闭管理通道：' + t);
+      if (hasIp(neg[2])) riskWhy = '删除含管理地址的行：' + t;
+      else if (U.DEPLOY_MGMT_RE.test(neg[2])) riskWhy = '关闭管理通道：' + t;
     } else if (prevTexts.includes(t)) {
       kind = 'same';
       note = '变更前已存在同样一行（幂等重下发）';
@@ -3451,6 +3508,14 @@ U.deployPreview = (lines, prevText, vendorKey, mgmtIp) => {
         if (hasIp(best.trim) && !hasIp(t)) why.push('管理地址被改写为不含原地址的取值：' + t);
       } else kind = 'add';
     }
+    // 自断管理通道：按**片段**补判，覆盖 do/sudo 等包装写法（`do undo snmp-agent` 在配置模式里
+    // 同样真的会关掉管理通道）——与主进程 shell.selfLockHit 保持同口径，否则渲染层不显示勾选框
+    // 而主进程要求确认，下发会被挡在「无法确认」的死角
+    if (!riskWhy) {
+      const rs = U.deploySegments(t).find(s => /^(undo|no)\s+\S/i.test(s) && U.DEPLOY_MGMT_RE.test(s));
+      if (rs && !hasIp(rs)) riskWhy = '关闭管理通道：' + t;
+    }
+    if (riskWhy) why.push(riskWhy);
     counts[kind]++;
     rows.push({ text: t, kind, note });
   }

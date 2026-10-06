@@ -123,8 +123,15 @@ function upsertRestoreEntry(list, entry, cap) {
   rest.push(clean);
   return rest.slice(Math.max(0, rest.length - (Math.floor(cap) || 24)));
 }
+/** 破坏性命令（删配置/清盘/重启/格式化）：auto 模式命中时降级为人工确认。
+ *  启发式宁可多拦（多一次确认无损失）。前缀类除空白/引号/管道外还覆盖「命令替换与转义」写法：
+ *  `$(reboot)`、`` `reboot` ``、`\reboot`、`x;reload`（旧版漏这些，AI 生成的命令可绕过降级），
+ *  动词里补 Linux 侧的 rm/mkfs/dd 与关机类（poweroff/halt/init 0）。
+ *  定义在模块级以便单测直接验证（见 test/run-tests.js 的「破坏性命令」用例）。 */
+const DESTRUCTIVE_CMD_RE = /(?:^|[^\w])(?:erase|format|delete|reset|undo\s+all|reload|reboot|shutdown|poweroff|halt|init\s+0|factory-?reset|write\s+erase|diskpart|mkfs(?:\.\w+)?|rm|rmdir|dd|fdisk|parted|mkswap|no\s+(?:interface|vlan|ip\s+route|router\s+\w+))(?:\s|$|\)|`)/i;
+function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == null ? '' : text)); }
 (function () {
-  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs, parseRecording, sanitizeBookmark, bookmarkKey, parseBookmarkList, fuzzyScore, mergeCmdHistory, upsertRestoreEntry }; return; } // Node 测试直取纯函数
+  if (typeof module !== 'undefined' && module.exports) { module.exports = { diffSessionOutputs, parseRecording, sanitizeBookmark, bookmarkKey, parseBookmarkList, fuzzyScore, mergeCmdHistory, upsertRestoreEntry, isDestructiveCmd, DESTRUCTIVE_CMD_RE }; return; } // Node 测试直取纯函数
   if (!window.topoShell) {
     // 浏览器直接打开本页：给出明确提示（否则空状态不显示、按钮无响应，整页死白）
     const e = document.getElementById('shEmpty');
@@ -1583,10 +1590,7 @@ function upsertRestoreEntry(list, entry, cap) {
   // 群发/AI/快捷按钮下发的 `password xxx` / `snmp-server community xxx` / `tacacs key xxx` 等会以明文长期驻留磁盘
   const SENSITIVE_CMD_RE = /(?:^|[\s;"'])(?:password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key)[\s:=]+\S/i;
   const isSensitiveCmd = (text) => SENSITIVE_CMD_RE.test(String(text == null ? '' : text));
-  // 破坏性命令（删配置/清盘/重启/格式化）：auto 模式命中时降级为人工确认。
-  // 启发式宁可多拦（多一次确认无损失），覆盖常见网络设备高危动词
-  const DESTRUCTIVE_CMD_RE = /(?:^|[\s;"'|&])(?:erase|format|delete|reset|undo\s+all|reload|reboot|shutdown|factory-?reset|write\s+erase|no\s+(?:interface|vlan|ip\s+route|router\s+\w+))(?:\s|$)/i;
-  const isDestructiveCmd = (text) => DESTRUCTIVE_CMD_RE.test(String(text == null ? '' : text));
+  // 破坏性命令判定：定义见模块级 DESTRUCTIVE_CMD_RE / isDestructiveCmd（可单测）
   let cmdHistory = (() => {
     try {
       const a = JSON.parse(localStorage.getItem(CMDH_KEY) || '[]');

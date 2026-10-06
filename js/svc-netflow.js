@@ -18,6 +18,8 @@ const TAIL_MAX = 300;               // 单次返回条数上限
 const MAX_FLOWS_PER_PKT = 200;      // 单包流记录条数上限（v5 count 可被伪造成 65535）
 const MAX_SESSIONS = 65536;         // 五元组聚合会话上限（超限整表清最旧 1/4，宁可丢历史不撑爆内存）
 const MAX_TEMPLATES = 512;          // 模板缓存上限（每源每模板一条；伪造源可膨胀，超限清最旧）
+const MAX_TPL_PER_PKT = 64;         // 单包可接受的模板数上限（一包可塞上千个 0 字段模板冲掉缓存）
+const MAX_TPL_PER_EXPORTER = 256;   // 每个 exporter 的模板上限（分桶：外部源不得挤掉真实设备的模板）
 const MAX_PKT = 65535;              // UDP 包长度上限
 const DEFAULT_MAX_PPS = 500;        // 防洪：每秒包数上限
 
@@ -98,6 +100,17 @@ function parseTemplates(fsBody, isIpfix) {
   return tpls;
 }
 
+/** 模板缓存淘汰：prefix 非空时只淘汰该前缀（单个 exporter）名下的最旧条目，直到不超过 limit；
+ *  prefix 传 null 时对整表做兜底淘汰。按 Map 插入序（= 最近更新序）删最旧的一半。
+ *  分桶淘汰的意义：任何单个来源（含伪造源）都只能挤掉**自己**的模板，不会连累真实设备的解析。 */
+function evictTemplates(tmpl, prefix, limit) {
+  const keys = [];
+  for (const k of tmpl.keys()) { if (!prefix || k.indexOf(prefix) === 0) keys.push(k); }
+  const over = keys.length - limit;
+  if (over <= 0) return;
+  for (const k of keys.slice(0, over)) tmpl.delete(k);   // 按插入序删最旧，只在本桶内删
+}
+
 /** 解析一个 UDP 包。tmpl 为调用方持有的模板缓存（Map: "exporter|sourceId|tplId" → {fields, totalLen}），
  *  模板随包更新。返回 {ok, version, records, templates, dropped, error}——纯函数可单测。 */
 function parseNetflowPacket(buf, exporter, tmpl) {
@@ -127,19 +140,26 @@ function parseNetflowPacket(buf, exporter, tmpl) {
       // 模板 / 选项模板 FlowSet：解析并缓存（同 Id 重复声明以最新为准——设备重启换布局）
       const tpls = parseTemplates(body, isIpfix);
       for (const t of tpls) {
+        if (newTpls.length >= MAX_TPL_PER_PKT) break;          // 单包模板数封顶：一包不得冲掉整个缓存
         const totalLen = t.fields.reduce((a, f) => a + (f.len === 65535 ? 1 : f.len), 0); // 可变长字段按 1 字节计（展开时再跳）
         const key = exporter + '|' + sourceId + '|' + t.id;
+        if (tmpl.has(key)) tmpl.delete(key);                   // 先删后插：保持插入序 = 最近更新序
         tmpl.set(key, { fields: t.fields, totalLen });
         newTpls.push(t);
-        if (tmpl.size > MAX_TEMPLATES) {                       // 伪造源可膨胀模板缓存：丢最旧一半
-          const keys = [...tmpl.keys()].slice(0, Math.floor(MAX_TEMPLATES / 2));
-          for (const k of keys) tmpl.delete(k);
-        }
+        // 分桶淘汰：只在本 exporter 自己的模板里淘汰最旧的，**别的来源（真实设备）不受影响**
+        // （旧实现全局删最旧一半，一个伪造包就能把真实设备模板冲掉 → 流量视图静默空白）
+        evictTemplates(tmpl, exporter + '|', MAX_TPL_PER_EXPORTER);
+        evictTemplates(tmpl, null, MAX_TEMPLATES);
       }
     } else if (fsId >= 256) {
       // 数据 FlowSet：按模板逐条展开；模板未到（设备先发数据后发模板 / 换了模板 Id）整段记 dropped
       const t = tmpl.get(exporter + '|' + sourceId + '|' + fsId);
       if (!t) { dropped++; p += fsLen; continue; }
+      // 模板字段总长为 0（fieldCount=0 的模板，或字段长度全为 0）时内层循环没有任何步进：
+      // fOff 不变 → q 不变、parsed 只在解出 src/dst 时自增 → while 条件恒真，主进程被
+      // 一个 32 字节的 UDP 包占死（NetFlow 端口默认开放，同网段任意主机可发）。
+      // 这类模板无信息可用，整段按丢弃处理。
+      if (!(t.totalLen > 0)) { dropped++; p += fsLen; continue; }
       let q = 0;
       while (q + t.totalLen <= body.length && parsed < MAX_FLOWS_PER_PKT) {
         let fOff = q;
@@ -179,7 +199,7 @@ function parseNetflowPacket(buf, exporter, tmpl) {
           out.push(rec);
           parsed++;
         } else dropped++;
-        q = fOff;
+        q = fOff > q ? fOff : q + 1;   // 无条件推进：即便字段布局异常也不允许零步进（纵深，防死循环）
       }
     }
     // 未知 FlowSet Id（1~255 间的保留值）：按长度跳过

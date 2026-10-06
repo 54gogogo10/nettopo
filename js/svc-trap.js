@@ -499,9 +499,9 @@ class TrapServer extends EventEmitter {
           this.hostDirs.add(hostDir);
         }
       } else {
-        // 满员：回收「最久未写且已静默」的来源目录（攻击者自造的目录会被自己的洪流优先回收）；
-        // 找不到可回收目标时仍放行写入，绝不永久饿死新来源，并计入 hostsOverCap
-        if (!this._reclaimHostDir(base)) this.stats.hostsOverCap++;
+        // 满员：回收一个「最久未写且已静默」的来源（只释放内存名额 + 清过期文件，保留期内日志不删）；
+        // 回收不到时不建新目录（进环形缓冲并计数）——绝不为腾位子删除保留期内的 Trap 归档
+        if (!this._reclaimHostDir(base)) { this.stats.hostsOverCap++; this.stats.diskDropped++; return; }
         this.hostDirs.add(hostDir);
       }
       try {
@@ -531,10 +531,13 @@ class TrapServer extends EventEmitter {
   }
 
   /** 名额满时回收一个「已静默」的来源目录（按 LRU 序尝试；条件与 syslog 同口径）：
-   *  无活跃写流 + 目录内无符号链接 + 最新文件 mtime 早于 hostDirReclaimMs。成功返回目录名。 */
+   *  无活跃写流 + 目录内无符号链接 + 最新文件 mtime 早于 hostDirReclaimMs。
+   *  **回收内存名额，不删保留期内日志**：只顺带清掉已超 keepDays 的日期文件（整目录 rmSync
+   *  会让伪造来源洪流删掉真实设备在保归档）。成功返回目录名。 */
   _reclaimHostDir(base) {
     if (!this.hostDirs) return null;
     const nowMs = Date.now();
+    const cutoff = nowMs - this.keepDays * 86400000;
     for (const h of this.hostDirs) {
       let active = false;
       for (const k of this.streams.keys()) { if (k.slice(0, k.indexOf('\x00')) === h) { active = true; break; } }
@@ -542,16 +545,26 @@ class TrapServer extends EventEmitter {
       const hd = path.join(base, h);
       if (!hd.startsWith(base + path.sep)) continue; // 纵深：只动库内目录
       let newest = 0, ok = true;
+      const files = [];
       try {
         for (const f of fs.readdirSync(hd)) {
           const fst = fs.lstatSync(path.join(hd, f));
           if (fst.isSymbolicLink()) { ok = false; break; }
           if (fst.mtimeMs > newest) newest = fst.mtimeMs;
+          files.push(f);
         }
       } catch (e) { ok = false; }
       if (!ok) continue;
       if (nowMs - newest < this.hostDirReclaimMs) continue;
-      try { fs.rmSync(hd, { recursive: true, force: true }); } catch (e) { continue; }
+      for (const f of files) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})\.log$/.exec(f);
+        if (!m) continue;
+        const t = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+        if (!Number.isFinite(t) || t >= cutoff) continue;   // 保留期内：一律保留
+        try { fs.unlinkSync(path.join(hd, f)); } catch (e) { /* ignore */ }
+      }
+      // 清完过期文件后目录若已空则连目录收回（腾目录项）；还有保留期内文件就保留目录
+      try { if (fs.readdirSync(hd).length === 0) fs.rmdirSync(hd); } catch (e) { /* ignore */ }
       this.hostDirs.delete(h);
       this.stats.dirsRecycled++;
       return h;

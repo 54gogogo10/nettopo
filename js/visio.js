@@ -283,7 +283,10 @@ ${cF('X', len, 'Width*1', '')}${cF('Y', 0, 'Height*0', '')}      </LineTo>
   </Shape>`);
 
     /* ---- 独立的 2D 文本框（水平、透明、无边框） ---- */
-    const lines = U.labelLines(l);
+    // 两行标注：按两端设备上下方位排序（与画布同口径）后**反转**——VDX 文本段落首段在上方，
+    // 而画布约定 index0 在下，不反转则 A 端接口/IP 与画布上下颠倒
+    const lines0 = U.labelLines(l);
+    const lines = lines0.length === 2 ? U.orderLabelLines(lines0, byId[l.a], byId[l.b]).slice().reverse() : lines0;
     const tw = 2.3, th = 0.55;
     const tpx = mx, tpy = my + 0.32; // 线中点上方（Visio Y 向上）
     let textRuns = '';

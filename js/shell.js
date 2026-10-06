@@ -15,6 +15,77 @@ const OPT_ECHO = 1, OPT_SGA = 3, OPT_NAWS = 31;
 /** 单个会话审计日志文件大小上限（超出滚动新文件，防高输出会话占满磁盘） */
 const SHELL_LOG_MAX_BYTES = 32 * 1024 * 1024;
 
+/* ---------- 配置下发：危险命令闸门（主进程独立实现） ---------- */
+/** 危险命令分段归一化：与渲染层 U.deploySegments **同口径、互不依赖**（两侧各有一份，
+ *  渲染层被绕过时主进程仍拦得住）。原先两侧都按整行行首锚定，`do reload`（配置模式里的
+ *  exec 命令）、`sudo reboot`（FRR/Linux 设备是产品自身支持的写法）、`x; reload`、
+ *  `/sbin/reboot` 都能绕过——现在先拆片段（去引号、按分隔符切段、剥 do/sudo/vtysh/nt-cli
+ *  包装与 -c 选项、纯路径取末段），再逐片段比对清单。 */
+function deploySegments(line) {
+  const out = [];
+  const src = String(line == null ? '' : line).trim();
+  if (!src) return out;
+  for (let seg of src.replace(/["']/g, ' ').split(/;|&&|\|\||\|/)) {
+    seg = String(seg).trim();
+    if (!seg) continue;
+    let prev = '', guard = 0;
+    while (prev !== seg && guard++ < 8) {
+      prev = seg;
+      seg = seg.replace(/^(?:sudo|do|vtysh|nt-cli)\b\s*/i, '')
+        .replace(/^(?:-[A-Za-z]|--[A-Za-z][A-Za-z-]*)\s*/, '')
+        .replace(/^[^A-Za-z0-9/._-]+/, '')
+        .replace(/[^A-Za-z0-9/._-]+$/, '')
+        .trim();
+    }
+    if (!seg) continue;
+    out.push(seg);
+    // 纯路径（无空格）额外取末段：/sbin/reboot → reboot（含空格的说明文字不取，防误判）
+    if (!/\s/.test(seg) && /\//.test(seg)) {
+      const base = seg.replace(/^.*\//, '');
+      if (base && base !== seg) out.push(base);
+    }
+  }
+  return out;
+}
+/** 不可逆动作清单（与渲染层 U.DEPLOY_FORBIDDEN 同口径）：重启 / 擦除 / 格式化 / 恢复出厂 / 删文件 */
+const DEPLOY_FORBIDDEN = [
+  /^reload\b/i, /^reboot\b/i, /^erase\b/i, /^format\b/i, /^factory-reset\b/i,
+  /^reset\s+saved-configuration\b/i, /^write\s+erase\b/i, /^undo\s+startup\s+saved-configuration\b/i,
+  /^startup\s+saved-configuration\b/i, /^delete\b/i, /^undelete\b/i,
+  /^(rm|rmdir|mkfs|dd|fdisk|parted|mkswap)\b/i, /^shutdown\s+[-/]/, /^boot\b/i, /^patch\b/i
+];
+/** 命中禁止清单时返回命中的**片段**（便于错误信息定位），否则 null */
+function forbiddenHit(line) {
+  for (const s of deploySegments(line)) {
+    if (DEPLOY_FORBIDDEN.some(re => re.test(s))) return s;
+  }
+  return null;
+}
+/** 需调用方**显式确认**才放行的告警类命令（与渲染层 U.DEPLOY_WARN 同口径）：
+ *  删除/关闭/清除/复位类——不可逆性弱于禁止清单，但同样不该「顺手就下发」。 */
+const DEPLOY_WARN = [
+  { re: /^(undo|no)\s+/i, why: '删除或关闭类命令' },
+  { re: /^(clear|reset|default)\b/i, why: '清除/复位类命令' },
+  { re: /^shutdown\s*$/i, why: '关闭接口（业务中断）' }
+];
+/** 管理面通道关键字：变更里对它们的删除/关闭可能自断管理连接 */
+const DEPLOY_MGMT_RE = /\b(ssh|stelnet|telnet|snmp-agent|snmp-server|ip\s+http|http\s+server|https|web-manager|netconf|restconf|management)\b/i;
+/** 告警类命中判定（返回原因文本，未命中返回 null） */
+function warnHit(line) {
+  for (const s of deploySegments(line)) {
+    const w = DEPLOY_WARN.find(x => x.re.test(s));
+    if (w) return w.why + '（' + s + '）';
+  }
+  return null;
+}
+/** 是否可能自断管理通道（对管理协议对象执行 undo/no） */
+function selfLockHit(line) {
+  for (const s of deploySegments(line)) {
+    if (/^(undo|no)\s+/i.test(s) && DEPLOY_MGMT_RE.test(s)) return s;
+  }
+  return null;
+}
+
 /** 文件名/目录名安全化（与 monitor.js 同款）：白名单外字符替换 + 剔除穿越成分与首尾点号 */
 function sanitizeLogName(s) {
   let out = String(s == null ? '' : s);
@@ -577,12 +648,6 @@ class ShellManager extends EventEmitter {
       let port = parseInt(opts.port, 10);
       if (!(port >= 1 && port <= 65535)) port = protocol === 'telnet' ? 23 : 22;
       // ---- 主进程独立硬守卫（与渲染层 U.checkChangeSet 口径一致但互不依赖）----
-      const FORBIDDEN = [
-        /^reload\b/i, /^reboot\b/i, /^erase\b/i, /^format\b/i, /^factory-reset\b/i,
-        /^reset\s+saved-configuration\b/i, /^write\s+erase\b/i, /^undo\s+startup\s+saved-configuration\b/i,
-        /^startup\s+saved-configuration\b/i, /^delete\b/i, /^undelete\b/i,
-        /^(rm|rmdir|mkfs|dd|fdisk|parted|mkswap)\b/i, /^shutdown\s+[-/]/, /^boot\b/i, /^patch\b/i
-      ];
       const lines = [];
       for (const c of (Array.isArray(opts.lines) ? opts.lines : [])) {
         const raw = String(c == null ? '' : c);
@@ -590,11 +655,26 @@ class ShellManager extends EventEmitter {
         const t = raw.replace(/[ ]+$/, '');
         if (!t.trim()) continue;
         if (t.length > 256) { bail('配置行超过 256 字符，已拒绝执行'); return; }
-        if (FORBIDDEN.some(re => re.test(t.trim()))) { bail('配置行命中禁止下发清单，已拒绝执行：' + t.trim().slice(0, 80)); return; }
+        const hit = forbiddenHit(t);
+        if (hit) { bail('配置行命中禁止下发清单，已拒绝执行：' + t.trim().slice(0, 80) + '（命中片段 ' + hit + '）'); return; }
         lines.push(t);
         if (lines.length > 200) { bail('配置行超过 200 行上限，已拒绝执行'); return; }
       }
       if (!lines.length) { bail('未提供要下发的配置行'); return; }
+      // ---- 告警类命令的**主进程侧确认校验**（纵深：渲染层的勾选框只是 UI，绕过它就等于没确认）----
+      // 删除/关闭/清除类与「可能自断管理通道」的变更必须带调用方的显式确认标记；
+      // 编辑过变更集后渲染层会清掉勾选，因此确认始终对应**本次这批行**。
+      const warnReasons = [];
+      for (const t of lines) { const w = warnHit(t); if (w && warnReasons.indexOf(w) < 0) warnReasons.push(w); }
+      if (warnReasons.length && !opts.ackWarn) {
+        bail('变更集含需显式确认的危险动作，未收到确认：' + warnReasons.join('；'));
+        return;
+      }
+      const lockLine = lines.map(selfLockHit).find(Boolean) || '';
+      if (lockLine && !opts.ackSelfLock) {
+        bail('变更可能关闭本机管理通道（SSH/Telnet/SNMP/HTTP），未收到确认：' + lockLine);
+        return;
+      }
       const clamp = (v, lo, hi, d) => { const n = parseInt(v, 10); return (n >= lo && n <= hi) ? n : d; };
       const waitMs = clamp(opts.waitMs, 200, 20000, 1200);
       const cmdTimeoutMs = clamp(opts.cmdTimeoutMs, 1000, 60000, 10000);
@@ -602,8 +682,14 @@ class ShellManager extends EventEmitter {
       const showCmd = cleanLog(opts.showCmd).trim().slice(0, 256);
       const screenCmd = cleanLog(opts.screenCmd).trim().slice(0, 256);
       // 前置命令（如 FRR/vtysh 设备需先 `enable` 进特权模式才能读配置与进配置模式）：
-      // 在关分页与前置备份之前发送，失败即中止——后面每一步都依赖它
+      // 在关分页与前置备份之前发送，失败即中止——后面每一步都依赖它。
+      // 与变更行**同一套闸门**：前置命令同样会发到设备上，此前的实现漏检，一条 `reload`
+      // 填在「前置命令」里就能绕过整批禁止清单（凭据档案里的 preCmd 也会被自动注入）。
       const preCmd = cleanLog(opts.preCmd).trim().slice(0, 256);
+      if (preCmd) {
+        const ph = forbiddenHit(preCmd);
+        if (ph) { bail('前置命令命中禁止下发清单，已拒绝执行：' + preCmd.slice(0, 80) + '（命中片段 ' + ph + '）'); return; }
+      }
       const enterCmd = cleanLog(opts.enterCmd).trim().slice(0, 256);
       const exitCmd = cleanLog(opts.exitCmd).trim().slice(0, 256);
       const saveCmd = cleanLog(opts.saveCmd).trim().slice(0, 256);
@@ -788,6 +874,9 @@ class ShellManager extends EventEmitter {
         if (preCmd) {
           const rp = await sendOne(preCmd);
           const pe = errOf(rp.text);
+          // 交互确认同样是"不该继续"的信号：设备要求 [Y/N] / "Proceed?" 时若照常往下发
+          // 关分页与取配置命令，那些命令会被当成对确认提示的应答（语义完全失控）
+          if (CONFIRM_RE.test(rp.text)) { finish(false, '前置命令触发设备交互确认，已中止（请确认影响后手工执行）：' + preCmd); return; }
           if (rp.err || pe) { finish(false, '前置命令失败（' + preCmd + '）：' + (rp.err || pe)); return; }
           if (settled) return;
         }
@@ -1323,4 +1412,4 @@ class ShellManager extends EventEmitter {
   }
 }
 
-module.exports = { ShellManager, cleanSftpRemotePath, sftpRemoteJoin, fmtSftpSize, makeDecoder };
+module.exports = { ShellManager, cleanSftpRemotePath, sftpRemoteJoin, fmtSftpSize, makeDecoder, deploySegments, forbiddenHit, warnHit, selfLockHit };

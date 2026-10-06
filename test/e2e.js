@@ -161,6 +161,35 @@ function findChrome() {
   await new Promise(r => setTimeout(r, 300));
   console.log('导出调用无异常 ✓');
 
+  // ---- 底图（机房平面图）：撤销不得清空 + 刷新后仍在 ----
+  // 回归背景：snapshot() 曾漏 underlay 字段、saveGraph 载荷也没有这个键，导致「任意一次
+  // Ctrl+Z 清空当前页底图」「刷新/重启后底图消失」——两条都不是报错而是静默丢数据。
+  const UNDERLAY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+  const ulSet = await page.evaluate((png) => {
+    const st = window.__topo.state;
+    st.underlay = { dataUrl: png, name: 'e2e平面图.png', x: 40, y: 60, w: 600, h: 400, opacity: 0.8, visible: true, locked: false, adjust: false };
+    window.__topo.applyUnderlay();
+    return { img: document.querySelectorAll('#underlayLayer image').length, has: !!st.underlay };
+  }, UNDERLAY_PNG);
+  if (!(ulSet.img === 1 && ulSet.has)) errors.push('[underlay] 设置底图后未渲染（#underlayLayer image=' + ulSet.img + '）');
+  const ulPos = await page.evaluate(() => {
+    const r = document.querySelector('.node').getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  });
+  await page.mouse.move(ulPos.x, ulPos.y);
+  await page.mouse.down();
+  await page.mouse.move(ulPos.x + 60, ulPos.y + 40, { steps: 6 });
+  await page.mouse.up();
+  await new Promise(r => setTimeout(r, 200));
+  await page.evaluate(() => document.querySelector('#btnUndo').click());
+  await new Promise(r => setTimeout(r, 250));
+  const ulAfterUndo = await page.evaluate(() => ({
+    img: document.querySelectorAll('#underlayLayer image').length,
+    has: !!window.__topo.state.underlay
+  }));
+  if (!(ulAfterUndo.img === 1 && ulAfterUndo.has)) errors.push('[underlay] 撤销后底图被清空（img=' + ulAfterUndo.img + '，state.underlay=' + ulAfterUndo.has + '）');
+  console.log('底图：撤销后仍在 =', ulAfterUndo.img === 1 && ulAfterUndo.has);
+
   // ---- 持久化：刷新后自动恢复 ----
   const beforeReload = await page.evaluate(() => window.__topo.state.nodes.length);
   await page.reload({ waitUntil: 'load' });
@@ -168,12 +197,46 @@ function findChrome() {
   const afterReload = await page.evaluate(() => {
     const n = window.__topo ? window.__topo.state.nodes.length : -1;
     const vis = document.querySelectorAll('.node').length;
-    return { state: n, rendered: vis };
+    return {
+      state: n, rendered: vis,
+      underlayImg: document.querySelectorAll('#underlayLayer image').length,
+      underlayState: window.__topo ? !!window.__topo.state.underlay : false
+    };
   });
   console.log('刷新恢复: 刷新前', beforeReload, '节点 → 刷新后', JSON.stringify(afterReload));
+  if (!(afterReload.underlayImg === 1 && afterReload.underlayState)) {
+    errors.push('[underlay] 刷新后底图丢失（img=' + afterReload.underlayImg + '，state.underlay=' + afterReload.underlayState + '）');
+  }
   await page.screenshot({ path: 'shot_restored.png' });
   // 刷新后重新覆盖 confirm，避免后续测试弹窗阻塞
   await page.evaluate(() => { window.confirm = () => true; });
+
+  // ---- 视图参数健壮性：工程/本地存储里的非法 pan·zoom 不得污染画布坐标 ----
+  // 旧实现直接 setView(data.pan, data.zoom) → clamp 对非数字返回 NaN → transform 无效、
+  // toWorld() 全 NaN，之后一次拖动就把节点坐标写成 NaN（落盘为 null，刷新后设备跳到原点）
+  {
+    await page.evaluate(() => {
+      const raw = JSON.parse(localStorage.getItem('nettopo.graph') || '{}');
+      raw.pan = { x: 'abc', y: {} };
+      raw.zoom = 'NaN';
+      localStorage.setItem('nettopo.graph', JSON.stringify(raw));
+    });
+    await page.reload({ waitUntil: 'load' });
+    await new Promise(r => setTimeout(r, 600));
+    const view = await page.evaluate(() => {
+      const st = window.__topo.state, rd = window.__topo.renderer;
+      const world = document.getElementById('world');
+      return {
+        zoom: rd.zoom,
+        panX: rd.pan && rd.pan.x,
+        nodeX: st.nodes[0] ? st.nodes[0].x : null,
+        transform: world ? String(world.getAttribute('transform') || '') : ''
+      };
+    });
+    const viewOk = Number.isFinite(view.zoom) && Number.isFinite(view.panX) && Number.isFinite(view.nodeX) && !/NaN/.test(view.transform);
+    if (!viewOk) errors.push('[view] 非法 pan/zoom 污染画布（' + JSON.stringify(view) + '）');
+    console.log('非法视图参数恢复:', JSON.stringify(view));
+  }
 
   // ---- 长名称宽度自适应（走编辑弹窗 UI） ----
   await page.evaluate(() => {

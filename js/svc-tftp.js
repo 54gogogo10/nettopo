@@ -341,7 +341,7 @@ class TftpSession {
 }
 
 class TftpServer extends EventEmitter {
-  /** @param opts { rootDir, maxFileSize=32MB, maxSessions=8 } */
+  /** @param opts { rootDir, maxFileSize=32MB, maxSessions=8, maxFilesPerHost=256, maxTotalBytes=1GB } */
   constructor(opts) {
     super();
     opts = opts || {};
@@ -351,13 +351,44 @@ class TftpServer extends EventEmitter {
     // 单来源 IP 并发会话上限：慢会话（收 ACK0 后不发数据，等 30s 空闲超时）可用 8 个槽位
     // 饿死同网段其它设备的配置推送——按 IP 分配配额（NAT 后多设备场景留 4）
     this.maxSessionsPerIp = Math.max(1, Math.floor(Number(opts.maxSessionsPerIp) || 4));
+    // 写入配额：TFTP 协议本身无认证，LAN 任意主机可反复 WRQ。只有单文件上限挡不住
+    // 「几万个 1KB 文件」把 userData 所在盘写满 / inode 耗尽，故再加单来源文件数与全库字节上限
+    this.maxFilesPerHost = Math.max(1, Math.floor(Number(opts.maxFilesPerHost) || 256));
+    this.maxTotalBytes = Math.max(this.maxFileSize, Math.floor(Number(opts.maxTotalBytes) || 1024 * 1024 * 1024));
     this.sock = null;
     this.port = 0;
     this.running = false;
     this.lastError = '';
     this.sessions = new Map(); // 'addr:port' -> TftpSession
-    this.stats = { rxFiles: 0, rxBytes: 0, txFiles: 0, denied: 0, evicted: 0 };
+    this.stats = { rxFiles: 0, rxBytes: 0, txFiles: 0, denied: 0, evicted: 0, quotaDenied: 0 };
     try { fs.mkdirSync(this.rootDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
+  }
+
+  /** 写入配额检查（WRQ 建立会话前调用）：单来源文件数 + 全库占用字节。
+   *  超限即拒绝（ERROR 3 磁盘满语义），计入 quotaDenied——不静默丢包，面板可见。 */
+  _quotaCheck(ipDir) {
+    let files = 0, bytes = 0;
+    const walk = (dir) => {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch (e) { return; }
+      for (const n of names) {
+        let st;
+        try { st = fs.lstatSync(path.join(dir, n)); } catch (e) { continue; }
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) walk(path.join(dir, n));
+        else if (st.isFile()) { files++; bytes += st.size; }
+      }
+    };
+    walk(this.rootDir);
+    if (bytes >= this.maxTotalBytes) return { ok: false, why: 'TFTP 收件目录已达容量上限' };
+    let hostFiles = 0;
+    try {
+      for (const n of fs.readdirSync(ipDir)) {
+        try { if (fs.lstatSync(path.join(ipDir, n)).isFile()) hostFiles++; } catch (e) { /* ignore */ }
+      }
+    } catch (e) { /* 目录不存在：计数 0 */ }
+    if (hostFiles >= this.maxFilesPerHost) return { ok: false, why: '该来源的文件数已达上限' };
+    return { ok: true };
   }
 
   /** 逐出「尚未进展」的最久会话（腾出一个会话槽）。返回是否成功逐出。
@@ -478,6 +509,11 @@ class TftpServer extends EventEmitter {
     const dir = path.resolve(this.rootDir, sanitizeIpDir(rinfo.address));
     const base = path.resolve(this.rootDir) + path.sep;
     if (!dir.startsWith(base)) { this.stats.denied++; this._sendErrorTo(rinfo, 2, 'Access violation'); return; }
+    // 写入配额（仅 WRQ 落盘方向）：单来源文件数 + 全库字节上限，超限如实拒绝并计数
+    if (req.opcode !== 1) {
+      const q = this._quotaCheck(dir);
+      if (!q.ok) { this.stats.quotaDenied++; this._sendErrorTo(rinfo, 3, 'Disk full or allocation exceeded'); return; }
+    }
     const sess = new TftpSession(this, req.opcode === 1 ? 'rrq' : 'wrq',
       { address: rinfo.address, port: rinfo.port }, name, req.options);
     sess.finalPath = path.join(dir, name);

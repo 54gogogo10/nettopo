@@ -1072,7 +1072,10 @@ class MonitorManager extends EventEmitter {
     {
       const bRaw = Array.isArray(bOpt.command) ? bOpt.command : String(bOpt.command == null ? '' : bOpt.command).split(/\r?\n/);
       for (const c of bRaw) {
-        const s = String(c == null ? '' : c).trim();
+        // 与 commands / onConnect 同口径剔除控制字符：命令原样发往设备，中段的单个 \r
+        // 既不被 /\r?\n/ 拆分也去不掉（pty 的 ICRNL 会把它当回车），等于在「仅读取」模式下
+        // 也能执行第二条写命令（如 `display current-configuration\rreload`）。
+        const s = String(c == null ? '' : c).replace(/[\u0000-\u001f\u007f]/g, '').trim();
         if (!s) continue;
         if (backupCmds.length >= 16) break;
         backupCmds.push(s.length > 256 ? s.slice(0, 256) : s);
@@ -1162,7 +1165,8 @@ class MonitorManager extends EventEmitter {
     {
       const mtRaw = Array.isArray(mtOpt.command) ? mtOpt.command : String(mtOpt.command == null ? '' : mtOpt.command).split(/\r?\n/);
       for (const c of mtRaw) {
-        const s = String(c == null ? '' : c).trim();
+        // 同 backup.commands：命令直发设备，中段控制字符可注入第二条命令（口径与 commands 一致）
+        const s = String(c == null ? '' : c).replace(/[\u0000-\u001f\u007f]/g, '').trim();
         if (!s) continue;
         if (metrics.commands.length >= 8) break;
         metrics.commands.push(s.length > 256 ? s.slice(0, 256) : s);

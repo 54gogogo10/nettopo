@@ -204,10 +204,14 @@ function restore(s) {
     sheetStash();
     state.sheetIdx = s.sheetIdx;
     refreshSheets();
+    // 跨页撤销：底图跟随目标页（与 switchSheet 同口径）
+    state.underlay = U.sanitizeUnderlay(state.sheets[state.sheetIdx].underlay);
   }
   state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
   state.regions = s.regions || [];
-  state.underlay = U.sanitizeUnderlay(s.underlay);
+  // 底图不参与撤销（导入/调整底图本身不入撤销栈，snapshot() 里也没有 underlay）：
+  // 若按快照回填（sanitizeUnderlay(undefined) → null），任意一次 Ctrl+Z 都会清空当前页底图。
+  // 同页撤销保持当前底图不动；跨页撤销已在上方跟随目标页取回。
   state.sel = { kind: null, id: null };
   if (state.sheets[state.sheetIdx]) { state.sheets[state.sheetIdx].nodes = state.nodes; state.sheets[state.sheetIdx].links = state.links; state.sheets[state.sheetIdx].texts = state.texts; state.sheets[state.sheetIdx].regions = state.regions; state.sheets[state.sheetIdx].underlay = state.underlay; }
   if (Array.isArray(s.downLinks)) { state.downLinks = new Set(s.downLinks); renderer.setDownLinks(state.downLinks); }
@@ -1145,6 +1149,7 @@ function openConfigDeploy(presetNodeId, preset) {
   const ackEl = ov.querySelector('#cdAck'), warnAckEl = ov.querySelector('#cdWarnAck'), lockAckEl = ov.querySelector('#cdLockAck');
   const warnWrap = ov.querySelector('#cdWarnWrap'), lockWrap = ov.querySelector('#cdLockWrap');
   const runBtn = ov.querySelector('#cdRun'), csvBtn = ov.querySelector('#cdCsv'), rollBtn = ov.querySelector('#cdRoll');
+  const preEl = ov.querySelector('#cdPre');            // 前置命令：与变更行同一套禁止清单
   let baseline = { text: '', name: '', error: '' };   // 当前设备的基线（最近一次配置备份）
   let preview = null;                                  // 最近一次 dry-run 结果
   let parsed = { ok: true, lines: [], skipped: { comment: 0, blank: 0, dup: 0, mode: 0, save: 0 } };
@@ -1221,21 +1226,26 @@ function openConfigDeploy(presetNodeId, preset) {
       + (preview.rows.length > 60 ? '<div class="bk-empty">（仅显示前 60 行，共 ' + preview.rows.length + ' 行）</div>' : '');
     updateRunState();
   };
-  /** 执行按钮可用性：解析通过 + 无硬禁止 + 必勾选项齐备 */
+  /** 执行按钮可用性：解析通过 + 无硬禁止（变更行与前置命令同口径）+ 必勾选项齐备 */
   const updateRunState = () => {
     const gate = parsed.ok ? U.checkChangeSet(parsed.lines || []) : { ok: false, warn: [] };
     const hasLines = !!(parsed.ok && parsed.lines && parsed.lines.length);
+    // 前置命令与变更行同属"要发到设备上的东西"：一并过闸门（主进程还有一遍独立校验）
+    const pre = preEl ? String(preEl.value || '').trim() : '';
+    const preHit = pre ? U.checkChangeSet([pre]) : null;
+    const preBad = !!(preHit && preHit.ok === false);
     const needWarn = hasLines && (gate.warn || []).length > 0;
     const needLock = hasLines && !!(preview && preview.risk.selfLock);
     warnWrap.style.display = needWarn ? 'flex' : 'none';
     lockWrap.style.display = needLock ? 'flex' : 'none';
     if (!needWarn) warnAckEl.checked = false;
     if (!needLock) lockAckEl.checked = false;
-    const gateOk = hasLines && gate.ok !== false && (!needWarn || warnAckEl.checked) && (!needLock || lockAckEl.checked);
+    const gateOk = hasLines && gate.ok !== false && !preBad && (!needWarn || warnAckEl.checked) && (!needLock || lockAckEl.checked);
     runBtn.disabled = !(gateOk && ackEl.checked);
     runBtn.title = !hasLines ? '请先填写变更集'
-      : (gate.ok === false ? ('禁止下发：' + gate.error)
-        : (!ackEl.checked ? '请先勾选「我已核对预览与风险」' : ''));
+      : (preBad ? ('禁止下发：前置命令 ' + preHit.error)
+        : (gate.ok === false ? ('禁止下发：' + gate.error)
+          : (!ackEl.checked ? '请先勾选「我已核对预览与风险」' : '')));
   };
 
   ov.querySelector('#cdGen').onclick = () => {
@@ -1257,10 +1267,13 @@ function openConfigDeploy(presetNodeId, preset) {
     lastResult = null; rollBtn.disabled = true;
     ackEl.checked = false;
     clearTimeout(deb);
-    deb = setTimeout(refreshPreview, 250);
+    // 定时器 id 归零：点击「执行」时据此判断"是否还在防抖窗口内"（见 runBtn.onclick）
+    deb = setTimeout(() => { deb = 0; refreshPreview(); }, 250);
   });
   devEl.onchange = () => { lastResult = null; rollBtn.disabled = true; ackEl.checked = false; syncDevice(); };
   vEl.onchange = () => { ackEl.checked = false; refreshPreview(); };
+  // 前置命令改动即时复查（禁止下发时按钮直接置灰并给出原因，避免走到连接设备才发现）
+  if (preEl) preEl.addEventListener('input', updateRunState);
 
   /** 结果视图：逐行成功/失败 + 设备回显 */
   const renderResult = (r) => {
@@ -1308,8 +1321,14 @@ function openConfigDeploy(presetNodeId, preset) {
     const c = cur();
     if (!c.host) { toast('该设备没有管理地址'); return; }
     if (!parsed.ok || !parsed.lines.length) { toast('变更集为空或解析失败'); return; }
+    // 输入防抖窗口（250ms）内点击：parsed/preview 还是编辑前的内容，照此下发等于**静默下发旧变更集**。
+    // 先把预览刷新到最新，并要求用户重新核对（与「编辑后原确认作废」的语义一致）。
+    if (deb) { clearTimeout(deb); deb = 0; refreshPreview(); toast('变更集刚编辑过，已刷新预览——请重新核对后再执行'); return; }
     const gate = U.checkChangeSet(parsed.lines);
     if (!gate.ok) { toast('已拦截：' + gate.error); return; }
+    const preTxt = preEl ? String(preEl.value || '').trim() : '';
+    const preGate = preTxt ? U.checkChangeSet([preTxt]) : null;
+    if (preGate && preGate.ok === false) { toast('已拦截：' + preGate.error); return; }
     const port = c.port;
     const proto = c.protocol;
     // 账号来源：手填 / 设备监控配置（预填在上方字段里）优先；字段为空时才回落到凭据库档案
@@ -1329,10 +1348,12 @@ function openConfigDeploy(presetNodeId, preset) {
         keyPassphrase: c.cred ? c.cred.keyPass : '',
         encoding: c.cred ? c.cred.encoding : '',
         vendor: vEl.value,
-        preCmd: ov.querySelector('#cdPre').value.trim(),
+        preCmd: preTxt,
         lines: parsed.lines.map(l => l.text),
         plan: planEl.value,
         kind: 'change',
+        // 主进程会按收到的行自行判定是否需要告警类确认，并核对这些标记（UI 勾选只是第一道）
+        ackWarn: warnAckEl.checked, ackSelfLock: lockAckEl.checked,
         doSave: saveEl.checked, verify: verifyEl.checked,
         expectFp: trustedFpOf(c.host, port)
       }, cdPatch));
@@ -3830,6 +3851,7 @@ function sheetStash() {
   if (!s) return;
   s.nodes = state.nodes; s.links = state.links; s.texts = state.texts;
   s.regions = state.regions || [];
+  s.underlay = state.underlay || null;   // 底图同样写回：sheets 是每页数据的唯一权威副本
   s.pan = renderer.pan; s.zoom = renderer.zoom;
 }
 /** 全部页的节点合集（监控 reconcile 覆盖所有页，切页不打断后台任务） */
@@ -3864,7 +3886,9 @@ function switchSheet(idx, opts) {
   renderer.setDownLinks(state.downLinks);
   Layout.separateOverlaps(state.nodes); // 页数据有节点重叠时推开（正常页为 no-op）
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
-  if (s.pan && s.zoom) renderer.setView(s.pan, s.zoom); else renderer.fit();
+  const vws = normView(s.pan, s.zoom);
+  if (vws) renderer.setView(vws.pan, vws.zoom); else renderer.fit();
+  applyUnderlay();   // 每张图纸一张底图：切页必须重绘，否则画布留着上一页的底图
   updateUndoBtns();
   refreshSheets();
   refreshAll();
@@ -3874,8 +3898,8 @@ function switchSheet(idx, opts) {
 }
 function addSheet() {
   if (!state.sheets.length) {
-    // 第一次加页：当前拓扑成为第 1 页
-    state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 1', nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions || [], pan: renderer.pan, zoom: renderer.zoom });
+    // 第一次加页：当前拓扑成为第 1 页（underlay 一并带过去——否则「先导底图再加页」时第 1 页的底图丢了）
+    state.sheets.push({ id: 'p' + (++state.sheetSeq), name: '页面 1', nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions || [], underlay: state.underlay, pan: renderer.pan, zoom: renderer.zoom });
     state.sheetIdx = 0;
   } else {
     sheetStash();
@@ -4409,6 +4433,9 @@ async function applyProjectData(data) {
     const act = state.sheets[state.sheetIdx];
     act.nodes = state.nodes; act.links = state.links; act.texts = state.texts; // 顶层即当前页（避免二次 sanitize）
     act.regions = state.regions;
+    // 底图取活动页那一份（与 restoreGraph / switchSheet 同口径，老工程顶层缺 underlay 时也能取回）
+    state.underlay = U.sanitizeUnderlay(act.underlay || state.underlay);
+    act.underlay = state.underlay;
     refreshSheets();
   }
   renderer.showLabels = state.showLabels;
@@ -4426,8 +4453,10 @@ async function applyProjectData(data) {
   updateUndoBtns();
   Layout.separateOverlaps(state.nodes); // 工程数据本身有节点重叠（异常/老版本工程）时推开，正常工程为 no-op
   renderer.setData(state.nodes, state.links, state.texts, state.regions);
-  if (data.pan && data.zoom) renderer.setView(data.pan, data.zoom);
+  const vw = normView(data.pan, data.zoom);
+  if (vw) renderer.setView(vw.pan, vw.zoom);
   else renderer.fit();
+  applyUnderlay();   // 工程文件里的底图必须在打开后立即绘制（此前只赋了 state.underlay，画布空白）
   refreshAll();
   saveGraph();
   reconcileMonitors();
@@ -6424,6 +6453,9 @@ saveGraph.flush = () => {
       links: state.links,
       texts: state.texts,
       regions: state.regions,
+      // 底图必须落盘：单图纸工程没有 sheets，缺这一项刷新后底图就永久消失；
+      // 多图纸工程另有 sheets[i].underlay 一份（本项与活动页保持一致）
+      underlay: state.underlay,
       pan: renderer.pan,
       zoom: renderer.zoom,
       sheets: state.sheets,
@@ -6436,11 +6468,34 @@ saveGraph.flush = () => {
       downLinks: [...state.downLinks],
       ts: Date.now()
     }));
-  } catch (e) { /* 存储超限时忽略 */ }
+    saveGraph._quotaWarned = false;   // 成功后复位，下次再超限还能提醒
+  } catch (e) {
+    // 配额超限（QuotaExceededError）：底图/自定义类型图片很容易把 localStorage 撑爆。
+    // 此前静默忽略，后果是**整个自动保存（含节点编辑）永久失效且用户毫无察觉**——
+    // 这里如实提示一次并引导改用工程文件/自动备份（不重复刷屏）。
+    const name = String((e && e.name) || '');
+    const quota = name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED' || (e && e.code === 22);
+    if (quota && !saveGraph._quotaWarned) {
+      saveGraph._quotaWarned = true;
+      try { toast('本机存储已满，自动保存失败：请「保存工程」到文件备份，并精简底图或自定义类型图片'); } catch (e2) { /* ignore */ }
+    }
+  }
 };
 // 防抖窗口内关闭/刷新页面：同步落盘兜底（pagehide 兜 Electron 隐藏卸载，beforeunload 兜常规刷新）
 window.addEventListener('beforeunload', () => { try { saveGraph.flush(); } catch (e) { /* ignore */ } });
 window.addEventListener('pagehide', () => { try { saveGraph.flush(); } catch (e) { /* ignore */ } });
+
+/** 视图参数归一（工程文件 / 本地存储 / 图纸页都可能带非数字 pan·zoom——旧版本或被手改）：
+ *  直接交给 renderer.setView 时 clamp 对非数字返回 NaN → transform 失效、toWorld() 全 NaN，
+ *  之后一次拖动就把节点坐标写成 NaN、落盘为 null，刷新后设备跳到原点。
+ *  返回 null 表示不可用，调用方回落 fit()。 */
+function normView(pan, zoom) {
+  const z = Number(zoom);
+  if (!Number.isFinite(z) || z <= 0) return null;
+  const x = Number(pan && pan.x), y = Number(pan && pan.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { pan: { x, y }, zoom: z };
+}
 
 function restoreGraph() {
   try {
@@ -6461,7 +6516,9 @@ function restoreGraph() {
     state.links = cleaned.links;
     state.texts = cleaned.texts;
     state.regions = U.sanitizeRegions(d.regions);
-      state.underlay = U.sanitizeUnderlay(d.underlay);
+    // 底图的最终取值在多图纸分支之后确定（活动页的 sheets[i].underlay 优先，单图纸取顶层）；
+    // 这里先留 null，避免沿用上一次会话的残留值
+    state.underlay = null;
     U.seedCounters(state.nodes, state.links, state.texts, state.regions); // 避免新 ID 与恢复节点/文本框冲突
     state.sel = { kind: null, id: null };
     state.undoStack = []; // 初始状态无需撤销
@@ -6496,15 +6553,22 @@ function restoreGraph() {
       const act = state.sheets[state.sheetIdx];
       act.nodes = state.nodes; act.links = state.links; act.texts = state.texts;
       act.regions = state.regions;
+      // 底图取活动页那一份（多图纸各页独立；写回活动页与 switchSheet 同口径）
+      state.underlay = U.sanitizeUnderlay(act.underlay);
+      act.underlay = state.underlay;
       refreshSheets(); // 页签栏须随 sheets 重建：启动序列的 refreshSheets 先于 restoreGraph 执行，此刻 sheets 仍为空——不补则刷新后页签栏隐藏、他页不可达（与 applyProjectData 同口径）
+    } else {
+      state.underlay = U.sanitizeUnderlay(d.underlay);   // 单图纸：取顶层（saveGraph 已写入）
     }
     renderer.showLabels = state.showLabels;
     renderer.showSubnets = state.showSubnets;
     renderer.subnetNames = state.subnetNames;
     renderer.setDownLinks(state.downLinks);
     renderer.setData(state.nodes, state.links, state.texts, state.regions);
-    if (d.pan && d.zoom) renderer.setView(d.pan, d.zoom);
+    const vwr = normView(d.pan, d.zoom);
+    if (vwr) renderer.setView(vwr.pan, vwr.zoom);
     else renderer.fit();
+    applyUnderlay();   // 恢复后必须显式绘制底图：渲染层只认 applyUnderlay 下发的对象
     updateUndoBtns();
     refreshAll();
     // 恢复持久化的链路监测任务（保存时已剥离凭据，凭据在启动载荷时按 credMode/credId 现解析）——
@@ -9747,6 +9811,9 @@ function applyUnderlay() {
     if (underlaySaveTimer) clearTimeout(underlaySaveTimer);
     underlaySaveTimer = setTimeout(() => { underlaySaveTimer = null; try { saveGraph(); } catch (e) { /* ignore */ } }, 600);
   });
+  // setUnderlay 只清「重建标记」，真正的 DOM 重建在 update() 里（_renderUnderlay）：
+  // 不下发这一帧，调用方拿到的仍是上一张底图（切页/打开工程/撤销恢复都会表现为「底图没出现」）。
+  renderer.update();
 }
 function openUnderlayPanel() {
   const root = $('#modalRoot');
@@ -12570,6 +12637,13 @@ function openNetServices() {
         form.ftp.password = randomFtpPassword();
         ov.querySelector('#nsvFtpPass').value = form.ftp.password;
         toast('FTP 已自动生成随机口令，请在设备侧 copy 命令中使用新口令');
+      }
+      // SNMP v3 用户名必须与认证口令成对：只填用户名会被解析层静默降级为 noAuth，
+      // 同网段任意主机即可伪造（含空用户名的）明文 Trap 进系统通知与事件时间线（主进程也会校验）
+      if (form.trap.v3.user && !form.trap.v3.authPass) {
+        toast('SNMP v3 已填用户名但未填认证口令：请补全认证口令，或清空用户名');
+        btn.disabled = false;   // 提前返回必须自己复位按钮，否则「保存并应用」会永久置灰
+        return;
       }
       const r = await window.topoNetSvc.setConfig(form);
       if (r && r.ok) {

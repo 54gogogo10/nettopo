@@ -451,8 +451,12 @@ class FtpConnection {
         this._bumpIdle(); // 数据传输期没有控制命令，空闲超时不能掐断慢速大文件
         size += chunk.length;
         if (size > this.server.maxFileSize) { bail(552, '超出单文件大小上限，传输中止。'); return; }
-        ws.write(chunk);
+        // 写背压：慢盘/网络盘上 write 返回 false 表示内核缓冲已满，此时必须暂停数据连接，
+        // 否则用户态写队列无界堆积（maxFileSize × 并发会话，默认 64MB × 4 ≈ 256MB 常驻内存，
+        // 与同机 Electron 渲染进程抢内存）。Syslog/Trap 侧已是同款处理（见各自 _write 分支）。
+        if (!ws.write(chunk)) dataSock.pause();
       });
+      ws.on('drain', () => { try { dataSock.resume(); } catch (e) { /* 连接可能已关闭 */ } });
       dataSock.on('error', () => bail(426, '数据连接异常，传输中止。'));
       dataSock.on('close', (hadErr) => {
         if (failed) return;

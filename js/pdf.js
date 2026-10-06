@@ -41,7 +41,11 @@ function buildSvgImage(graph, opts) {
 
   const esc = U.escXml;
   const parts = [];
-  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
+  // 根元素必须声明 xmlns:xlink：底图 `<image>` 双写 href/xlink:href（老 WebKit 只认 xlink），
+  // 而 SVG 被 Image/文件打开时按 XML 解析——未声明的前缀是致命错误，会导致
+  // 「有底图的工程」导出 PDF/PNG 直接走 img.onerror、导出的 .svg 打不开（实测 Chrome 报
+  // Namespace prefix xlink for href on image is not defined）。设备图标走 DOM setAttributeNS，不受影响。
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
   parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff"/>`);
 
   // 底图先画（垫在所有元素之下）：透明度沿用画布设置，导出件与屏幕所见一致
@@ -90,15 +94,19 @@ function buildSvgImage(graph, opts) {
     if (!g) continue;
     const lines = opts.showLabels === false ? [] : U.labelLines(l).map(s => U.truncate(s, 40));
     if (!lines.length) continue;
+    // 两行标注按两端设备在画布上的上下方位排序（与 render.js 同一口径）：否则 A 端接口/IP
+    // 会被画到下方，而画布上 A 在上，导出件与屏幕所见相反、读者会把两端读反
+    const ordered = lines.length === 2 ? U.orderLabelLines(lines, byId[l.a], byId[l.b]) : lines;
     const mx = X((g.x1 + g.x2) / 2), my = Y((g.y1 + g.y2) / 2);
     const dx = g.x2 - g.x1, dy = g.y2 - g.y1;
     const len = Math.hypot(dx, dy) || 1;
     const pairOff = (pairIdx.get(l.id) || 0) * 67;
     const cx = mx + dx / len * 10;
     const cy = my + dy / len * 10 - 34 - pairOff;
-    const maxLine = lines.reduce((a, b) => a.length > b.length ? a : b, '');
-    labels.push({ x: cx, y: cy, w: U.measureText(maxLine, SIZE) + 12, h: lines.length * SIZE * 1.2 + 4 });
-    labelData.push({ lines, cx, cy });
+    const maxLine = ordered.reduce((a, b) => a.length > b.length ? a : b, '');
+    labels.push({ x: cx, y: cy, w: U.measureText(maxLine, SIZE) + 12, h: ordered.length * SIZE * 1.2 + 4 });
+    // 绘制时 index0 在下方（见下方 forEach 的 y 计算），与画布口径一致
+    labelData.push({ lines: ordered, cx, cy });
   }
   U.resolveLabelCollisions(labels, {
     pad: 6,

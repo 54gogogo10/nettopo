@@ -932,15 +932,27 @@ function isHttpUrl(u) {
   try { const p = new URL(u).protocol; return p === 'http:' || p === 'https:'; } catch (e) { return false; }
 }
 
-/* ---- 机密落盘（FTP 服务口令等 settings.json 内容）：safeStorage 加密，前缀 enc1: 标记密文。
- *   加密不可用时保持原值落盘（行为与旧版一致）；解密失败返回空串（口令回退默认，需重新保存） ---- */
+/* ---- 机密落盘（FTP 服务口令、Trap v3 口令、Webhook 加签密钥、AI Key 等 settings.json 内容）：
+ *   safeStorage 加密，前缀 enc1: 标记密文。
+ *   **加密不可用时拒存该字段（返回空串）并让调用方如实报错**——绝不退化成明文落盘：
+ *   本机其他用户、备份工具与同步盘都能读到 settings.json 明文。此处与统一凭据库
+ *   （credential-store 加密不可用即拒存并告警）保持同一口径。 */
 const ENC_PREFIX = 'enc1:';
+/** 系统加密是否可用（DPAPI / 密钥环）。不可用时所有口令类字段一律拒存 */
+function secretsEncryptable() {
+  try {
+    const { safeStorage } = require('electron');
+    return !!(safeStorage && safeStorage.isEncryptionAvailable());
+  } catch (e) { return false; }
+}
+/** 拒存口令时的统一提示（界面据此提示用户，不静默丢字段） */
+const SECRET_STORE_ERR = '系统加密不可用（缺少 DPAPI / 系统密钥环），口令未保存——请先在系统层启用密钥环后重试';
 function encryptSecretValue(text) {
   try {
     const { safeStorage } = require('electron');
-    if (!safeStorage || !safeStorage.isEncryptionAvailable()) return String(text);
+    if (!safeStorage || !safeStorage.isEncryptionAvailable()) return '';   // 拒存：不落明文
     return ENC_PREFIX + safeStorage.encryptString(String(text)).toString('base64');
-  } catch (e) { return String(text); }
+  } catch (e) { return ''; }
 }
 function decryptSecretValue(value) {
   const v = String(value == null ? '' : value);
@@ -1312,8 +1324,11 @@ ipcMain.handle('monitor:set-settings', (e, p) => {
       timeoutSec: w.timeoutSec != null ? w.timeoutSec : cur.timeoutSec
     });
     if (w.secret === '') next.secret = '';
-    else if (typeof w.secret === 'string' && w.secret) next.secret = encryptSecretValue(w.secret);
-    else next.secret = (s.webhookNotify && s.webhookNotify.secret) || '';
+    else if (typeof w.secret === 'string' && w.secret) {
+      // 加密不可用则整次保存拒绝（其余字段也不落盘）——不静默丢密钥，更不退化成明文
+      if (!secretsEncryptable()) return { ok: false, error: SECRET_STORE_ERR };
+      next.secret = encryptSecretValue(w.secret);
+    } else next.secret = (s.webhookNotify && s.webhookNotify.secret) || '';
     s.webhookNotify = next;
     dirty = true;
   }
@@ -1585,6 +1600,9 @@ ipcMain.handle('deploy:run', async (e, p) => {
     screenCmd: v.screen, showCmd: v.showCfg, enterCmd: v.enter, exitCmd: v.exit, saveCmd: v.save,
     // 前置命令由渲染层显式给出（如思科用户模式需先 enable）：空则不发
     preCmd: String((p && p.preCmd) || '').trim().slice(0, 256),
+    // 告警类确认（删除/关闭类、自断管理连接）由主进程复核：渲染层勾选框只是 UI，
+    // 主进程按收到的行自行判定「是否必须有确认」并核对这两个标记
+    ackWarn: !!(p && p.ackWarn), ackSelfLock: !!(p && p.ackSelfLock),
     doSave, verify,
     waitMs: p && p.waitMs, cmdTimeoutMs: p && p.cmdTimeoutMs, readyTimeoutMs: p && p.readyTimeoutMs
   });
@@ -1892,6 +1910,21 @@ ipcMain.handle('netsvc:set', async (e, p) => {
   // 渲染层载荷尺寸封顶（纵深）：正常面板载荷 < 4KB，超限视为异常输入直接拒绝，
   // 防 settings.json 被无界撑大（applyConfig 内各字段本身有白名单归一化）
   try { if (Buffer.byteLength(JSON.stringify(cfg), 'utf8') > 64 * 1024) return { ok: false, error: '配置载荷过大' }; } catch (err) { return { ok: false, error: '配置载荷无效' }; }
+  // SNMP v3 用户名与认证口令必须成对：只填用户名会让 normalizeV3User 静默降级为 noAuth，
+  // 此后同网段任意主机都能伪造（含空用户名的）明文 Trap 进系统通知与事件时间线。
+  // 要收无认证 Trap 就清空用户名（v3 接收整体不启用），不存在「填了用户却不认证」的合法形态。
+  if (cfg.trap && cfg.trap.v3 && typeof cfg.trap.v3 === 'object') {
+    const vu = String(cfg.trap.v3.user || '').trim();
+    if (vu && !String(cfg.trap.v3.authPass || '')) {
+      return { ok: false, error: 'SNMP v3 已填用户名但未填认证口令：请补全认证口令，或清空用户名（不用 v3 接收）' };
+    }
+  }
+  // 口令类字段一律要求系统加密可用：不可用时整次保存拒绝（此前会明文写进 settings.json）
+  {
+    const wantSecret = (cfg.ftp && typeof cfg.ftp.password === 'string' && cfg.ftp.password && cfg.ftp.password.indexOf(ENC_PREFIX) !== 0)
+      || (cfg.trap && cfg.trap.v3 && typeof cfg.trap.v3 === 'object' && ['authPass', 'privPass'].some(f => typeof cfg.trap.v3[f] === 'string' && cfg.trap.v3[f]));
+    if (wantSecret && !secretsEncryptable()) return { ok: false, error: SECRET_STORE_ERR };
+  }
   const status = await netSvc.applyConfig(cfg);
   // 落盘用 applyConfig 后的「生效配置」：normalizeConfig 可能把默认/空 FTP 口令替换为随机口令，
   // 若仍落盘原始 payload，重启后又会生成新随机口令，设备侧配置的 copy 口令每次重启即失效
@@ -2081,6 +2114,7 @@ ipcMain.handle('ai:set-config', (e, p) => {
   else if (p && typeof p.apiKey === 'string' && p.apiKey) {
     // 空串=保持不变；限长与 secure:encrypt 口径一致。保存 Key 的同时绑定当前端点主机：
     // 之后无论谁改动 baseUrl，这把 Key 都不会被发往别的主机（见 aiCfgFromSettings）
+    if (!secretsEncryptable()) return { ok: false, error: SECRET_STORE_ERR };
     s.ai.apiKeyEnc = encryptSecretValue(p.apiKey.slice(0, 4096));
     s.ai.ai_host = aiHostOf(s.ai.baseUrl);
   }

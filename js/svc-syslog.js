@@ -393,8 +393,14 @@ class SyslogServer extends EventEmitter {
     const now = Date.now();
     const last = this.alertLast.get(cdKey) || 0;
     if (now - last < this.alertRules.cooldownSec * 1000) return;
+    // 先删后插：Map 保插入序，这样顺序即「最近一次告警时间」，下面淘汰的才是最旧的
+    if (this.alertLast.has(cdKey)) this.alertLast.delete(cdKey);
     this.alertLast.set(cdKey, now);
-    if (this.alertLast.size > 512) this.alertLast.clear(); // 冷却表只防风暴，无需精确：超限整体清零重新冷却
+    // 冷却表封顶：按序淘汰最旧的一半，**不能整体 clear()**——伪造 ≥513 个来源即可清空冷却表，
+    // 让仍在冷却期内的真实告警立刻重新触发（IPC 推送 + 系统通知 + 事件时间线风暴）
+    if (this.alertLast.size > 512) {
+      for (const k of [...this.alertLast.keys()].slice(0, 256)) this.alertLast.delete(k);
+    }
     this.stats.alerts++;
     this.emit('alert', {
       seq: ent.seq, ts: ent.ts, host: ent.host, severity: ent.severity, facility: ent.facility,
@@ -463,10 +469,11 @@ class SyslogServer extends EventEmitter {
           this.hostDirs.add(hostDir);
         }
       } else {
-        // 满员：回收「最久未写且已静默」的主机目录（释放磁盘与名额）——攻击者自造的目录会被自己
-        // 的洪流优先回收，真实活跃设备因 mtime 新鲜不会被选中。找不到可回收目标时（例如全部目录
-        // 都在静默期内）仍放行本次写入，绝不永久饿死新来源，同时计入 hostsOverCap 供面板告警
-        if (!this._reclaimHostDir(base)) this.stats.hostsOverCap++;
+        // 满员：回收一个「最久未写且已静默」的来源（只释放内存名额 + 清过期文件，**保留期内日志不删**）。
+        // 回收不到（全部来源都在活跃/保留期内）时本次**不建新目录**：日志进环形缓冲并如实计数，
+        // 宁可让陌生新来源不落盘，也不为腾位子去删保留期内的审计日志（keepDays 承诺优先）。
+        // 容量会随 keepDays 自然释放，故不是「永久饿死」。
+        if (!this._reclaimHostDir(base)) { this.stats.hostsOverCap++; this.stats.diskDropped++; return; }
         this.hostDirs.add(hostDir);
       }
       try {
@@ -495,10 +502,14 @@ class SyslogServer extends EventEmitter {
 
   /** 名额满时回收一个「已静默」的主机目录（按 LRU 序尝试）：
    *  条件 = 无活跃写流 + 目录内无符号链接 + 最新文件 mtime 早于 hostDirReclaimMs。
-   *  释放磁盘与内存名额，使归档容量在伪造 HOST 洪流下有界；成功返回目录名，否则 null。 */
+   *  **回收的是内存名额，不是日志**：只顺带删除**已超出 keepDays 保留期**的日期文件
+   *  （保留期承诺不可破——此前整目录 rmSync，伪造 HOST 洪流就能把真实设备的在保日志一起删掉，
+   *  面板只显示「名额回收」，用户毫无察觉；过期清理另有 _cleanupOld 按天跑，这里只是顺手做）。
+   *  成功返回目录名，否则 null。 */
   _reclaimHostDir(base) {
     if (!this.hostDirs) return null;
     const nowMs = Date.now();
+    const cutoff = nowMs - this.keepDays * 86400000;
     for (const h of this.hostDirs) {
       let active = false;
       for (const k of this.streams.keys()) { if (k.slice(0, k.indexOf('\x00')) === h) { active = true; break; } }
@@ -506,16 +517,26 @@ class SyslogServer extends EventEmitter {
       const hd = path.join(base, h);
       if (!hd.startsWith(base + path.sep)) continue; // 纵深：只动库内目录
       let newest = 0, ok = true;
+      const files = [];
       try {
         for (const f of fs.readdirSync(hd)) {
           const fst = fs.lstatSync(path.join(hd, f));
           if (fst.isSymbolicLink()) { ok = false; break; } // 含链接的目录不碰（防误删链接目标）
           if (fst.mtimeMs > newest) newest = fst.mtimeMs;
+          files.push(f);
         }
       } catch (e) { ok = false; }
       if (!ok) continue;
       if (nowMs - newest < this.hostDirReclaimMs) continue; // 仍在活跃期：不回收
-      try { fs.rmSync(hd, { recursive: true, force: true }); } catch (e) { continue; }
+      for (const f of files) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})\.log$/.exec(f);
+        if (!m) continue;                                   // 非日期归档不动
+        const t = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+        if (!Number.isFinite(t) || t >= cutoff) continue;    // 保留期内：一律保留
+        try { fs.unlinkSync(path.join(hd, f)); } catch (e) { /* ignore */ }
+      }
+      // 清完过期文件后目录若已空，连目录一起收回（腾 inode/目录项）；还有保留期内文件就保留目录
+      try { if (fs.readdirSync(hd).length === 0) fs.rmdirSync(hd); } catch (e) { /* ignore */ }
       this.hostDirs.delete(h);
       this.stats.dirsRecycled++;
       return h;

@@ -16,7 +16,7 @@ const path = require('path');
 const MAX_KEEP = 500;                          // 记录总数上限（超出滚动清理最旧）
 const MAX_BYTES = 2 * 1024 * 1024;             // 单条记录上限 2MB
 const NAME_RE = /^deploy_\d{8}_\d{6}(?:_\d+)?_[a-z0-9]{4}\.json$/;
-const SECRET_RE = /((?:^|[\s;"'])(?:password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key)\b[\s:=]+).*/gi;
+const SECRET_RE = /((?:^|[^\w])(?:password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key|authentication-key)\b[\s:=]+).*/gi;
 
 /** 厂家配置模式口径（**主进程权威副本**）：渲染层只传一个厂家键，
  *  真正下发的「关分页/取配置/进配置模式/退出/保存」命令一律由主进程按此表决定——
@@ -112,6 +112,16 @@ class DeployStore {
     const planMask = maskAll(String(rec.plan == null ? '' : rec.plan).replace(/\r\n?/g, '\n').split('\n').slice(0, 400));
     const linesMask = maskAll(lines);
     const appliedMask = maskAll(applied.map(a => a.line));
+    // error 字段同样过打码：设备报错常把**整条命令**回显出来（FRR 实测 `% [ZEBRA] Unknown command: ip route …`，
+    // 华为报错也会带上下文），含 password/community 的行一旦下发失败，明文就会跟着错误信息落进审计文件
+    const errs = [];
+    const errIdx = applied.map(a => errs.push(String((a && a.error) || '')) - 1);
+    const resErrIdx = errs.push(String((rec.result && rec.result.error) || '')) - 1;
+    const bkpErrIdx = errs.push(String((rec.backup && rec.backup.error) || '')) - 1;
+    const savErrIdx = errs.push(String((rec.saved && rec.saved.error) || '')) - 1;
+    const verErrIdx = errs.push(String((rec.verify && rec.verify.error) || '')) - 1;
+    const errMask = maskAll(errs);
+    const errOf = (i) => { const s = String(errMask.lines[i] || '').slice(0, 400); return s.length ? s : null; };
     const out = {
       v: 1,
       at: now.toISOString(),
@@ -128,22 +138,22 @@ class DeployStore {
       lineCount: lines.length,
       plan: planMask.lines.join('\n'),
       lines: linesMask.lines,
-      applied: appliedMask.lines.map((t, i) => ({ line: t, ok: applied[i].ok, error: applied[i].error })),
+      applied: appliedMask.lines.map((t, i) => ({ line: t, ok: applied[i].ok, error: errOf(errIdx[i]) })),
       result: {
         ok: !!(rec.result && rec.result.ok),
         appliedCount: parseInt(rec.result && rec.result.appliedCount, 10) || 0,
         failedAt: parseInt(rec.result && rec.result.failedAt, 10) || 0,
         remaining: parseInt(rec.result && rec.result.remaining, 10) || 0,
-        error: (rec.result && rec.result.error) ? String(rec.result.error).slice(0, 400) : null
+        error: errOf(resErrIdx)
       },
       backup: {
         ok: !!(rec.backup && rec.backup.ok),
         file: (rec.backup && rec.backup.file) ? String(rec.backup.file).slice(0, 80) : '',
-        error: (rec.backup && rec.backup.error) ? String(rec.backup.error).slice(0, 400) : null
+        error: errOf(bkpErrIdx)
       },
-      saved: { ok: !!(rec.saved && rec.saved.ok), error: (rec.saved && rec.saved.error) ? String(rec.saved.error).slice(0, 400) : null },
-      verify: { ok: !!(rec.verify && rec.verify.ok), error: (rec.verify && rec.verify.error) ? String(rec.verify.error).slice(0, 400) : null },
-      maskedCount: planMask.maskedCount + linesMask.maskedCount + appliedMask.maskedCount
+      saved: { ok: !!(rec.saved && rec.saved.ok), error: errOf(savErrIdx) },
+      verify: { ok: !!(rec.verify && rec.verify.ok), error: errOf(verErrIdx) },
+      maskedCount: planMask.maskedCount + linesMask.maskedCount + appliedMask.maskedCount + errMask.maskedCount
     };
     let tmpPath = '';
     try {

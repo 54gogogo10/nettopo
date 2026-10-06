@@ -20,6 +20,7 @@ const { NetflowServer } = require('./svc-netflow.js');
 
 const READ_CAP = 2 * 1024 * 1024;   // 单文件预览上限
 const LIST_CAP = 300;               // 文件列表条数上限
+const LIST_SCAN_CAP = 20000;        // 编目扫描的目录项上限（TFTP 无认证且无配额，洪流下不能全量枚举）
 
 /** 默认配置（端口 69/21/514/162 为协议标准端口；Linux 非 root 绑定失败时面板会提示改高位端口） */
 function defaultConfig() {
@@ -119,6 +120,8 @@ class NetServices extends EventEmitter {
     opts = opts || {};
     this.baseDir = opts.baseDir;
     this.configBackup = opts.configBackup || null;
+    // 编目扫描上限（可被测试下调；见 listFiles 注释）
+    this.listScanCap = Math.max(10, Math.floor(Number(opts.listScanCap) || LIST_SCAN_CAP));
     this.tftpDir = path.join(this.baseDir, 'tftp');
     this.ftpDir = path.join(this.baseDir, 'ftp');
     this.syslogDir = path.join(this.baseDir, 'syslog');
@@ -244,14 +247,22 @@ class NetServices extends EventEmitter {
     return null;
   }
 
-  /** 收到的文件编目（TFTP 按来源 IP 分目录；FTP 根目录与一级子目录都计入），时间倒序 */
+  /** 收到的文件编目（TFTP 按来源 IP 分目录；FTP 根目录与一级子目录都计入），时间倒序。
+   *  **扫描上限**：TFTP 无认证、无写入配额，LAN 任意主机可推入数万文件；此前先全量
+   *  readdir+lstat 再排序截断，等于每次打开面板都在主进程同步遍历整库（界面卡死）。
+   *  现在边遍历边计数，超过 LIST_SCAN_CAP 立即停止并置 truncated，面板可如实提示未列全。 */
   listFiles() {
     const out = [];
+    let scanned = 0, truncated = false;
+    const hitCap = () => { if (scanned < this.listScanCap) return false; truncated = true; return true; };
     const walk = (svc, root) => {
+      if (hitCap()) return;
       let names = [];
       try { names = fs.readdirSync(root); } catch (e) { return; }
       for (const n of names) {
+        if (hitCap()) return;
         if (n.endsWith('.part') || n.includes('.part-')) continue;
+        scanned++;
         const full = path.join(root, n);
         let st;
         try { st = fs.lstatSync(full); } catch (e) { continue; }
@@ -261,7 +272,9 @@ class NetServices extends EventEmitter {
           let subs = [];
           try { subs = fs.readdirSync(full); } catch (e) { subs = []; }
           for (const f of subs) {
+            if (hitCap()) return;
             if (f.endsWith('.part') || f.includes('.part-')) continue;
+            scanned++;
             const fp = path.join(full, f);
             let st2;
             try { st2 = fs.lstatSync(fp); } catch (e) { continue; }
@@ -276,7 +289,7 @@ class NetServices extends EventEmitter {
     walk('tftp', this.tftpDir);
     walk('ftp', this.ftpDir);
     out.sort((a, b) => b.time - a.time);
-    return { ok: true, items: out.slice(0, LIST_CAP) };
+    return { ok: true, items: out.slice(0, LIST_CAP), truncated, total: out.length };
   }
 
   /** 定位一个收到的文件（白名单校验 + 库内路径校验）。返回绝对路径或 null */

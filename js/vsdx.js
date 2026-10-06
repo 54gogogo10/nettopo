@@ -408,7 +408,10 @@ function buildVSDX(graph, opts) {
     const id = linkShape.get(l.id);
 
     // 独立 2D 文本框（永远水平）：先收集，全部算完后统一防碰撞
-    const lines = opts.showLabels === false ? [] : U.labelLines(l).map(s => U.truncate(s, 40));
+    const lines0 = opts.showLabels === false ? [] : U.labelLines(l).map(s => U.truncate(s, 40));
+    // 两行标注：先按两端设备上下方位排序（与画布 render.js 同口径），再**反转**——
+    // 画布的约定是 index0 画在下方，而 Visio 文本框的首段在上方，不反转则导出件与画布正好相反
+    const lines = lines0.length === 2 ? U.orderLabelLines(lines0, byId[l.a], byId[l.b]).slice().reverse() : lines0;
     if (lines.length) {
       const FONT = 10; // pt
       // 估宽为 pt 口径（measureText 以 size 为单位宽度），换算英寸须 /72（此前误除 96 低估 25%，
