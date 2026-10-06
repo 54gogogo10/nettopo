@@ -21,6 +21,13 @@ const NAME_RE = /^cfg_\d{8}_\d{6}(?:_\d+)?\.cfg$/;
  * 规则是正则（大小写不敏感、逐行匹配），命中即视为噪声行：既不参与 diff 判定，也不产生新备份。 */
 const DEFAULT_IGNORE_RULES = [
   '^\\s*!\\s*Last configuration change',
+  // 华为 YunShan OS（S 系列新版本，真机 S6700 V600R025C10SPC500 实测）用这两行记录配置变更/保存时刻：
+  //   !Last configuration was updated at 2026-10-06 05:56:41+00:00 by _OPS_
+  //   !Last configuration was saved at 2026-10-06 01:08:28+00:00
+  // 旧口径只认思科的 "! Last configuration change at" / "! NVRAM config last updated"，
+  // 于是**两台配置完全相同的交换机被跨设备漂移对比报成 2 处差异**（实测），同设备每次保存后
+  // 也会误报「配置有变化」。这两行不代表有人改配置，属易变行。
+  '^\\s*!\\s*Last configuration was (updated|saved)',
   '^\\s*!\\s*Configuration last modified',
   '^\\s*!\\s*NVRAM config last updated',
   '^\\s*!\\s*Startup-config last updated',

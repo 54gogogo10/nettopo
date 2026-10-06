@@ -2210,13 +2210,50 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const errsI = [];
     mgrI.on('status', (id, s) => { if (s && s.state === 'error') errsI.push(s.text); });
     const endedI = new Promise((res) => mgrI.on('end', (id, reason) => res(reason || '')));
-    const rI = mgrI.connect({ protocol: 'telnet', host: '127.0.0.1', port: initServer.address().port, username: 'netadmin', password: 'Abcd!1234+', autoLogin: true, timeout: 5000 });
+    const rI = mgrI.connect({ protocol: 'telnet', host: '127.0.0.1', port: initServer.address().port, username: 'netadmin', password: 'Abcd!1234+', autoLogin: true, unattended: true, timeout: 5000 });
     ok(rI && rI.ok, '初始口令场景：会话建立并进入自动登录');
     const reasonI = await Promise.race([endedI, new Promise((res) => setTimeout(() => res('（超时未断开）'), 6000))]);
-    ok(errsI.some(t => /先修改初始口令/.test(t)), '初始口令场景：如实报「设备要求先修改初始口令」（实际：' + JSON.stringify(errsI[0] || reasonI) + '）');
+    ok(errsI.some(t => /先修改初始口令/.test(t)), '初始口令场景：无人值守如实报「设备要求先修改初始口令」（实际：' + JSON.stringify(errsI[0] || reasonI) + '）');
     ok(!errsI.some(t => /认证失败/.test(t)), '初始口令场景：不再误报为「用户名或密码被设备拒绝」（排障方向不被带偏）');
     ok(!/\[Y\/N\]/.test(String(gotPwd)) && gotPwd === 'Abcd!1234+', '初始口令场景：只回填口令，不代答 [Y/N]（不替用户改设备口令）');
     ok(!initSocks.size || true, '初始口令场景：会话已断开（不挂死）');
+
+    // 交互式（Web Shell）不得被中止：人可以直接答 Y/N 完成改密，这里必须把提示留给用户，
+    // 且**登录状态机必须停止接管**——否则会把 "Please enter old/new password:" 当成登录提示
+    // 重发登录口令并以「密码被设备拒绝」误报（真机实测：应答 y 后即被自家状态机打断）
+    {
+      let reqAfterBanner = 0;
+      const socks2 = new Set();
+      let phase2 = 0;
+      const srv2 = net.createServer((sock) => {
+        socks2.add(sock);
+        sock.on('close', () => socks2.delete(sock));
+        sock.on('error', () => {});
+        sock.write('Warning: Telnet is not a secure protocol.\r\n\r\nUsername:');
+        sock.on('data', (d) => {
+          const t = d.toString('latin1');
+          if (phase2 === 0) { phase2 = 1; sock.write('\r\nPassword:'); return; }
+          if (phase2 === 1) {
+            phase2 = 2;
+            sock.write('\r\nWarning: The initial password poses security risks. The password needs to be changed, Continue? [Y/N]:');
+            return;
+          }
+          reqAfterBanner++;   // 对话框期间设备收到的任何输入（只应来自"人"，不该来自状态机）
+        });
+      });
+      await new Promise((res) => srv2.listen(0, '127.0.0.1', res));
+      const mgrX = new ShellManager();
+      const errsX = [];
+      mgrX.on('status', (id, s) => { if (s && s.state === 'error') errsX.push(s.text); });
+      const rX = mgrX.connect({ protocol: 'telnet', host: '127.0.0.1', port: srv2.address().port, username: 'netadmin', password: 'Abcd!1234+', autoLogin: true, timeout: 5000 });
+      ok(rX && rX.ok, '初始口令场景（交互式）：会话建立');
+      await new Promise((res) => setTimeout(res, 1200));
+      ok(!errsX.some(t => /先修改初始口令/.test(t)), '初始口令场景（交互式）：不擅自中止会话（提示留给用户答 Y/N）');
+      eq(reqAfterBanner, 0, '初始口令场景（交互式）：登录状态机在该对话框后不再发送任何内容（不重发口令、不误判断连）');
+      mgrX.closeAll();
+      for (const s of socks2) s.destroy();
+      await Promise.race([new Promise((res) => srv2.close(res)), new Promise((res) => setTimeout(res, 1000))]);
+    }
     for (const s of initSocks) s.destroy();
     await Promise.race([new Promise((res) => initServer.close(res)), new Promise((res) => setTimeout(res, 1000))]);
   }
@@ -3277,6 +3314,17 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       await mm2._checkAlerts(job2);
       await new Promise((res) => setTimeout(res, 600));
       ok(events.some(e => e.matched === true && /ffr-tail/.test(e.matchedText || '')), '关键字告警：超预算时丢最旧保留最新命中行');
+      // 触发路径（真机回归）：普通监控任务（非"仅读取"）的输出到达后应即在去抖窗口内检到命中，
+      // 而不是等下一个周期——周期检查点在「命令下发结束」那一刻，真机（华为 S6700）输出要 ~1s 才回来，
+      // 于是首轮永远检不到、命中要等 next cycle（intervalSec 大时延迟可达一小时）
+      mm2.start({ key: 'c@h', deviceId: 'c', name: 'c', protocol: 'ssh', host: '1.2.3.4', port: 22, commands: ['echo x'], alerts: [{ pattern: 'realdev-hit', note: 't' }] });
+      const job3 = mm2.jobs.get('c@h');
+      mm2._bySid.set('sx3', job3.key);
+      const evBefore = events.length;
+      mm2._onOutput('sx3', 'banner\r\nrealdev-hit cpu 95%\r\n');
+      await new Promise((res) => setTimeout(res, 900));
+      ok(events.length > evBefore && events.some(e => e.matched === true && /realdev-hit/.test(e.matchedText || '')),
+        '关键字告警：普通任务输出到达后即在去抖窗口内触发（真机回归：此前要等下一个周期）');
       mm2.stopAll();
       rmTmp(tmpA);
     }
@@ -8278,6 +8326,18 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(sameAfterIgnore(volatileA, volatileB, []) === false, '不过滤时噪声行差异当然算变更（对照）');
       const realB = volatileB.replace('10.0.0.1', '10.0.0.9');
       ok(sameAfterIgnore(volatileA, realB, DEFAULT_IGNORE_RULES) === false, '真实配置改动仍然判定为变更（不误吞）');
+      // 真机回归（华为 S6700 / YunShan OS V600R025C10SPC500）：配置头两行时间戳每次保存都会变，
+      // 旧默认规则只认思科写法 → 两台完全相同的交换机被跨设备漂移对比报成 2 处差异
+      {
+        const yA = '!Software Version V600R025C10SPC500\n!Last configuration was updated at 2026-10-06 05:56:41+00:00 by _OPS_\n!Last configuration was saved at 2026-10-06 01:08:28+00:00\nsysname HUAWEI\nreturn';
+        const yB = '!Software Version V600R025C10SPC500\n!Last configuration was updated at 2026-10-06 05:57:23+00:00 by _OPS_\n!Last configuration was saved at 2026-10-06 01:09:08+00:00\nsysname HUAWEI\nreturn';
+        ok(sameAfterIgnore(yA, yB, DEFAULT_IGNORE_RULES) === true, '真机回归：YunShan OS 配置时间戳属易变行（不算配置变更）');
+        const yDiff = ConfigBackupStore.diffConfigText(yA, yB, DEFAULT_IGNORE_RULES);
+        const yAdd = []; for (const h of (yDiff.hunks || [])) for (const ln of (h.lines || [])) if (ln.type !== 'same') yAdd.push(ln.text);
+        eq(yDiff.changed, false, '真机回归：两台仅时间戳不同的交换机跨设备对比不报漂移（实际差异 ' + yAdd.length + ' 行）');
+        const yReal = yB.replace('sysname HUAWEI', 'sysname LSW-2');
+        ok(sameAfterIgnore(yA, yReal, DEFAULT_IGNORE_RULES) === false, '真机回归：sysname 变化仍判为真实漂移（规则不误吞）');
+      }
 
       // 跨设备漂移对比（配置备份中心「跨设备对比」）：同一库两台设备各自入库，读出后跨内容 diff
       {

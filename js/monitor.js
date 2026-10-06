@@ -1449,6 +1449,7 @@ class MonitorManager extends EventEmitter {
       jump: job.jump || null,
       cols: 120, rows: 40,
       autoLogin: job.protocol === 'telnet', // Telnet 无传输层认证：由 shell 层自动应答 Username:/Password: 登录提示（SSH 不受影响）
+      unattended: true,                     // 无人值守：强制改初始口令这类要人决定的提示一律中止并如实报原因
       expectFp: job.expectFp || '',
       owner: 'monitor' // 标记归属：Web Shell 窗口关闭时 closeAll('monitor') 不会误杀监控连接
     });
@@ -2169,8 +2170,11 @@ class MonitorManager extends EventEmitter {
         if (job._backupCap) captured.push(t);
       }
     }
-    // 仅读取模式：不跑周期循环，输出到达后去抖检查告警（避免高频输出逐行触发正则）
-    if (job.readOnly && job.alerts.length && job._alertPending && job._alertPending.length && !job._alertTimer && !job._alertChecking) {
+    // 输出到达后去抖检查告警（避免高频输出逐行触发正则）。
+    // **对所有带告警关键字的任务生效，不只"仅读取"模式**：周期循环的检查点在「命令下发结束」
+    // 那一刻，而真机（华为 S6700 实测）输出要 1s 左右才回来——于是首轮永远检不到命中，
+    // 命中要等下一个周期，intervalSec 设大（如备份类 3600s）时告警延迟可达一小时。
+    if (job.alerts.length && job._alertPending && job._alertPending.length && !job._alertTimer && !job._alertChecking) {
       job._alertTimer = setTimeout(() => {
         job._alertTimer = null;
         if (job.enabled && !job.stopping) this._checkAlerts(job).catch(() => { /* 告警检查失败不中断监控 */ });
@@ -2454,6 +2458,7 @@ class MonitorManager extends EventEmitter {
         jump: job.jump || null,
         cols: 120, rows: 40,
         autoLogin: job.protocol === 'telnet', // 与监控会话同口径：独立备份会话也要过 Telnet 登录提示
+        unattended: true,                     // 无人值守：同上（强制改初始口令不代答）
         expectFp: job.expectFp || '',
         owner: 'monitor'
       });

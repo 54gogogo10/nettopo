@@ -213,6 +213,10 @@ class ShellManager extends EventEmitter {
       expectFp: String(opts.expectFp || '').trim(),
       // Telnet 明文登录自动应答（仅 _telnet 消费；后台监控场景无人工介入，必须自动过登录提示）
       autoLogin: !!opts.autoLogin,
+      // 无人值守标记（监控/一次性采集/下发置 true；交互式 Web Shell 不置）：
+      // 用于「设备要求先修改初始口令」这类**必须由人决定**的交互提示——无人值守时中止并如实报原因，
+      // 交互式则把提示原样留给用户处理（见 _telnet 的 loginFeed）
+      unattended: !!opts.unattended,
       jump,
       // SSH 公钥认证（可选）：私钥内容 + 私钥口令；缺省仍走密码/keyboard-interactive
       privateKey: typeof opts.privateKey === 'string' ? opts.privateKey.trim() : '',
@@ -455,6 +459,7 @@ class ShellManager extends EventEmitter {
         jump: opts.jump && typeof opts.jump === 'object' ? opts.jump : null,
         cols: 200, rows: 50, // 宽终端：减少设备输出折行（表格解析更稳）
         autoLogin: protocol === 'telnet',
+        unattended: true,   // 无人值守：要求人工决定的交互提示（如强制改初始口令）一律中止并如实报原因
         encoding: opts.encoding === 'gbk' ? 'gbk' : 'utf8',
         expectFp: String(opts.expectFp || '').trim(),
         owner: 'monitor' // 后台采集语义：Web Shell 窗口关闭的 closeAll('monitor') 不误杀；结束后参数副本自动清理
@@ -707,6 +712,7 @@ class ShellManager extends EventEmitter {
         jump: opts.jump && typeof opts.jump === 'object' ? opts.jump : null,
         cols: 200, rows: 50,
         autoLogin: protocol === 'telnet',
+        unattended: true,   // 无人值守：要求人工决定的交互提示（如强制改初始口令）一律中止并如实报原因
         encoding: opts.encoding === 'gbk' ? 'gbk' : 'utf8',
         expectFp: String(opts.expectFp || '').trim(),
         owner: 'monitor' // 后台语义：Web Shell 窗口关闭的 closeAll('monitor') 不误杀
@@ -1315,15 +1321,18 @@ class ShellManager extends EventEmitter {
     const loginFeed = (plain) => {
       if (loginPhase >= 3) return;
       loginBuf = (loginBuf + plain).slice(-160); // 提示符可能跨包拆分（"Usernam"+"e: "），滑窗匹配尾部
-      // 华为 VRP 首次登录（新账号 / 初始口令未改）会强制改密：
+      // 登录后设备弹出「需要人工决定」的对话框——典型是华为 VRP 强制改初始口令：
       //   `Warning: The initial password poses security risks. The password needs to be changed, Continue? [Y/N]:`
-      // 答 N → `Error: The initial password of user must be changed.` 并直接断开会话。
-      // 自动答 Y 等于替用户改设备口令（写操作，且新口令无处安放），一律不代答；
-      // 但必须**如实报原因**——旧实现只看到「又要用户名」，报成"用户名或密码被设备拒绝"，
-      // 把排障方向带偏到凭据上（真机实测：192.168.50.102-104 三台华为设备均为此状态）。
-      if (/(?:initial\s+password|password\s+needs?\s+to\s+be\s+changed|must\s+be\s+changed)/i.test(loginBuf)) {
+      // 一旦出现，**必须立刻停止登录自动化**：后续的 `Please enter old/new password:` 会被登录状态机
+      // 当成登录提示而重发登录口令，最后以「Telnet 认证失败：密码被设备拒绝」误报并断开会话——
+      // 真机实测（192.168.50.102）：交互式应答 y 之后正是被自家状态机打断，人工根本无法完成改密。
+      // 处理：无人值守（监控/采集/下发，带 unattended:true）→ 中止并如实报原因；
+      //       交互式（Web Shell）→ 只停止接管，把对话框留给用户（不代答 Y/N，那是替用户改设备口令）。
+      if (/(?:initial\s+password|password\s+needs?\s+to\s+be\s+changed|must\s+be\s+changed|Continue\?\s*\[Y\/N\])/i.test(loginBuf)) {
         loginPhase = 3;
-        loginFail('设备要求先修改初始口令（' + String(o.host) + '）：请在设备本地/Web 首次登录改密后再采集（自动化不代改口令）');
+        if (o.unattended) {
+          loginFail('设备要求先修改初始口令（' + String(o.host) + '）：请在设备本地/SSH/Web 首次登录改密后再采集（无人值守不代改口令）');
+        }
         return;
       }
       // 提示符后的尾随空白只认空格/制表符：登录提示总是行内等待输入，永不被 \r\n 收尾。
