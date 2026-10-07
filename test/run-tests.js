@@ -3792,7 +3792,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(rbLines.indexOf(' undo ip address 10.0.30.1 255.255.255.0') >= 0 && rbLines.indexOf('interface Vlanif30') >= 0,
         '回滚：新建块的子命令取反删除且保留缩进（块上下文无缩进）');
       const iSub = rbLines.indexOf(' undo ip address 10.0.30.1 255.255.255.0');
-      ok(iSub >= 0 && rbLines.indexOf('undo interface Vlanif30') === iSub + 1, '回滚：先撤销子命令、再删除新建块（LIFO）');
+      // 真机实测：块内子命令的逆操作之后必须先 `quit` 退出子视图，否则在接口视图里下发
+      // `undo interface …` 会被设备拒绝（整条回滚中断、新建块删不掉）
+      ok(iSub >= 0 && rbLines[iSub + 1] === 'quit' && rbLines.indexOf('undo interface Vlanif30') === iSub + 2,
+        '回滚：先撤销子命令、退出子视图、再删除新建块（LIFO + 视图回退）', JSON.stringify(rbLines.slice(0, 6)));
       ok(rbLines.indexOf(' ip address 10.0.10.1 255.255.255.0') >= 0, '回滚：覆盖式变更回填变更前原值（含缩进）');
       ok(rbLines.indexOf(' description OLD') >= 0, '回滚：description 回填原值');
       ok(/^# 回滚变更单/.test(rb.text), '回滚：文本带表头说明');
@@ -3807,6 +3810,34 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const rbWrap = U.buildRollback(U.parseChangeSet(wrapLine).lines, prev, 'cisco');
       ok(rbWrap.manual.length === 1 && /外壳包装行/.test(rbWrap.manual[0].why), '回滚：外壳包装行列为人工项（不产出非法取反）');
       ok(rbWrap.lines.every(l => l.text.indexOf('no nt-cli') < 0), '回滚：可下发部分不含 `no nt-cli …` 这类非法命令');
+      // 真机回归（华为 S6700 / YunShan OS）：新增的 `description <文本>` 取反成 `undo description <文本>`
+      // 被设备拒（Error: Too many parameters found at '^' position.）→ 整条回滚中断、新建块删不掉。
+      // 属性型子命令的取反形式不接取值，必须生成 `undo description`。
+      {
+        const prevDesc = 'interface GigabitEthernet0/0/1\n port link-type access';
+        const rbDesc = U.buildRollback(U.parseChangeSet('interface LoopBack99\n description nettopo-verify').lines, prevDesc, 'huawei');
+        const dl = rbDesc.lines.map(l => l.text);
+        ok(dl.indexOf(' undo description') >= 0, '真机回归：属性型子命令取反不带取值（undo description）', JSON.stringify(dl));
+        ok(dl.every(l => !/undo description\s+\S/.test(l)), '真机回归：不产出 `undo description <文本>`（设备会报 Too many parameters）');
+        ok(dl.indexOf('undo interface LoopBack99') >= 0, '真机回归：新建块仍按 LIFO 删除');
+        ok(/不接参数/.test(rbDesc.lines.filter(l => l.text.indexOf('undo description') >= 0)[0].why || ''), '真机回归：回滚单里说明该行为何不带取值');
+        // 取值的命令（标识符型）必须保留取值，不能被这条规则误伤
+        const rbId = U.buildRollback(U.parseChangeSet('interface GigabitEthernet0/0/2\n port default vlan 20').lines, prevDesc, 'huawei');
+        ok(rbId.lines.map(l => l.text).indexOf(' undo port default vlan') >= 0, '取反规则：port default vlan 同样不接取值');
+        const rbKeep = U.buildRollback(U.parseChangeSet('vlan 30\n description X2').lines, prevDesc, 'huawei');
+        ok(rbKeep.lines.map(l => l.text).indexOf('undo vlan 30') >= 0, '取反规则：标识符型命令（vlan 30）保留取值（不误删参数）');
+        const rbSys = U.buildRollback(U.parseChangeSet('sysname NEW-SW').lines, prevDesc, 'huawei');
+        ok(rbSys.lines.map(l => l.text).indexOf('undo sysname') >= 0, '取反规则：顶层属性命令（sysname）也不带取值');
+        // 真机回归：块内子命令逆操作后必须退出子视图再删块（华为 quit / 思科 exit）
+        const iSubD = dl.indexOf(' undo description');
+        ok(iSubD >= 0 && dl[iSubD + 1] === 'quit' && dl.indexOf('undo interface LoopBack99') === iSubD + 2,
+          '真机回归：删块前先退出子视图（华为 quit）', JSON.stringify(dl));
+        // 思科接口块按设计列为人工项（无法 no interface）→ 用思科可删的块验证 exit
+        const rbCiscoSub = U.buildRollback(U.parseChangeSet('router ospf 1\n network 10.0.0.0 0.0.0.255 area 0').lines, prevDesc, 'cisco');
+        const cl = rbCiscoSub.lines.map(l => l.text);
+        ok(cl.indexOf('exit') >= 0 && cl.indexOf('no router ospf 1') === cl.indexOf('exit') + 1,
+          '真机回归：思科用 exit 退出子视图后再删块', JSON.stringify(cl));
+      }
       ok(/需人工确认 1 行/.test(rbWrap.text), '回滚：表头如实标注人工项数量');
 
       // 恢复变更单（备份中心「恢复此备份」）：current（当前配置近似）→ target（所选备份）
@@ -3816,7 +3847,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(rr.ok === true && rr.del === 4 && rr.add === 5, '恢复：删除 4 行 / 恢复+覆盖 5 行（实际 ' + rr.del + '/' + rr.add + '）');
       ok(rr.text.indexOf('undo vlan 99') >= 0 && rr.text.indexOf('undo acl number 3001') >= 0, '恢复：消失的顶层块取反删除');
       ok(rr.text.indexOf(' rule 5 permit ip') < 0, '恢复：整块删除时子命令不再逐行取反（块级 undo 已覆盖）');
-      ok(rr.text.indexOf('interface GE0/0/1\nundo port default vlan 99') >= 0, '恢复：子命令取反先补块头（重新进入所在块）');
+      ok(rr.text.indexOf('interface GE0/0/1\nundo port default vlan') >= 0, '恢复：子命令取反先补块头（重新进入所在块）且属性型命令不带取值');
       ok(rr.text.indexOf('undo ip address 10.0.30.254') < 0 && rr.text.indexOf('ip address 10.0.30.1 255.255.255.0') >= 0, '恢复：同块同键不同值走覆盖，不产出冗余 undo');
       ok(rr.text.indexOf('ip route-static 0.0.0.0 0 10.0.0.1') >= 0, '恢复：覆盖式恢复新取值');
       const rrSame = U.buildRestoreChangeSet(restoreTarget, restoreTarget, 'huawei');

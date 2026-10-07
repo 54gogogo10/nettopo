@@ -3217,20 +3217,22 @@ U.checkInspectCommands = (cmds) => {
 
 /** 厂家配置模式口径（仅网络设备：Linux 无配置模式概念，不参与下发） */
 U.DEPLOY_VENDORS = {
+  // back = 退出**当前子视图**回到上级视图。删除块的命令必须在上级视图下发：真机实测
+  // （华为 S6700）在接口视图里下发 `undo interface LoopBack99` 被设备拒绝，回滚单因此中断、块删不掉。
   huawei: {
-    label: '华为 VRP', enter: 'system-view', exit: 'return', save: 'save', negate: 'undo',
+    label: '华为 VRP', enter: 'system-view', exit: 'return', save: 'save', negate: 'undo', back: 'quit',
     screen: 'screen-length 0 temporary', showCfg: 'display current-configuration'
   },
   h3c: {
-    label: 'H3C Comware', enter: 'system-view', exit: 'return', save: 'save force', negate: 'undo',
+    label: 'H3C Comware', enter: 'system-view', exit: 'return', save: 'save force', negate: 'undo', back: 'quit',
     screen: 'screen-length disable', showCfg: 'display current-configuration'
   },
   cisco: {
-    label: '思科 IOS', enter: 'configure terminal', exit: 'end', save: 'write memory', negate: 'no',
+    label: '思科 IOS', enter: 'configure terminal', exit: 'end', save: 'write memory', negate: 'no', back: 'exit',
     screen: 'terminal length 0', showCfg: 'show running-config'
   },
   ruijie: {
-    label: '锐捷', enter: 'configure terminal', exit: 'end', save: 'write memory', negate: 'no',
+    label: '锐捷', enter: 'configure terminal', exit: 'end', save: 'write memory', negate: 'no', back: 'exit',
     screen: 'terminal length 0', showCfg: 'show running-config'
   }
 };
@@ -3545,8 +3547,38 @@ U.deployPreview = (lines, prevText, vendorKey, mgmtIp) => {
  *  - 无法可靠求逆的行不进入可下发部分，以注释形式出现在 text 里并列入 manual
  *  返回 {ok, error, text, lines:[{text,kind,why}], manual:[{line,why}], reversible}
  *  prevText 为空时 ok=false —— 没有基线就谈不上回滚，这正是「强制前置备份」的意义。 */
-U.buildRollback = (lines, prevText, vendorKey) => {
-  const v = U.deployVendor(vendorKey);
+/** 取反形式**不接参数**的命令前缀（属性型子命令）：生成回滚/恢复变更单时，命中即下发
+ *  `<undo|no> <前缀>`，丢掉后面的取值。
+ *  真机实测（华为 S6700 / YunShan OS V600R025C10SPC500）：把新增的 `description nettopo-verify`
+ *  取反成 `undo description nettopo-verify`，设备回 `Error: Too many parameters found at '^' position.`
+ *  ——该命令的 undo 形式不接受参数，正确写法是 `undo description`；结果整条回滚中断、接口删不掉。
+ *  华为 VRP 与思科/锐捷在这类「属性型」命令上口径一致（`no description` / `no mtu`），故本表不分厂家。
+ *  设备 CLI 帮助实测（华为 S6700 `undo X ?`）：description / port link-type 只有 `<cr>`（只能不带参，
+ *  带参必报 Too many parameters）；port default vlan 为 `INTEGER<1-4094> | <cr>`（参数可选，两种都合法）。 */
+const UNDO_NO_ARG_PREFIX = [
+  'description', 'alias', 'mtu', 'speed', 'duplex', 'negotiation auto', 'bandwidth', 'sysname',
+  'clock timezone', 'clock daylight-saving-time',
+  'port default vlan', 'port link-type', 'port trunk pvid vlan', 'port trunk allow-pass vlan',
+  'port hybrid pvid vlan', 'port hybrid untagged vlan', 'port hybrid tagged vlan',
+  'dot1q termination vid', 'qinq termination pe-vid', 'stp edged-port', 'stp root-protection',
+  'stp loop-protection', 'stp bpdu-protection', 'dhcp snooping trusted', 'dhcp snooping enable'
+];
+/** 命中的最长「取反不接参数」前缀（无命中返回空串）。要求前缀后是空白，避免 `descriptionX` 误命中 */
+function undoNoArgPrefix(text) {
+  const t = String(text == null ? '' : text).trim().toLowerCase();
+  let best = '';
+  for (const k of UNDO_NO_ARG_PREFIX) {
+    if (t.length > k.length && t.slice(0, k.length) === k && /\s/.test(t.charAt(k.length)) && k.length > best.length) best = k;
+  }
+  return best;
+}
+/** 生成子命令的取反行：属性型命令去掉取值（`undo description`），其余保持原样（`undo snmp-agent community read X`） */
+function negateSub(lead, negate, text) {
+  const keep = undoNoArgPrefix(text);
+  return keep ? (lead + negate + ' ' + keep) : (lead + negate + ' ' + text);
+}
+
+U.buildRollback = (lines, prevText, vendorKey) => {  const v = U.deployVendor(vendorKey);
   const prev = U.cfgSplit(prevText || '');
   if (!prev.length) return { ok: false, error: '没有变更前配置基线，无法生成回滚变更单（请先执行一次前置备份）', text: '', lines: [], manual: [], reversible: 0 };
   const topSet = new Set(prev.filter(o => o.indent === 0).map(o => o.text.trim()));
@@ -3557,6 +3589,7 @@ U.buildRollback = (lines, prevText, vendorKey) => {
   }).filter(o => o.text);
   const out = [];
   const manual = [];
+  let inSubView = false;   // 上一条逆操作是在子视图里下发的（块级删除前必须先 back 退出）
   const push = (text, kind, why) => {
     if (!text) return;
     // 只压连续重复（同块上下文重复进入无意义）；不做全局去重——不同块里同样的值行都要下发
@@ -3592,13 +3625,21 @@ U.buildRollback = (lines, prevText, vendorKey) => {
         manual.push({ line: text, why: '思科/锐捷无法用 no interface 删除接口，需人工处理（可改用 default interface）' });
         continue;
       }
-      inv = v.negate + ' ' + text; kind = 'undo'; why = '删除本次新建的块';
+      // 块内子命令的逆操作刚下发过 → 先退出子视图再删块：删块的命令在子视图里会被设备拒绝
+      // （真机实测：接口视图里 `undo interface LoopBack99` 报错，整条回滚中断）
+      if (inSubView) { push(v.back, 'exit', '退出子视图后删除块'); inSubView = false; }
+      inv = negateSub('', v.negate, text); kind = 'undo'; why = '删除本次新建的块';
     } else {
       const cands = byCtx.get(ctx) || [];
       if (cands.some(c => c.trim === text)) continue;        // 变更前同块已有同一行 → 无需撤销
       const best = cfgBestMatch(cands, text);
       if (best) { inv = best.raw; kind = 'restore'; why = '恢复变更前的取值'; }
-      else { inv = lead + v.negate + ' ' + text; kind = 'undo'; why = '删除本次新增的子命令'; }
+      else {
+        const keep = undoNoArgPrefix(text);
+        inv = negateSub(lead, v.negate, text); kind = 'undo';
+        why = keep ? ('删除本次新增的子命令（' + v.negate + ' ' + keep + '：该命令的取反形式不接参数）') : '删除本次新增的子命令';
+      }
+      inSubView = true;   // 本条逆操作在子视图内下发，块级删除前必须先退出
     }
     if (ctx && indent > 0) push(ctx, 'context', '重新进入所在块');   // 逆序下发：先补块上下文再下发逆操作
     push(inv, kind, why);
@@ -3606,7 +3647,7 @@ U.buildRollback = (lines, prevText, vendorKey) => {
   const head = [
     '# 回滚变更单（自动生成 · ' + v.label + '）',
     '# 依据：变更前配置基线；可自动回滚 ' + out.filter(o => o.kind !== 'context').length + ' 行、需人工确认 ' + manual.length + ' 行',
-    '# 提示：部分平台不接受带参数的 ' + v.negate + ' 形式，个别行若下发失败请按结果报告手工处理'
+    '# 提示：属性型子命令（description/mtu/speed 等）的取反形式不接取值，已自动按 `' + v.negate + ' <命令>` 生成；其余行若下发失败请按结果报告手工处理'
   ].concat(manual.map(m => '#   [需人工] ' + m.line + ' —— ' + m.why));
   const text = head.join('\n') + '\n' + out.map(o => o.text).join('\n') + '\n';
   return { ok: true, error: null, text, lines: out, manual, reversible: out.filter(o => o.kind !== 'context').length };
@@ -3641,6 +3682,7 @@ U.buildRestoreChangeSet = (targetText, currentText, vendorKey) => {
   const tgtIdx = idx(target);
   const out = [];
   const manual = [];
+  let inSubView = false;   // 上一条逆操作在子视图内下发（块级删除前必须先 back 退出子视图）
   const push = (text) => {
     const last = out[out.length - 1];
     if (last && last.text === text) return; // 连续重复（同块反复进入）去重
@@ -3660,7 +3702,9 @@ U.buildRestoreChangeSet = (targetText, currentText, vendorKey) => {
         manual.push({ line: t, why: '思科/锐捷无法用 no interface 删除接口，需人工处理' });
         continue;
       }
-      push(v.negate + ' ' + t); del++;
+      // 上一条逆操作在子视图内（如 `undo description`）→ 先退出子视图，否则块级删除会被设备拒绝
+      if (inSubView) { push(v.back); inSubView = false; }
+      push(negateSub('', v.negate, t)); del++;
     } else if (!targetTop.has(ctx)) {
       continue;                            // 所在块整体被删：块级 undo 已覆盖
     } else if (freeTextCtx(ctx)) {
@@ -3674,7 +3718,8 @@ U.buildRestoreChangeSet = (targetText, currentText, vendorKey) => {
       if ((tgtIdx.byCtx.get(ctx) || []).some(c => cfgBestMatch(
         (tgtIdx.byCtx.get(ctx) || []).map(x => ({ raw: x, trim: x })), t))) continue; // 同键不同值 → 添加部分的覆盖行生效
       push(ctx);
-      push(v.negate + ' ' + t); del++;
+      push(negateSub('', v.negate, t)); del++;
+      inSubView = true;   // 该逆操作在子视图内下发
     }
   }
   // ---- 添加部分：target 有而 current 没有的行（按 target 原顺序） ----
