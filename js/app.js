@@ -9380,7 +9380,7 @@ function openMonitorConfig(id) {
         <div class="mh-sep">在线探测</div>
         <label class="mh-pr" title="按间隔探测该地址连通性，失败时侧栏变红并弹通知（仅读取模式同样适用）"><input type="checkbox" class="mh-pr-cb"${r.probeEnabled ? ' checked' : ''}/>在线探测</label>
         <select class="mh-pr-type" title="探测方式"><option value="tcp"${r.probeType !== 'icmp' ? ' selected' : ''}>TCP</option><option value="icmp"${r.probeType === 'icmp' ? ' selected' : ''}>ICMP</option></select>
-        <input class="mh-pr-int" type="number" min="5" max="3600" title="探测间隔（秒）" value="${U.escHtml(r.probeIntervalSec)}"/><span class="mh-unit">秒</span>
+        <input class="mh-pr-int" type="number" min="5" max="3600" title="探测间隔（秒）。对 Telnet(23) 等CLI 端口建议 ≥300：每次 TCP 探测设备侧都要挂一个 VTY 会话，间隔过短会触发设备连接防御甚至占满 VTY（真机实测：5 秒间隔数分钟后该设备所有新连接被拒）" value="${U.escHtml(r.probeIntervalSec)}"/><span class="mh-unit">秒</span>
         <input class="mh-pr-port" type="number" min="1" max="65535" placeholder="端口(默认管理口)" title="探测目标端口，留空 = 管理端口" value="${U.escHtml(r.probePort)}"/>
         <div class="mh-sep">输出关键字告警</div>
         <button type="button" class="tb mh-alert-btn" title="输出匹配这些关键字时告警">告警${Array.isArray(r.alerts) && r.alerts.length ? '（' + r.alerts.length + '）' : ''}</button>

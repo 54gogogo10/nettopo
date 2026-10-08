@@ -1529,7 +1529,9 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
     if (!v3user) return { ok: false, error: 'SNMP v3 需填写用户名' };
     target = {
       user: v3user,
-      authProto: (() => { const p = String((p && p.v3AuthProto) || 'sha').toLowerCase(); return p === 'md5' ? 'md5' : (/^sha2-(224|256|384|512)$/.test(p) ? p : 'sha'); })(),
+      // 内层箭头不得再声明 const p（遮蔽外层形参会 TDZ 报错——真机暴露：v3 Walk 一律
+      // 「Cannot access 'p' before initialization」，v2c 不受影响，smoke mock 测不出）
+      authProto: (() => { const ap = String((p && p.v3AuthProto) || 'sha').toLowerCase(); return ap === 'md5' ? 'md5' : (/^sha2-(224|256|384|512)$/.test(ap) ? ap : 'sha'); })(),
       authPass: String((p && p.v3AuthPass) || '').slice(0, 128),
       privProto: String((p && p.v3PrivProto) || 'aes').toLowerCase() === 'des' ? 'des' : 'aes',
       privPass: String((p && p.v3PrivPass) || '').slice(0, 128)

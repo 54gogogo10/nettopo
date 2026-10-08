@@ -1793,7 +1793,9 @@ class MonitorManager extends EventEmitter {
         try {
           if (wantIf) await this._collectIfTable(job);
           if (wantPerf) await this._collectPerf(job);
-        } catch (e) { /* 采集失败静默：不影响监控主流程 */ }
+        } catch (e) {
+          if (process.env.NETTOPO_SMOKE) console.error('[snmp-poll] 采集异常', job.host, String((e && e.message) || e)); // 真机排障观测点
+        }
         job._snmpBusy = false;
       }
     } else {
@@ -1809,7 +1811,10 @@ class MonitorManager extends EventEmitter {
     const port = job.sysinfo.snmpPort || 161;
     // 1. 接口名表（ifDescr walk 拿到全部 ifIndex）
     const descr = await snmpWalk(OID_IF_DESCR, host, target, 3000, port);
-    if (!descr.ok || !descr.varbinds.length) return;
+    if (!descr.ok || !descr.varbinds.length) {
+      if (process.env.NETTOPO_SMOKE) console.error('[snmp-if] ifDescr walk 失败', host, descr.error || ('0 行 · target=' + (target && target.user ? 'v3:' + target.user : 'v2c')));
+      return;
+    }
     const ifs = new Map(); // ifIndex -> {i, n, oper, speed, inC, outC}
     for (const vb of descr.varbinds) {
       const idx = vb.oid.slice(OID_IF_DESCR.length + 1);

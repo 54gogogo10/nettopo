@@ -3839,6 +3839,25 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
           '真机回归：思科用 exit 退出子视图后再删块', JSON.stringify(cl));
       }
       ok(/需人工确认 1 行/.test(rbWrap.text), '回滚：表头如实标注人工项数量');
+      // 真机回归（华为 S6700 / YunShan OS 2026-10-08）：多上下文变更单里的**中段视图切换行**
+      // （quit——退出 LoopBack99 子视图再配 info-center loghost）此前被按标识符型求逆成
+      // `undo quit`，真机必拒（Error: Unrecognized command），回滚第 2 行即中断、LoopBack99 删不掉。
+      // 视图切换行是位置性行、不是配置状态，不参与求逆。
+      {
+        const planQ = U.parseChangeSet('interface LoopBack99\n description nettopo-verify\nquit\ninfo-center loghost 192.168.50.111');
+        ok(planQ.lines.length === 4 && planQ.skipped.mode === 0, '变更单解析：中段 quit 保留（下发时用于退出子视图）', JSON.stringify(planQ.lines.map(l => l.text)));
+        const rbQ = U.buildRollback(planQ.lines, 'interface Vlanif1\n ip address 10.0.0.1 255.255.255.0', 'huawei');
+        const ql = rbQ.lines.map(l => l.text);
+        ok(ql.every(l => !/^undo (quit|return|exit|end)$/i.test(l.trim())), '真机回归：视图切换行不产出 `undo quit` 这类非法逆操作', JSON.stringify(ql));
+        const iLog = ql.indexOf('undo info-center loghost 192.168.50.111');
+        ok(iLog === 0, '真机回归：回滚按逆序先撤后配的 loghost（system 视图直发）');
+        ok(ql.indexOf('interface LoopBack99') === iLog + 1 && ql[iLog + 2] === ' undo description' && ql[iLog + 3] === 'quit' && ql[iLog + 4] === 'undo interface LoopBack99',
+          '真机回归：块子命令求逆仍先重进块、退出子视图、再删块（顺序不被视图切换行破坏）', JSON.stringify(ql));
+        // 恢复变更单同口径：配置文本里若混入视图切换行，不产出 undo quit / 也不当新增行重放
+        const rsQ = U.buildRestoreChangeSet('sysname A\nquit\nvlan 20', 'sysname B', 'huawei');
+        ok(rsQ.ok && rsQ.text.indexOf('undo quit') < 0 && rsQ.text.split('\n').every(l => l.trim() !== 'quit' || l.startsWith('#')),
+          '真机回归：恢复变更单同样跳过视图切换行', rsQ.text.replace(/\s+/g, ' ').slice(0, 90));
+      }
 
       // 恢复变更单（备份中心「恢复此备份」）：current（当前配置近似）→ target（所选备份）
       const restoreTarget = 'sysname SW-POOL\nvlan 20\nvlan 30\ninterface Vlanif30\n ip address 10.0.30.1 255.255.255.0\n description TO-CORE\ninterface GE0/0/1\n port link-type trunk\nip route-static 0.0.0.0 0 10.0.0.1';

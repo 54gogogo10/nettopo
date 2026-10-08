@@ -3616,6 +3616,11 @@ U.buildRollback = (lines, prevText, vendorKey) => {  const v = U.deployVendor(ve
     let inv = '', kind = '', why = '';
     if (neg) {
       inv = neg[1] + neg[3].trim(); kind = 'restore'; why = '重新启用（本次为删除/关闭）';
+    } else if (U.DEPLOY_EXIT_RE.test(text)) {
+      // 中段视图切换行（quit/return/exit/end）：下发时用来退出子视图的位置性行，不是配置状态，
+      // 没有也不该有「逆操作」——此前按标识符型生成 `undo quit`，真机必拒（Error: Unrecognized
+      // command），回滚第 2 行即中断、后续新建块删不掉（2026-10-08 华为 S6700 真机实测）
+      continue;
     } else if (shellWrapRe.test(text)) {
       manual.push({ line: text, why: '外壳包装行（如 vtysh/nt-cli -c "…"）：配置在引号内，无法自动求逆——请按其内部配置行手工生成回滚' });
       continue;
@@ -3695,6 +3700,7 @@ U.buildRestoreChangeSet = (targetText, currentText, vendorKey) => {
   let del = 0;
   for (const o of current) {
     const t = o.text.trim();
+    if (U.DEPLOY_EXIT_RE.test(t)) continue;   // 视图切换行不是配置状态（与 buildRollback 同口径）
     const ctx = o.indent === 0 ? '' : o.ctx;
     if (o.indent === 0) {
       if (targetTop.has(t)) continue;
@@ -3726,6 +3732,7 @@ U.buildRestoreChangeSet = (targetText, currentText, vendorKey) => {
   let add = 0;
   for (const o of target) {
     const t = o.text.trim();
+    if (U.DEPLOY_EXIT_RE.test(t)) continue;   // 视图切换行不是配置状态（与 buildRollback 同口径）
     const ctx = o.indent === 0 ? '' : o.ctx;
     if (o.indent === 0) {
       if (topSet.has(t)) continue;         // current 已有该块
