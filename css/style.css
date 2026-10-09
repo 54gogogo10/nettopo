@@ -53,10 +53,10 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 input, select, textarea { font: inherit; color: inherit; }
 /* 裸输入控件兜底（不在 .frow/.m-row 等容器内的）：跟随主题变量，避免 Chromium 默认浅色底在暗色主题刺眼。
  * 已有专属样式的输入（.frow/.m-row/.cfg-box/.wv-addr/.sh-cast 等）特异性更高，不受影响。 */
-textarea, input[type="text"], input[type="password"], input[type="number"], input:not([type]) {
+textarea, select, input[type="text"], input[type="password"], input[type="number"], input:not([type]) {
   background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
 }
-textarea:focus, input[type="text"]:focus, input[type="password"]:focus, input[type="number"]:focus, input:not([type]):focus {
+textarea:focus, select:focus, input[type="text"]:focus, input[type="password"]:focus, input[type="number"]:focus, input:not([type]):focus {
   border-color: var(--accent); outline: none;
 }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
