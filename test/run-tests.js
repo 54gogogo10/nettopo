@@ -9614,6 +9614,23 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(missing.length === 0, 'i18n：关键词条英文覆盖完整' + (missing.length ? '（缺：' + missing.join('、') + '）' : ''));
       I18N2.setLang('zh');
       eq(I18N2.t('文件'), '文件', 'i18n：切回中文恢复原样');
+      // 语言包：导出/导入回路、覆盖内建词条、脏数据白名单清洗
+      const pack = I18N2.exportPack();
+      eq(pack.format, 'nettopo-langpack', 'i18n：语言包带格式标识');
+      ok(pack.count > 100, 'i18n：导出包含内建词条（' + pack.count + ' 条）');
+      I18N2.setLang('en');
+      // JSON.parse 口径构造脏包（对象字面量的 __proto__ 是改原型，不是键——不忠实）
+      const dirty = JSON.parse('{"文件":"File ","自定义设备名":"Custom Device","__proto__":{"x":1},"坏词条":42}');
+      const imp = I18N2.importPack({ entries: dirty }, 'merge');
+      ok(imp.ok && imp.count === 2 && imp.dropped === 2, 'i18n：导入清洗（合法 2 条、丢弃原型键与非字符串 ' + imp.dropped + ' 条）');
+      eq(I18N2.t('自定义设备名'), 'Custom Device', 'i18n：用户词条生效（新词条翻译）');
+      eq(I18N2.t('文件'), 'File ', 'i18n：用户词条覆盖内建译文');
+      const I18N3 = load();
+      I18N3.setLang('en');
+      eq(I18N3.t('自定义设备名'), 'Custom Device', 'i18n：语言包持久化并随重载生效');
+      I18N3.clearPack();
+      eq(I18N3.t('自定义设备名'), '自定义设备名', 'i18n：清除语言包回落原文');
+      eq(I18N3.importPack('not-an-object', 'merge').ok, false, 'i18n：非对象语言包被拒绝');
     } finally {
       global.localStorage = savedLS;
     }

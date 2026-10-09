@@ -28,6 +28,60 @@
   let lang = readLang();
   const listeners = [];
 
+  /* ---- 语言包（用户/社区词典）：白名单清洗后存 localStorage，覆盖内建 EN 词条 ---- */
+  const PACK_KEY = 'nettopo.langpack';
+  const PACK_FORMAT = 'nettopo-langpack';
+  const PACK_VERSION = 1;
+  const PACK_MAX_ENTRIES = 3000;
+  let userPack = {};
+  const readUserPack = () => {
+    try {
+      const raw = store && store.getItem ? store.getItem(PACK_KEY) : '';
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      const cleaned = cleanPackEntries(obj && obj.entries ? obj.entries : obj);
+      if (!cleaned.rejected) userPack = cleaned.entries;
+    } catch (e) { /* 损坏语言包按无语言包处理 */ }
+  };
+  /** 词条白名单清洗：仅接受 string→string；键长/值长封顶；原型链键一律丢弃并计数 */
+  const cleanPackEntries = (obj) => {
+    const out = {};
+    let dropped = 0, n = 0;
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { entries: out, dropped: 0, rejected: true };
+    for (const k of Object.keys(obj)) {
+      if (n >= PACK_MAX_ENTRIES) { dropped++; continue; }
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') { dropped++; continue; }
+      if (typeof k !== 'string' || !k.trim() || k.length > 200) { dropped++; continue; }
+      const v = obj[k];
+      if (typeof v !== 'string' || v.length > 4000) { dropped++; continue; }
+      out[k] = v; n++;
+    }
+    return { entries: out, dropped, rejected: false };
+  };
+  readUserPack();
+
+  /** 导出语言包：内建 EN 词典 + 用户词条合并（词条即翻译的单一事实来源） */
+  const exportPack = () => {
+    const entries = Object.assign({}, EN, userPack);
+    return { format: PACK_FORMAT, formatVersion: PACK_VERSION, lang: 'en', name: 'English', count: Object.keys(entries).length, exportedAt: new Date().toISOString(), entries };
+  };
+
+  /** 导入语言包：白名单清洗，merge（默认，覆盖同名词条）或 replace；返回 {ok,count,dropped,rejected} */
+  const importPack = (obj, mode) => {
+    const body = obj && typeof obj === 'object' && obj.entries ? obj.entries : obj;
+    const cleaned = cleanPackEntries(body);
+    if (cleaned.rejected) return { ok: false, count: 0, dropped: 0, error: '语言包格式不正确（需要 {entries:{中文原文:译文}} 映射）' };
+    userPack = mode === 'replace' ? cleaned.entries : Object.assign({}, userPack, cleaned.entries);
+    try { if (store) store.setItem(PACK_KEY, JSON.stringify({ format: PACK_FORMAT, formatVersion: PACK_VERSION, entries: userPack })); } catch (e) { /* 存储超限按未持久化处理 */ }
+    for (const cb of listeners) { try { cb(lang); } catch (e) { /* ignore */ } }
+    return { ok: true, count: Object.keys(cleaned.entries).length, dropped: cleaned.dropped };
+  };
+
+  const clearPack = () => {
+    userPack = {};
+    try { if (store) store.removeItem(PACK_KEY); } catch (e) { /* ignore */ }
+  };
+
   /** 英文词典：键 = 界面中文原文（与源码逐字一致，含省略号与括号），值 = 英文文案 */
   const EN = {
     // ---- 工具栏与通用按钮 ----
@@ -182,11 +236,13 @@
     '已切换为中文界面（Language switched to Chinese）': '已切换为中文界面（Language switched to Chinese）'
   };
 
-  /** 翻译：中文原文 → 当前语言；未命中回落原文（用户数据永远原样） */
+  /** 翻译：中文原文 → 当前语言；用户语言包优先（社区/用户修正覆盖内建），均未命中回落原文（用户数据永远原样） */
   const t = (s) => {
     const str = String(s == null ? '' : s);
     if (lang === 'zh') return str;
-    return EN[str] || str;
+    if (Object.prototype.hasOwnProperty.call(userPack, str)) return userPack[str];
+    if (Object.prototype.hasOwnProperty.call(EN, str)) return EN[str];
+    return str;
   };
 
   const getLang = () => lang;
@@ -226,7 +282,7 @@
     return n > 0;
   };
 
-  const api = { t, getLang, setLang, onChange, applyChrome, normalizeLang, LANGS };
+  const api = { t, getLang, setLang, onChange, applyChrome, normalizeLang, LANGS, exportPack, importPack, clearPack, packSize: () => Object.keys(userPack).length };
   global.TopoI18n = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : this));

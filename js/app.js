@@ -7319,12 +7319,43 @@ function wire() {
     TopoI18n.applyChrome();
     toast(l === 'en' ? '已切换为英文界面（Language switched to English）' : '已切换为中文界面（Language switched to Chinese）');
   };
+  const exportLangPack = () => {
+    if (!globalThis.TopoI18n) return;
+    const pack = TopoI18n.exportPack();
+    U.download('nettopo-english-langpack.json', new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' }));
+    toast('已导出语言包（' + pack.count + ' 条词条）');
+  };
+  const importLangPack = () => {
+    if (!globalThis.TopoI18n) return;
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.json,application/json';
+    inp.onchange = () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      const rd = new FileReader();
+      rd.onload = () => {
+        let obj = null;
+        try { obj = JSON.parse(String(rd.result)); } catch (e) { toast('语言包导入失败：不是有效的 JSON'); return; }
+        const r = TopoI18n.importPack(obj, 'merge');
+        if (!r || !r.ok) { toast('导入失败：' + ((r && r.error) || '格式不正确')); return; }
+        TopoI18n.applyChrome();
+        toast('语言包已导入：' + r.count + ' 条词条' + (r.dropped ? '，丢弃 ' + r.dropped + ' 条不合法项' : ''));
+      };
+      rd.readAsText(f, 'utf8');
+    };
+    inp.click();
+  };
   if (globalThis.TopoI18n && TopoI18n.getLang() !== 'zh') TopoI18n.applyChrome();
   $('#btnLang').onclick = (e) => {
     const cur = globalThis.TopoI18n ? TopoI18n.getLang() : 'zh';
     openDrop(e.currentTarget, [
       { ic: 'web', label: '中文（简体）', active: cur === 'zh', act: () => switchLang('zh') },
-      { ic: 'web', label: 'English', active: cur === 'en', act: () => switchLang('en') }
+      { ic: 'web', label: 'English', active: cur === 'en', act: () => switchLang('en') },
+      { sep: true },
+      { ic: 'download', label: '导出语言包…', act: exportLangPack },
+      { ic: 'upload', label: '导入语言包…', act: importLangPack },
+      { ic: 'undo', label: '恢复内建词典', act: () => { if (!globalThis.TopoI18n) return; TopoI18n.clearPack(); TopoI18n.applyChrome(); toast('已恢复内建词典（用户语言包已清除）'); } }
     ]);
   };
   $('#btnAbout').onclick = openAbout;
