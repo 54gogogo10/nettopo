@@ -62,6 +62,16 @@ textarea:focus, select:focus, input[type="text"]:focus, input[type="password"]:f
 /* 勾选/单选框统一主题色：此前 accent-color 散在各容器规则里，裸勾选框（内联标签/列表项）
  * 落到 Chromium 默认蓝，与主题靛蓝色调不一致——基础层全局声明，各容器规则同值不受影响 */
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+/* 滑条填充轨同主题色 */
+input[type="range"] { accent-color: var(--accent); }
+/* 文件选择框（类型管理图标上传 / 底图上传）：按钮与文字随主题，避免原生浅色样式 */
+input[type="file"] { color: var(--text); }
+input[type="file"]::file-selector-button {
+  font: inherit; color: var(--text); background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; margin-right: 8px; cursor: pointer;
+}
+/* placeholder 用主题弱色：Chromium 默认灰在暗色深底上对比不足 */
+::placeholder { color: var(--muted); opacity: 1; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
