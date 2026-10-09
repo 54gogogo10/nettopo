@@ -1795,6 +1795,64 @@ U.saveComplianceRules = (rules) => {
   } catch (e) { /* 存储超限忽略 */ }
   return U.complianceRules;
 };
+
+/* ================= 设备纳管预配生成器（onboarding plan） =================
+ * 按厂家生成让设备可被纳管（SSH / SNMP v3 / LLDP / Trap）所需的命令清单，分两类：
+ *   auto   —— 非交互行：可经「配置变更下发」的安全闸门直接下发；
+ *   manual —— 交互行：命令中途弹口令提示（华为/H3C 的 usm-user 建号），需在设备控制台手工执行。
+ * 命令口径来自真机验证（华为 YunShan 禁 v2c 与 SHA-1；usm-user 建号不带组名需单独挂组等）。 */
+U.onboardPlan = (opts) => {
+  const o = opts || {};
+  const vendor = ['huawei', 'h3c', 'cisco'].indexOf(o.vendor) >= 0 ? o.vendor : 'huawei';
+  const u = {
+    group: String(o.v3Group || 'NetTopoGrp').replace(/[^\w.-]/g, '').slice(0, 32) || 'NetTopoGrp',
+    user: String(o.v3User || 'nettopov3').replace(/[^\w.-]/g, '').slice(0, 32) || 'nettopov3',
+    auth: String(o.v3AuthPass || 'NetTopoAuth1').slice(0, 128),
+    priv: String(o.v3PrivPass || 'NetTopoPriv1').slice(0, 128)
+  };
+  const want = { ssh: o.ssh !== false, snmp: o.snmp !== false, lldp: o.lldp !== false };
+  const auto = [], manual = [], notes = [];
+  if (vendor === 'huawei') {
+    if (want.ssh) auto.push('stelnet server enable');
+    if (want.snmp) {
+      auto.push('snmp-agent',
+        'snmp-agent protocol source-status all-interface',
+        'snmp-agent sys-info version v3',
+        'snmp-agent group v3 ' + u.group + ' privacy read-view ViewDefault');
+      manual.push(
+        { cmd: 'snmp-agent usm-user v3 ' + u.user + ' authentication-mode sha2-256', note: '回车后按提示输入认证口令两次：' + u.auth },
+        { cmd: 'snmp-agent usm-user v3 ' + u.user + ' privacy-mode aes128', note: '回车后按提示输入加密口令两次：' + u.priv },
+        { cmd: 'snmp-agent usm-user v3 ' + u.user + ' ' + u.group, note: '把用户挂入组（该固件 usm-user 建号不带组名，需单独执行）' });
+      auto.push('snmp-agent trap enable');
+    }
+    if (want.lldp) auto.push('lldp enable');
+    notes.push('华为 YunShan/新固件：SNMP 仅 v3（禁 v2c），认证仅 SHA-2 系（禁 SHA-1/MD5）——采集侧认证档位选 sha2-256、加密选 aes128。');
+  } else if (vendor === 'h3c') {
+    if (want.ssh) auto.push('ssh server enable');
+    if (want.snmp) {
+      auto.push('snmp-agent',
+        'snmp-agent sys-info version v3',
+        'snmp-agent group v3 ' + u.group + ' privacy',
+        'snmp-agent trap enable');
+      manual.push(
+        { cmd: 'snmp-agent usm-user v3 ' + u.user + ' ' + u.group + ' authentication-mode sha-256', note: '回车后按提示输入认证口令两次：' + u.auth },
+        { cmd: 'snmp-agent usm-user v3 ' + u.user + ' ' + u.group + ' privacy-mode aes128', note: '回车后按提示输入加密口令两次：' + u.priv });
+    }
+    if (want.lldp) auto.push('lldp enable');
+    notes.push('H3C Comware：SNMP v3 组需 privacy 档；usm-user 建号即交互输入口令，经控制台完成。');
+  } else {
+    if (want.snmp) {
+      auto.push('snmp-server group ' + u.group + ' v3 priv',
+        'snmp-server user ' + u.user + ' ' + u.group + ' v3 auth sha ' + u.auth + ' priv aes 128 ' + u.priv,
+        'snmp-server enable traps');
+    }
+    if (want.lldp) auto.push('lldp run');
+    notes.push('思科 IOS：snmp-server user 的明文口令在配置中即时散列为本地化密文，下发后回读不可比对原文；SSH 开通另依赖域名与 RSA 密钥（crypto key generate rsa），不在本向导内。');
+  }
+  notes.push('账号口令策略（首次登录改密、复杂度）不在本向导范围，请按现场规范在设备侧维护。');
+  return { vendor: vendor, auto: auto, manual: manual, notes: notes };
+};
+
 /** 对一份配置文本执行检查：每条启用规则返回 {pass, lines}（禁止类为命中行，必须类为已匹配行） */
 U.checkCompliance = (text, rules) => {
   // 单行限长：防超大行（压缩/粘贴异常）拖慢逐行正则扫描

@@ -1059,6 +1059,108 @@ function openBatchInspect() {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#biVendor').focus(); }, 250);
 }
 
+/* ================= 设备纳管预配向导（生成管理开通清单 → 控制台手工行 / 经变更单下发自动行） =================
+ * 回答「新设备怎么才能被纳管」：按厂家生成 SNMP v3（只读采集账号）/ Stelnet / LLDP 的开通命令，
+ * 分「非交互行（可走变更单安全闸门下发）」与「交互行（usm-user 建号弹口令提示，需控制台手工）」。
+ * 命令口径来自真机验证（U.onboardPlan，含华为禁 v2c/SHA-1、usm-user 单独挂组等固件口径）。 */
+function openOnboardWizard() {
+  const cands = state.nodes.filter(n => (U.nodeMgmts(n)[0] || ''));
+  if (!cands.length) { toast('拓扑中还没有带管理地址的设备'); return; }
+  const rootNode = $('#modalRoot');
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal ws-dialog" role="dialog" style="width:760px;max-height:88vh;display:flex;flex-direction:column">
+      <h3>设备纳管预配</h3>
+      <div class="m-sub">按厂家生成开通 SNMP v3 采集 / Stelnet / LLDP 所需的命令清单。<b>非交互行</b>可经「配置变更下发」安全下发；<b>控制台交互行</b>（usm-user 建号弹口令提示）请在设备控制台手工执行。命令口径来自真机验证。</div>
+      <div class="frow" style="display:flex;gap:12px;flex-wrap:wrap">
+        <label>目标设备 <select id="obDev">${cands.map(n => '<option value="' + U.escHtml(n.id) + '">' + U.escHtml(n.name + '（' + (U.nodeMgmts(n)[0] || '') + '）') + '</option>').join('')}</select></label>
+        <label>厂家 <select id="obVendor">
+          <option value="huawei">华为 VRP / YunShan</option>
+          <option value="h3c">H3C Comware</option>
+          <option value="cisco">思科 IOS</option>
+        </select></label>
+      </div>
+      <div class="frow" style="display:flex;gap:12px;flex-wrap:wrap">
+        <label>SNMP v3 组名 <input id="obGrp" type="text" value="NetTopoGrp" style="width:120px"/></label>
+        <label>用户名 <input id="obUser" type="text" value="nettopov3" style="width:110px"/></label>
+        <label>认证口令 <input id="obAuth" type="text" value="NetTopoAuth1" style="width:130px"/></label>
+        <label>加密口令 <input id="obPriv" type="text" value="NetTopoPriv1" style="width:130px"/></label>
+      </div>
+      <div class="frow" style="display:flex;gap:14px;flex-wrap:wrap">
+        <label class="ck-field"><input id="obSnmp" type="checkbox" checked/><span>SNMP v3 采集账号</span></label>
+        <label class="ck-field"><input id="obSsh" type="checkbox" checked/><span>Stelnet/SSH 服务</span></label>
+        <label class="ck-field"><input id="obLldp" type="checkbox" checked/><span>LLDP（拓扑发现）</span></label>
+        <button type="button" class="tb" id="obGen">重新生成</button>
+      </div>
+      <div class="as-sect">非交互行（经「配置变更下发」安全闸门下发）</div>
+      <textarea id="obAuto" readonly spellcheck="false" style="width:100%;height:130px;font-family:ui-monospace,Consolas,monospace;font-size:12px"></textarea>
+      <div class="as-sect">控制台交互行（在设备控制台 system-view 下逐条手工执行）</div>
+      <textarea id="obManual" readonly spellcheck="false" style="width:100%;height:110px;font-family:ui-monospace,Consolas,monospace;font-size:12px"></textarea>
+      <div id="obNotes" class="m-sub" style="margin:6px 0 0"></div>
+      <div class="m-actions">
+        <button type="button" class="tb" id="obCopyM">复制控制台清单</button>
+        <button type="button" class="tb primary" id="obDeploy">经变更单下发自动行…</button>
+        <button type="button" class="tb" data-act="cancel">关闭</button>
+      </div>
+    </div>`;
+  rootNode.appendChild(ov);
+  ov.tabIndex = -1; ov.focus();
+  const close = () => ov.remove();
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.querySelector('[data-act=cancel]').onclick = close;
+  const regen = () => {
+    const node = state.nodes.find(n => n.id === ov.querySelector('#obDev').value);
+    const plan = U.onboardPlan({
+      vendor: ov.querySelector('#obVendor').value,
+      v3Group: ov.querySelector('#obGrp').value,
+      v3User: ov.querySelector('#obUser').value,
+      v3AuthPass: ov.querySelector('#obAuth').value,
+      v3PrivPass: ov.querySelector('#obPriv').value,
+      snmp: ov.querySelector('#obSnmp').checked,
+      ssh: ov.querySelector('#obSsh').checked,
+      lldp: ov.querySelector('#obLldp').checked
+    });
+    ov.querySelector('#obAuto').value = plan.auto.join('\n');
+    ov.querySelector('#obManual').value = plan.manual.map(m => m.cmd + '\n    ↳ ' + m.note).join('\n');
+    ov.querySelector('#obNotes').textContent = plan.notes.join(' ');
+    ov.querySelector('#obDeploy').disabled = !plan.auto.length;
+    return { node, plan };
+  };
+  ov.querySelector('#obVendor').addEventListener('change', () => {
+    const node = state.nodes.find(n => n.id === ov.querySelector('#obDev').value);
+    if (node && node.vendor && ['huawei', 'h3c', 'cisco'].includes(node.vendor)) ov.querySelector('#obVendor').value = node.vendor;
+    regen();
+  });
+  ['obDev', 'obGrp', 'obUser', 'obAuth', 'obPriv', 'obSnmp', 'obSsh', 'obLldp'].forEach(id => {
+    ov.querySelector('#' + id).addEventListener('change', regen);
+  });
+  const copyText = (txt, done) => {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(done).catch(() => toast('复制失败'));
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = txt; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败'); }
+      ta.remove();
+    }
+  };
+  ov.querySelector('#obCopyM').onclick = () => {
+    const { plan } = regen();
+    const txt = plan.manual.map(m => m.cmd + '\n! ' + m.note).join('\n') || '（该厂家无需控制台交互行）';
+    copyText(txt, () => toast('已复制控制台清单'));
+  };
+  ov.querySelector('#obDeploy').onclick = () => {
+    const { node, plan } = regen();
+    if (!plan.auto.length) { toast('没有可自动下发的行'); return; }
+    close();
+    openConfigDeploy(node ? node.id : '', { plan: plan.auto.join('\n') });
+  };
+  regen();
+  setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#obDev').focus(); }, 250);
+}
+
 /* ================= 配置变更下发（变更单 → dry-run → 强制前置备份 → 逐行下发 → 回滚/审计） =================
  * 这是**会改动设备**的功能，整条链路按「先看后做」设计：
  *  ① 变更集解析 + 安全闸门：重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝（不可覆盖）；
@@ -7230,6 +7332,7 @@ function wire() {
       toast(on ? '已开启链路状态叠加：连通绿 / 中断红（虚线闪烁）/ 未知灰' : '已关闭链路状态叠加');
     } },
     { ic: 'shield', label: '凭据库（设备访问凭据集中维护）…', act: () => openCredManager() },
+    { ic: 'shield', label: '设备纳管预配…', act: () => openOnboardWizard() },
     { sep: true },
     { ic: 'doc', label: '监控日志…', act: () => {
       const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
@@ -13841,6 +13944,7 @@ if (typeof globalThis !== 'undefined') {
     openConfigDeploy,
     openDeployHistory,
     openCredManager,
+    openOnboardWizard,
     openTeamPackImport,
     openSlaReport,
     openInspectionReport,

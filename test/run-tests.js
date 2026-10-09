@@ -9683,6 +9683,24 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
   }
 
   {
+    // 设备纳管预配生成器（util.onboardPlan）：厂家命令口径与分类
+    console.log('== 设备纳管预配 ==');
+    const huawei = U.onboardPlan({ vendor: 'huawei' });
+    ok(huawei.auto.some(l => /stelnet server enable/.test(l)) && huawei.auto.some(l => /snmp-agent group v3 NetTopoGrp privacy/.test(l)), '预配：华为自动行含 Stelnet 与 v3 组');
+    eq(huawei.manual.length, 3, '预配：华为交互行 3 条（usm-user 建号两次口令 + 挂组）');
+    ok(huawei.manual.every(m => /usm-user v3 /.test(m.cmd) && m.note), '预配：交互行带口令提示说明');
+    ok(huawei.notes.join('').includes('sha2-256'), '预配：华为备注提示 SHA-2 档位');
+    const cisco = U.onboardPlan({ vendor: 'cisco', ssh: false, lldp: false });
+    eq(cisco.manual.length, 0, '预配：思科全部非交互（无控制台行）');
+    ok(cisco.auto.some(l => /^snmp-server user \S+ \S+ v3 auth sha /.test(l)), '预配：思科 snmp-server user 行内联认证');
+    const off = U.onboardPlan({ vendor: 'huawei', snmp: false, ssh: false, lldp: false });
+    eq(off.auto.length, 0, '预配：全部取消勾选则无自动行');
+    const clean = U.onboardPlan({ vendor: 'huawei', v3Group: 'bad group;x', v3User: 'ok-user1' });
+    ok(clean.auto.some(l => /snmp-agent group v3 badgroupx privacy/.test(l)), '预配：组名清洗非法字符');
+    ok(clean.auto.some(l => /usm-user v3 ok-user1/.test(l)) === false && clean.manual.some(m => m.cmd.includes('ok-user1')), '预配：用户名清洗后进交互行');
+  }
+
+  {
     // SNMP 失败诊断（monitor.snmpAdviceText）：分类与处置建议
     console.log('== SNMP 失败诊断 ==');
     const { snmpAdviceText } = require('../js/monitor.js');
