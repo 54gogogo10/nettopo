@@ -2491,6 +2491,19 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
   /* ---- 监控模块（monitor.js）单元测试 ---- */
   {
     const { MonitorManager, sanitizeFilename } = require('../js/monitor.js');
+    // 0b) verifyFingerprint 只读查询（fp 省略）：交互式首连静默放行判定，不写库
+    {
+      const fpSelf = { trusted: new Map(), _saveTrust: () => { fpSelf.saved = true; } };
+      const vf = MonitorManager.prototype.verifyFingerprint;
+      const peek = (h, p) => vf.call(fpSelf, h, p, '');
+      const first = peek('10.255.0.9', 22);
+      ok(first.ok === true && first.first === true && !fpSelf.saved, '指纹 peek：未知主机返回 first 且不写库');
+      // 显式钉扎后再 peek：返回钉扎值
+      const pin = vf.call(fpSelf, '10.255.0.9', 22, 'SHA256:abc');
+      ok(pin.ok === true && pin.first === true, '指纹钉扎：首连写入');
+      const again = peek('10.255.0.9', 22);
+      ok(again.ok === true && again.first === false && again.fp === 'SHA256:abc', '指纹 peek：已钉扎返回钉扎值（交互式静默放行判据）');
+    }
     // 0) sanitizeFilename 路径穿越回归（R3 修复：正则曾写成 "/字符类" 永不匹配）
     eq(sanitizeFilename('..\\..\\escape'), '____escape', 'sanitizeFilename 剔除 ..（防路径穿越）');
     eq(sanitizeFilename('a/b'), 'a_b', 'sanitizeFilename 剔除斜杠');

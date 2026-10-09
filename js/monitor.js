@@ -1391,9 +1391,14 @@ class MonitorManager extends EventEmitter {
   verifyFingerprint(host, port, fp) {
     const h = String(host == null ? '' : host).trim();
     const f = String(fp == null ? '' : fp);
-    if (!h || !f) return { ok: false, error: '指纹信息不完整，已拒绝连接' };
+    if (!h) return { ok: false, error: '指纹信息不完整，已拒绝连接' };
     const key = fpKeyOf(h, port);
     const known = this.trusted.get(key);
+    // 只读查询（fp 省略）：交互式首连的「静默放行判定」用——已钉扎返回钉扎值不写库，未知返回 first
+    if (!f) {
+      if (known) return { ok: true, first: false, fp: known };
+      return { ok: true, first: true, unknown: true };
+    }
     if (known) {
       // 指纹一致：放行（不重复写库）；变化：拒绝并回明确原因（由调用方转成会话失败）
       if (known === f) return { ok: true, first: false };

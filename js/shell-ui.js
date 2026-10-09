@@ -347,8 +347,11 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
       meta: { host: info.host || '', port: info.port || '', username: info.username || '', deviceName: info.deviceName || '', protocol: info.protocol || '', encoding: info.encoding || 'utf8' } };
     rcBtn.addEventListener('click', (e) => { e.stopPropagation(); reconnectNow(rec); });
     sessions.set(sid, rec);
-    // 标签恢复登记：保存连接元数据 + DPAPI 密文凭据（同名书签已存密文自动回填）
-    upsertRestore({ protocol: info.protocol, host: info.host, port: info.port, username: info.username, encoding: info.encoding, name: info.deviceName, pwdEnc: info.pwdEnc, jumpPwdEnc: info.jumpPwdEnc, jump: info.jump });
+    // 标签恢复登记：保存连接元数据 + DPAPI 密文凭据（同名书签已存密文自动回填）。
+    // Console 串口会话不参与恢复（本地 Web Serial 无法按元数据静默重连，恢复成 SSH 会连错）
+    if (rec.meta.protocol !== 'serial') {
+      upsertRestore({ protocol: info.protocol, host: info.host, port: info.port, username: info.username, encoding: info.encoding, name: info.deviceName, pwdEnc: info.pwdEnc, jumpPwdEnc: info.jumpPwdEnc, jump: info.jump });
+    }
     term.write('\x1b[33m正在连接 ' + bannerText(info.title || sid) + ' …\r\n\x1b[0m');
     for (const item of rec.buf.splice(0)) {
       if (item[0] === 'out') term.write(item[1]);
@@ -357,6 +360,8 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
     }
     term.onData((d) => {
       if (rec.ended) return;
+      // Console 串口会话：数据走渲染层本地 Web Serial（rec.serialWrite），不经主进程管道
+      if (rec.meta.protocol === 'serial' && rec.serialWrite) { rec.serialWrite(d); return; }
       // 主进程 shell:data 单次限长 1MB：粘贴整段大配置时 onData 一次性携带全部文本，超限被
       // 静默丢弃（内容完全不发送且无提示）——按 512KB 分片下发
       if (d.length <= 512 * 1024) { window.topoShell.sendData(sid, d); return; }
@@ -419,6 +424,8 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
   function closeTab(sid) {
     const s = sessions.get(sid);
     if (!s) return;
+    // Console 串口会话：先释放串口（Web Serial 本地会话，主进程无对应会话可关）
+    if (s.meta.protocol === 'serial' && s.serialClose) { try { s.serialClose(); } catch (e) { /* ignore */ } }
     // 始终通知主进程关闭：活动会话关闭连接；已结束会话清理其建连参数（防内存留凭据副本）
     window.topoShell.close(sid);
     removeRestoreEntry(s.meta); // 显式关闭标签：从恢复列表移除，下次开窗不再重连
@@ -1702,6 +1709,7 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
           <select id="wsProto">
             <option value="ssh"${(saved.protocol || 'ssh') === 'ssh' ? ' selected' : ''}>SSH（默认端口 22）</option>
             <option value="telnet"${saved.protocol === 'telnet' ? ' selected' : ''}>Telnet（默认端口 23）</option>
+            <option value="serial"${saved.protocol === 'serial' ? ' selected' : ''}>串口 Console（USB-Console 调试线）</option>
           </select>
         </div>
         <div class="frow">
@@ -1767,14 +1775,24 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
     }
     const protoEl = ov.querySelector('#wsProto');
     const portEl = ov.querySelector('#wsPort');
-    const autoPort = () => protoEl.value === 'telnet' ? '23' : '22';
+    const jumpOnEl = ov.querySelector('#wsJumpOn');
+    const autoPort = () => protoEl.value === 'telnet' ? '23' : protoEl.value === 'serial' ? '9600' : '22';
+    const syncSerialUi = () => {
+      const isSerial = protoEl.value === 'serial';
+      const hostRow = ov.querySelector('#wsHost');
+      if (hostRow) hostRow.placeholder = isSerial ? '本机串口（点「连接」后弹出选择）' : '例如 10.255.0.1';
+      const portIn = ov.querySelector('#wsPort');
+      if (portIn) { portIn.min = isSerial ? '1200' : '1'; portIn.max = isSerial ? '12000000' : '65535'; portIn.title = isSerial ? '波特率（Console 常用 9600，新设备多为 9600/115200）' : ''; }
+      if (jumpOnEl) jumpOnEl.disabled = isSerial;
+    };
     protoEl.addEventListener('change', () => {
+      syncSerialUi();
       const cur = portEl.value.trim();
       const otherDefault = autoPort() === '23' ? '22' : '23';
       if (!cur || cur === otherDefault) portEl.value = autoPort();
     });
+    syncSerialUi();
     if (!portEl.value.trim()) portEl.value = autoPort();
-    const jumpOnEl = ov.querySelector('#wsJumpOn');
     jumpOnEl.addEventListener('change', () => { ov.querySelector('#wsJumpWrap').style.display = jumpOnEl.checked ? '' : 'none'; });
     const doConnect = async () => {
       const cfg = {
@@ -1794,6 +1812,12 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
           password: ov.querySelector('#wsJumpPass').value,
           expectFp: undefined           // 同样不传本机记住的指纹（裁决交主进程信任门）
         };
+      }
+      if (cfg.protocol === 'serial') {
+        // Console 串口：渲染层 Web Serial 本地会话（不经主进程 Shell 管道），主机/账号字段不适用
+        close();
+        connectSerial(cfg);
+        return;
       }
       if (!cfg.host) { toast('请填写主机地址（管理口 IP）'); return; }
       // 标签恢复登记用：密码加密为 DPAPI 密文随建连参数透传（明文不落盘）
@@ -1843,6 +1867,60 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
       ov.querySelector(sel).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doConnect(); } });
     }
     setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#wsHost').focus(); }, 250);
+  }
+
+  /* Console 串口（Web Serial，渲染层本地会话）：不走主进程 Shell 管道——
+   * requestPort 选口 → open（波特率取「端口」输入框）→ readable 泵进 xterm、onData 写回 writer。
+   * 拒绝环境/未选口只提示不建标签；标签关闭（closeTab 的 serialClose 钩子）即释放串口。 */
+  async function connectSerial(cfg) {
+    if (!navigator.serial || !navigator.serial.requestPort) { toast('此环境不支持 Web Serial：请使用桌面版（Electron）的 Web Shell'); return; }
+    let port;
+    try {
+      port = await navigator.serial.requestPort();
+    } catch (e) { toast('未选择串口（已取消）'); return; }
+    const baud = Math.max(1200, Math.min(12000000, parseInt(cfg.port, 10) || 9600));
+    try {
+      await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' });
+    } catch (e) {
+      toast('串口打开失败：' + String((e && e.message) || e) + '（可能被其他程序占用）');
+      return;
+    }
+    const sid = 'serial-' + Date.now();
+    addTab({ sid: sid, title: 'CONSOLE @' + baud, protocol: 'serial', host: '串口', port: String(baud), encoding: cfg.encoding });
+    const rec = sessions.get(sid);
+    if (!rec) return;
+    rec.meta.protocol = 'serial';
+    rec.meta.port = String(baud);
+    const dec = new TextDecoder(cfg.encoding === 'gbk' ? 'gbk' : 'utf-8');
+    const enc = new TextEncoder();
+    rec.serialWrite = async (d) => {
+      try {
+        const w = port.writable.getWriter();
+        await w.write(enc.encode(d));
+        w.releaseLock();
+      } catch (e) { /* 写失败按断开处理（读循环会收尾） */ }
+    };
+    rec.serialClose = () => { try { port.close(); } catch (e) { /* ignore */ } };
+    (async () => {
+      try {
+        while (port.readable) {
+          const reader = port.readable.getReader();
+          try {
+            for (;;) {
+              const { value, done } = await reader.read();
+              if (value && value.length) rec.term.write(dec.decode(value, { stream: true }));
+              if (done) break;
+            }
+          } finally { reader.releaseLock(); }
+          break;
+        }
+      } catch (e) { /* 拔线/关闭 */ }
+      if (!rec.ended) {
+        rec.ended = true;
+        applyEnd(rec, '串口已断开');
+      }
+    })();
+    toast('串口已连接（' + baud + ' 波特）');
   }
 
   function toast(msg) {

@@ -403,7 +403,13 @@ class ShellManager extends EventEmitter {
       return hit;
     }
     this._pendingVerify.delete(host);
-    for (const rec of arr) { try { rec.verify(!!trust); } catch (e) { /* ignore */ } }
+    for (const rec of arr) {
+      try { rec.verify(!!trust); } catch (e) { /* ignore */ }
+      // 用户显式信任 → 写入主进程权威信任库：下次交互式连接经只读 peek 静默放行（不再重复弹窗）
+      if (trust && rec && rec.fp && typeof this._trustGate === 'function') {
+        try { this._trustGate(host, rec.port, rec.fp); } catch (e) { /* ignore */ }
+      }
+    }
     return true;
   }
 
@@ -1200,8 +1206,24 @@ class ShellManager extends EventEmitter {
           em.emit('status', { state: 'info', host, fp, text: '主机密钥指纹: ' + fp });
           return true;
         }
-        // 首次连接：暂停握手，等用户/监控确认信任该指纹（同主机多会话各自排队）
+        // 首次连接：暂停握手，等用户/监控确认信任该指纹（同主机多会话各自排队）。
+        // 交互式连接先问主进程权威信任库（只读）：已钉扎且一致 → 静默放行（不再每次弹窗）；
+        // 已钉扎但不一致 → 直接拒绝（中间人）；未知 → 走下面的人工确认。
+        if (!expectFp && typeof this._trustGate === 'function') {
+          let peek = null;
+          try { peek = this._trustGate(host, port); } catch (e) { peek = null; }
+          if (peek && peek.ok && !peek.first && peek.fp) {
+            if (peek.fp !== fp) {
+              em.emit('status', { state: 'error', text: (host === o.host ? '主机' : '跳板') + '密钥指纹不匹配：' + fp + '（钉扎 ' + peek.fp + '），可能存在中间人攻击' });
+              return false;
+            }
+            em.emit('status', { state: 'info', host, fp, text: '主机密钥指纹与已钉扎一致，自动连接: ' + fp });
+            return true;
+          }
+        }
         rec.verify = verify;
+        rec.fp = fp;
+        rec.port = port;
         const arr = this._pendingVerify.get(host);
         if (arr) arr.push(rec);
         else this._pendingVerify.set(host, [rec]);

@@ -2402,6 +2402,16 @@ ipcMain.handle('ai:daily-set', (e, p) => {
 });
 
 app.whenReady().then(() => {
+  // Web Serial（Console 串口）：渲染层 navigator.serial 需要主进程放行——
+  // 选择器自动取首个端口（Console 场景插上即可用），权限检查对 serial 一律放行
+  try {
+    session.defaultSession.on('select-serial-port', (event, contents, portList, webContents, callback) => {
+      event.preventDefault();
+      callback(portList && portList.length ? portList[0].portId : '');
+    });
+    session.defaultSession.setPermissionCheckHandler((wc, permission) => permission === 'serial');
+    session.defaultSession.setDevicePermissionHandler((details) => !!(details && details.deviceType === 'serial'));
+  } catch (e) { logCrash('serial', e); }
   // 导出文件时弹出「另存为」对话框
   session.defaultSession.on('will-download', (e, item) => {
     item.setSaveDialogOptions({
