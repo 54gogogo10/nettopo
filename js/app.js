@@ -5,6 +5,8 @@
 'use strict';
 const U = TopoUtil, M = TopoModel, Layout = TopoLayout;
 const $ = U.$, $$ = U.$$;
+// 界面语言（js/i18n.js）：t() 按当前语言翻译界面文案，未命中回落中文原文
+const T = (s) => (globalThis.TopoI18n ? TopoI18n.t(s) : s);
 
 /* localStorage 安全读取：浏览器禁用存储（隐私模式/沙箱）时 getItem 会抛异常，
  * 顶层状态初始化不能因此中断整个应用 */
@@ -5566,7 +5568,7 @@ function setHint(msg) {
   const t0 = Date.now();
   const DUR = 3;
   const show = (left) => {
-    $('#hintBar').innerHTML = `<span class="hb-txt">${U.escHtml(msg)}</span>${left == null ? '' : `<span class="hb-ct">${Math.max(left, 0)}s</span>`}<button class="hb-x" type="button" title="退出当前模式">✕</button>`;
+    $('#hintBar').innerHTML = `<span class="hb-txt">${U.escHtml(T(msg))}</span>${left == null ? '' : `<span class="hb-ct">${Math.max(left, 0)}s</span>`}<button class="hb-x" type="button" title="${T('退出当前模式')}">✕</button>`;
   };
   const render = () => {
     const left = DUR - Math.floor((Date.now() - t0) / 1000);
@@ -5767,7 +5769,7 @@ function openDrop(anchor, items) {
   drop.innerHTML = items.map(it => {
     if (it.sep) return '<div class="d-sep"></div>';
     const active = it.active ? ' mode-on' : '';
-    return `<button class="ci${it.danger ? ' danger' : ''}${active}" data-k="${it.key || ''}"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(it.label)}</button>`;
+    return `<button class="ci${it.danger ? ' danger' : ''}${active}" data-k="${it.key || ''}"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(T(it.label))}</button>`;
   }).join('');
   U.fillIcons();
   drop.classList.remove('hidden');
@@ -5842,17 +5844,17 @@ function openModal(opts) {
     } else {
       ctrl = `<input name="${f.name}" type="text" value="${U.escHtml(f.value || '')}" placeholder="${U.escHtml(f.ph || '')}"/>`;
     }
-    return `<div class="frow"><label>${U.escHtml(f.label)}${req}</label>${ctrl}</div>`;
+    return `<div class="frow"><label>${U.escHtml(T(f.label))}${req}</label>${ctrl}</div>`;
   }).join('');
 
   ov.innerHTML = `
     <div class="modal" role="dialog">
-      <h3>${U.escHtml(opts.title)}</h3>
+      <h3>${U.escHtml(T(opts.title))}</h3>
       ${opts.sub ? `<div class="m-sub">${U.escHtml(opts.sub)}</div>` : ''}
       <form>${rowsHtml}
         <div class="m-actions">
-          <button type="button" class="tb" data-act="cancel">取消</button>
-          <button type="submit" class="tb primary">${U.escHtml(opts.submit || '确定')}</button>
+          <button type="button" class="tb" data-act="cancel">${T('取消')}</button>
+          <button type="submit" class="tb primary">${U.escHtml(T(opts.submit || '确定'))}</button>
         </div>
       </form>
     </div>`;
@@ -6004,7 +6006,7 @@ function toast(msg) {
     t.style.cssText = 'position:fixed;left:50%;bottom:44px;transform:translateX(-50%);z-index:90;pointer-events:none;background:var(--tooltip-bg);color:var(--tooltip-tx);padding:9px 18px;border-radius:10px;font-size:12.5px;box-shadow:0 10px 30px rgba(0,0,0,.3);transition:opacity .3s;max-width:70vw';
     document.body.appendChild(t);
   }
-  t.textContent = msg;
+  t.textContent = T(msg);
   t.style.opacity = '1';
   clearTimeout(t._h);
   t._h = setTimeout(() => { t.style.opacity = '0'; }, 2600);
@@ -6135,7 +6137,7 @@ function openCtx(e, kind, id) {
   menu.innerHTML = items.map(it => {
     if (it.sep) return '<div style="height:1px;background:var(--border);margin:4px 8px"></div>';
     if (it.head) return `<div style="padding:5px 10px 3px;font-size:10.5px;color:var(--muted);font-weight:600">${U.escHtml(it.head)}</div>`;
-    return `<button class="ci ${it.danger ? 'danger' : ''}"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(it.label)}</button>`;
+    return `<button class="ci ${it.danger ? 'danger' : ''}"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(T(it.label))}</button>`;
   }).join('');
   U.fillIcons();
   menu.classList.remove('hidden');
@@ -6927,7 +6929,7 @@ function openHelp() {
       <tr><td>Ctrl+Shift+L</td><td>切换链路标注</td></tr>
     </table>
     <h4>说明</h4>
-    <p>浏览器打开 index.html 亦可编辑与导出（画布、导入导出等核心功能通用）；<b>Web Shell、设备管理 Web 页、后台监控、诊断 / 终端定位、网络服务、合规检查与 AI 助手为桌面版专属</b>（需 Electron 环境）。全部数据仅保存在本机，建议用「保存工程」定期备份；桌面版支持在线升级（帮助 → 关于 → 检查更新）。更多信息见右上角「关于」。</p>
+    <p>浏览器打开 index.html 亦可编辑与导出（画布、导入导出等核心功能通用）；<b>Web Shell、设备管理 Web 页、后台监控、诊断 / 终端定位、网络服务、合规检查与 AI 助手为桌面版专属</b>（需 Electron 环境）。全部数据仅保存在本机，建议用「保存工程」定期备份；桌面版支持在线升级（帮助 → 关于 → 检查更新）。<b>界面语言</b>：工具栏「Language / 语言」按钮可在中文 / English 间切换（覆盖菜单 / 右键菜单 / 常用按钮与提示，选择随本机记住，词典持续扩充）。更多信息见右上角「关于」。</p>
     <h4>许可证</h4>
     <p>本软件遵循 <b>GNU AGPL-3.0</b> 许可证并附带附加条款发布（全文见项目根目录 <code>LICENSE</code> 文件）：个人和非营利组织可按 AGPL-3.0 条款自由使用；<b>公司、组织和营利性实体在使用、分发或修改本软件之前必须获得商业许可</b>（商业用途需单独授权）。商业许可查询：<code>gogogo10@163.com</code>。所集成的第三方组件许可见项目 <code>THIRD-PARTY-NOTICES.md</code> 与 <code>lib/</code> 内声明文件。</p>
   </div>`;
@@ -7309,6 +7311,22 @@ function wire() {
   $('#btnRedo').onclick = redo;
   $('#btnTheme').onclick = toggleTheme;
   $('#btnHelp').onclick = openHelp;
+  // 界面语言切换：菜单 / 右键菜单 / 提示在下次打开时经 t() 生效，工具栏铬件立即生效
+  const switchLang = (l) => {
+    if (!globalThis.TopoI18n) return;
+    const prev = TopoI18n.getLang();
+    if (TopoI18n.setLang(l) === prev) return;
+    TopoI18n.applyChrome();
+    toast(l === 'en' ? '已切换为英文界面（Language switched to English）' : '已切换为中文界面（Language switched to Chinese）');
+  };
+  if (globalThis.TopoI18n && TopoI18n.getLang() !== 'zh') TopoI18n.applyChrome();
+  $('#btnLang').onclick = (e) => {
+    const cur = globalThis.TopoI18n ? TopoI18n.getLang() : 'zh';
+    openDrop(e.currentTarget, [
+      { ic: 'web', label: '中文（简体）', active: cur === 'zh', act: () => switchLang('zh') },
+      { ic: 'web', label: 'English', active: cur === 'en', act: () => switchLang('en') }
+    ]);
+  };
   $('#btnAbout').onclick = openAbout;
 
   $('#zIn').onclick = () => renderer.zoomBy(1.25);

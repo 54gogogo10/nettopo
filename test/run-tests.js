@@ -9585,6 +9585,39 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(rBad.ok === null && /非法/.test(rBad.error), '本机探测：非法地址直接拒绝（不拼进 ping 参数）');
       eq(require('../js/link-path.js').LIMITS.segments, 12, '上限：单条路径段数上限 12');
     }
+
+  {
+    // 界面语言层（js/i18n.js）：词典命中 / 未命中回落 / 持久化 / 关键词条覆盖
+    console.log('== 界面语言 i18n ==');
+    const mem = { _m: Object.create(null), getItem(k) { return Object.prototype.hasOwnProperty.call(this._m, k) ? this._m[k] : null; }, setItem(k, v) { this._m[k] = String(v); } };
+    const savedLS = global.localStorage;
+    global.localStorage = mem;
+    try {
+      const load = () => { delete require.cache[require.resolve('../js/i18n.js')]; return require('../js/i18n.js'); };
+      const I18N = load();
+      eq(I18N.getLang(), 'zh', 'i18n：默认语言中文');
+      eq(I18N.t('文件'), '文件', 'i18n：中文下 t() 原样返回');
+      eq(I18N.normalizeLang('EN'), 'en', 'i18n：语言名归一化大小写');
+      eq(I18N.normalizeLang('fr'), 'zh', 'i18n：不支持的语言回落中文');
+      I18N.setLang('en');
+      eq(I18N.t('文件'), 'File', 'i18n：英文词典命中（文件 → File）');
+      eq(I18N.t('添加设备'), 'Add Device', 'i18n：英文词典命中（添加设备 → Add Device）');
+      eq(I18N.t('配置变更下发…'), 'Config Change Deployment…', 'i18n：带省略号词条逐字匹配');
+      eq(I18N.t('某台用户设备名'), '某台用户设备名', 'i18n：未命中文案回落原文（用户数据不翻译）');
+      eq(mem._m['nettopo.lang'], 'en', 'i18n：语言选择持久化到 localStorage');
+      eq(load().getLang(), 'en', 'i18n：重新加载沿用持久化语言');
+      // 关键词条覆盖：三个入口菜单、右键菜单、通用按钮各抽锚点，防止整块漏译
+      const I18N2 = load();
+      I18N2.setLang('en');
+      const must = ['新建空白画布', '拓扑校验', '监控中心…', '导出 Visio', '编辑设备…', '取消', '确定', '托盘常驻（关闭窗口后台继续监控）'];
+      const missing = must.filter(k => I18N2.t(k) === k);
+      ok(missing.length === 0, 'i18n：关键词条英文覆盖完整' + (missing.length ? '（缺：' + missing.join('、') + '）' : ''));
+      I18N2.setLang('zh');
+      eq(I18N2.t('文件'), '文件', 'i18n：切回中文恢复原样');
+    } finally {
+      global.localStorage = savedLS;
+    }
+  }
 })().then(() => {
   suiteFinished = true;
   console.log('');
