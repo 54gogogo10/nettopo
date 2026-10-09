@@ -9618,6 +9618,28 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       global.localStorage = savedLS;
     }
   }
+
+  {
+    // CLI 无头模式（cli.js）：参数/CSV 解析、CSV 转义、基线选择与退出码映射
+    console.log('== CLI 无头模式 ==');
+    const cli = require('../cli.js');
+    const rows = cli.parseDevsCsv('host,username,password,protocol,port\r\n10.0.0.1,admin,"a""b",ssh,2222\r\n');
+    eq(rows.length, 1, 'CLI：表头行跳过、余行解析');
+    eq(rows[0].port, 2222, 'CLI：显式端口生效');
+    eq(rows[0].password, 'a"b', 'CLI：双引号包裹与 "" 转义');
+    const rows2 = cli.parseDevsCsv('10.0.0.2,admin,pwd,telnet\n10.0.0.3,admin,pwd\n');
+    eq(rows2.length, 2, 'CLI：无表头两行全解析');
+    eq(rows2[0].protocol + ':' + rows2[0].port, 'telnet:23', 'CLI：telnet 缺省端口 23');
+    eq(rows2[1].protocol + ':' + rows2[1].port, 'ssh:22', 'CLI：协议缺省 ssh/22');
+    const csv = cli.formatInspectCsv([{ device: 'd1', host: 'h1', protocol: 'ssh', error: '', outputs: [{ cmd: 'display version', ok: true, text: 'a,b "c"\nline2' }] }]);
+    ok(csv.startsWith('device,host,protocol,command,ok,output'), 'CLI：巡检 CSV 表头固定');
+    ok(csv.includes('"a,b ""c""'), 'CLI：输出单元格转义逗号与引号');
+    eq(cli.pickPack('vrp').name, '华为 VRP 设备基线', 'CLI：基线名模糊匹配');
+    eq(cli.pickPack('').name, '等保通用基线（推荐）', 'CLI：缺省取第一套基线');
+    eq(cli.complianceSummary([{ violations: 2 }, { violations: 0 }]).exitCode, 2, 'CLI：有违规退出码 2');
+    eq(cli.complianceSummary([{ violations: 0 }]).exitCode, 0, 'CLI：无违规退出码 0');
+    eq(cli.SAVE_COMMANDS.cisco[1], 'show running-config', 'CLI：厂家保存命令集就位');
+  }
 })().then(() => {
   suiteFinished = true;
   console.log('');
