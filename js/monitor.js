@@ -1877,7 +1877,9 @@ class MonitorManager extends EventEmitter {
         if (o) fn(o, vb.value);
       }
     };
-    await merge(OID_IF_OPER, (o, v) => { o.oper = v === 1 ? 'up' : (v === 2 ? 'down' : 'other'); });
+    // decodeValue 对 INTEGER 一律回字符串（真机实测：华为/思科 ifOper 均为 "1"/"2"）：
+    // 数值化后再判定，否则恒落 other，接口状态在所有设备上都显示「其他」
+    await merge(OID_IF_OPER, (o, v) => { const n = Number(v); o.oper = n === 1 ? 'up' : (n === 2 ? 'down' : 'other'); });
     await merge(OID_IF_HIGHSPEED, (o, v) => { o.high = Number(v) || 0; }); // Mbps，先取以备哨兵换算
     await merge(OID_IF_SPEED, (o, v) => { o.speed = Number(v) || 0; });
     // 标称速率换算：ifSpeed 为 0 或哨兵 4294967295 时改用 ifHighSpeed×1e6。
