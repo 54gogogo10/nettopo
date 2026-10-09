@@ -12625,7 +12625,10 @@ function openNetServices() {
       <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）、<b>向本机发送 syslog 日志</b>、<b>把 SNMP Trap 告警上报到本机</b>、<b>把 NetFlow / IPFIX 流量记录导出到本机</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
       <div class="nsv-bindbar">
         <label>监听地址</label>
-        <div class="nsv-bindlist" id="nsvBindList"></div>
+        <div class="nsv-binddd" id="nsvBindDd">
+          <button type="button" class="tb nsv-bindbtn" id="nsvBindBtn" title="点击选择监听地址（可多选）">全部网卡</button>
+          <div class="nsv-bindpanel hidden" id="nsvBindPanel"></div>
+        </div>
         <span class="nsv-hint">五个服务共用，可多选（「全部网卡」与其余互斥，一个不选等同全部网卡）。TFTP / Syslog / Trap / NetFlow 无认证——多宿主机（同时连内网与 Wi-Fi/热点）建议只勾选受信网络的地址</span>
       </div>
       <div class="nsv-top">
@@ -12759,21 +12762,44 @@ function openNetServices() {
     ov.remove();
   };
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
-  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  ov.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      // 下拉面板先收起：Escape 只关面板，再按一次才关弹窗
+      if (bindPanelOpen()) { closeBindPanel(); return; }
+      close();
+    }
+  });
   ov.querySelector('[data-act=close]').onclick = close;
   ov.querySelector('[data-act=refresh]').onclick = () => { loadFiles(); refreshTail(true); };
-  // 监听地址多选 chips：「全部网卡」与具体地址互斥（勾全部即清其余，勾任一具体地址即取消全部）
-  ov.querySelector('#nsvBindList').addEventListener('change', (e) => {
+  // 监听地址下拉多选：「全部网卡」与具体地址互斥（勾全部即清其余，勾任一具体地址即取消全部）
+  const bindDd = ov.querySelector('#nsvBindDd'), bindBtn = ov.querySelector('#nsvBindBtn'), bindPanel = ov.querySelector('#nsvBindPanel');
+  const bindPanelOpen = () => !bindPanel.classList.contains('hidden');
+  const closeBindPanel = () => { bindPanel.classList.add('hidden'); bindDd.classList.remove('open'); };
+  bindBtn.onclick = () => {
+    if (bindPanelOpen()) { closeBindPanel(); return; }
+    bindPanel.classList.remove('hidden');
+    bindDd.classList.add('open');
+    // 面板绝对定位在按钮正下方（.nsv-binddd 为定位上下文，offsetTop 即按钮在其中的纵偏移）
+    bindPanel.style.left = '0';
+    bindPanel.style.top = (bindBtn.offsetTop + bindBtn.offsetHeight + 4) + 'px';
+  };
+  // 面板外点击即收起（弹窗内其它区域/其它控件）；注销监听在 nsvOffs 声明处统一登记（声明在后，此处只挂监听）
+  // closest 需判存在：合成事件的 target 可能是 document（真实点击恒为元素）
+  const bindOutside = (e) => { if (bindPanelOpen() && e.target.closest && !e.target.closest('#nsvBindDd')) closeBindPanel(); };
+  document.addEventListener('pointerdown', bindOutside, true);
+  bindPanel.addEventListener('change', (e) => {
     const cb = e.target;
     if (!cb || cb.type !== 'checkbox') return;
-    const boxes = [...ov.querySelectorAll('#nsvBindList input[type=checkbox]')];
+    const boxes = [...bindPanel.querySelectorAll('input[type=checkbox]')];
     const allCb = boxes.find((b) => b.value === '0.0.0.0');
     if (cb === allCb && cb.checked) {
       for (const b of boxes) { if (b !== allCb) b.checked = false; }
     } else if (cb !== allCb && cb.checked && allCb) {
       allCb.checked = false;
     }
-    for (const b of boxes) { const lab = b.closest('.nsv-bind'); if (lab) lab.classList.toggle('on', b.checked); }
+    for (const b of boxes) { const lab = b.closest('.nsv-opt'); if (lab) lab.classList.toggle('on', b.checked); }
+    updateBindBtnLabel();
   });
 
   /* ---------- 服务状态与配置回填 ---------- */
@@ -12809,37 +12835,44 @@ function openNetServices() {
       ? ('已收 ' + st.syslog.rxMsgs + ' 条' + (st.syslog.dropped ? ' · 限速丢弃 ' + st.syslog.dropped : ''))
       : '') + (st.syslog.alerts ? (st.syslog.rxMsgs ? ' · ' : '') + '告警 ' + st.syslog.alerts + ' 条' : '');
   }
-  /** 渲染监听地址多选 chips：候选 = 全部网卡 + 本机各 IPv4（含回环）；
-   *  已保存但当前不在本机的地址仍展示（标「已不在本机」），接口恢复后重新应用即生效 */
+  /** 渲染监听地址下拉多选面板：候选 = 全部网卡 + 本机各 IPv4（含回环）；
+   *  已保存但当前不在本机的地址仍列出（标「已不在本机」），接口恢复后重新应用即生效。
+   *  按钮文案反映当前选择：全部网卡 / 仅 <IP> / 已选 N 个地址（明细进 title） */
+  function updateBindBtnLabel() {
+    const boxes = [...bindPanel.querySelectorAll('input[type=checkbox]')];
+    const checked = boxes.filter((b) => b.checked).map((b) => b.value);
+    const all = !checked.length || checked.indexOf('0.0.0.0') >= 0;
+    bindBtn.textContent = all ? '全部网卡' : (checked.length === 1 ? ('仅 ' + checked[0]) : ('已选 ' + checked.length + ' 个地址'));
+    bindBtn.title = all ? '点击选择监听地址（可多选）' : ('当前监听：' + checked.join('、'));
+  }
   function renderBindChips(saved) {
-    const box = ov.querySelector('#nsvBindList');
-    if (!box) return;
     const savedSet = new Set((Array.isArray(saved) ? saved : []).map(String));
     const all = savedSet.has('0.0.0.0') || !savedSet.size;
     const seen = new Set(['127.0.0.1']);
     const items = [
-      { ip: '0.0.0.0', label: '全部网卡', isAll: true },
-      { ip: '127.0.0.1', label: '127.0.0.1（本机）' }
+      { ip: '0.0.0.0', label: '全部网卡', sub: '默认，局域网设备可达', isAll: true },
+      { ip: '127.0.0.1', label: '127.0.0.1', sub: '本机回环（仅本机可连）' }
     ];
     for (const ip of (ips || [])) {
       if (!ip || ip === '127.0.0.1' || ip === '0.0.0.0' || seen.has(ip)) continue;
       seen.add(ip);
-      items.push({ ip, label: ip });
+      items.push({ ip, label: ip, sub: '本机地址' });
     }
     for (const ip of savedSet) {
       if (ip === '0.0.0.0' || seen.has(ip)) continue;
       seen.add(ip);
-      items.push({ ip, label: ip + '（已不在本机）', dead: true });
+      items.push({ ip, label: ip, sub: '已不在本机（接口恢复后重新应用生效）', dead: true });
     }
-    box.innerHTML = items.map((it) => {
+    bindPanel.innerHTML = items.map((it) => {
       const on = it.isAll ? all : (!all && savedSet.has(it.ip));
-      return '<label class="nsv-bind' + (on ? ' on' : '') + (it.dead ? ' dead' : '') + '">'
+      return '<label class="nsv-opt' + (on ? ' on' : '') + (it.dead ? ' dead' : '') + '">'
         + '<input type="checkbox" value="' + U.escHtml(it.ip) + '"' + (on ? ' checked' : '') + '/>'
-        + '<span>' + U.escHtml(it.label) + '</span></label>';
+        + '<span class="nsv-opt-tx"><b>' + U.escHtml(it.label) + '</b><i>' + U.escHtml(it.sub || '') + '</i></span></label>';
     }).join('');
+    updateBindBtnLabel();
   }
   function fillForm(cfg) {
-    // 监听地址（五服务共用，可多选本机地址）：先渲染 chips 再回填表单（依赖 loadCfg 已更新的 ips）
+    // 监听地址（五服务共用，可多选本机地址）：先渲染下拉面板再回填表单（依赖 loadCfg 已更新的 ips）
     renderBindChips(Array.isArray(cfg && cfg.listen) ? cfg.listen : ['0.0.0.0']);
     ov.querySelector('#nsvTftpOn').checked = !!cfg.tftp.enabled;
     ov.querySelector('#nsvTftpPort').value = cfg.tftp.port;
@@ -12873,8 +12906,8 @@ function openNetServices() {
   }
   function readForm() {
     const pasv = String(ov.querySelector('#nsvFtpPasv').value || '').match(/^(\d+)\s*-\s*(\d+)$/);
-    // 监听地址多选：勾了任一具体地址即按勾选集合保存；「全部网卡」或一个未勾都等同全部网卡
-    const bindSel = [...ov.querySelectorAll('#nsvBindList input[type=checkbox]:checked')].map((b) => b.value)
+    // 监听地址多选（下拉面板）：勾了任一具体地址即按勾选集合保存；「全部网卡」或一个未勾都等同全部网卡
+    const bindSel = [...ov.querySelectorAll('#nsvBindPanel input[type=checkbox]:checked')].map((b) => b.value)
       .filter((v) => v !== '0.0.0.0');
     return {
       listen: bindSel.length ? bindSel : ['0.0.0.0'],
@@ -13309,6 +13342,8 @@ function openNetServices() {
   const onStEvt = (s) => { st = s; renderStatus(); };
   // onX 每次调用都会新增 ipcRenderer 监听器：退订函数随弹窗关闭注销，防反复开合累积
   const nsvOffs = [];
+  // 监听地址下拉的外点收起监听（bindOutside 声明见上方 bind 块）随弹窗关闭注销
+  nsvOffs.push(() => document.removeEventListener('pointerdown', bindOutside, true));
   const offFile = window.topoNetSvc.onFile(onFileEvt);
   if (typeof offFile === 'function') nsvOffs.push(offFile);
   const offSt = window.topoNetSvc.onStatus(onStEvt);
