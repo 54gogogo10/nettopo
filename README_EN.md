@@ -33,9 +33,9 @@ Opening `index.html` in a browser also works (core features available; desktop-o
 | 🖼️ **Canvas & Editing** | Topology from CSV / Excel / neighbor tables in one click · Force-directed **zero-overlap** layout · Multi-sheet · Region grouping · Free node resizing · Orthogonal routing · Machine-room floor-plan underlay · Light/dark themes |
 | 🔍 **Analysis & Validation** | Topology validation · Bandwidth-optimal path analysis · Subnet analysis · SPOF & blast-radius analysis · Interface table · Link aggregation · IPAM live-network audit |
 | 📤 **Import & Delivery** | PDF / PNG / SVG / **Visio (VSDX)** / Excel · Interactive topology HTML · Asset inventory / IP plan / design report · Vendor config generation · Topology auto-discovery |
-| 📡 **Monitoring & Ops** | Web Shell (SSH/Telnet multi-tab + SFTP + AI assistant) · Silent device monitoring (probes / keywords / SNMP / **environment sensors**) · Config backup / drift compare / **one-click restore** · Change deployment with rollback · Compliance baseline check |
-| 🔔 **Alerting** | Alert dependency suppression · Silence / maintenance windows · Four-level graded sounds · **Alert webhook delivery (WeCom / DingTalk / Feishu)** · End-to-end link connectivity monitoring · Event acknowledgment · SLA report · **One-click inspection report** |
-| 🧰 **Built-in Services & AI** | TFTP / FTP / Syslog / SNMP Trap servers · **NetFlow/IPFIX collector** · Diagnostics toolbox · Batch inspection · MAC/ARP endpoint locator · AI analysis & daily report |
+| 📡 **Monitoring & Ops** | Web Shell (SSH/Telnet multi-tab + SFTP + AI assistant) · Silent device monitoring (probes / keywords / SNMP / **environment sensors**) · Config backup / drift compare / **one-click restore** · Change deployment with rollback · Compliance baseline check · Onboarding prep wizard · Serial console |
+| 🔔 **Alerting** | Alert dependency suppression · Silence / maintenance windows · Four-level graded sounds · **Alert webhook delivery (WeCom / DingTalk / Feishu)** · End-to-end link connectivity monitoring · Event acknowledgment · SLA report · **One-click inspection report** · Alert escalation · **History replay** |
+| 🧰 **Built-in Services & AI** | TFTP / FTP / Syslog / SNMP Trap servers · **NetFlow/IPFIX collector** · Diagnostics toolbox · Batch inspection · MAC/ARP endpoint locator · AI analysis & daily report · **Headless CLI** |
 
 ---
 
@@ -194,6 +194,11 @@ Opening `index.html` in a browser also works (core features available; desktop-o
   - LLM reads **device config backups** and **device logs** — configs produce a fixed-section report (overview / interfaces & IPs / routing & switching / security / risks & weak configs / suggestions), logs produce (overview / level stats / key events / anomaly signs / root-cause hypothesis); **streaming output**, stoppable, extra instructions supported ("focus on ACLs")
   - Results auto-save to "Analysis History" (up to 200) for review / Markdown export / delete; API keys stored encrypted locally, all calls run in the main process (the renderer never hits the internet), analyzed content is delimiter-wrapped and declared untrusted (anti prompt-injection), overlong inputs truncated (configs keep head / logs keep tail); the backup center and log browser offer "AI Analyze" shortcuts
 - **Scheduled AI daily report**: "AI ▾ Schedule Daily Report…" sets a daily generation time (off by default; requires AI configured) — at the time, the main process summarizes monitoring status, disk/memory/load metrics, HTTP probes and certificate days, recent events and 7-day uptime, calls the AI for a Chinese daily report, **saves it into "Analysis History"** and notifies; the next run time is visible in the dialog
+- **Onboarding prep wizard**: "Monitor ▾ Onboarding Prep…" generates vendor-specific (Huawei / H3C / Cisco) command lists to enable SNMP v3 / Stelnet / LLDP — non-interactive lines go through the deployment safety gates in one click; interactive lines (usm-user password prompts) copy to the device console with annotated passwords. Vendor dialects carry real-device adaptations (Huawei disables v2c/SHA-1, usm-user needs a separate group attach)
+- **Serial console**: Web Shell adds a "Serial Console" protocol (USB debug cable — pick the port on Connect, the "Port" box is the baud rate, default 9600; GBK decoding supported) for out-of-band scenarios like first-time provisioning and password recovery; multi-tab / recording / quick buttons all apply
+- **Alert escalation**: "Alert Levels & Sounds…" accepts an unacknowledged-escalation timeout (off by default) — warnings and above unacknowledged past the deadline escalate one level and re-notify (system notification + sound + webhook from one source), once per event, capped at 5 per sweep
+- **History replay**: "Monitor ▾ History Replay…" scrubs a timeline over the last 7 days showing per-time device up/down coloring (from 10-minute uptime samples with a 30-minute lookback) — failure review without digging through logs; exiting restores live monitoring
+- **SNMP failure diagnostics**: on SNMP Walk failure the diagnostics toolbox appends an ICMP reachability verdict with Chinese remediation advice (timeout vs authorization error vs view permission, calibrated against real firmware behavior)
 - **Backup manager**: auto-backups and "Back up now" live in the local backup library — browse / restore / delete / clear, rolling "keep last N"
 - **Tray icon**: enabled, closing the main window minimizes to the system tray while background monitoring continues
 
@@ -205,7 +210,7 @@ Opening `index.html` in a browser also works (core features available; desktop-o
 
 You can also open `index.html` in a browser (Chrome / Edge) or serve it from any static server — canvas editing, import/export and other core features all work; **Web Shell, background monitoring and compliance checks are desktop-only** (browsers lack local network capabilities).
 
-**UI language**: the 🌐 (Language / 语言) button on the toolbar switches between **Chinese / English** — menus, canvas context menu, common buttons and prompts translate immediately; the choice is remembered locally. First release covers the interface chrome (deep forms inside dialogs remain Chinese for now; the dictionary keeps growing); user data (device names, notes) is always shown verbatim.
+**UI language**: the 🌐 (Language / 语言) button on the toolbar switches between **Chinese / English** — menus, canvas context menu, common buttons and prompts translate immediately; the choice is remembered locally. **Language packs** (JSON dictionaries) can be exported / imported to fix translations or contribute new languages, with one-click restore to the built-in dictionary; user data (device names, notes) is always shown verbatim.
 
 Three steps to a diagram:
 
@@ -432,6 +437,19 @@ Export structures (VSDX/VDX/PDF) · Web Shell sessions · multi-mgmt · sanitiza
 </details>
 
 **e2e coverage**: canvas editing/drag undo, delete cascade & multi-step undo/redo, CSV/Excel import, save project & CSV export content assertions, neighbor import, interface table, subnet analysis, SPOF/impact, LAG validation exemption, quick search, multi-sheet, theme switch, browser degradation, plus cross-module integration rounds (CSV export→import round trip, save→open full round trip, link dialog↔interface table consistency, validation↔fix linkage, multi-sheet×undo isolation, type colors↔SVG export consistency, etc.).
+
+### Headless CLI (cli.js)
+
+Runs the main-process pure-Node modules without any UI, for cron inspections, CI compliance gates and scripted backups (exit codes: 0 ok · 1 argument/connection error · 2 compliance violations):
+
+```bash
+node cli.js inspect    --devs hosts.csv --vendor huawei --out inspect.csv   # batch read-only inspection (CSV/JSON)
+node cli.js backup     --devs hosts.csv --base ./nettopo-cli-data --diff    # running-config into library + drift hint
+node cli.js compliance --base ./nettopo-cli-data                            # baseline scan (exit 2 on violations)
+node cli.js compliance --file running.cfg --pack minimal                    # single-file scan
+```
+
+Device CSV: `host,username,password,protocol,port` (optional header row; protocol defaults to ssh, port to 22/23). Verified against real Huawei S6700 devices over SSH: inspection output, config backups into the library, and a baseline scan reporting 6 violations.
 
 **Electron smokes** (UI logic against local mock servers, needs a desktop):
 
