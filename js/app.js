@@ -7305,6 +7305,7 @@ function wire() {
   ]);
   $('#btnDropMonitor').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'grid', label: '监控中心…', act: () => openMonitorCenter() },
+    { ic: 'clock', label: '监控历史回放…', act: () => openUptimeReplay() },
     { ic: 'pulse', label: (monOverlayOn() ? '✓ ' : '') + '监控状态叠加（节点角标）', act: () => {
       const on = !monOverlayOn();
       try { localStorage.setItem(MON_OVERLAY_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
@@ -7638,6 +7639,128 @@ function wire() {
   if (monOverlayOn()) seedMonOverlay();
   // 供 __topo 顶层导出桥接（函数为 wire 作用域私有，顶层无法直接引用）
   globalThis.__monOverlay = { sync: () => syncMonOverlay(), seed: () => seedMonOverlay() };
+
+  /* ---- 监控历史回放（监控 ▾）：拖时间轴看过去 7 天任意时刻的设备在线状态着色 ----
+   * 数据 = 在线率 10 分钟明细采样（UptimeStore，键 deviceId@host）。回放把该时刻的状态写入
+   * state.monitorStatus 后走既有「监控状态叠加」渲染；进入前保存原状态、退出时还原——
+   * 不写盘、不碰实时监控任务。链路历史不入画布（v1，链路事件在时间线可查）。 */
+  let replayActive = null; // { saved: {deviceId: ms 原状态}, at }
+  const REPLAY_LOOKBACK = 30 * 60000; // 采样回看窗口：该时刻前 30 分钟内的最后一桶才算数
+  const replayStatesAt = (series, at) => {
+    const out = { states: {}, on: 0, off: 0, unk: 0 };
+    const seen = new Set();
+    for (const key of Object.keys(series)) {
+      const did = String(key).split('@')[0];
+      if (seen.has(did)) continue;
+      seen.add(did);
+      const arr = series[key] || [];
+      let last = null;
+      for (const s of arr) { if (s[0] <= at) last = s; else break; }
+      if (!last || at - last[0] > REPLAY_LOOKBACK) { out.unk++; continue; }
+      const st = last[1] ? 'ok' : 'offline';
+      out.states[did] = st;
+      if (st === 'ok') out.on++; else out.off++;
+    }
+    // 有监控配置但没有任何采样的设备：计入「无数据」（画布上无角标）
+    for (const did of Object.keys(state.monitorCfg || {})) {
+      if (!seen.has(did)) out.unk++;
+    }
+    return out;
+  };
+  const replayRestore = () => {
+    if (!replayActive) return;
+    for (const [did, ms] of Object.entries(replayActive.saved || {})) {
+      if (ms) state.monitorStatus[did] = ms; else delete state.monitorStatus[did];
+    }
+    replayActive = null;
+    const btn = document.getElementById('urToggle');
+    if (btn) { btn.textContent = '进入回放'; }
+    const lbl = document.getElementById('urTime');
+    if (lbl) lbl.textContent = '已退出回放，画布恢复实时监控状态';
+    syncMonOverlay();
+  };
+  const openUptimeReplay = async () => {
+    if (!window.topoMonitor || !window.topoMonitor.uptime) { toast('历史回放需要桌面版（Electron）环境'); return; }
+    let series = null;
+    try {
+      const r = await window.topoMonitor.uptime();
+      if (!r || !r.ok || !r.series) { toast('暂无在线率采样数据（先开启设备监控的在线探测）'); return; }
+      series = r.series;
+    } catch (e) { toast('读取在线率采样失败'); return; }
+    const keys = Object.keys(series);
+    if (!keys.length) { toast('暂无在线率采样数据（先开启设备监控的在线探测）'); return; }
+    let lo = Infinity, hi = -Infinity;
+    for (const k of keys) for (const s of (series[k] || [])) { if (s[0] < lo) lo = s[0]; if (s[0] > hi) hi = s[0]; }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) { toast('暂无在线率采样数据'); return; }
+    replayRestore();
+    const STEP = 600000;
+    const max = Math.floor(hi / STEP) * STEP;
+    const min = Math.max(lo - STEP, max - 7 * 86400000);
+    const rootNode = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal ws-dialog" role="dialog" style="width:640px">
+        <h3>监控历史回放</h3>
+        <div class="m-sub">拖动时间轴查看过去 7 天任意时刻的<b>设备在线状态</b>（开启「监控状态叠加」后节点角标随回放着色）。数据取在线率 10 分钟采样；进入回放不影响实时监控，退出即还原。</div>
+        <div class="frow"><label>时刻</label>
+          <input id="urSlider" type="range" min="${min}" max="${max}" step="${STEP}" value="${max}" style="width:100%"/>
+        </div>
+        <div class="frow" id="urTime" style="font-weight:600"></div>
+        <div class="m-actions">
+          <button type="button" class="tb primary" id="urToggle">进入回放</button>
+          <button type="button" class="tb" data-act="cancel">关闭</button>
+        </div>
+      </div>`;
+    rootNode.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => { replayRestore(); ov.remove(); };
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    ov.querySelector('[data-act=cancel]').onclick = close;
+    const slider = ov.querySelector('#urSlider');
+    const lbl = ov.querySelector('#urTime');
+    const showLabel = () => {
+      const at = parseInt(slider.value, 10);
+      const st = replayStatesAt(series, at);
+      lbl.textContent = new Date(at).toLocaleString() + '　在线 ' + st.on + ' · 离线 ' + st.off + ' · 无数据 ' + st.unk + (replayActive ? '　（回放中）' : '');
+    };
+    const enterReplay = () => {
+      if (replayActive) { replayRestore(); return; } // replayRestore 已写「已退出回放」提示，别再被 showLabel 覆盖
+      const saved = {};
+      for (const did of new Set(Object.keys(state.monitorCfg || {}).concat(Object.keys(state.monitorStatus || {})))) {
+        saved[did] = state.monitorStatus[did] || null;
+      }
+      replayActive = { saved, at: parseInt(slider.value, 10) };
+      try { localStorage.setItem(MON_OVERLAY_KEY, '1'); } catch (e) { /* ignore */ }
+      const btn = ov.querySelector('#urToggle');
+      btn.textContent = '退出回放';
+      applyReplay();
+    };
+    let applyTimer = 0;
+    const applyReplay = () => {
+      if (!replayActive) return;
+      clearTimeout(applyTimer);
+      applyTimer = setTimeout(async () => {
+        if (!replayActive) return;
+        const at = parseInt(slider.value, 10);
+        replayActive.at = at;
+        const st = replayStatesAt(series, at);
+        for (const did of Object.keys(replayActive.saved)) {
+          const s = st.states[did];
+          if (s) state.monitorStatus[did] = { state: s, perHost: {}, text: '历史回放' };
+          else delete state.monitorStatus[did];
+        }
+        syncMonOverlay();
+        lbl.textContent = new Date(at).toLocaleString() + '　在线 ' + st.on + ' · 离线 ' + st.off + ' · 无数据 ' + st.unk + '　（回放中）';
+      }, 120);
+    };
+    slider.addEventListener('input', showLabel);
+    slider.addEventListener('change', () => { if (replayActive) applyReplay(); });
+    ov.querySelector('#urToggle').onclick = enterReplay;
+    showLabel();
+  };
+
 
   /* ---- 拓扑画布链路流量叠加（监控 ▾ 开关，localStorage 记忆）：连线中点徽标显示实时利用率。
      数据取各设备 SNMP ifTable 采样速率（monitor:iftraffic 推送），按「设备 + 跨厂家规范化接口名」
