@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
-const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue } = require('./js/monitor.js');
+const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue, snmpAdviceText } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
 const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-backup.js');
 const { CredentialStore } = require('./js/credential-store.js');
@@ -1548,6 +1548,13 @@ ipcMain.handle('diag:snmp-walk', async (e, p) => {
   if (r.ok && !r.varbinds.length) {
     const g = await snmpGetValue(host, target, oid, timeoutMs, port);
     if (g.ok) return { ok: true, varbinds: [{ oid: g.oid, value: g.value }] };
+  }
+  if (!r.ok) {
+    // 失败诊断：ICMP 可达性 + 失败分类中文建议（尽力而为，不改变失败语义）
+    let reachable = null;
+    try { const p = await ping(host, 1); if (p && typeof p.ok === 'boolean') reachable = p.ok; } catch (e) { /* ignore */ }
+    const advice = snmpAdviceText({ error: r.error, v3: !!(target && typeof target === 'object'), reachable });
+    return { ok: false, varbinds: r.varbinds || [], error: ((r.error || '采集失败') + (advice ? '\n[诊断] ' + advice : '')), advice };
   }
   return { ok: !!r.ok, varbinds: r.varbinds || [], error: r.error || null };
 });

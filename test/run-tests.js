@@ -9657,6 +9657,20 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     eq(cli.complianceSummary([{ violations: 0 }]).exitCode, 0, 'CLI：无违规退出码 0');
     eq(cli.SAVE_COMMANDS.cisco[1], 'show running-config', 'CLI：厂家保存命令集就位');
   }
+
+  {
+    // SNMP 失败诊断（monitor.snmpAdviceText）：分类与处置建议
+    console.log('== SNMP 失败诊断 ==');
+    const { snmpAdviceText } = require('../js/monitor.js');
+    const a1 = snmpAdviceText({ error: 'SNMP v3 响应超时', v3: true, reachable: true });
+    ok(/ICMP 可达/.test(a1) && /usm-user/.test(a1) && /sha2-256/.test(a1), 'SNMP 诊断：v3 超时 + ICMP 可达 → 服务侧原因清单');
+    const a2 = snmpAdviceText({ error: 'SNMP v3 响应超时', v3: true, reachable: false });
+    ok(/ICMP 不可达/.test(a2) && /优先排查网络/.test(a2), 'SNMP 诊断：v3 超时 + ICMP 不可达 → 先查网络');
+    ok(/授权错误/.test(snmpAdviceText({ error: 'authorizationError', v3: true })) && /SHA-2/.test(snmpAdviceText({ error: 'authorizationError', v3: true })), 'SNMP 诊断：authorizationError → 口令/算法核对');
+    ok(/团体字/.test(snmpAdviceText({ error: 'SNMP 响应超时', v3: false, reachable: null })), 'SNMP 诊断：v2c 超时 → 团体字/服务侧');
+    ok(/视图/.test(snmpAdviceText({ error: 'noSuchObject', v3: true })), 'SNMP 诊断：noSuchObject → 读视图');
+    ok(snmpAdviceText({ error: '未知错误', reachable: null }) === '', 'SNMP 诊断：未知错误不编造建议');
+  }
 })().then(() => {
   suiteFinished = true;
   console.log('');

@@ -2719,5 +2719,32 @@ class MonitorManager extends EventEmitter {
   }
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, errRatePps, ifErrOver, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, envLevels, parseEnvSensors, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT, OID_IF_INERR, OID_IF_OUTERR, OID_ENV_TYPE, OID_ENV_SCALE, OID_ENV_PREC, OID_ENV_VALUE };
+/** SNMP 采集失败分类与中文处置建议（纯函数：诊断工具箱 / 二层推断 / 单测共用）。
+ *  判定口径以真实固件行为为准：华为 YunShan 对「v3 用户不存在」直接丢包（表现为超时），
+ *  「用户存在但口令/算法不匹配」多数固件回 authorizationError；部分新固件禁用 v2c 与 SHA-1。 */
+function snmpAdviceText(opts) {
+  const err = String((opts && opts.error) || '');
+  const v3 = !!(opts && opts.v3);
+  const reachable = opts && typeof opts.reachable === 'boolean' ? opts.reachable : null;
+  const reachTxt = reachable == null ? '' : (reachable
+    ? 'ICMP 可达——网络通，问题在 SNMP 服务侧。'
+    : 'ICMP 不可达——优先排查网络/路由/防火墙，再查 SNMP 配置。');
+  if (/authorization/i.test(err)) {
+    return reachTxt + 'SNMP v3 授权错误（authorizationError）：用户存在，但认证/隐私口令或算法不匹配——核对认证档位（新固件常仅支持 SHA-2 系、禁用 SHA-1/MD5）与加密协议（AES/DES）。';
+  }
+  if (/超时|timeout/i.test(err)) {
+    return reachTxt + (v3
+      ? 'SNMP v3 请求无应答。若设备可达，常见原因按概率：① v3 用户不存在或引擎 ID 已变（设备重启/恢复出厂会丢 usm-user）② 认证/隐私口令不符 ③ 组或视图权限不足 ④ UDP 161 被 ACL 拦截。建议在设备侧执行 display snmp-agent usm-user 核对，并确认算法档位（如 sha2-256 + aes128）。'
+      : 'SNMP 请求无应答：团体字不匹配、SNMP 服务未启用或被 ACL 拦截（部分新固件已禁用 v2c）。');
+  }
+  if (/unreachable|refused/i.test(err)) {
+    return '网络不可达或端口拒绝：检查管理路由，确认设备 SNMP 代理已监听（华为需 snmp-agent protocol source-status all-interface）且 UDP 161 已放行。';
+  }
+  if (/noSuch(Name|Object|Instance)/i.test(err)) {
+    return 'OID 不可读（noSuchObject/Instance）：SNMP 组的读视图（read-view）未包含该子树——调整视图或更换 OID。';
+  }
+  return reachTxt;
+}
+
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, snmpAdviceText, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, errRatePps, ifErrOver, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, envLevels, parseEnvSensors, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT, OID_IF_INERR, OID_IF_OUTERR, OID_ENV_TYPE, OID_ENV_SCALE, OID_ENV_PREC, OID_ENV_VALUE };
 
