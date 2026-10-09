@@ -428,7 +428,8 @@ class TftpServer extends EventEmitter {
     return { opcode, fileName, mode, options };
   }
 
-  start(port) {
+  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP） */
+  start(port, host) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     return new Promise((resolve) => {
       const sock = dgram.createSocket('udp4');
@@ -442,7 +443,7 @@ class TftpServer extends EventEmitter {
         resolve({ ok: false, error: this._bindHint(this.lastError) });
       };
       sock.once('error', fail);
-      sock.bind(port || 0, () => {
+      sock.bind(port || 0, host || undefined, () => {
         if (settled) return;
         settled = true;
         this.sock = sock;

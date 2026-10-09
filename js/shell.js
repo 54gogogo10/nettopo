@@ -14,6 +14,9 @@ const OPT_ECHO = 1, OPT_SGA = 3, OPT_NAWS = 31;
 
 /** 单个会话审计日志文件大小上限（超出滚动新文件，防高输出会话占满磁盘） */
 const SHELL_LOG_MAX_BYTES = 32 * 1024 * 1024;
+/** WebShell 审计日志保留天数（跨天清理，与监控日志/内置 syslog 服务同口径）：此前只有单文件
+ *  滚动、无总量回收，长期运行会把 userData 所在盘无界写满 */
+const WEBLOG_KEEP_DAYS = 90;
 
 /* ---------- 配置下发：危险命令闸门（主进程独立实现） ---------- */
 /** 危险命令分段归一化：与渲染层 U.deploySegments **同口径、互不依赖**（两侧各有一份，
@@ -82,6 +85,25 @@ function warnHit(line) {
 function selfLockHit(line) {
   for (const s of deploySegments(line)) {
     if (/^(undo|no)\s+/i.test(s) && DEPLOY_MGMT_RE.test(s)) return s;
+  }
+  return null;
+}
+/** AI 命令助手 auto 模式专用的「降级人工确认」类：账号/口令/AAA/SNMP 凭据/ACL/远程拷贝等
+ *  安全敏感变更。这些动作不在禁止清单（业务上合法），但经提示注入的 LLM 输出静默落到设备上
+ *  等于开了后门——auto 直执行前必须转人工确认。仅 AI 路径使用，不影响配置变更下发的清单语义。 */
+const AI_CONFIRM_RES = [
+  { re: /^(local-user|username|user|useradd|adduser|passwd)\b/i, why: '创建/修改设备账号' },
+  { re: /^(aaa)\b/i, why: '修改 AAA 认证' },
+  { re: /\b(password|passphrase|community)\b/i, why: '口令/团体字类变更' },
+  { re: /^(snmp-agent|snmp-server)\b/i, why: '修改 SNMP 配置' },
+  { re: /^(copy|put|get)\b.*\b(tftp|ftp|scp|sftp)\b/i, why: '与远程文件服务器互拷（配置外传风险）' },
+  { re: /^(ip\s+acl|acl\s+number|firewall)\b/i, why: 'ACL/防火墙规则变更' },
+  { re: /^(ssh|telnet)\s+[^\s]+@/i, why: '从设备外连其它主机' }
+];
+/** 命中 AI 确认类返回原因文本，未命中返回 null */
+function aiConfirmHit(line) {
+  for (const s of deploySegments(line)) {
+    for (const x of AI_CONFIRM_RES) { if (x.re.test(s)) return x.why; }
   }
   return null;
 }
@@ -169,6 +191,39 @@ class ShellManager extends EventEmitter {
     this._params = new Map(); // sid -> 建连参数副本（断线重连用；仅内存，不落盘）
     this._pendingVerify = new Map(); // host -> [{verify, ...}]（SSH 首次连接待确认指纹；同一主机可有多个会话排队）
     this.logDir = (typeof opts.logDir === 'string' && opts.logDir.trim()) ? opts.logDir.trim() : '';
+    // 审计日志保留清理：构造时一次 + 每日一次（unref，不阻塞退出）。只删超期日期目录，
+    // 活跃会话的写流始终落在当天目录（滚动也按当天），不会命中 cutoff
+    this._cleanupOldLogs();
+    this._logKeepTimer = setInterval(() => { try { this._cleanupOldLogs(); } catch (e) { /* ignore */ } }, 24 * 3600 * 1000);
+    if (this._logKeepTimer.unref) this._logKeepTimer.unref();
+  }
+
+  /** WebShell 审计日志跨天保留清理：删除 WebShell-<主机>/<YYYY-MM-DD> 中超过保留期的日期目录，
+   *  空主机目录回收。lstat 拒符号链接；近 1 小时有写入的不清（设备/本机时钟错误场景）。 */
+  _cleanupOldLogs() {
+    if (!this.logDir) return;
+    try {
+      const cutoff = Date.now() - WEBLOG_KEEP_DAYS * 86400000;
+      for (const host of fs.readdirSync(this.logDir)) {
+        if (!/^WebShell-/.test(host)) continue; // 只动自己的审计日志目录
+        const hd = path.join(this.logDir, host);
+        let st;
+        try { st = fs.lstatSync(hd); } catch (e) { continue; }
+        if (!st.isDirectory() || st.isSymbolicLink()) continue;
+        for (const d of fs.readdirSync(hd)) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+          const dd = path.join(hd, d);
+          let dst;
+          try { dst = fs.lstatSync(dd); } catch (e) { continue; }
+          if (dst.isSymbolicLink()) continue;
+          if (dst.mtimeMs > Date.now() - 3600000) continue; // 近 1 小时有写入不清
+          const t = new Date(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)).getTime();
+          if (!(Number.isFinite(t) && t < cutoff)) continue;
+          try { fs.rmSync(dd, { recursive: true, force: true }); } catch (e) { /* 句柄占用等：跳过 */ }
+        }
+        try { fs.rmdirSync(hd); } catch (e) { /* 非空：保留 */ }
+      }
+    } catch (e) { /* 目录不存在等：忽略 */ }
   }
 
   /** 建立会话。opts: {protocol:'ssh'|'telnet', host, port, username, password, cols, rows}
@@ -1496,4 +1551,4 @@ class ShellManager extends EventEmitter {
   }
 }
 
-module.exports = { ShellManager, cleanSftpRemotePath, sftpRemoteJoin, fmtSftpSize, makeDecoder, deploySegments, forbiddenHit, warnHit, selfLockHit };
+module.exports = { ShellManager, cleanSftpRemotePath, sftpRemoteJoin, fmtSftpSize, makeDecoder, deploySegments, forbiddenHit, warnHit, selfLockHit, aiConfirmHit };

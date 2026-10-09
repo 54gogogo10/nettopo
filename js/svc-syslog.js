@@ -213,6 +213,11 @@ class SyslogServer extends EventEmitter {
     this._newDirWinStart = 0;
     this._newDirWinCount = 0;
     this.lastDay = '';
+    // 归档磁盘总量配额：无认证 UDP 写入在限速内仍可达数十 GB/天（keepDays 清理追不上写满系统盘）。
+    // 与 TFTP 收件库同口径的全库字节上限，超限丢档（diskDropped 计数）而非无界落盘
+    this.maxTotalBytes = Math.max(1024 * 1024, Math.floor(Number(opts.maxTotalBytes) || 1024 * 1024 * 1024));
+    this._diskBytes = 0;  // 全库占用字节（启动扫描 + 写入增量维护，超限清理后重扫校准）
+    this._quotaAt = 0;    // 上次超限触发「清理+重扫」的时间（节流，防高频消息拖垮事件循环）
     this.stats = { rxMsgs: 0, dropped: 0, hosts: 0, alerts: 0, diskDropped: 0, dirsRecycled: 0, hostsOverCap: 0 };
     this.alertRules = normalizeAlertRules(null);
     this.alertLast = new Map();  // 告警冷却：'主机\x00规则键' -> 上次告警时间
@@ -220,9 +225,11 @@ class SyslogServer extends EventEmitter {
     this._winCount = 0;
     try { fs.mkdirSync(this.baseDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
     this._cleanupOld();
+    this._scanDiskBytes();
   }
 
-  start(port, withTcp) {
+  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP），UDP 与 TCP 同地址 */
+  start(port, withTcp, host) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     const wantTcp = withTcp === true;
     return new Promise((resolve) => {
@@ -237,7 +244,7 @@ class SyslogServer extends EventEmitter {
         resolve({ ok: false, error: this._bindHint(this.lastError) });
       };
       udp.once('error', fail);
-      udp.bind(port || 0, () => {
+      udp.bind(port || 0, host || undefined, () => {
         if (settled) return;
         const udpPort = udp.address().port;
         const afterUdp = () => {
@@ -274,7 +281,7 @@ class SyslogServer extends EventEmitter {
         // 一部分（设备配置 logging host 只写一个端口号，TCP/UDP 走同一号）。代价是 Windows 下
         // TCP 临时端口区间与 UDP 重叠时可能撞车 → EADDRINUSE，此时 start 如实返回 ok:false、
         // this.port 保持 0；调用方必须检查返回值（测试侧的重复重试见 run-tests 的 startSyslogWithRetry）
-        tcp.listen(udpPort, '0.0.0.0', () => {
+        tcp.listen(udpPort, host || '0.0.0.0', () => {
           if (settled) return;
           tcp.removeListener('error', failTcp);
           this.tcp = tcp;
@@ -492,6 +499,8 @@ class SyslogServer extends EventEmitter {
     // 写流背压：写不动（慢盘/网络盘挂起）时不再无界堆积内存——丢弃本条并计数，环形缓冲与实时
     // 告警不受影响；积压过高时直接重建该流（旧流已失去意义）
     const line = fmtLogLine(d, ent) + '\n';
+    // 全库字节配额先于写入判定：超限丢档（环形缓冲与告警不受影响，面板 diskDropped 可见）
+    if (!this._diskOk(Buffer.byteLength(line))) { this.stats.diskDropped++; return; }
     try {
       if (!st.write(line)) {
         this.stats.diskDropped++;
@@ -576,6 +585,38 @@ class SyslogServer extends EventEmitter {
     } catch (e) { /* ignore */ }
   }
 
+  /** 全库占用字节扫描（启动时与超限清理后校准增量计数）：与 TFTP 收件库同口径，跳过符号链接 */
+  _scanDiskBytes() {
+    let total = 0;
+    const walk = (dir) => {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch (e) { return; }
+      for (const n of names) {
+        let st;
+        try { st = fs.lstatSync(path.join(dir, n)); } catch (e) { continue; }
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) walk(path.join(dir, n));
+        else if (st.isFile()) total += st.size;
+      }
+    };
+    walk(this.baseDir);
+    this._diskBytes = total;
+  }
+
+  /** 落盘配额闸门：超限时节流触发一次过期清理 + 全库重扫（keepDays 是主要释放途径），
+   *  仍超限则丢档返回 false——环形缓冲/实时告警不受影响，stats.diskDropped 如实计数 */
+  _diskOk(addBytes) {
+    if (this._diskBytes + addBytes <= this.maxTotalBytes) { this._diskBytes += addBytes; return true; }
+    const now = Date.now();
+    if (now - this._quotaAt > 600000) {
+      this._quotaAt = now;
+      this._cleanupOld();
+      this._scanDiskBytes();
+    }
+    if (this._diskBytes + addBytes <= this.maxTotalBytes) { this._diskBytes += addBytes; return true; }
+    return false;
+  }
+
   /** 环形缓冲增量拉取（seq 之后的条目） */
   tail(sinceSeq) {
     const since = Number.isFinite(Number(sinceSeq)) ? Number(sinceSeq) : 0;
@@ -597,6 +638,7 @@ class SyslogServer extends EventEmitter {
       running: this.running, port: this.port, tcpPort: this.tcpOn ? this.tcpPort : 0, tcp: !!this.tcp,
       error: this.lastError,
       rxMsgs: this.stats.rxMsgs, dropped: this.stats.dropped, diskDropped: this.stats.diskDropped,
+      diskBytes: this._diskBytes, diskQuota: this.maxTotalBytes,
       dirsRecycled: this.stats.dirsRecycled, hostsOverCap: this.stats.hostsOverCap,
       hosts: this.hostDirs ? this.hostDirs.size : 0,
       buffered: this.ring.length, alerts: this.stats.alerts, alertOn: this.alertRules.enabled

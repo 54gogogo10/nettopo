@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('topoShell', {
   trustFingerprint: (host, trust) => ipcRenderer.invoke('shell:trust', { host, trust }),
   /* 一次性命令执行（采集邻居表 / MAC·ARP 定位等无人值守采集；独立会话，主进程内完成） */
   runOneShot: (p) => ipcRenderer.invoke('shell:oneshot', p),
+  /* AI 命令闸门：把命令清单交主进程按配置变更下发同一套危险命令表裁决（forbidden/warn/selfLock）。
+   *  auto 模式直接执行 LLM 生成物，渲染层启发式词表之外必须有主进程权威二次裁决 */
+  cmdGate: (lines) => ipcRenderer.invoke('shell:cmd-gate', { lines }),
   copyText: (text) => ipcRenderer.invoke('shell:clipboard-write', text),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   pasteText: () => ipcRenderer.invoke('shell:clipboard-read'),

@@ -3,7 +3,7 @@
 const { app, BrowserWindow, session, ipcMain, dialog, Notification, Tray, Menu, shell: electronShell } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { ShellManager, sftpRemoteJoin } = require('./js/shell.js');
+const { ShellManager, sftpRemoteJoin, forbiddenHit, warnHit, selfLockHit, aiConfirmHit } = require('./js/shell.js');
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue, snmpAdviceText } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
@@ -1125,6 +1125,19 @@ ipcMain.on('shell:data', (e, id, data) => {
 });
 ipcMain.on('shell:resize', (e, id, cols, rows) => { if (shellSender(e) && shellUiSession(id)) shell.resize(id, cols, rows); });
 ipcMain.on('shell:close', (e, id) => { if (shellSender(e) && shellUiSession(id)) shell.close(id); });
+/* AI 命令闸门：对命令清单做主进程权威裁决（与配置变更下发同一套 forbiddenHit/warnHit/selfLockHit）。
+ *  auto 模式会把 LLM 生成物直接发到真实设备，渲染层启发式词表被绕过/过用时这里是第二道闸。 */
+ipcMain.handle('shell:cmd-gate', (e, p) => {
+  if (!shellSender(e)) return { ok: false, error: 'forbidden' };
+  const lines = Array.isArray(p && p.lines) ? p.lines : [];
+  const out = [];
+  for (const c of lines.slice(0, 64)) {
+    const t = String(c == null ? '' : c).replace(/[\u0000-\u001f\u007f]/g, '').trim();
+    if (!t || t.length > 256) continue; // 空行/超长行不参与裁决，渲染层按原样处理
+    out.push({ text: t, forbidden: forbiddenHit(t) || null, warn: warnHit(t) || null, selfLock: !!selfLockHit(t), aiConfirm: aiConfirmHit(t) || null });
+  }
+  return { ok: true, lines: out };
+});
 ipcMain.handle('shell:clipboard-write', (e, text) => {
   if (!shellSender(e)) return { ok: false, error: 'forbidden' };
   text = String(text == null ? '' : text);
@@ -2552,7 +2565,12 @@ app.whenReady().then(() => {
   };
   app.on('web-contents-created', (e, contents) => {
     contents.on('will-navigate', (ev, url) => {
-      if (contents.getType() === 'webview') return; // 设备页内嵌 guest 自由导航（另有 popup 拦截）
+      // 设备页内嵌 guest 可自由导航（另有 popup 拦截），但仅限 http(s)——与 will-attach-webview
+      // 的 src 校验同口径：guest 后续跳到 file:/javascript: 等一律拒（Chromium webSecurity 之外再兜一层）
+      if (contents.getType() === 'webview') {
+        if (!/^https?:\/\//i.test(url)) ev.preventDefault();
+        return;
+      }
       if (!isAllowedLocalPage(url)) ev.preventDefault();
     });
     // 纵深：guest 一律无 preload、无 Node；src 仅放行 http(s)（渲染层已校验，此处兜底）

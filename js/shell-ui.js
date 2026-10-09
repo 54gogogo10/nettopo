@@ -1160,7 +1160,7 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
       for (const c of cmds) {
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = 'sh-ai-cmd' + (c.done ? ' done' : '');
+        b.className = 'sh-ai-cmd' + (c.done ? ' done' : '') + (c.err ? ' err' : '');
         b.title = '点击复制：' + c.text;
         b.textContent = c.text;
         b.onclick = () => { try { window.topoShell.copyText(c.text); toast('命令已复制'); } catch (e) { /* ignore */ } };
@@ -1248,24 +1248,48 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
       showAiResult([{ text: '未能从回复中提取命令', err: true }], [], [{ label: '关闭', act: () => {} }]);
       return;
     }
-    // auto 模式对「破坏性命令」仍强制人工确认：终端上下文（横幅/MOTD）设备可控，可经提示注入
-    // 诱导 LLM 生成删配置/清盘类命令；直接执行无回旋余地，故命中破坏性关键词时降级为确认模式
-    if (aiMode === 'auto' && cmds.some((c) => isDestructiveCmd(c.text))) {
-      showAiResult(
-        [{ text: '检测到可能造成配置/数据丢失的命令（共 ' + cmds.length + ' 条，目标：' + target + '），已从「直接执行」降级为人工确认：', err: true }],
-        cmds,
-        [
-          { label: '执行全部', act: async () => {
-              const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
-              toast('已下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」');
-            } },
-          { label: '复制全部', act: () => { try { window.topoShell.copyText(cmds.map((c) => c.text).join('\n')); toast('命令已复制'); } catch (e) { /* ignore */ } } },
-          { label: '放弃', act: () => {} }
-        ]
-      );
-      return;
-    }
+    // auto 模式的双重闸门：终端上下文（横幅/MOTD/回显）设备可控，可经提示注入诱导 LLM 生成
+    // 删配置/清盘/开后门类命令，直接执行无回旋余地。第一道是渲染层启发式词表；第二道是主进程
+    // 权威闸门（shell:cmd-gate，与配置变更下发同一套 forbiddenHit/warnHit/selfLockHit）——渲染层
+    // 词表被绕过/过用时仍兜得住。命中禁止清单整批拒发；命中告警/自断管理类降级人工确认
     if (aiMode === 'auto') {
+      let gate = null;
+      try { gate = (window.topoShell && window.topoShell.cmdGate) ? await window.topoShell.cmdGate(cmds.map((c) => c.text)) : null; } catch (e) { gate = null; }
+      const gl = (gate && gate.ok && Array.isArray(gate.lines)) ? gate.lines : [];
+      const byText = new Map(gl.map((g) => [g.text, g]));
+      const hitForbidden = gl.filter((g) => g.forbidden);
+      const hitWarn = gl.filter((g) => !g.forbidden && (g.warn || g.selfLock || g.aiConfirm));
+      const heuristicHit = cmds.some((c) => isDestructiveCmd(c.text));
+      if (hitForbidden.length) {
+        const reasons = [];
+        for (const g of hitForbidden) { if (reasons.indexOf(g.forbidden) < 0) reasons.push(g.forbidden); }
+        showAiResult(
+          [{ text: '主进程闸门拦截：' + hitForbidden.length + ' 条命令命中禁止下发清单（' + reasons.join('；') + '），整批不予执行：', err: true }],
+          cmds.map((c) => { const g = byText.get(c.text); return (g && g.forbidden) ? Object.assign({}, c, { err: true }) : c; }),
+          [
+            { label: '复制全部（自行斟酌）', act: () => { try { window.topoShell.copyText(cmds.map((c) => c.text).join('\n')); toast('命令已复制'); } catch (e) { /* ignore */ } } },
+            { label: '放弃', act: () => {} }
+          ]
+        );
+        return;
+      }
+      if (hitWarn.length || heuristicHit) {
+        const wr = [];
+        for (const g of hitWarn) { const r = g.warn || g.aiConfirm || '可能关闭本机管理通道'; if (wr.indexOf(r) < 0) wr.push(r); }
+        showAiResult(
+          [{ text: '检测到需人工确认的命令（共 ' + cmds.length + ' 条，目标：' + target + (wr.length ? '；原因：' + wr.slice(0, 3).join('；') : '') + '），已从「直接执行」降级为人工确认：', err: true }],
+          cmds,
+          [
+            { label: '执行全部', act: async () => {
+                const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
+                toast('已下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」');
+              } },
+            { label: '复制全部', act: () => { try { window.topoShell.copyText(cmds.map((c) => c.text).join('\n')); toast('命令已复制'); } catch (e) { /* ignore */ } } },
+            { label: '放弃', act: () => {} }
+          ]
+        );
+        return;
+      }
       const n = await sendCommandsToSession(sid, cmds.map((c) => c.text));
       showAiResult([{ text: '已直接下发 ' + n + '/' + cmds.length + ' 条命令到「' + target + '」（模式：直接执行）' }], cmds, [{ label: '关闭', act: () => {} }]);
       return;

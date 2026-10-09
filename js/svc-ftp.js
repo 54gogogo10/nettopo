@@ -308,7 +308,7 @@ class FtpConnection {
       };
       srv.once('error', onErr);
       srv.once('listening', onOk);
-      try { srv.listen(port, '0.0.0.0'); }
+      try { srv.listen(port, (this.server && this.server.bindHost) || '0.0.0.0'); }
       catch (e) { srv.removeListener('error', onErr); srv.removeListener('listening', onOk); resolve(false); }
     });
     const range = this.server.pasvRange();
@@ -669,8 +669,12 @@ class FtpServer extends EventEmitter {
     return { min, count, next };
   }
 
-  start(port) {
+  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP）；
+   *  PASV 数据通道绑定同地址（PASV 应答地址取控制连接本端地址，两者天然一致） */
+  start(port, host) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
+    this.bindHost = host && /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host)
+      && host.split('.').every(x => Number(x) <= 255) ? host : '0.0.0.0';
     return new Promise((resolve) => {
       const srv = net.createServer();
       let settled = false;
@@ -684,7 +688,7 @@ class FtpServer extends EventEmitter {
       };
       srv.once('error', fail);
       srv.maxConnections = Math.max(4, this.maxSessions + 16); // 内核层限流：超限连接排队而非耗尽句柄
-      srv.listen(port || 0, '0.0.0.0', () => {
+      srv.listen(port || 0, this.bindHost, () => {
         if (settled) return;
         settled = true;
         this.srv = srv;

@@ -291,14 +291,21 @@ class TrapServer extends EventEmitter {
     // 使目录总量在伪造源 IP 洪流下有界；回收计数进 stats.dirsRecycled，不做无声删除
     this.hostDirReclaimMs = Math.max(60000, Math.floor(Number(opts.hostDirReclaimMs) || 30 * 60000));
     this.lastDay = '';
+    // 归档磁盘总量配额（与 syslog/TFTP 收件库同口径）：无认证 UDP Trap 在限速内仍可无界写盘，
+    // 超限丢档（diskDropped 计数）并节流触发过期清理
+    this.maxTotalBytes = Math.max(1024 * 1024, Math.floor(Number(opts.maxTotalBytes) || 1024 * 1024 * 1024));
+    this._diskBytes = 0;  // 全库占用字节（启动扫描 + 写入增量维护，超限清理后重扫校准）
+    this._quotaAt = 0;    // 上次超限触发「清理+重扫」的时间（节流）
     this.stats = { rxPackets: 0, malformed: 0, dropped: 0, v3Unknown: 0, v3AuthFail: 0, communityReject: 0, diskDropped: 0, dirsRecycled: 0, hostsOverCap: 0 };
     this._winStart = 0;
     this._winCount = 0;
     try { fs.mkdirSync(this.baseDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
     this._cleanupOld();
+    this._scanDiskBytes();
   }
 
-  start(port) {
+  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP） */
+  start(port, host) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     return new Promise((resolve) => {
       const udp = dgram.createSocket('udp4');
@@ -312,7 +319,7 @@ class TrapServer extends EventEmitter {
         resolve({ ok: false, error: this._bindHint(this.lastError) });
       };
       udp.once('error', fail);
-      udp.bind(port || 0, () => {
+      udp.bind(port || 0, host || undefined, () => {
         if (settled) return;
         settled = true;
         this.udp = udp;
@@ -522,6 +529,8 @@ class TrapServer extends EventEmitter {
       + ' trap=' + ent.trap + ' oid=' + (ent.oid || '-')
       + (ent.msg ? ' ' + ent.msg : '');
     // 写流背压：写不动时丢弃本条并计数（环形缓冲与实时推送不受影响），积压过高直接重建该流
+    // 全库字节配额先于写入判定：超限丢档（环形缓冲与实时推送不受影响，面板 diskDropped 可见）
+    if (!this._diskOk(Buffer.byteLength(line) + 1)) { this.stats.diskDropped++; return; }
     try {
       if (!st.write(line + '\n')) {
         this.stats.diskDropped++;
@@ -603,6 +612,37 @@ class TrapServer extends EventEmitter {
     } catch (e) { /* ignore */ }
   }
 
+  /** 全库占用字节扫描（启动时与超限清理后校准增量计数）：与 syslog/TFTP 同口径，跳过符号链接 */
+  _scanDiskBytes() {
+    let total = 0;
+    const walk = (dir) => {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch (e) { return; }
+      for (const n of names) {
+        let st;
+        try { st = fs.lstatSync(path.join(dir, n)); } catch (e) { continue; }
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) walk(path.join(dir, n));
+        else if (st.isFile()) total += st.size;
+      }
+    };
+    walk(this.baseDir);
+    this._diskBytes = total;
+  }
+
+  /** 落盘配额闸门（与 syslog 同口径）：超限丢档，节流触发过期清理 + 全库重扫 */
+  _diskOk(addBytes) {
+    if (this._diskBytes + addBytes <= this.maxTotalBytes) { this._diskBytes += addBytes; return true; }
+    const now = Date.now();
+    if (now - this._quotaAt > 600000) {
+      this._quotaAt = now;
+      this._cleanupOld();
+      this._scanDiskBytes();
+    }
+    if (this._diskBytes + addBytes <= this.maxTotalBytes) { this._diskBytes += addBytes; return true; }
+    return false;
+  }
+
   /** 环形缓冲增量拉取（seq 之后的条目） */
   tail(sinceSeq) {
     const since = Number.isFinite(Number(sinceSeq)) ? Number(sinceSeq) : 0;
@@ -615,6 +655,7 @@ class TrapServer extends EventEmitter {
       running: this.running, port: this.port, error: this.lastError,
       rxPackets: this.stats.rxPackets, malformed: this.stats.malformed, dropped: this.stats.dropped,
       diskDropped: this.stats.diskDropped, dirsRecycled: this.stats.dirsRecycled,
+      diskBytes: this._diskBytes, diskQuota: this.maxTotalBytes,
       hostsOverCap: this.stats.hostsOverCap, hosts: this.hostDirs ? this.hostDirs.size : 0, buffered: this.ring.length,
       v3Users: this.v3Users.length, v3Unknown: this.stats.v3Unknown, v3AuthFail: this.stats.v3AuthFail,
       communityGuard: this.communities.length > 0, communityReject: this.stats.communityReject

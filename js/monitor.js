@@ -898,6 +898,9 @@ const MAX_ALERT_PENDING_CHARS = 1024 * 1024;
 const MAX_BACKUP_CAPTURE_CHARS = 8 * 1024 * 1024;
 /** 单设备单日日志滚动文件数上限：高输出设备按 32MB 滚动一天可写数百个文件，超限删最旧 */
 const MAX_LOG_FILES_PER_DAY = 24;
+/** 监控日志保留天数（跨天清理，与内置 syslog/trap 服务同口径）：此前只有单文件滚动与单日文件数
+ *  封顶，历史日期目录从不回收——多设备 7×24 长期运行会把 userData 所在盘无界写满 */
+const LOG_KEEP_DAYS = 90;
 
 class MonitorManager extends EventEmitter {
   /** @param {import('./shell').ShellManager} shell 共享的会话管理器
@@ -917,10 +920,46 @@ class MonitorManager extends EventEmitter {
     this._bySid = new Map();     // sid -> key
     this.trusted = new Map();    // host -> fp
     this._loadTrust();
+    // 日志保留清理：构造时一次 + 每日一次（unref，不阻塞退出）。删除只针对超期日期目录，
+    // 活跃任务的当日目录不可能命中 cutoff（纵深：logDate 与任务比对再跳过）
+    this._cleanupOldLogs();
+    this._logKeepTimer = setInterval(() => { try { this._cleanupOldLogs(); } catch (e) { /* ignore */ } }, 24 * 3600 * 1000);
+    if (this._logKeepTimer.unref) this._logKeepTimer.unref();
     // 一次性订阅底层会话事件，按 sid 路由到任务
     shell.on('output', (sid, data) => this._onOutput(sid, data));
     shell.on('status', (sid, info) => this._onStatus(sid, info));
     shell.on('end', (sid, reason) => this._onEnd(sid, reason));
+  }
+
+  /** 跨天日志保留清理：删除超过 LOG_KEEP_DAYS 的日期目录（<设备>/<YYYY-MM-DD>），空设备目录回收。
+   *  与 svc-syslog 的 _cleanupOld 同口径：近 1 小时内有写入的不清（设备时钟错误场景），
+   *  lstat 拒符号链接，全程 try/catch——清理失败不影响监控主流程。 */
+  _cleanupOldLogs() {
+    try {
+      const cutoff = Date.now() - LOG_KEEP_DAYS * 86400000;
+      for (const dev of fs.readdirSync(this.logBaseDir)) {
+        const devDir = path.join(this.logBaseDir, dev);
+        let st;
+        try { st = fs.lstatSync(devDir); } catch (e) { continue; }
+        if (!st.isDirectory() || st.isSymbolicLink()) continue;
+        for (const d of fs.readdirSync(devDir)) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+          const dd = path.join(devDir, d);
+          let dst;
+          try { dst = fs.lstatSync(dd); } catch (e) { continue; }
+          if (dst.isSymbolicLink()) continue;
+          if (dst.mtimeMs > Date.now() - 3600000) continue; // 近 1 小时有写入不清
+          const t = new Date(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)).getTime();
+          if (!(Number.isFinite(t) && t < cutoff)) continue;
+          // 有任务正在往该日期写（理论上当日目录才可能，纵深再挡一次）
+          let active = false;
+          for (const j of this.jobs.values()) { if (j && j.logDate === d) { active = true; break; } }
+          if (active) continue;
+          try { fs.rmSync(dd, { recursive: true, force: true }); } catch (e) { /* 句柄占用等：跳过 */ }
+        }
+        try { fs.rmdirSync(devDir); } catch (e) { /* 非空：保留 */ }
+      }
+    } catch (e) { /* 目录不存在等：忽略 */ }
   }
 
   /** 更新易变行忽略规则提供者（宿主在设置变更后调用；规则用于「无变化不新增」与变更 diff） */

@@ -233,7 +233,8 @@ class NetflowServer extends EventEmitter {
     this._winStart = 0; this._winCount = 0;
   }
 
-  async start(port) {
+  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP） */
+  async start(port, host) {
     if (this.sock) return { ok: true, port: this.port };
     // 0 为合法 bind 端口（系统随机分配，测试用）：不能用 || 兜底（0 会被误当缺省换成 9995）
     const n = Math.floor(Number(port));
@@ -248,7 +249,7 @@ class NetflowServer extends EventEmitter {
         done({ ok: false, error: String((e && e.message) || e) });
       });
       sock.on('message', (msg, rinfo) => this._onPacket(msg, rinfo));
-      sock.bind(p, () => {
+      sock.bind(p, host || undefined, () => {
         this.sock = sock;
         this.port = sock.address().port;
         done({ ok: true, port: this.port });

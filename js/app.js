@@ -6447,6 +6447,12 @@ function refreshPanel() {
   const wrap = $('#listWrap');
   const q = state.search.trim().toLowerCase();
   if (state.tab === 'nodes') {
+    // 度数索引一次建好：逐节点对全量链路 filter 是 O(节点×链路)，数千节点大图上一次刷新即数千万次比较
+    const linkCnt = new Map();
+    for (const l of state.links) {
+      linkCnt.set(l.a, (linkCnt.get(l.a) || 0) + 1);
+      linkCnt.set(l.b, (linkCnt.get(l.b) || 0) + 1);
+    }
     const list = state.nodes
       .filter(n => !q || String(n.name || '').toLowerCase().includes(q) || String(n.note || '').toLowerCase().includes(q))
       .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh'));
@@ -6456,7 +6462,7 @@ function refreshPanel() {
     }
     wrap.innerHTML = list.map(n => {
       const t = U.getType(n.type);
-      const cnt = state.links.filter(l => l.a === n.id || l.b === n.id).length;
+      const cnt = linkCnt.get(n.id) || 0;
       return `<div class="pitem ${state.sel.kind === 'node' && state.sel.id === n.id ? 'sel' : ''}" data-kind="node" data-id="${n.id}">
         <span class="dot" style="background:${t.c1}"></span>
         <span class="nm">${U.escHtml(n.name)}<span class="sub">${U.escHtml(t.label)}${n.note ? ' · ' + U.escHtml(n.note) : ''}</span></span>
@@ -6466,9 +6472,11 @@ function refreshPanel() {
       </div>`;
     }).join('');
   } else {
+    // 端点索引一次建好：逐链路两次 find 是 O(链路×节点)
+    const nodeById = new Map(state.nodes.map(n => [n.id, n]));
     const list = state.links
       .map(l => {
-        const a = state.nodes.find(n => n.id === l.a), b = state.nodes.find(n => n.id === l.b);
+        const a = nodeById.get(l.a), b = nodeById.get(l.b);
         return { l, a, b };
       })
       .filter(({ l, a, b }) => {
@@ -7955,11 +7963,20 @@ function wire() {
           if (!ms.state || !Object.keys(ms.perHost).length) delete state.monitorStatus[did];
         } else delete state.monitorStatus[did];
       } else {
-        if (!state.monitorStatus[did]) state.monitorStatus[did] = { state: null, text: '', perHost: {} };
+        const ms0 = state.monitorStatus[did];
+        const prev = ms0 ? { state: ms0.state, text: ms0.text } : null;
+        if (!ms0) state.monitorStatus[did] = { state: null, text: '', perHost: {} };
         const oldHost = state.monitorStatus[did].perHost[host] || {};
         state.monitorStatus[did].perHost[host] = Object.assign({}, oldHost, { state: info.state, text: info.text || '', since: info.since, probeOk: info.probeOk, alert: info.alert, backup: info.backup });
         state.monitorStatus[did].state = aggregateMonitorState(state.monitorStatus[did].perHost);
         state.monitorStatus[did].text = aggregateMonitorText(state.monitorStatus[did].perHost);
+        // 与 onProbe 同款早退：状态事件高频（N 台启动瞬间的 connecting→monitoring 翻转、重连抖动），
+        // 聚合状态与文案均未变时不做面板全量重建（innerHTML 重挂监听器成本高）；选中的正是该设备时
+        // 仅轻量刷新选中卡
+        if (prev && prev.state === state.monitorStatus[did].state && prev.text === state.monitorStatus[did].text) {
+          if (state.sel && state.sel.kind === 'node' && state.sel.id === did) renderSelCard();
+          return;
+        }
       }
       refreshPanel();
       renderSelCard();
@@ -12606,6 +12623,16 @@ function openNetServices() {
     <div class="modal nsv-dialog" role="dialog" style="width:1100px;height:86vh">
       <h3>网络服务（TFTP / FTP / Syslog / Trap / NetFlow）</h3>
       <div class="m-sub">在本机开启服务后，局域网设备可把<b>配置文件推送到本机</b>（TFTP / FTP）、<b>向本机发送 syslog 日志</b>、<b>把 SNMP Trap 告警上报到本机</b>、<b>把 NetFlow / IPFIX 流量记录导出到本机</b>；收到的文件可一键导入「配置备份库」（进入备份中心 / 合规检查体系）。全部数据仅保存在本机。</div>
+      <div class="nsv-bindbar">
+        <label>监听地址</label>
+        <select id="nsvBind">
+          <option value="0.0.0.0">全部网卡（默认，局域网设备可达）</option>
+          <option value="127.0.0.1">仅本机 127.0.0.1（调试用，设备不可达）</option>
+          <option value="custom">指定本机 IP…</option>
+        </select>
+        <input type="text" id="nsvBindIp" placeholder="本机某个网卡 IP，如 192.168.1.10" maxlength="15" spellcheck="false" autocomplete="off" hidden/>
+        <span class="nsv-hint">五个服务共用。TFTP / Syslog / Trap / NetFlow 无认证——多宿主机（同时连内网与 Wi-Fi/热点）建议限定地址，避免在不可信网络暴露</span>
+      </div>
       <div class="nsv-top">
         <div class="nsv-cards">
           <div class="nsv-card">
@@ -12740,6 +12767,10 @@ function openNetServices() {
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=close]').onclick = close;
   ov.querySelector('[data-act=refresh]').onclick = () => { loadFiles(); refreshTail(true); };
+  ov.querySelector('#nsvBind').onchange = () => {
+    const sel = ov.querySelector('#nsvBind');
+    ov.querySelector('#nsvBindIp').hidden = sel.value !== 'custom';
+  };
 
   /* ---------- 服务状态与配置回填 ---------- */
   let st = null;   // netsvc status
@@ -12749,22 +12780,23 @@ function openNetServices() {
     el.title = s.error || '';
   };
   const stText = (s) => s.error ? ('错误：' + s.error)
-    : (s.running ? '运行中 :' + s.port + (s.cfgPort !== s.port ? '（配置 ' + s.cfgPort + '）' : '') : '已停止');
+    : (s.running ? '运行中 :' + s.port + (s.cfgPort !== s.port ? '（配置 ' + s.cfgPort + '）' : '') + (st.listen && st.listen !== '0.0.0.0' ? ' @' + st.listen : '') : '已停止');
   function renderStatus() {
     if (!st) return;
+    const bindTag = (st.listen && st.listen !== '0.0.0.0') ? ' @' + st.listen : '';
     dotFor(ov.querySelector('#nsvTftpDot'), st.tftp); ov.querySelector('#nsvTftpSt').textContent = stText(st.tftp);
     dotFor(ov.querySelector('#nsvFtpDot'), st.ftp); ov.querySelector('#nsvFtpSt').textContent = stText(st.ftp);
     dotFor(ov.querySelector('#nsvSysDot'), st.syslog); ov.querySelector('#nsvSysSt').textContent = st.syslog.running
-      ? ('运行中 :' + st.syslog.port + (st.syslog.tcp ? '（UDP+TCP）' : '（UDP）')) : (st.syslog.error ? '错误：' + st.syslog.error : '已停止');
+      ? ('运行中 :' + st.syslog.port + (st.syslog.tcp ? '（UDP+TCP）' : '（UDP）') + bindTag) : (st.syslog.error ? '错误：' + st.syslog.error : '已停止');
     dotFor(ov.querySelector('#nsvTrapDot'), st.trap); ov.querySelector('#nsvTrapSt').textContent = st.trap.running
-      ? ('运行中 :' + st.trap.port + '（UDP）' + (st.trap.rxPackets ? ' · 已收 ' + st.trap.rxPackets + ' 包' : '')
+      ? ('运行中 :' + st.trap.port + '（UDP）' + bindTag + (st.trap.rxPackets ? ' · 已收 ' + st.trap.rxPackets + ' 包' : '')
         + (st.trap.communityGuard ? ' · 团体字白名单' + (st.trap.communityReject ? '（已拒 ' + st.trap.communityReject + '）' : '') : ''))
       : (st.trap.error ? '错误：' + st.trap.error : '已停止');
     if (st.netflow) {
       dotFor(ov.querySelector('#nsvNfDot'), st.netflow);
       const nfs = st.netflow.stats || {};
       ov.querySelector('#nsvNfSt').textContent = st.netflow.running
-        ? ('运行中 :' + st.netflow.port + '（UDP）' + (nfs.flows ? ' · 已收 ' + nfs.flows + ' 条流记录' : '') + (nfs.badPkts ? ' · 畸形包 ' + nfs.badPkts : ''))
+        ? ('运行中 :' + st.netflow.port + '（UDP）' + bindTag + (nfs.flows ? ' · 已收 ' + nfs.flows + ' 条流记录' : '') + (nfs.badPkts ? ' · 畸形包 ' + nfs.badPkts : ''))
         : (st.netflow.error ? '错误：' + st.netflow.error : '已停止');
     }
     ov.querySelector('#nsvLogCnt').textContent = (st.syslog.rxMsgs
@@ -12772,6 +12804,12 @@ function openNetServices() {
       : '') + (st.syslog.alerts ? (st.syslog.rxMsgs ? ' · ' : '') + '告警 ' + st.syslog.alerts + ' 条' : '');
   }
   function fillForm(cfg) {
+    // 监听地址（五服务共用）：全部网卡 / 仅本机 / 指定 IP（自定义档显示 IP 输入框）
+    const bind = String((cfg && cfg.listen) || '0.0.0.0');
+    const bindSel = ov.querySelector('#nsvBind'), bindIp = ov.querySelector('#nsvBindIp');
+    if (bind === '0.0.0.0' || bind === '127.0.0.1') { bindSel.value = bind; bindIp.value = ''; }
+    else { bindSel.value = 'custom'; bindIp.value = bind; }
+    bindIp.hidden = bindSel.value !== 'custom';
     ov.querySelector('#nsvTftpOn').checked = !!cfg.tftp.enabled;
     ov.querySelector('#nsvTftpPort').value = cfg.tftp.port;
     ov.querySelector('#nsvFtpOn').checked = !!cfg.ftp.enabled;
@@ -12804,7 +12842,10 @@ function openNetServices() {
   }
   function readForm() {
     const pasv = String(ov.querySelector('#nsvFtpPasv').value || '').match(/^(\d+)\s*-\s*(\d+)$/);
+    const bindSel = ov.querySelector('#nsvBind').value;
+    const bindIp = ov.querySelector('#nsvBindIp').value.trim();
     return {
+      listen: bindSel === 'custom' ? (bindIp || '0.0.0.0') : bindSel,
       tftp: { enabled: ov.querySelector('#nsvTftpOn').checked, port: parseInt(ov.querySelector('#nsvTftpPort').value, 10) || 69 },
       ftp: {
         enabled: ov.querySelector('#nsvFtpOn').checked,
@@ -12923,6 +12964,13 @@ function openNetServices() {
         ov.querySelector('#nsvFtpPass').value = form.ftp.password;
         toast('FTP 已自动生成随机口令，请在设备侧 copy 命令中使用新口令');
       }
+      // 监听地址自定义档校验：点分 IPv4 字面量（服务端 cleanBind 同口径，此处拦住明显笔误）
+      if (form.listen !== '0.0.0.0' && form.listen !== '127.0.0.1'
+        && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(form.listen)) {
+        toast('监听地址格式无效：请填本机某个网卡的 IPv4 地址（如 192.168.1.10）');
+        btn.disabled = false;
+        return;
+      }
       // SNMP v3 用户名必须与认证口令成对：只填用户名会被解析层静默降级为 noAuth，
       // 同网段任意主机即可伪造（含空用户名的）明文 Trap 进系统通知与事件时间线（主进程也会校验）
       if (form.trap.v3.user && !form.trap.v3.authPass) {
@@ -12951,7 +12999,7 @@ function openNetServices() {
     btn.disabled = false;
   };
   ov.querySelector('[data-act=defaults]').onclick = async () => {
-    fillForm({ tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } }, trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } }, netflow: { enabled: false, port: 9995, maxPps: 500 } });
+    fillForm({ listen: '0.0.0.0', tftp: { enabled: false, port: 69 }, ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true }, syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } }, trap: { enabled: false, port: 162, community: '', v3: { user: '', authProto: 'sha', authPass: '', privProto: 'aes', privPass: '' } }, netflow: { enabled: false, port: 9995, maxPps: 500 } });
     ov.querySelector('#nsvCmd').textContent = buildCmdExample(ips[0] || '192.168.1.10');
     toast('已恢复默认值（尚未保存，请点「保存并应用」）');
   };

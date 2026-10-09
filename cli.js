@@ -111,7 +111,8 @@ function usage() {
   ${PROG} backup     --devs <csv> [--base <dir>] [--name <设备名>] [--diff] [--vendor <v>]
   ${PROG} compliance --base <dir> | --file <cfg> [--pack <基线名>] [--out <file>]
 通用：
-  --host/--user/--pass/--proto/--port   单设备参数（等价一行 --devs）
+  --host/--user/--pass/--proto/--port   单设备参数（等价一行 --devs；口令也可用环境变量 NETTOPO_CLI_PASS 传入，
+                                        避免进 shell 历史与进程列表）
   --timeout <ms>   单命令超时（默认 15000）
 退出码：0 成功 · 1 参数/连接错误 · 2 合规发现违规
 设备清单 CSV：host,username,password,protocol,port（首行可为表头）`);
@@ -138,7 +139,8 @@ async function loadDevs(args) {
   }
   if (args.host) {
     const proto = String(args.proto || 'ssh').toLowerCase() === 'telnet' ? 'telnet' : 'ssh';
-    return [{ host: args.host, username: args.user || '', password: args.pass || '', protocol: proto, port: parseInt(args.port, 10) || (proto === 'telnet' ? 23 : 22) }];
+    // 口令优先级：--pass 显式参数 > NETTOPO_CLI_PASS 环境变量（避免口令进 shell 历史与进程列表）
+    return [{ host: args.host, username: args.user || '', password: args.pass || process.env.NETTOPO_CLI_PASS || '', protocol: proto, port: parseInt(args.port, 10) || (proto === 'telnet' ? 23 : 22) }];
   }
   throw new Error('需要 --devs <csv> 或 --host <地址>');
 }
