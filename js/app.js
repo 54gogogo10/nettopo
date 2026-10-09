@@ -6954,14 +6954,14 @@ function openAbout() {
     <div class="about-row"><b>用途</b><span>网络拓扑可视化设计、后台监控与配置管理工具</span></div>
     <div class="about-row"><b>运行环境</b><span>Windows 桌面版（Electron）/ 现代浏览器</span></div>
     <div class="about-row"><b>版权</b><span>© 2026 NetTopo 项目，保留所有权利</span></div>
-    <div class="about-row"><b>许可</b><span>MIT License</span></div>
+    <div class="about-row"><b>许可</b><span>GNU AGPL-3.0（附附加条款，商业用途需商业许可）</span></div>
     <div class="about-row"><b>项目主页</b><span class="about-url">https://github.com/54gogogo10/nettopo</span></div>
     <div class="about-actions">
       <button type="button" class="tb" id="aboutUpdate" hidden>检查更新</button>
       <button type="button" class="tb" id="aboutCopy">复制链接</button>
       <button type="button" class="tb primary" id="aboutOpen">在浏览器打开</button>
     </div>
-    <div class="about-license">本软件基于 MIT 许可证发布：允许自由使用、复制、修改、合并、出版发行、再许可和/或销售副本，但需保留上述版权声明与许可声明。本软件按“现状”提供，不作任何明示或暗示的担保。</div>
+    <div class="about-license">本软件遵循 <b>GNU AGPL-3.0</b> 许可证并附带附加条款发布：个人和非营利组织可按 AGPL-3.0 条款自由使用；公司、组织和营利性实体在使用、分发或修改前须获得商业许可，商业用途需单独授权。商业许可查询：<span class="about-url">gogogo10@163.com</span>。全文见项目 LICENSE 文件。</div>
     <div class="about-note">数据仅保存在本机；Web Shell 与设备管理 Web 页为桌面版功能。</div>
   </div>`;
   form.insertBefore(body, form.querySelector('.m-actions'));

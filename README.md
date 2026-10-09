@@ -519,3 +519,11 @@ sudo bash test/live-lab.sh up|down|status                          # 在实验�
 - 升级包必须通过随发布提供的 `.sha256` 清单校验才会被安装（防下载不完整/传输篡改）；版本号无法解析时不自动升级，只引导到发布页人工确认
 - 发布新版约定：`npm run build` 会自动升版本并生成 `dist/portable/*-portable.exe` 与同名 `.sha256`；在 GitHub 创建 Release，tag 使用 `v1.0.0-<YYYYMMDD><字母>`（与 package.json 版本一致），把 exe 与 `.sha256` 两个文件都上传为资产，客户端即可检测并升级。注意 GitHub 会剥离资产名中的非 ASCII 字符（中文前缀会被去掉），上传前先把两个文件复制为 ASCII 前缀名（如 `NetTopo-1.0.0-<YYYYMMDD><字母>-portable.exe`）
 - 浏览器版无在线升级（`index.html` 直接打开使用）
+
+## 许可证
+本项目（所有分支）遵循 **GNU AGPL-3.0** 许可证，并附带以下附加条款（全文见根目录 `LICENSE`）：
+
+- 本软件的**商业用途需要单独的商业许可**；
+- 公司、组织和营利性实体在使用、分发或修改本软件之前必须获得商业许可；
+- 个人和非营利组织可以根据 AGPL-3.0 的条款自由使用本软件；
+- 商业许可查询：**gogogo10@163.com**。
