@@ -13,6 +13,7 @@ Opening `index.html` in a browser also works (core features available; desktop-o
 ## Table of Contents
 
 - [Feature Overview](#feature-overview)
+- [Screenshots](#screenshots)
 - [Feature List](#feature-list) (Canvas & Editing · Analysis & Validation · Import & Delivery · Monitoring & Ops (Desktop))
 - [Getting Started](#getting-started)
 - [Spreadsheet Format](#spreadsheet-format)
@@ -35,6 +36,21 @@ Opening `index.html` in a browser also works (core features available; desktop-o
 | 📡 **Monitoring & Ops** | Web Shell (SSH/Telnet multi-tab + SFTP + AI assistant) · Silent device monitoring (probes / keywords / SNMP / **environment sensors**) · Config backup / drift compare / **one-click restore** · Change deployment with rollback · Compliance baseline check |
 | 🔔 **Alerting** | Alert dependency suppression · Silence / maintenance windows · Four-level graded sounds · **Alert webhook delivery (WeCom / DingTalk / Feishu)** · End-to-end link connectivity monitoring · Event acknowledgment · SLA report · **One-click inspection report** |
 | 🧰 **Built-in Services & AI** | TFTP / FTP / Syslog / SNMP Trap servers · **NetFlow/IPFIX collector** · Diagnostics toolbox · Batch inspection · MAC/ARP endpoint locator · AI analysis & daily report |
+
+---
+
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Main window · sample topology (light)](docs/screenshots/main-light.png) | ![Main window · dark theme](docs/screenshots/main-dark.png) |
+| *Main window · sample topology (light theme)* | *Main window · dark theme* |
+| ![IP address management](docs/screenshots/ipam.png) | ![Topology validation report](docs/screenshots/validation.png) |
+| *IP address management (subnet summary · conflict detection · live audit)* | *Topology validation report (click to locate on canvas)* |
+| ![NOC dashboard mode](docs/screenshots/dashboard.png) | ![English UI](docs/screenshots/main-en.png) |
+| *NOC dashboard mode (wall display)* | *English UI (one-click Language switch)* |
+| ![Network services](docs/screenshots/net-services.png) | ![Config change deployment](docs/screenshots/config-deploy.png) |
+| *Network services (TFTP / FTP / Syslog / Trap / NetFlow)* | *Config change deployment (safety gates · dry-run · rollback)* |
 
 ---
 

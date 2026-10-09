@@ -13,6 +13,7 @@
 ## 目录
 
 - [功能总览](#功能总览)
+- [界面截图](#界面截图)
 - [功能清单](#功能清单)（画布与编辑 · 分析与校验 · 导入与交付 · 监控与运维（桌面版））
 - [快速上手](#快速上手)
 - [表格格式](#表格格式)
@@ -35,6 +36,21 @@
 | 📡 **监控与运维** | Web Shell（SSH/Telnet 多标签 + SFTP + AI 助手）· 设备静默监控（探测 / 关键字 / SNMP / **环境温度**）· 配置备份 / 漂移对比 / **一键恢复** · 变更下发与回滚 · 合规基线检查 |
 | 🔔 **告警体系** | 告警依赖抑制 · 静默 / 维护窗口 · 四级分级提示音 · **告警外发（Webhook 到企业微信/钉钉/飞书）** · 端到端链路连通性监测 · 事件确认留痕 · SLA 报表 · **巡检报告一键生成** |
 | 🧰 **内置服务与 AI** | TFTP / FTP / Syslog / SNMP Trap 服务器 · **NetFlow/IPFIX 流量收集** · 诊断工具箱 · 批量巡检 · MAC/ARP 终端定位 · AI 解析与巡检日报 |
+
+---
+
+## 界面截图
+
+| | |
+| --- | --- |
+| ![主界面 · 示例拓扑（浅色）](docs/screenshots/main-light.png) | ![主界面 · 暗色主题](docs/screenshots/main-dark.png) |
+| *主界面 · 示例拓扑（浅色主题）* | *主界面 · 暗色主题* |
+| ![IP 地址管理](docs/screenshots/ipam.png) | ![拓扑校验报告](docs/screenshots/validation.png) |
+| *IP 地址管理（网段汇总 · 冲突检测 · 实网核对）* | *拓扑校验报告（点击定位到画布）* |
+| ![监控大屏模式](docs/screenshots/dashboard.png) | ![英文界面](docs/screenshots/main-en.png) |
+| *监控大屏模式（值班投屏）* | *英文界面（Language / 语言一键切换）* |
+| ![网络服务](docs/screenshots/net-services.png) | ![配置变更下发](docs/screenshots/config-deploy.png) |
+| *网络服务（TFTP / FTP / Syslog / Trap / NetFlow）* | *配置变更下发（安全闸门 · dry-run · 回滚）* |
 
 ---
 
