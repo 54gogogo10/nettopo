@@ -109,7 +109,7 @@ Opening `index.html` in a browser also works (core features available; desktop-o
 
 ### Monitoring & Ops (Desktop)
 
-- **Web Shell**: right-click a device to open SSH/Telnet to its mgmt address in an independent multi-tab window; the main window stays free
+- **Web Shell**: right-click a device to open SSH/Telnet to its mgmt address in an independent multi-tab window; the main window stays free; protocols also include a **serial console** (USB debug cable for out-of-band provisioning / password recovery)
   - **Connection & auth**: SSH password / public key; via SSH jump host (bastion) with separate fingerprints for jump/target; output encoding selectable (UTF-8 / GBK for CJK on legacy devices); after disconnect a "Reconnect" banner appears **rebuilding the same tab in place** (no new tab, terminal history kept)
   - **SFTP file panel** (top bar "⇅ Files"): browse the remote directory of the current SSH session — upload / download / mkdir / rename / delete (double-click downloads; Telnet sessions not supported)
   - **Connection bookmarks** (top bar "☆ Bookmarks"): save frequent connections (protocol/address/account/encoding; optional DPAPI-encrypted passwords), double-click to connect; **tab restore**: reopening the window re-connects the last tab list staggered (DPAPI ciphertext re-registered per connection; explicitly closed tabs not restored)
@@ -333,6 +333,10 @@ Without headers, columns are read as "deviceA, deviceB, interfaceA, IP A, interf
 | Alert silence | Right-click "Mute Alerts for 1 Hour", or daily maintenance windows in the monitoring dialog |
 | Alert levels & sounds | "Monitor ▾ Alert Levels & Sounds…": four levels, minimum sound level / volume / master off, per-event overrides |
 | Alert webhook | "Monitor ▾ Alert Webhook Delivery…": WeCom / DingTalk / Feishu or generic receiver, minimum level / cooldown / send test, encrypted signing keys |
+| Serial console | Pick "Serial Console" in the Web Shell protocol: choose the port on Connect, the "Port" box is the baud rate (default 9600), GBK decoding supported |
+| Onboarding prep | "Monitor ▾ Onboarding Prep…": vendor command lists — non-interactive lines via deployment gates, console lines copied to the device |
+| History replay | "Monitor ▾ History Replay…": scrub the timeline for device up/down coloring at any past moment; exiting restores live monitoring |
+| Alert escalation | "Alert Levels & Sounds…" accepts an unacknowledged-escalation timeout (default off): stale warning+ alerts re-notify one level higher |
 | Event acknowledgment | Monitor Center "Event Timeline": unacked orange bar + count badge; acknowledge with note (handover), undoable |
 | Alert dependency suppression | Automatic: upstream loss merges downstream offline notifications into the root cause, recovery broadcasts outcomes |
 | Floor plan underlay | "View ▾ Floor Plan Underlay…": one image per sheet as reference, PDF·image·SVG exports include it, 6MB cap |
@@ -550,7 +554,7 @@ On a **4-device Huawei S6700 chain (YunShan OS V600R025C10SPC500)** (s1–s4, LL
 
 - All data stays local: monitoring logs (`userData/monitor-logs`), config backups (`userData/config-backups`), credential vault (`userData/credentials`), files & Syslog logs received by network services (`userData/net-services`), AI analysis records (`userData/ai-analysis`), uptime samples (`userData/monitor-uptime.json`: 10-minute detail 7 days + daily rollups 400 days) and monitoring configs (incl. passwords); passwords are OS-encrypted (Windows DPAPI safeStorage) at rest; monitoring fingerprints are also local
 - Excel parsing uses the bundled local SheetJS, **fully offline**; browsers cannot overwrite original files on disk so "save back to spreadsheet" is provided as an export; custom types and images live in browser localStorage — clearing browser data loses them, so keep "Save Project" backups
-- Desktop Web Shell supports SSH (password / keyboard-interactive) and Telnet (RFC854 negotiation + NAWS); SSH host keys show a SHA256 fingerprint on first connect and are remembered; changed fingerprints refuse connection
+- Desktop Web Shell supports SSH (password / keyboard-interactive), Telnet (RFC854 negotiation + NAWS) and a serial console (Web Serial, local USB debug cable); SSH host keys show a SHA256 fingerprint on first connect and are remembered (explicit trust writes the main-process authority store), pinned-and-matching hosts connect silently without re-prompting, changed fingerprints refuse connection
 
 ### AI & the internet
 
