@@ -1,0 +1,52 @@
+== NetTopo 真机 GUI 验证（华为 S6700/eNSP × 4，SNMPv3） ==
+  设备：s1(192.168.50.101) · s2(192.168.50.102) · s3(192.168.50.103) · s4(192.168.50.104)；测试机 192.168.50.111
+
+== 设备准备（s1：SNMPv3 用户 / trap 目标 / SFTP / loghost） ==
+  ✓ prep：SNMP v3 用户/组/trap 目标已配置
+  ✓ prep：真机 SNMPv3 GET 可达（sysDescr）（Huawei YunShan OS  Version 1.25.1.1 (S67）
+  ✓ prep：flash: 中 TFTP put 源文件（1.cfg）
+
+== R1 应用启动与桌面能力 ==
+  ✓ 主窗口应用脚本就绪
+  ✓ 桌面专属桥可用（topoShell/topoMonitor/topoBackup）
+  ✓ 示例拓扑载入并写入真机管理地址
+
+== R2-R3 Web Shell · 真机 SSH 会话（指纹 TOFU / 命令输出 / 多标签） ==
+  ✓ 主窗口发起 s1 SSH 连接
+  ✓ 真机首次连接弹出指纹确认（SHA256 + 主机）（ 首次连接 · 确认主机指纹 首次连接 192.168.50.101，请核对 SSH 主机密钥指纹（可用 ssh-keygen -l -E ）
+  ✓ 真机 SSH 会话建立（VRP 提示符出现）（终端尾部：026-10-08 12:34:12 from 192.168.50.111 through SSH.<HUAWEI> ）
+  ✓ 真机命令输出进入终端（display version → Huawei YunShan OS）
+  ✓ 标签标题标明协议（核心路由器R1 · SSH 192.168.50.101:22）
+  ✓ 主窗口发起 s2 SSH 连接
+  ✓ 第二台真机连接后出现第 2 个标签
+  ✓ 第 2 个标签为独立活会话（display clock 返回真机时间）
+
+== R5 设备监控配置（真机 SSH + SNMPv3 参数，界面写入） ==
+  ✓ 设备监控配置弹窗可打开
+
+[gui-real][异常] 页面执行异常: {"exceptionId":2,"text":"Uncaught","lineNumber":9,"columnNumber":38,"scriptId":"33","stackTrace":{"callFrames":[{"functionName":"","scriptId":"33","url":"","lineNumber":9,"columnNumber":38},{"functionName":"","scriptId":"33","url":"","lineNumber":27,"columnNumber":4}]},"exception":{"type":"object","
+    at CDP.evaluate (D:\zcode\nettopo\test\_gui-live-real.js:136:35)
+    at async r5MonitorConfig (D:\zcode\nettopo\test\_gui-live-real.js:264:22)
+    at async D:\zcode\nettopo\test\_gui-live-real.js:823:44
+
+[清理] 还原 s1 临时配置…
+  清理结果：v2c 共体已清=false，v3 用户已清=true，trap 目标已清=true
+  ⚠ 清理未完全生效，请人工核对 s1（输出截要）：
+Enter system view, return user view with return command.
+[HUAWEI]
+[HUAWEI]
+[HUAWEI]
+                                    ^
+Error: Wrong parameter found at '^' position.
+[HUAWEI]
+[HUAWEI]
+                                       ^
+Error: Incomplete command found at '^' position.
+[HUAWEI]
+[HUAWEI]
+Warning: The operation will stop the SFTP server. Continue? [Y/N]:
+Error: Please choose 'YES' or 'NO' first before pressing 'Enter'. [Y/N]:
+Error: Please choose 'YES' or 'NO' first before pressing 'Enter'. [Y/N]:
+Error: Please choose 'YES' or 'NO' first before pressing 'Enter'. [Y/N]:
+Error: Please choose 'YES' or 'NO' first before pressing 'Enter'. [Y/N]:
+Error: Please choose 'YES' or 'NO' first before pressing 'Enter'. [Y/N]:

@@ -1,0 +1,32 @@
+
+> nettopo@1.0.0-20261009i build
+> node bump-version.js && electron-builder --config build/electron-builder.yml && node gen-checksums.js
+
+  js/util.js: v20261009i → v20261009j
+  index.html: v20261009i → v20261009j
+  shell.html: v20261009i → v20261009j
+  webview.html: v20261009i → v20261009j
+  package.json: 1.0.0-20261009i → 1.0.0-20261009j
+  package-lock.json: → 1.0.0-20261009j
+版本：v20261009i → v20261009j，已写入 5 个文件及 package.json
+  • electron-builder  version=26.15.3 os=10.0.26300
+  • loaded configuration  file=D:\zcode\nettopo\build\electron-builder.yml
+  • skipped dependencies rebuild  reason=npmRebuild is set to false
+  • packaging       platform=win32 arch=x64 electron=43.3.0 appOutDir=dist\portable\win-unpacked
+  • using custom unpacked Electron distribution  electronDist=node_modules\electron\dist
+  • copying unpacked Electron  source=D:\zcode\nettopo\node_modules\electron\dist destination=D:\zcode\nettopo\dist\portable\win-unpacked
+  • searching for node modules  pm=npm searchDir=D:\zcode\nettopo
+  • updating asar integrity executable resource  executablePath=dist\portable\win-unpacked\网络拓扑管理软件.exe
+  • afterPack: 烧录 Electron fuses → 网络拓扑管理软件.exe
+  • signing with signtool.exe  path=dist\portable\win-unpacked\网络拓扑管理软件.exe
+  • signing with signtool.exe  path=dist\portable\win-unpacked\resources\app.asar.unpacked\node_modules\ssh2\util\pagent.exe
+  • building        target=portable file=dist\portable\网络拓扑管理软件-1.0.0-20261009j-portable.exe archs=x64
+  • signing with signtool.exe  path=dist\portable\win-unpacked\resources\elevate.exe
+  • signing with signtool.exe  path=dist\portable\网络拓扑管理软件-1.0.0-20261009j-portable.exe
+  • 跳过非当前版本产物 → 网络拓扑管理软件-1.0.0-20261009f-portable.exe（当前版本 1.0.0-20261009j）
+  • 跳过非当前版本产物 → 网络拓扑管理软件-1.0.0-20261009g-portable.exe（当前版本 1.0.0-20261009j）
+  • 跳过非当前版本产物 → 网络拓扑管理软件-1.0.0-20261009h-portable.exe（当前版本 1.0.0-20261009j）
+  • 跳过非当前版本产物 → 网络拓扑管理软件-1.0.0-20261009i-portable.exe（当前版本 1.0.0-20261009j）
+  • SHA256 → 网络拓扑管理软件-1.0.0-20261009j-portable.exe.sha256
+校验清单生成完成（1 份）
+EXIT=0

@@ -1,0 +1,34 @@
+== NetTopo 真机 GUI 验证（华为 S6700 × 4 · Telnet） ==
+  设备：s1(192.168.50.101) · s2(192.168.50.102) · s3(192.168.50.103)  用例：r4,r15
+
+== 前置：真机 LLDP 邻居采集（Node 层，串行防 VTY 限流） ==
+    s1 → 192.168.50.102:GE1/0/1
+    s2 → 192.168.50.101:GE1/0/1 192.168.50.103:GE1/0/1
+    s3 → 192.168.50.102:GE1/0/2
+
+== R4 设备监控（界面配置真机 → 静默采集 + SNMP 采集组 v3） ==
+  ✓ 拓扑中找到监控目标节点（s3）
+  ✓ s3 监控弹窗：Telnet 凭据/探测/命令/告警关键字/备份/SNMP v3（SHA-2+AES128）写入并保存（{"filled":{"ok":true},"v3set":{"ok":true},"saved":true}）
+  ✓ s2 监控配置：SNMP v3 + 备份 + 监控启用（真实在线率/备份与二层推断凭据）（{"f2":{"ok":true},"v32":{"ok":true},"s2r":true}）
+  ✓ s1 凭据配置启用保存（telnet/23 落盘）（{"f3":{"ok":true},"v33":{"ok":true},"s3r":true}）
+  ✓ s1 凭据保留且监控已停用（下发通道可查 telnet/23，无长连接占用）（{"enabled":false,"hasCred":true,"st":""}）
+  ✓ 真机监控进入 monitoring 状态（Telnet 自动应答登录）（当前=monitoring 192.168.50.103：监控中：192.168.50.103:23（TEL）
+  ✓ 侧栏设备项显示监控在线标记（探测 TCP 23 通）
+  ✓ 监控日志落盘且含真机输出（display version → S6700）
+
+== R15 网络服务（GUI 启用 → 真机日志/Trap/文件实时到达） ==
+  ✓ 网络服务面板可打开
+  ✓ Syslog 服务监听 UDP 514（运行中 :514（UDP））
+  ✓ Trap 服务监听 UDP 15162（v3 USM 用户已注册）（运行中 :15162（UDP））
+    （target-host 下发会话：成功）
+  ✓ Syslog 实时接收真机日志（来源 192.168.50.101，登录事件）（06:35:50notice192.168.50.103Oct 7 2026 18:18:15 HUAWEI %%01CLI/5/CMDRECORD(s):CID=0x80ca2713;Recorde）
+  ⊘ 跳过：真机 Trap 接收（90 秒窗口内设备未发出 authenticationFailure）（该固件可能未使能 standard 认证失败 Trap；服务与 v3 用户注册已验证）
+    （tftp 会话：成功）
+    （本机 TFTP 客户端（真机固件 WEAKEA 禁用 TFTP 客户端））
+    （本机 TFTP WRQ 推送：成功）
+  ✓ TFTP 接收文件并按来源 IP 分目录（本机 TFTP 客户端（真机固件 WEAKEA 禁用 TFTP 客户端））（时间服务来源文件名大小2026-10-09 06:40:40TFTP127.0.0.1nettopo-real-cfg.bin81 B查看导入备份删除 | dir候选=无）
+  ✓ 收到文件一键导入配置备份库（进入备份/对比/合规体系）（已导入备份库：s1 @ 127.0.0.1 → cfg_20261009_064041.cfg）
+  ⚠ NetFlow 收集器运行态：运行中 :9995（UDP） —— 真机未配 NetStream 流源，仅验证服务启动
+  ✓ 收尾：Trap 目标/日志主机/LoopBack99 已从 s1 撤销
+
+== 结果：14 通过，0 失败，1 跳过 ==

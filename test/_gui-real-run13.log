@@ -1,0 +1,37 @@
+== NetTopo 真机 GUI 验证（华为 S6700 × 4 · Telnet） ==
+  设备：s1(192.168.50.101) · s2(192.168.50.102) · s3(192.168.50.103)  用例：r4,r14,r15,r20,r21,r23,r26
+
+== 前置：真机 LLDP 邻居采集（Node 层，串行防 VTY 限流） ==
+    s1 → 192.168.50.102:GE1/0/1
+    s2 → 192.168.50.101:GE1/0/1 192.168.50.103:GE1/0/1
+    s3 → 192.168.50.102:GE1/0/2
+
+== R4 设备监控（界面配置真机 → 静默采集 + SNMP 采集组 v3） ==
+  ✓ 拓扑中找到监控目标节点（s3）
+  ✓ s3 监控弹窗：Telnet 凭据/探测/命令/告警关键字/备份/SNMP v3（SHA-2+AES128）写入并保存（{"filled":{"ok":true},"v3set":{"ok":true},"saved":true}）
+  ✓ s2 监控配置：SNMP v3 + 备份 + 监控启用（真实在线率/备份与二层推断凭据）（{"f2":{"ok":true},"v32":{"ok":true},"s2r":true}）
+  ✓ s1 凭据配置启用保存（telnet/23 落盘）（{"f3":{"ok":true},"v33":{"ok":true},"s3r":true}）
+  ✓ s1 凭据保留且监控已停用（下发通道可查 telnet/23，无长连接占用）（{"enabled":false,"hasCred":true,"st":""}）
+  ✓ 真机监控进入 monitoring 状态（Telnet 自动应答登录）（当前=monitoring 192.168.50.103：监控中：192.168.50.103:23（TEL）
+  ✓ 侧栏设备项显示监控在线标记（探测 TCP 23 通）
+  ✓ 监控日志落盘且含真机输出（display version → S6700）
+
+== R14 配置变更下发（s4：dry-run → 强制前置备份 → 逐行下发 → 回读） ==
+  ✓ 下发面板读取基线（最近一次真机配置备份）（基线：cfg_20261009_034811.cfg（120 行，用于 dry-run 预判与回滚生成））
+  ✓ dry-run 预判：变更行分类为新增（不连设备）（将下发 4 行（新增 1 · 覆盖 0 · 删除/关闭 0 · 幂等 3）#配置行性质说明1interface LoopBack99幂等变更前已存在同样一行（幂等重下发）2desc | 计划长度={"len":139}）
+    （下发未成功，等 150 秒重试：escription nettopo-verify✓回显3quit✓回显4info-center loghost 192.168.50.111✓回显← 返回预览）
+    （下发未成功，等 150 秒重试：escription nettopo-verify✓回显3quit✓回显4info-center loghost 192.168.50.111✓回显← 返回预览）
+  ✗ 下发执行完成（前置备份 → 逐行下发 → 回采校验）（✓ 下发成功：4 行 · 前置备份 cfg_20261009_041611.cfg · 保存配置 未执行 · 回采 成功回采校验：已取回 185 行运行配置#配置行结果失败原因设备1interface LoopBack99✓回显2 description nettopo-verify✓回显3quit✓回显4info-center loghost 192.168.50.111✓回显← 返回预览）
+  ✓ 下发记录审计列表含本次变更（设备/时间/口径）（ 配置变更下发记录 每次下发（含回滚）一条记录：设备 / 厂家 / 逐行结果 / 前置备份文件名 / 保存与回采结论。记录在落盘前对 password、community 等口令类）
+
+== R15 网络服务（GUI 启用 → 真机日志/Trap/文件实时到达） ==
+  ✓ 网络服务面板可打开
+  ✓ Syslog 服务监听 UDP 514（运行中 :514（UDP））
+  ✓ Trap 服务监听 UDP 15162（v3 USM 用户已注册）（运行中 :15162（UDP））
+    （target-host 下发会话：成功）
+  ✓ Syslog 实时接收真机日志（来源 192.168.50.101，登录事件）（04:26:05notice192.168.50.103Oct 7 2026 16:08:30 HUAWEI %%01CLI/5/CMDRECORD(s):CID=0x80ca2713;Recorde）
+  ⊘ 跳过：真机 Trap 接收（90 秒窗口内设备未发出 authenticationFailure）（该固件可能未使能 standard 认证失败 Trap；服务与 v3 用户注册已验证）
+    （tftp 会话：成功）
+
+[_gui-real][异常] cfgFile is not defined
+    at D:\zcode\nettopo\test\_gui-real.js:1008:38

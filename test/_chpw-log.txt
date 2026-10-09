@@ -1,0 +1,64 @@
+[22:05:00] === s2 改密 ===
+[22:05:00] chpw 192.168.50.102 第 1 次尝试
+>>> [pass] 设备: "Password:" → 应答 旧口令
+>>> [old] 设备: "Please enter old password:" → 应答 旧口令
+>>> [neu] 设备: "Please enter new password:" → 应答 新口令(同旧)
+>>> [conf] 设备: "Please confirm new password:" → 应答 新口令确认
+>>> 进入提示符: "<HUAWEI>"
+
+>>> 结束：PROMPT
+    | "<HUAWEI>"
+[22:05:04] chpw 192.168.50.102 成功
+[22:06:44] === s2 复登验证（新口令） ===
+[22:06:44] verify 192.168.50.102 (new)
+192.168.50.102 → TIMEOUT | 尾部: []
+[22:08:40] === s3 改密 ===
+[22:08:40] chpw 192.168.50.103 第 1 次尝试
+>>> [pass] 设备: "Password:" → 应答 旧口令
+>>> [old] 设备: "Please enter old password:" → 应答 旧口令
+>>> [neu] 设备: "Please enter new password:" → 应答 新口令(同旧)
+>>> [conf] 设备: "Please confirm new password:" → 应答 新口令确认
+>>> 进入提示符: "<HUAWEI>"
+
+>>> 结束：PROMPT
+    | "<HUAWEI>"
+[22:08:43] chpw 192.168.50.103 成功
+[22:10:23] === s3 复登验证（新口令） ===
+[22:10:23] verify 192.168.50.103 (new)
+192.168.50.103 → TIMEOUT | 尾部: []
+[22:12:19] === s4 探测（表格口令） ===
+[22:12:19] verify 192.168.50.104 (table)
+192.168.50.104 → TIMEOUT | 尾部: []
+[22:14:05] === s4 探测（变体口令） ===
+[22:14:05] verify 192.168.50.104 (variant)
+192.168.50.104 → TIMEOUT | 尾部: []
+[22:16:01] === s1 ShellManager 应用路径复登验证（新口令） ===
+192.168.50.101 pass="Abcd!1234+1" ok=true 版本=Version 1.25.1.1 (S6700 V600R025C10SPC50
+[22:16:04] === 全部完成 ===
+[22:20:40] === s2 ShellManager 复登验证 ===
+192.168.50.102 pass="Abcd!1234+1" ok=true 版本=Version 1.25.1.1 (S6700 V600R025C10SPC50
+[22:22:23] === s3 ShellManager 复登验证 ===
+192.168.50.103 pass="Abcd!1234+1" ok=true 版本=Version 1.25.1.1 (S6700 V600R025C10SPC50
+[22:24:06] === s4 探测（表格口令 Abcd!1234+） ===
+192.168.50.104 → TIMEOUT | 尾部: []
+[22:24:22] === s4 口令状态: unknown ===
+[22:25:23] === SNMP v3 预配 s1,s2,s3 ===
+
+######## 192.168.50.101 ########
+  结果: TIMEOUT
+  回显尾部: ["The last login time is 2026-10-07 09:58:12 from 192.168.50.111 through Telnet.","<HUAWEI>screen-length 0 temporary","Info: The configuration takes effect on the current user terminal interface only.","<HUAWEI>system-view","Enter system view, return user view with return command.","[HUAWEI]snmp-agent","Info: It will create the SNMP listening socket after the source interface or source address is configured.","[HUAWEI]snmp-agent group v3 NetTopoGrp privacy read-view ViewDefault","[HUAWEI]snmp-agent usm-user v3 nettopov3 NetTopoGrp authentication-mode sha2-256 \u001b[1D","^","Error: Incomplete command found at '^' position.","[HUAWEI]"]
+  全转录: ["Warning: Telnet is not a secure protocol, and it is recommended to use Stelnet.","Username:netadmin","Password:","Info: Password will expire in: - days.\u0000","Info: The max number of VTY users is 5, the number of current VTY users online is 1, and total number of terminal users online is 1.","The current login time is 2026-10-07 10:07:34.","The last login time is 2026-10-07 09:58:12 from 192.168.50.111 through Telnet.","<HUAWEI>screen-length 0 temporary","Info: The configuration takes effect on the current user terminal interface only.","<HUAWEI>system-view","Enter system view, return user view with return command.","[HUAWEI]snmp-agent","Info: It will create the SNMP listening socket after the source interface or source address is configured.","[HUAWEI]snmp-agent group v3 NetTopoGrp privacy read-view ViewDefault","[HUAWEI]snmp-agent usm-user v3 nettopov3 NetTopoGrp authentication-mode sha2-256 \u001b[1D","^","Error: Incomplete command found at '^' position.","[HUAWEI]"]
+
+######## 192.168.50.102 ########
+  结果: TIMEOUT
+  回显尾部: ["The last login time is 2026-10-07 10:02:51 from 192.168.50.111 through Telnet.","<HUAWEI>screen-length 0 temporary","Info: The configuration takes effect on the current user terminal interface only.","<HUAWEI>system-view","Enter system view, return user view with return command.","[HUAWEI]snmp-agent","Info: It will create the SNMP listening socket after the source interface or source address is configured.","[HUAWEI]snmp-agent group v3 NetTopoGrp privacy read-view ViewDefault","[HUAWEI]snmp-agent usm-user v3 nettopov3 NetTopoGrp authentication-mode sha2-256 \u001b[1D","^","Error: Incomplete command found at '^' position.","[HUAWEI]"]
+  全转录: ["Warning: Telnet is not a secure protocol, and it is recommended to use Stelnet.","Username:netadmin","Password:","Info: Password will expire in: - days.\u0000","Info: The max number of VTY users is 5, the number of current VTY users online is 1, and total number of terminal users online is 1.","The current login time is 2026-10-07 10:08:19.","The last login time is 2026-10-07 10:02:51 from 192.168.50.111 through Telnet.","<HUAWEI>screen-length 0 temporary","Info: The configuration takes effect on the current user terminal interface only.","<HUAWEI>system-view","Enter system view, return user view with return command.","[HUAWEI]snmp-agent","Info: It will create the SNMP listening socket after the source interface or source address is configured.","[HUAWEI]snmp-agent group v3 NetTopoGrp privacy read-view ViewDefault","[HUAWEI]snmp-agent usm-user v3 nettopov3 NetTopoGrp authentication-mode sha2-256 \u001b[1D","^","Error: Incomplete command found at '^' position.","[HUAWEI]"]
+
+######## 192.168.50.103 ########
+  结果: TIMEOUT
+  回显尾部: ["The last login time is 2026-10-07 10:04:34 from 192.168.50.111 through Telnet.","<HUAWEI>screen-length 0 temporary","Info: The configuration takes effect on the current user terminal interface only.","<HUAWEI>system-view","Enter system view, return user view with return command.","[HUAWEI]snmp-agent","Info: It will create the SNMP listening socket after the source interface or source address is configured.","[HUAWEI]snmp-agent group v3 NetTopoGrp privacy read-view ViewDefault","[HUAWEI]snmp-agent usm-user v3 nettopov3 NetTopoGrp authentication-mode sha2-256 \u001b[1D","^","Error: Incomplete command found at '^' position.","[HUAWEI]"]
+  全转录: ["Warning: Telnet is not a secure protocol, and it is recommended to use Stelnet.","Username:netadmin","Password:","Info: Password will expire in: - days.\u0000","Info: The max number of VTY users is 5, the number of current VTY users online is 1, and total number of terminal users online is 1.","The current login time is 2026-10-07 10:09:02.","The last login time is 2026-10-07 10:04:34 from 192.168.50.111 through Telnet.","<HUAWEI>screen-length 0 temporary","Info: The configuration takes effect on the current user terminal interface only.","<HUAWEI>system-view","Enter system view, return user view with return command.","[HUAWEI]snmp-agent","Info: It will create the SNMP listening socket after the source interface or source address is configured.","[HUAWEI]snmp-agent group v3 NetTopoGrp privacy read-view ViewDefault","[HUAWEI]snmp-agent usm-user v3 nettopov3 NetTopoGrp authentication-mode sha2-256 \u001b[1D","^","Error: Incomplete command found at '^' position.","[HUAWEI]"]
+
+==== 汇总: 192.168.50.101✗ 192.168.50.102✗ 192.168.50.103✗
+[22:27:34] === s4 未能定口令（unknown），跳过其 SNMP 预配 ===
+[22:27:34] === 链式任务全部完成 ===
