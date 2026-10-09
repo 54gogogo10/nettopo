@@ -6961,7 +6961,7 @@ function openAbout() {
       <button type="button" class="tb" id="aboutCopy">复制链接</button>
       <button type="button" class="tb primary" id="aboutOpen">在浏览器打开</button>
     </div>
-    <div class="about-license">本软件遵循 <b>GNU AGPL-3.0</b> 许可证并附带附加条款发布：个人和非营利组织可按 AGPL-3.0 条款自由使用；公司、组织和营利性实体在使用、分发或修改前须获得商业许可，商业用途需单独授权。商业许可查询：<span class="about-url">gogogo10@163.com</span>。全文见项目 LICENSE 文件。</div>
+    <div class="about-license">本软件遵循 <b>GNU AGPL-3.0</b> 许可证并附带附加条款发布：个人和非营利组织可按 AGPL-3.0 条款自由使用；公司、组织和营利性实体在使用、分发或修改前须获得商业许可，商业用途需单独授权。商业许可查询：<span class="about-url">gogogo10@163.com</span>。全文见项目 LICENSE 文件；第三方组件许可见 THIRD-PARTY-NOTICES.md 与 lib/ 内声明。</div>
     <div class="about-note">数据仅保存在本机；Web Shell 与设备管理 Web 页为桌面版功能。</div>
   </div>`;
   form.insertBefore(body, form.querySelector('.m-actions'));
