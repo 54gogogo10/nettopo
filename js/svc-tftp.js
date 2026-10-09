@@ -355,7 +355,7 @@ class TftpServer extends EventEmitter {
     // 「几万个 1KB 文件」把 userData 所在盘写满 / inode 耗尽，故再加单来源文件数与全库字节上限
     this.maxFilesPerHost = Math.max(1, Math.floor(Number(opts.maxFilesPerHost) || 256));
     this.maxTotalBytes = Math.max(this.maxFileSize, Math.floor(Number(opts.maxTotalBytes) || 1024 * 1024 * 1024));
-    this.sock = null;
+    this.socks = [];             // 监听套接字（多选地址时同端口各绑一个）
     this.port = 0;
     this.running = false;
     this.lastError = '';
@@ -428,37 +428,66 @@ class TftpServer extends EventEmitter {
     return { opcode, fileName, mode, options };
   }
 
-  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP） */
-  start(port, host) {
+  /** 启动监听。hosts 为地址数组（同端口按地址各绑一个套接字；缺省全部网卡）。部分地址绑定
+   *  失败（接口已下线等）不影响其余地址：失败清单写入 lastError；全部失败才返回 ok:false */
+  start(port, hosts) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     return new Promise((resolve) => {
-      const sock = dgram.createSocket('udp4');
-      let settled = false;
-      const fail = (err) => {
-        if (settled) return;
-        settled = true;
-        try { sock.close(); } catch (e) { /* ignore */ }
-        this.running = false;
-        this.lastError = String((err && err.message) || err);
-        resolve({ ok: false, error: this._bindHint(this.lastError) });
-      };
-      sock.once('error', fail);
-      sock.bind(port || 0, host || undefined, () => {
-        if (settled) return;
-        settled = true;
-        this.sock = sock;
-        this.port = sock.address().port;
+      const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
+      const want = list.length ? list : ['0.0.0.0'];
+      const failures = [];
+      const socks = [];
+      let realPort = 0;
+      const finish = () => {
+        if (!socks.length) {
+          this.running = false;
+          this.lastError = failures.join('；');
+          resolve({ ok: false, error: this._bindHint(this.lastError) });
+          return;
+        }
+        this.socks = socks;
+        this.port = realPort;
         this.running = true;
-        this.lastError = '';
-        sock.on('message', (buf, rinfo) => {
-          if (!this.running) return;
-          try { this._onMessage(buf, rinfo); } catch (e) { this.lastError = String(e && e.message || e); }
-        });
-        sock.on('error', (err) => { this.lastError = String(err && err.message || err); this.stop(); });
-        sock.on('close', () => { this.running = false; });
+        this.lastError = failures.length ? ('部分地址监听失败：' + failures.join('；')) : '';
         resolve({ ok: true, port: this.port });
-      });
+      };
+      const bindOne = (i) => {
+        if (i >= want.length) { finish(); return; }
+        const h = want[i];
+        const sock = dgram.createSocket('udp4');
+        let settled = false;
+        const onErr = (err) => {
+          if (settled) return;
+          settled = true;
+          try { sock.close(); } catch (e) { /* ignore */ }
+          failures.push(h + '：' + String((err && err.message) || err));
+          bindOne(i + 1);
+        };
+        sock.once('error', onErr);
+        sock.bind(realPort || (port || 0), h === '0.0.0.0' ? undefined : h, () => {
+          if (settled) return;
+          settled = true;
+          sock.removeListener('error', onErr);
+          if (!realPort) realPort = sock.address().port; // port=0 时后续地址跟随首个实际端口
+          sock.on('message', (buf, rinfo) => {
+            if (!this.running) return;
+            try { this._onMessage(buf, rinfo, sock); } catch (e) { this.lastError = String(e && e.message || e); }
+          });
+          sock.on('error', () => this._dropSock(sock)); // 运行期单套接字故障：摘掉它，其余地址继续
+          socks.push(sock);
+          bindOne(i + 1);
+        });
+      };
+      bindOne(0);
     });
+  }
+
+  /** 摘除一个监听套接字（运行期错误）；全部摘除即服务停止 */
+  _dropSock(sock) {
+    const i = this.socks.indexOf(sock);
+    if (i >= 0) this.socks.splice(i, 1);
+    try { sock.close(); } catch (e) { /* ignore */ }
+    if (!this.socks.length) this.running = false;
   }
 
   /** 端口占用/权限类报错附上可操作的提示（Linux 非 root 绑 69 需提权或换高位端口） */
@@ -472,10 +501,11 @@ class TftpServer extends EventEmitter {
   async stop() {
     this.running = false;
     for (const s of [...this.sessions.values()]) { try { s.abort(new Error('服务停止')); } catch (e) { /* ignore */ } }
-    if (this.sock) { const s = this.sock; this.sock = null; try { s.close(); } catch (e) { /* ignore */ } }
+    for (const s of this.socks) { try { s.close(); } catch (e) { /* ignore */ } }
+    this.socks = [];
   }
 
-  _onMessage(buf, rinfo) {
+  _onMessage(buf, rinfo, sock) {
     const key = rinfo.address + ':' + rinfo.port;
     if (this.sessions.has(key)) return; // 后续包走会话套接字，主套接字直接忽略
     const req = TftpServer.parseRequest(buf);
@@ -484,7 +514,7 @@ class TftpServer extends EventEmitter {
     const name = sanitizeTftpName(req.fileName);
     if (!name) {
       this.stats.denied++;
-      this._sendErrorTo(rinfo, 2, 'Illegal filename');
+      this._sendErrorTo(rinfo, 2, 'Illegal filename', sock);
       return;
     }
     if (this.sessions.size >= this.maxSessions) {
@@ -494,7 +524,7 @@ class TftpServer extends EventEmitter {
       // 无可逐出者（全部会话都已真实交换过数据）才如实拒绝。
       if (!this._evictStalledSession()) {
         this.stats.denied++;
-        this._sendErrorTo(rinfo, 4, 'Too many sessions');
+        this._sendErrorTo(rinfo, 4, 'Too many sessions', sock);
         return;
       }
     }
@@ -504,16 +534,16 @@ class TftpServer extends EventEmitter {
     for (const s of this.sessions.values()) { if (s.peer.address === rinfo.address && s.progressed) perIp++; }
     if (perIp >= this.maxSessionsPerIp) {
       this.stats.denied++;
-      this._sendErrorTo(rinfo, 4, 'Too many sessions for this host');
+      this._sendErrorTo(rinfo, 4, 'Too many sessions for this host', sock);
       return;
     }
     const dir = path.resolve(this.rootDir, sanitizeIpDir(rinfo.address));
     const base = path.resolve(this.rootDir) + path.sep;
-    if (!dir.startsWith(base)) { this.stats.denied++; this._sendErrorTo(rinfo, 2, 'Access violation'); return; }
+    if (!dir.startsWith(base)) { this.stats.denied++; this._sendErrorTo(rinfo, 2, 'Access violation', sock); return; }
     // 写入配额（仅 WRQ 落盘方向）：单来源文件数 + 全库字节上限，超限如实拒绝并计数
     if (req.opcode !== 1) {
       const q = this._quotaCheck(dir);
-      if (!q.ok) { this.stats.quotaDenied++; this._sendErrorTo(rinfo, 3, 'Disk full or allocation exceeded'); return; }
+      if (!q.ok) { this.stats.quotaDenied++; this._sendErrorTo(rinfo, 3, 'Disk full or allocation exceeded', sock); return; }
     }
     const sess = new TftpSession(this, req.opcode === 1 ? 'rrq' : 'wrq',
       { address: rinfo.address, port: rinfo.port }, name, req.options);
@@ -523,10 +553,11 @@ class TftpServer extends EventEmitter {
     sess.start().catch(() => { this.sessions.delete(key); });
   }
 
-  _sendErrorTo(rinfo, code, msg) {
-    if (!this.sock) return;
+  _sendErrorTo(rinfo, code, msg, sock) {
+    const s = sock || this.socks[0];
+    if (!s) return;
     const buf = Buffer.concat([Buffer.from([0, 5]), padBuf(code), Buffer.from(msg + '\0', 'utf8')]);
-    try { this.sock.send(buf, 0, buf.length, rinfo.port, rinfo.address); } catch (e) { /* ignore */ }
+    try { s.send(buf, 0, buf.length, rinfo.port, rinfo.address); } catch (e) { /* ignore */ }
   }
 
   _sessionStarted() { /* 钩子（统计用） */ }
@@ -544,6 +575,7 @@ class TftpServer extends EventEmitter {
   status() {
     return {
       running: this.running, port: this.port, error: this.lastError,
+      addrs: this.socks.map((s) => { try { return s.address().address; } catch (e) { return ''; } }).filter(Boolean),
       sessions: this.sessions.size, rxFiles: this.stats.rxFiles, rxBytes: this.stats.rxBytes,
     denied: this.stats.denied, evicted: this.stats.evicted
     };

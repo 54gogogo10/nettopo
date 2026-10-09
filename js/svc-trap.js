@@ -275,7 +275,7 @@ class TrapServer extends EventEmitter {
     this.communities = (Array.isArray(opts.communities) ? opts.communities : String(opts.communities || '').split(','))
       .map(x => String(x == null ? '' : x).trim()).filter(Boolean).slice(0, 16);
     this.ringMax = Math.max(50, Math.floor(Number(opts.ringMax) || MAX_RING));
-    this.udp = null;
+    this.udps = [];
     this.port = 0;
     this.running = false;
     this.lastError = '';
@@ -304,34 +304,72 @@ class TrapServer extends EventEmitter {
     this._scanDiskBytes();
   }
 
-  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP） */
-  start(port, host) {
+  /** 启动监听。hosts 为地址数组（同端口按地址各绑一个套接字；缺省全部网卡）。部分地址绑定
+   *  失败（接口已下线等）不影响其余地址：失败清单写入 lastError；全部失败才返回 ok:false */
+  start(port, hosts) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     return new Promise((resolve) => {
-      const udp = dgram.createSocket('udp4');
-      let settled = false;
+      const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
+      const want = list.length ? list : ['0.0.0.0'];
+      const failures = [];
+      const socks = [];
+      let realPort = 0;
+      let failed = false;
       const fail = (err) => {
-        if (settled) return;
-        settled = true;
-        try { udp.close(); } catch (e) { /* ignore */ }
+        if (failed) return;
+        failed = true;
+        for (const s of socks) { try { s.close(); } catch (e) { /* ignore */ } }
         this.running = false;
         this.lastError = String((err && err.message) || err);
         resolve({ ok: false, error: this._bindHint(this.lastError) });
       };
-      udp.once('error', fail);
-      udp.bind(port || 0, host || undefined, () => {
-        if (settled) return;
-        settled = true;
-        this.udp = udp;
-        this.port = udp.address().port;
-        this.running = true;
-        this.lastError = '';
-        udp.on('message', (buf, rinfo) => this._ingest(buf, rinfo && rinfo.address, rinfo && rinfo.port));
-        udp.on('error', (err) => { this.lastError = String(err && err.message || err); this.stop(); });
-        udp.on('close', () => { this.running = false; });
-        resolve({ ok: true, port: this.port });
-      });
+      const bindOne = (i) => {
+        if (i >= want.length) {
+          if (!socks.length) {
+            this.lastError = failures.join('；');
+            resolve({ ok: false, error: this._bindHint(this.lastError) });
+            return;
+          }
+          this.udps = socks;
+          this.port = realPort;
+          this.running = true;
+          this.lastError = failures.length ? ('部分地址监听失败：' + failures.join('；')) : '';
+          resolve({ ok: true, port: this.port });
+          return;
+        }
+        const h = want[i];
+        const udp = dgram.createSocket('udp4');
+        let settled = false;
+        const onErr = (err) => {
+          if (settled) return;
+          settled = true;
+          try { udp.close(); } catch (e) { /* ignore */ }
+          failures.push(h + '：' + String((err && err.message) || err));
+          bindOne(i + 1);
+        };
+        udp.once('error', onErr);
+        udp.bind(realPort || (port || 0), h === '0.0.0.0' ? undefined : h, () => {
+          if (settled) return;
+          settled = true;
+          udp.removeListener('error', onErr);
+          if (!realPort) realPort = udp.address().port; // port=0 时后续地址跟随首个实际端口
+          udp.on('message', (buf, rinfo) => this._ingest(buf, rinfo && rinfo.address, rinfo && rinfo.port, udp));
+          udp.on('error', () => this._dropUdp(udp)); // 运行期单套接字故障：摘掉它，其余地址继续
+          udp.on('close', () => { if (!this.udps.some((x) => x === udp)) this.running = this.udps.length > 0; });
+          socks.push(udp);
+          bindOne(i + 1);
+        });
+      };
+      bindOne(0);
     });
+  }
+
+  /** 摘除一个监听套接字（运行期错误）；全部摘除即服务停止 */
+  _dropUdp(sock) {
+    const i = this.udps.indexOf(sock);
+    if (i >= 0) this.udps.splice(i, 1);
+    try { sock.close(); } catch (e) { /* ignore */ }
+    if (!this.udps.length) this.running = false;
   }
 
   _bindHint(err) {
@@ -343,12 +381,13 @@ class TrapServer extends EventEmitter {
 
   async stop() {
     this.running = false;
-    if (this.udp) { const s = this.udp; this.udp = null; try { s.close(); } catch (e) { /* ignore */ } }
+    for (const s of this.udps) { try { s.close(); } catch (e) { /* ignore */ } }
+    this.udps = [];
     for (const st of this.streams.values()) { try { st.end(); } catch (e) { /* ignore */ } }
     this.streams.clear();
   }
 
-  _ingest(buf, peer, peerPort) {
+  _ingest(buf, peer, peerPort, sock) {
     const now = Date.now();
     if (now - this._winStart >= 1000) { this._winStart = now; this._winCount = 0; }
     if (++this._winCount > this.maxPerSec) { this.stats.dropped++; return; }
@@ -360,7 +399,7 @@ class TrapServer extends EventEmitter {
     }
     // v1/v2c 团体字白名单：配置后 community 不符即丢弃（无认证协议的唯一源过滤手段）
     if (this.communities.length && !this.communities.includes(r.community)) { this.stats.communityReject++; return; }
-    if (r.inform) { r._peerAddr = String(peer || '').replace(/^::ffff:/, ''); r._peerPort = peerPort; this._answerInform(r); }
+    if (r.inform) { r._peerAddr = String(peer || '').replace(/^::ffff:/, ''); r._peerPort = peerPort; r._sock = sock || this.udps[0]; this._answerInform(r); }
     const summary = summarize(r.varbinds);
     const ent = {
       seq: ++this.seq,
@@ -446,7 +485,7 @@ class TrapServer extends EventEmitter {
    *  UDP 无连接：按触发包的来源地址/端口回源（_ingest 已挂在 r 上）。 */
   _answerInform(r) {
     try {
-      if (!this.udp || !r.pduRaw || !r._peerAddr) return;
+      if (!r._sock || !r.pduRaw || !r._peerAddr) return;
       const pf = r.pduRaw;
       // PDU body：request-id, error-status, error-index, varbinds —— 取 rid，varbinds 从第 4 个 TLV 起原样回显
       const ridT = tlvWalk(pf.body, 0);
@@ -467,7 +506,7 @@ class TrapServer extends EventEmitter {
       const pdu = Buffer.concat([berTlv(0x02, Buffer.from(uintBytes(rid))), berTlv(0x02, Buffer.from([0])), berTlv(0x02, Buffer.from([0])), varb]);
       const body = Buffer.concat([Buffer.from([0x02, 0x01, 0x01]), berTlv(0x04, Buffer.from(String(r.community || ''), 'utf8'))]);
       const msg = berTlv(0x30, Buffer.concat([body, berTlv(0xa2, pdu)]));
-      this.udp.send(msg, r._peerPort, r._peerAddr, () => {});
+      r._sock.send(msg, r._peerPort, r._peerAddr, () => {});
     } catch (e) { /* 应答失败不阻断 */ }
   }
 
@@ -653,6 +692,7 @@ class TrapServer extends EventEmitter {
   status() {
     return {
       running: this.running, port: this.port, error: this.lastError,
+      addrs: this.udps.map((s) => { try { return s.address().address; } catch (e) { return ''; } }).filter(Boolean),
       rxPackets: this.stats.rxPackets, malformed: this.stats.malformed, dropped: this.stats.dropped,
       diskDropped: this.stats.diskDropped, dirsRecycled: this.stats.dirsRecycled,
       diskBytes: this._diskBytes, diskQuota: this.maxTotalBytes,

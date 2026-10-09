@@ -5652,18 +5652,25 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ok(nc.syslog.alert && nc.syslog.alert.enabled === false && nc.syslog.alert.severity === 3 && Array.isArray(nc.syslog.alert.keywords), '配置归一化：Syslog 告警规则回退默认');
     const ncAlert = normalizeConfig({ syslog: { alert: { enabled: true, severity: 4, keywords: [' down ', 'down', ''], cooldownSec: 99999 } } });
     ok(ncAlert.syslog.alert.enabled === true && ncAlert.syslog.alert.severity === 4 && ncAlert.syslog.alert.keywords.length === 1 && ncAlert.syslog.alert.cooldownSec === 300, '配置归一化：Syslog 告警规则清洗与钳制');
-    // 监听地址归一化（多宿主机限定暴露面）：''/'*' → 全部网卡；localhost → 127.0.0.1；
-    // 合法 IPv4 字面量保留；主机名/越界段一律回落全部网卡
+    // 监听地址列表归一化（多宿主机限定暴露面，可多选）：''/'*'/'0.0.0.0' 与具体地址互斥
+    // （出现即整体收敛全部网卡）；localhost → 127.0.0.1；非法项剔除；去重封顶 8 个；
+    // 全部非法/为空回落全部网卡；旧版单地址字符串兼容（转数组）
     const bindCases = [
-      [undefined, '0.0.0.0'], ['', '0.0.0.0'], ['*', '0.0.0.0'], ['0.0.0.0', '0.0.0.0'],
-      ['localhost', '127.0.0.1'], ['127.0.0.1', '127.0.0.1'], ['192.168.10.5', '192.168.10.5'],
-      ['eth0', '0.0.0.0'], ['999.1.1.1', '0.0.0.0'], ['1.2.3', '0.0.0.0']
+      [undefined, ['0.0.0.0']], ['', ['0.0.0.0']], ['*', ['0.0.0.0']], ['0.0.0.0', ['0.0.0.0']],
+      ['localhost', ['127.0.0.1']], ['127.0.0.1', ['127.0.0.1']], ['192.168.10.5', ['192.168.10.5']],
+      ['eth0', ['0.0.0.0']], ['999.1.1.1', ['0.0.0.0']], ['1.2.3', ['0.0.0.0']],
+      [['127.0.0.1', '192.168.10.5'], ['127.0.0.1', '192.168.10.5']],
+      [['192.168.10.5', 'localhost', '192.168.10.5'], ['192.168.10.5', '127.0.0.1']],
+      [['127.0.0.1', '0.0.0.0'], ['0.0.0.0']],
+      [['eth0', '10.0.0.1', '999.1.1.1'], ['10.0.0.1']],
+      [[], ['0.0.0.0']]
     ];
     let bindBad = 0;
     for (const [inp, want] of bindCases) {
-      if (normalizeConfig({ listen: inp }).listen !== want) { bindBad++; console.log('  监听地址归一化不符：', JSON.stringify(inp), '→', normalizeConfig({ listen: inp }).listen, '期望', want); }
+      const got = normalizeConfig({ listen: inp }).listen;
+      if (JSON.stringify(got) !== JSON.stringify(want)) { bindBad++; console.log('  监听地址归一化不符：', JSON.stringify(inp), '→', JSON.stringify(got), '期望', JSON.stringify(want)); }
     }
-    ok(bindBad === 0, '配置归一化：监听地址三档清洗（' + bindCases.length + ' 例）');
+    ok(bindBad === 0, '配置归一化：监听地址列表清洗（' + bindCases.length + ' 例，含互斥/去重/兼容）');
     // 真实绑定：限定 127.0.0.1 后 UDP/TCP 套接字实际地址即回环（设备不可达）
     {
       const { TftpServer: T2 } = require('../js/svc-tftp.js');
@@ -5671,18 +5678,31 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const { TrapServer: T3 } = require('../js/svc-trap.js');
       const { NetflowServer: N2 } = require('../js/svc-netflow.js');
       const { FtpServer: F2 } = require('../js/svc-ftp.js');
+      const addrOf = (s) => { try { return s.address().address; } catch (e) { return ''; } };
       const t2 = new T2({ rootDir: path.join(tmpSvc, 'bind-tftp') });
-      ok((await t2.start(0, '127.0.0.1')).ok && t2.sock.address().address === '127.0.0.1', '监听地址：TFTP 绑定回环生效'); await t2.stop();
+      ok((await t2.start(0, ['127.0.0.1'])).ok && t2.socks.length === 1 && addrOf(t2.socks[0]) === '127.0.0.1', '监听地址：TFTP 绑定回环生效'); await t2.stop();
       const s2 = new S2({ baseDir: path.join(tmpSvc, 'bind-syslog') });
-      const s2r = await s2.start(0, true, '127.0.0.1');
-      ok(s2r.ok && s2.udp.address().address === '127.0.0.1' && s2.tcp.address().address === '127.0.0.1', '监听地址：Syslog UDP+TCP 绑定回环生效'); await s2.stop();
+      const s2r = await s2.start(0, true, ['127.0.0.1']);
+      ok(s2r.ok && s2.udps.length === 1 && addrOf(s2.udps[0]) === '127.0.0.1' && s2.tcps.length === 1 && addrOf(s2.tcps[0]) === '127.0.0.1', '监听地址：Syslog UDP+TCP 绑定回环生效'); await s2.stop();
       const t3 = new T3({ baseDir: path.join(tmpSvc, 'bind-trap') });
-      ok((await t3.start(0, '127.0.0.1')).ok && t3.udp.address().address === '127.0.0.1', '监听地址：Trap 绑定回环生效'); await t3.stop();
+      ok((await t3.start(0, ['127.0.0.1'])).ok && t3.udps.length === 1 && addrOf(t3.udps[0]) === '127.0.0.1', '监听地址：Trap 绑定回环生效'); await t3.stop();
       const n2 = new N2({});
-      ok((await n2.start(0, '127.0.0.1')).ok && n2.sock.address().address === '127.0.0.1', '监听地址：NetFlow 绑定回环生效'); await n2.stop();
+      ok((await n2.start(0, ['127.0.0.1'])).ok && n2.socks.length === 1 && addrOf(n2.socks[0]) === '127.0.0.1', '监听地址：NetFlow 绑定回环生效'); await n2.stop();
       const f2 = new F2({ rootDir: path.join(tmpSvc, 'bind-ftp') });
-      const f2r = await f2.start(0, '127.0.0.1');
-      ok(f2r.ok && f2.srv.address().address === '127.0.0.1' && f2.bindHost === '127.0.0.1', '监听地址：FTP 控制通道绑定回环（PASV 随之）'); await f2.stop();
+      const f2r = await f2.start(0, ['127.0.0.1']);
+      ok(f2r.ok && f2.srvs.length === 1 && addrOf(f2.srvs[0]) === '127.0.0.1', '监听地址：FTP 控制通道绑定回环（PASV 随本端地址）'); await f2.stop();
+      // 多地址同端口：127.0.0.1 与 127.0.0.2 各绑一个套接字，端口一致、地址各异（真机多网卡同语义）
+      const t4 = new T2({ rootDir: path.join(tmpSvc, 'bind-multi') });
+      const t4r = await t4.start(0, ['127.0.0.1', '127.0.0.2']);
+      ok(t4r.ok && t4.socks.length === 2
+        && new Set(t4.socks.map(addrOf)).size === 2
+        && new Set(t4.socks.map((s) => s.address().port)).size === 1,
+        '监听地址：多地址同端口各绑一个套接字（TFTP 双回环地址）'); await t4.stop();
+      const s3 = new S2({ baseDir: path.join(tmpSvc, 'bind-multi-sys') });
+      const s3r = await s3.start(0, false, ['127.0.0.1', '127.0.0.2']);
+      ok(s3r.ok && s3.udps.length === 2 && new Set(s3.udps.map(addrOf)).size === 2
+        && new Set(s3.udps.map((s) => s.address().port)).size === 1,
+        '监听地址：Syslog 多地址同端口生效'); await s3.stop();
     }
 
     /* ---------- TFTP 服务器（协议级客户端） ---------- */

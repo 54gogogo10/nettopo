@@ -308,7 +308,9 @@ class FtpConnection {
       };
       srv.once('error', onErr);
       srv.once('listening', onOk);
-      try { srv.listen(port, (this.server && this.server.bindHost) || '0.0.0.0'); }
+      // PASV 数据通道绑定控制连接的本端地址（多地址监听时与客户端实际到达路径一致，
+      // 同源校验与 PASV 应答地址天然对齐）
+      try { srv.listen(port, this._advertisedIp()); }
       catch (e) { srv.removeListener('error', onErr); srv.removeListener('listening', onOk); resolve(false); }
     });
     const range = this.server.pasvRange();
@@ -614,7 +616,7 @@ class FtpServer extends EventEmitter {
     this.pasvMin = Math.floor(Number(opts.pasvMin) || 0);
     this.pasvMax = Math.floor(Number(opts.pasvMax) || 0);
     this._pasvNext = 0;
-    this.srv = null;
+    this.srvs = [];             // 控制 server（多选地址时同端口各绑一个）
     this.port = 0;
     this.running = false;
     this.lastError = '';
@@ -669,60 +671,88 @@ class FtpServer extends EventEmitter {
     return { min, count, next };
   }
 
-  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP）；
-   *  PASV 数据通道绑定同地址（PASV 应答地址取控制连接本端地址，两者天然一致） */
-  start(port, host) {
+  /** 启动监听。hosts 为地址数组（同端口按地址各绑一个控制 server；缺省全部网卡）。部分地址
+   *  绑定失败（接口已下线等）不影响其余地址：失败清单写入 lastError；全部失败才返回 ok:false。
+   *  PASV 数据通道绑定控制连接的本端地址（多地址下天然与客户端到达路径一致） */
+  start(port, hosts) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
-    this.bindHost = host && /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host)
-      && host.split('.').every(x => Number(x) <= 255) ? host : '0.0.0.0';
     return new Promise((resolve) => {
-      const srv = net.createServer();
-      let settled = false;
-      const fail = (err) => {
-        if (settled) return;
-        settled = true;
-        try { srv.close(); } catch (e) { /* ignore */ }
-        this.running = false;
-        this.lastError = String((err && err.message) || err);
-        resolve({ ok: false, error: this._bindHint(this.lastError) });
-      };
-      srv.once('error', fail);
-      srv.maxConnections = Math.max(4, this.maxSessions + 16); // 内核层限流：超限连接排队而非耗尽句柄
-      srv.listen(port || 0, this.bindHost, () => {
-        if (settled) return;
-        settled = true;
-        this.srv = srv;
-        this.port = srv.address().port;
+      const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
+      const want = list.length ? list : ['0.0.0.0'];
+      const failures = [];
+      const srvs = [];
+      let realPort = 0;
+      const finish = () => {
+        if (!srvs.length) {
+          this.running = false;
+          this.lastError = failures.join('；');
+          resolve({ ok: false, error: this._bindHint(this.lastError) });
+          return;
+        }
+        this.srvs = srvs;
+        this.port = realPort;
         this.running = true;
-        this.lastError = '';
-        srv.on('connection', (socket) => {
-          const peerIp = (socket.remoteAddress || '').replace(/^::ffff:/, '');
-          if (this._isBanned(peerIp)) {
-            this.stats.denied++;
-            try { socket.end('421 登录失败次数过多，来源已被临时拒绝。\r\n'); } catch (e) { /* ignore */ }
-            return;
-          }
-          if (this.conns.size >= this.maxSessions) {
-            this.stats.denied++;
-            try { socket.end('421 连接数已达上限。\r\n'); } catch (e) { /* ignore */ }
-            return;
-          }
-          const conn = new FtpConnection(this, socket);
-          this.conns.add(conn);
-          conn.start();
-        });
-        // EMFILE/ENFILE（句柄耗尽）不整站停摆：句柄是进程级的，stop() 会拖垮使用方对其余
-        // 服务的管理；只记错误，等连接自然回收后自愈
-        srv.on('error', (err) => {
-          this.lastError = String(err && err.message || err);
-          const code = err && err.code;
-          if (code === 'EMFILE' || code === 'ENFILE') return;
-          this.stop();
-        });
-        srv.on('close', () => { this.running = false; });
+        this.lastError = failures.length ? ('部分地址监听失败：' + failures.join('；')) : '';
         resolve({ ok: true, port: this.port });
-      });
+      };
+      const bindOne = (i) => {
+        if (i >= want.length) { finish(); return; }
+        const h = want[i];
+        const bindAddr = h === '0.0.0.0' ? '0.0.0.0' : h;
+        const srv = net.createServer();
+        let settled = false;
+        const onErr = (err) => {
+          if (settled) return;
+          settled = true;
+          try { srv.close(); } catch (e) { /* ignore */ }
+          failures.push(h + '：' + String((err && err.message) || err));
+          bindOne(i + 1);
+        };
+        srv.once('error', onErr);
+        srv.maxConnections = Math.max(4, this.maxSessions + 16); // 内核层限流：超限连接排队而非耗尽句柄
+        srv.listen(realPort || (port || 0), bindAddr, () => {
+          if (settled) return;
+          settled = true;
+          srv.removeListener('error', onErr);
+          if (!realPort) realPort = srv.address().port; // port=0 时后续地址跟随首个实际端口
+          srv.on('connection', (socket) => {
+            const peerIp = (socket.remoteAddress || '').replace(/^::ffff:/, '');
+            if (this._isBanned(peerIp)) {
+              this.stats.denied++;
+              try { socket.end('421 登录失败次数过多，来源已被临时拒绝。\r\n'); } catch (e) { /* ignore */ }
+              return;
+            }
+            if (this.conns.size >= this.maxSessions) {
+              this.stats.denied++;
+              try { socket.end('421 连接数已达上限。\r\n'); } catch (e) { /* ignore */ }
+              return;
+            }
+            const conn = new FtpConnection(this, socket);
+            this.conns.add(conn);
+            conn.start();
+          });
+          // EMFILE/ENFILE（句柄耗尽）不整站停摆：句柄是进程级的，stop() 会拖垮使用方对其余
+          // 服务的管理；只记错误，等连接自然回收后自愈
+          srv.on('error', (err) => {
+            this.lastError = String(err && err.message || err);
+            const code = err && err.code;
+            if (code === 'EMFILE' || code === 'ENFILE') return;
+            this._dropSrv(srv);
+          });
+          srvs.push(srv);
+          bindOne(i + 1);
+        });
+      };
+      bindOne(0);
     });
+  }
+
+  /** 摘除一个控制 server（运行期错误，不触及已 accept 的连接——它们按会话生命周期回收） */
+  _dropSrv(srv) {
+    const i = this.srvs.indexOf(srv);
+    if (i >= 0) this.srvs.splice(i, 1);
+    try { srv.close(); } catch (e) { /* ignore */ }
+    if (!this.srvs.length) this.running = false;
   }
 
   _bindHint(err) {
@@ -735,7 +765,8 @@ class FtpServer extends EventEmitter {
   async stop() {
     this.running = false;
     for (const c of [...this.conns]) { try { c.destroy(); } catch (e) { /* ignore */ } }
-    if (this.srv) { const s = this.srv; this.srv = null; try { s.close(); } catch (e) { /* ignore */ } }
+    for (const s of this.srvs) { try { s.close(); } catch (e) { /* ignore */ } }
+    this.srvs = [];
   }
 
   _connClosed(conn) { this.conns.delete(conn); }
@@ -743,6 +774,7 @@ class FtpServer extends EventEmitter {
   status() {
     return {
       running: this.running, port: this.port, error: this.lastError,
+      addrs: this.srvs.map((s) => { try { return s.address().address; } catch (e) { return ''; } }).filter(Boolean),
       sessions: this.conns.size, rxFiles: this.stats.rxFiles, rxBytes: this.stats.rxBytes, denied: this.stats.denied
     };
   }

@@ -25,9 +25,10 @@ const LIST_SCAN_CAP = 20000;        // 编目扫描的目录项上限（TFTP 无
 /** 默认配置（端口 69/21/514/162 为协议标准端口；Linux 非 root 绑定失败时面板会提示改高位端口） */
 function defaultConfig() {
   return {
-    // 五个服务共用的监听地址：默认全部网卡（历史行为）；多宿主机可限定到本机回环或指定 IP，
-    // 避免在不可信网络（会议室 Wi-Fi/热点）暴露无认证的 TFTP/Syslog/Trap/NetFlow
-    listen: '0.0.0.0',
+    // 五个服务共用的监听地址列表：默认全部网卡（历史行为）；多宿主机可在面板勾选本机若干地址
+    // （同端口按地址各绑一个套接字），避免在不可信网络（会议室 Wi-Fi/热点）暴露无认证的
+    // TFTP/Syslog/Trap/NetFlow。兼容旧配置的单地址字符串（清洗时转为数组）。
+    listen: ['0.0.0.0'],
     tftp: { enabled: false, port: 69 },
     ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true },
     syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } },
@@ -51,15 +52,24 @@ function cleanCred(v, dft) {
   return s || dft;
 }
 
-/** 监听地址归一化：'' / '*' → 全部网卡；localhost → 127.0.0.1；其余仅接受点分 IPv4 字面量
- *  （绑定主机名语义含糊且面板只做「全部/仅本机/指定地址」三档），非法一律回落全部网卡 */
-function cleanBind(v) {
-  const s = String(v == null ? '' : v).trim();
-  if (!s || s === '*' || s === '0.0.0.0') return '0.0.0.0';
-  if (s.toLowerCase() === 'localhost' || s === '127.0.0.1') return '127.0.0.1';
-  const m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m && [m[1], m[2], m[3], m[4]].every(x => Number(x) <= 255)) return s;
-  return '0.0.0.0';
+/** 监听地址列表归一化：接受旧版单地址字符串或地址数组；'' / '*' / '0.0.0.0' 与其它地址互斥
+ *  （出现即整体收敛为全部网卡）；localhost → 127.0.0.1；其余仅接受点分 IPv4 字面量（绑定
+ *  主机名语义含糊），非法项剔除；去重后最多 8 个（面板只勾选本机地址，超限视为异常输入） */
+function cleanBindList(v) {
+  const raw = Array.isArray(v) ? v : [v];
+  const out = [];
+  const push = (s) => { if (s && out.indexOf(s) < 0) out.push(s); };
+  let all = false;
+  for (let item of raw) {
+    let s = String(item == null ? '' : item).trim();
+    if (!s || s === '*' || s === '0.0.0.0') { all = true; continue; }
+    if (s.toLowerCase() === 'localhost') s = '127.0.0.1';
+    const m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!(m && [m[1], m[2], m[3], m[4]].every(x => Number(x) <= 255))) continue; // 非法项剔除
+    push(s);
+  }
+  if (all || !out.length) return ['0.0.0.0'];
+  return out.slice(0, 8);
 }
 
 const DEFAULT_FTP_PASSWORD = 'nettopo';
@@ -77,7 +87,7 @@ function normalizeConfig(cfg) {
   const dft = defaultConfig();
   const out = defaultConfig();
   cfg = cfg && typeof cfg === 'object' ? cfg : {};
-  out.listen = cleanBind(cfg.listen);
+  out.listen = cleanBindList(cfg.listen);
   const t = cfg.tftp && typeof cfg.tftp === 'object' ? cfg.tftp : {};
   out.tftp.enabled = clampB(t.enabled, dft.tftp.enabled);
   out.tftp.port = clampPort(t.port, dft.tftp.port);
@@ -174,21 +184,23 @@ class NetServices extends EventEmitter {
   async _apply(cfg) {
     const n = normalizeConfig(cfg);
     this.cfg = n;
+    // 监听地址签名：地址列表任一变化即重启对应服务（数组顺序无关化）
+    const listenSig = JSON.stringify(n.listen.slice().sort());
     // TFTP：端口/监听地址变化或启停才动
     if (!n.tftp.enabled) {
       if (this.applied.tftp) { await this.tftp.stop(); this.applied.tftp = null; }
-    } else if (!this.applied.tftp || this.applied.tftp.port !== n.tftp.port || this.applied.tftp.listen !== n.listen) {
+    } else if (!this.applied.tftp || this.applied.tftp.port !== n.tftp.port || this.applied.tftp.listenSig !== listenSig) {
       await this.tftp.stop();
       const r = await this.tftp.start(n.tftp.port, n.listen);
       // 启动失败（端口被占等）不记录 applied：否则同端口配置被短路永不再尝试启动，错误粘滞到重启
-      this.applied.tftp = (r && r.ok) ? { port: n.tftp.port, listen: n.listen } : null;
+      this.applied.tftp = (r && r.ok) ? { port: n.tftp.port, listenSig } : null;
     }
     // FTP：端口/被动范围/监听地址变化或启停才重启；账号/覆盖热更新
     if (!n.ftp.enabled) {
       if (this.applied.ftp) { await this.ftp.stop(); this.applied.ftp = null; }
     } else {
       const a = this.applied.ftp;
-      const portChanged = !a || a.port !== n.ftp.port || a.pasvMin !== n.ftp.pasvMin || a.pasvMax !== n.ftp.pasvMax || a.listen !== n.listen;
+      const portChanged = !a || a.port !== n.ftp.port || a.pasvMin !== n.ftp.pasvMin || a.pasvMax !== n.ftp.pasvMax || a.listenSig !== listenSig;
       if (portChanged) {
         await this.ftp.stop();
         this.ftp = new FtpServer({
@@ -197,7 +209,7 @@ class NetServices extends EventEmitter {
         });
         this.ftp.on('file', (info) => this.emit('file', info));
         const r = await this.ftp.start(n.ftp.port, n.listen);
-        this.applied.ftp = (r && r.ok) ? { port: n.ftp.port, pasvMin: n.ftp.pasvMin, pasvMax: n.ftp.pasvMax, listen: n.listen } : null;
+        this.applied.ftp = (r && r.ok) ? { port: n.ftp.port, pasvMin: n.ftp.pasvMin, pasvMax: n.ftp.pasvMax, listenSig } : null;
       } else {
         this.ftp.setAuth({ username: n.ftp.username, password: n.ftp.password, overwrite: n.ftp.overwrite });
       }
@@ -206,10 +218,10 @@ class NetServices extends EventEmitter {
     if (!n.syslog.enabled) {
       if (this.applied.syslog) { await this.syslog.stop(); this.applied.syslog = null; }
     } else {
-      if (!this.applied.syslog || this.applied.syslog.port !== n.syslog.port || this.applied.syslog.tcp !== n.syslog.tcp || this.applied.syslog.listen !== n.listen) {
+      if (!this.applied.syslog || this.applied.syslog.port !== n.syslog.port || this.applied.syslog.tcp !== n.syslog.tcp || this.applied.syslog.listenSig !== listenSig) {
         await this.syslog.stop();
         const r = await this.syslog.start(n.syslog.port, n.syslog.tcp, n.listen);
-        this.applied.syslog = (r && r.ok) ? { port: n.syslog.port, tcp: n.syslog.tcp, listen: n.listen } : null;
+        this.applied.syslog = (r && r.ok) ? { port: n.syslog.port, tcp: n.syslog.tcp, listenSig } : null;
       }
       this.syslog.setAlertRules(n.syslog.alert);
     }
@@ -218,19 +230,19 @@ class NetServices extends EventEmitter {
       if (this.applied.trap) { await this.trap.stop(); this.applied.trap = null; }
     } else {
       const v3sig = JSON.stringify(n.trap.v3) + '|' + n.trap.community;
-      if (!this.applied.trap || this.applied.trap.port !== n.trap.port || this.applied.trap.v3sig !== v3sig || this.applied.trap.listen !== n.listen) {
+      if (!this.applied.trap || this.applied.trap.port !== n.trap.port || this.applied.trap.v3sig !== v3sig || this.applied.trap.listenSig !== listenSig) {
         await this.trap.stop();
         this.trap = new TrapServer({ baseDir: this.trapDir, v3Users: n.trap.v3.user ? [n.trap.v3] : [], communities: n.trap.community ? n.trap.community.split(',') : [] });
         this.trap.on('trap', (t) => this.emit('trap', t));
         const r = await this.trap.start(n.trap.port, n.listen);
-        this.applied.trap = (r && r.ok) ? { port: n.trap.port, v3sig, listen: n.listen } : null;
+        this.applied.trap = (r && r.ok) ? { port: n.trap.port, v3sig, listenSig } : null;
       }
     }
     // NetFlow/IPFIX：端口/限速/监听地址变化或启停才重启（流数据在内存，重启即清——面板有说明）
     if (!n.netflow.enabled) {
       if (this.applied.netflow) { await this.netflow.stop(); this.applied.netflow = null; }
     } else {
-      const sig = n.netflow.port + '|' + n.netflow.maxPps + '|' + n.listen;
+      const sig = n.netflow.port + '|' + n.netflow.maxPps + '|' + listenSig;
       if (!this.applied.netflow || this.applied.netflow.sig !== sig) {
         await this.netflow.stop();
         this.netflow = new NetflowServer({ maxPps: n.netflow.maxPps });

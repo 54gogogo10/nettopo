@@ -223,8 +223,9 @@ class NetflowServer extends EventEmitter {
     super();
     opts = opts || {};
     this.maxPps = Math.max(1, Math.floor(Number(opts.maxPps) || DEFAULT_MAX_PPS));
-    this.sock = null;
+    this.socks = [];               // 监听套接字（多选地址时同端口各绑一个）
     this.port = 0;
+    this.lastError = '';
     this.tmpl = new Map();           // "exporter|sourceId|tplId" → {fields, totalLen}
     this.ring = [];                  // 明细：{seq, ts, exporter, version, ...record}
     this.seq = 0;
@@ -233,48 +234,64 @@ class NetflowServer extends EventEmitter {
     this._winStart = 0; this._winCount = 0;
   }
 
-  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP） */
-  async start(port, host) {
-    if (this.sock) return { ok: true, port: this.port };
+  /** 启动监听。hosts 为地址数组（同端口按地址各绑一个套接字；缺省全部网卡）。部分地址绑定
+   *  失败（接口已下线等）不影响其余地址：失败清单写入 lastError 如实展示；全部失败才返回 ok:false */
+  async start(port, hosts) {
+    if (this.socks.length) return { ok: true, port: this.port };
     // 0 为合法 bind 端口（系统随机分配，测试用）：不能用 || 兜底（0 会被误当缺省换成 9995）
     const n = Math.floor(Number(port));
     const p = (Number.isInteger(n) && n >= 0 && n <= 65535) ? n : 9995;
-    return new Promise((resolve) => {
-      const sock = dgram.createSocket('udp4');
-      let settled = false;
-      const done = (r) => { if (!settled) { settled = true; resolve(r); } };
-      sock.on('error', (e) => {
-        try { sock.close(); } catch (err) { /* ignore */ }
-        this.sock = null;
-        done({ ok: false, error: String((e && e.message) || e) });
+    const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
+    const want = list.length ? list : ['0.0.0.0'];
+    const failures = [];
+    let realPort = 0;
+    for (const h of want) {
+      const r = await new Promise((resolve) => {
+        const sock = dgram.createSocket('udp4');
+        const onErr = (e) => { try { sock.close(); } catch (err) { /* ignore */ } resolve({ err: String((e && e.message) || e) }); };
+        sock.once('error', onErr);
+        sock.on('message', (msg, rinfo) => this._onPacket(msg, rinfo));
+        sock.bind(realPort || p, h === '0.0.0.0' ? undefined : h, () => {
+          sock.removeListener('error', onErr);
+          sock.on('error', () => this._dropSock(sock)); // 运行期单套接字故障：摘掉它，其余地址继续
+          resolve({ sock });
+        });
       });
-      sock.on('message', (msg, rinfo) => this._onPacket(msg, rinfo));
-      sock.bind(p, host || undefined, () => {
-        this.sock = sock;
-        this.port = sock.address().port;
-        done({ ok: true, port: this.port });
-      });
-    });
+      if (r.err) { failures.push(h + '：' + r.err); continue; }
+      if (!realPort) realPort = r.sock.address().port; // port=0 时后续地址跟随首个实际端口
+      this.socks.push(r.sock);
+    }
+    if (!this.socks.length) { this.lastError = failures.join('；'); return { ok: false, error: this.lastError }; }
+    this.port = realPort;
+    this.lastError = failures.length ? ('部分地址监听失败：' + failures.join('；')) : '';
+    return { ok: true, port: this.port };
+  }
+
+  /** 摘除一个监听套接字（运行期错误）；全部摘除即服务停止 */
+  _dropSock(sock) {
+    const i = this.socks.indexOf(sock);
+    if (i >= 0) this.socks.splice(i, 1);
+    try { sock.close(); } catch (e) { /* ignore */ }
   }
 
   async stop() {
-    if (!this.sock) return { ok: true };
-    const s = this.sock;
-    this.sock = null;
-    return new Promise((resolve) => {
-      try { s.close(() => resolve({ ok: true })); } catch (e) { resolve({ ok: true }); }
-    });
+    const socks = this.socks;
+    this.socks = [];
+    await Promise.all(socks.map((s) => new Promise((resolve) => { try { s.close(() => resolve()); } catch (e) { resolve(); } })));
+    return { ok: true };
   }
 
   status() {
     return {
-      running: !!this.sock, port: this.port, maxPps: this.maxPps,
+      running: this.socks.length > 0, port: this.port, maxPps: this.maxPps,
+      addrs: this.socks.map((s) => { try { return s.address().address; } catch (e) { return ''; } }).filter(Boolean),
+      error: this.lastError || '',
       stats: Object.assign({}, this.stats, { templates: this.tmpl.size, buffered: this.ring.length, sessions: this.agg.size })
     };
   }
 
   _onPacket(msg, rinfo) {
-    if (!this.sock || !msg || msg.length > MAX_PKT) return;
+    if (!this.socks.length || !msg || msg.length > MAX_PKT) return;
     // 简单滑窗限速：1 秒窗口内超过 maxPps 的包丢弃并计数
     const now = Date.now();
     if (now - this._winStart >= 1000) { this._winStart = now; this._winCount = 0; }

@@ -193,11 +193,10 @@ class SyslogServer extends EventEmitter {
     // 这让目录总量在持续伪造 HOST 洪流下保持有界（约 新建速率×静默期），而不是只靠限速拖时间；
     // 回收计数进 stats.dirsRecycled 并在面板可见，不做无声删除
     this.hostDirReclaimMs = Math.max(60000, Math.floor(Number(opts.hostDirReclaimMs) || 30 * 60000));
-    this.udp = null;
-    this.tcp = null;
+    this.udps = [];
+    this.tcps = [];
     this.port = 0;
     this.tcpPort = 0;
-    this.tcpOn = false;
     this.running = false;
     this.lastError = '';
     this.ring = [];
@@ -228,78 +227,110 @@ class SyslogServer extends EventEmitter {
     this._scanDiskBytes();
   }
 
-  /** 启动监听。host 可选（'0.0.0.0' 全部网卡 / '127.0.0.1' 仅本机 / 指定本机 IP），UDP 与 TCP 同地址 */
-  start(port, withTcp, host) {
+  /** 启动监听。hosts 为地址数组（同端口按地址各绑一套 UDP（+TCP）套接字；缺省全部网卡）。
+   *  部分地址绑定失败（接口已下线、TCP 随机端口撞车）不影响其余地址：失败清单写入 lastError；
+   *  全部失败才返回 ok:false */
+  start(port, withTcp, hosts) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     const wantTcp = withTcp === true;
     return new Promise((resolve) => {
-      const udp = dgram.createSocket('udp4');
-      let settled = false;
-      const fail = (err) => {
-        if (settled) return;
-        settled = true;
-        try { udp.close(); } catch (e) { /* ignore */ }
-        this.running = false;
-        this.lastError = String((err && err.message) || err);
-        resolve({ ok: false, error: this._bindHint(this.lastError) });
+      const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
+      const want = list.length ? list : ['0.0.0.0'];
+      const failures = [];
+      const udps = [], tcps = [];
+      let realPort = 0;
+      const finish = () => {
+        if (!udps.length) {
+          this.running = false;
+          this.lastError = failures.join('；');
+          resolve({ ok: false, error: this._bindHint(this.lastError) });
+          return;
+        }
+        this.udps = udps;
+        this.tcps = tcps;
+        this.port = realPort;
+        this.running = true;
+        this.lastError = failures.length ? ('部分地址监听失败：' + failures.join('；')) : '';
+        resolve({ ok: true, port: this.port });
       };
-      udp.once('error', fail);
-      udp.bind(port || 0, host || undefined, () => {
-        if (settled) return;
-        const udpPort = udp.address().port;
-        const afterUdp = () => {
-          if (settled) return;
-          settled = true;
-          this.udp = udp;
-          this.port = udpPort;
-          this.running = true;
-          this.lastError = '';
-          udp.on('message', (buf, rinfo) => {
-            try { this._ingest(buf.toString('utf8'), rinfo.address); } catch (e) { /* ignore */ }
-          });
-          udp.on('error', (err) => { this.lastError = String(err && err.message || err); this.stop(); });
-          udp.on('close', () => { this.running = false; });
-          resolve({ ok: true, port: this.port });
-        };
-        if (!wantTcp) { afterUdp(); return; }
-        const tcp = net.createServer();
-        const failTcp = (err) => {
+      const bindHost = (i) => {
+        if (i >= want.length) { finish(); return; }
+        const h = want[i];
+        const bindAddr = h === '0.0.0.0' ? undefined : h;
+        const udp = dgram.createSocket('udp4');
+        let settled = false;
+        const failHost = (err) => {
           if (settled) return;
           settled = true;
           try { udp.close(); } catch (e) { /* ignore */ }
-          try { tcp.close(); } catch (e) { /* ignore */ }
-          this.running = false;
-          this.lastError = String((err && err.message) || err);
-          resolve({ ok: false, error: this._bindHint(this.lastError) });
+          failures.push(h + '：' + String((err && err.message) || err));
+          bindHost(i + 1);
         };
-        tcp.once('error', failTcp);
-        // TCP 与 UDP 同端口（不同协议互不冲突）；仅接受整行/字节数 framing 的 RFC 6587。
-        // 固定端口场景保持「同端口」语义；**port=0（自动端口）不能跟随**：UDP 与 TCP 的临时端口
-        // 区间在 Windows 上重叠，跟随会随机撞上已占用的 TCP 端口而 EADDRINUSE，start() 返回 ok:false
-        // 且 this.port 停在 0（调用方若据此连接会拿到 EADDRNOTAVAIL/连接被拒）。此时让 TCP 自己取端口。
-        // 注意：随机端口场景（port=0）TCP 必须**跟随 UDP 实际绑定的端口**，这是「同端口」语义的
-        // 一部分（设备配置 logging host 只写一个端口号，TCP/UDP 走同一号）。代价是 Windows 下
-        // TCP 临时端口区间与 UDP 重叠时可能撞车 → EADDRINUSE，此时 start 如实返回 ok:false、
-        // this.port 保持 0；调用方必须检查返回值（测试侧的重复重试见 run-tests 的 startSyslogWithRetry）
-        tcp.listen(udpPort, host || '0.0.0.0', () => {
+        udp.once('error', failHost);
+        udp.bind(realPort || (port || 0), bindAddr, () => {
           if (settled) return;
-          tcp.removeListener('error', failTcp);
-          this.tcp = tcp;
-          try { this.tcpPort = tcp.address().port; } catch (e) { this.tcpPort = 0; }
-          tcp.maxConnections = MAX_TCP_CONNS; // 内核层限流：连接洪泛超限时挂起 accept 而非耗尽句柄
-          tcp.on('error', (err) => {
-            this.lastError = String(err && err.message || err);
-            // EMFILE/ENFILE（句柄耗尽）不整站停摆：只记错误，等空闲超时回收连接后自愈——
-            // stop() 会连 UDP 一起关掉，且句柄是进程级的，一个服务停摆会连锁拖垮其它服务
-            const code = err && err.code;
-            if (code === 'EMFILE' || code === 'ENFILE') return;
-            this.stop();
+          const udpPort = udp.address().port;
+          const afterUdp = () => {
+            if (settled) return;
+            settled = true;
+            if (!realPort) realPort = udpPort; // port=0 时后续地址跟随首个实际端口
+            udp.on('message', (buf, rinfo) => {
+              try { this._ingest(buf.toString('utf8'), rinfo.address); } catch (e) { /* ignore */ }
+            });
+            udp.on('error', () => this._dropUdp(udp)); // 运行期单套接字故障：摘掉它，其余地址继续
+            udps.push(udp);
+            bindHost(i + 1);
+          };
+          if (!wantTcp) { afterUdp(); return; }
+          const tcp = net.createServer();
+          const failTcp = (err) => {
+            if (settled) return;
+            settled = true;
+            try { udp.close(); } catch (e) { /* ignore */ }
+            try { tcp.close(); } catch (e) { /* ignore */ }
+            failures.push(h + '：' + String((err && err.message) || err));
+            bindHost(i + 1);
+          };
+          tcp.once('error', failTcp);
+          // TCP 与 UDP 同端口（不同协议互不冲突）；仅接受整行/字节数 framing 的 RFC 6587。
+          // 固定端口场景保持「同端口」语义；**port=0（自动端口）不能跟随**：UDP 与 TCP 的临时端口
+          // 区间在 Windows 上重叠，跟随会随机撞上已占用的 TCP 端口而 EADDRINUSE。多地址场景下
+          // 单个地址撞车只损失该地址（计入失败清单），不再拖垮其余地址。
+          tcp.listen(udpPort, bindAddr || '0.0.0.0', () => {
+            if (settled) return;
+            tcp.removeListener('error', failTcp);
+            try { this.tcpPort = tcp.address().port; } catch (e) { this.tcpPort = 0; }
+            tcp.maxConnections = MAX_TCP_CONNS; // 内核层限流：连接洪泛超限时挂起 accept 而非耗尽句柄
+            tcp.on('error', (err) => {
+              this.lastError = String(err && err.message || err);
+              // EMFILE/ENFILE（句柄耗尽）不整站停摆：只记错误，等空闲超时回收连接后自愈——
+              // 句柄是进程级的，一个服务停摆会连锁拖垮其它服务
+              const code = err && err.code;
+              if (code === 'EMFILE' || code === 'ENFILE') return;
+              this._dropTcp(tcp);
+            });
+            tcp.on('connection', (s) => this._onTcpConn(s));
+            tcps.push(tcp);
+            afterUdp();
           });
-          tcp.on('connection', (s) => this._onTcpConn(s));
-          afterUdp();
         });
-      });
+      };
+      bindHost(0);
     });
+  }
+
+  /** 摘除一个 UDP 监听套接字（运行期错误）；全部摘除即服务停止 */
+  _dropUdp(sock) {
+    const i = this.udps.indexOf(sock);
+    if (i >= 0) this.udps.splice(i, 1);
+    try { sock.close(); } catch (e) { /* ignore */ }
+    if (!this.udps.length) this.running = false;
+  }
+  /** 摘除一个 TCP 监听 server（运行期错误，不触及已 accept 的连接——它们由空闲超时回收） */
+  _dropTcp(srv) {
+    const i = this.tcps.indexOf(srv);
+    if (i >= 0) this.tcps.splice(i, 1);
+    try { srv.close(); } catch (e) { /* ignore */ }
   }
 
   _onTcpConn(sock) {
@@ -377,8 +408,10 @@ class SyslogServer extends EventEmitter {
 
   async stop() {
     this.running = false;
-    if (this.udp) { const s = this.udp; this.udp = null; try { s.close(); } catch (e) { /* ignore */ } }
-    if (this.tcp) { const s = this.tcp; this.tcp = null; try { s.close(); } catch (e) { /* ignore */ } }
+    for (const s of this.udps) { try { s.close(); } catch (e) { /* ignore */ } }
+    this.udps = [];
+    for (const s of this.tcps) { try { s.close(); } catch (e) { /* ignore */ } }
+    this.tcps = [];
     // 已 accept 的 TCP 连接一并销毁：close() 只停监听不影响存量连接（长连接设备会继续收日志落盘）
     if (this._tcpConns) {
       for (const s of this._tcpConns) { try { s.destroy(); } catch (e) { /* ignore */ } }
@@ -635,7 +668,8 @@ class SyslogServer extends EventEmitter {
 
   status() {
     return {
-      running: this.running, port: this.port, tcpPort: this.tcpOn ? this.tcpPort : 0, tcp: !!this.tcp,
+      running: this.running, port: this.port, tcpPort: this.tcps.length ? this.tcpPort : 0, tcp: this.tcps.length > 0,
+      addrs: this.udps.map((s) => { try { return s.address().address; } catch (e) { return ''; } }).filter(Boolean),
       error: this.lastError,
       rxMsgs: this.stats.rxMsgs, dropped: this.stats.dropped, diskDropped: this.stats.diskDropped,
       diskBytes: this._diskBytes, diskQuota: this.maxTotalBytes,
