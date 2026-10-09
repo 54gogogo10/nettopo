@@ -6928,6 +6928,8 @@ function openHelp() {
     </table>
     <h4>说明</h4>
     <p>浏览器打开 index.html 亦可编辑与导出（画布、导入导出等核心功能通用）；<b>Web Shell、设备管理 Web 页、后台监控、诊断 / 终端定位、网络服务、合规检查与 AI 助手为桌面版专属</b>（需 Electron 环境）。全部数据仅保存在本机，建议用「保存工程」定期备份；桌面版支持在线升级（帮助 → 关于 → 检查更新）。更多信息见右上角「关于」。</p>
+    <h4>许可证</h4>
+    <p>本软件遵循 <b>GNU AGPL-3.0</b> 许可证并附带附加条款发布（全文见项目根目录 <code>LICENSE</code> 文件）：个人和非营利组织可按 AGPL-3.0 条款自由使用；<b>公司、组织和营利性实体在使用、分发或修改本软件之前必须获得商业许可</b>（商业用途需单独授权）。商业许可查询：<code>gogogo10@163.com</code>。所集成的第三方组件许可见项目 <code>THIRD-PARTY-NOTICES.md</code> 与 <code>lib/</code> 内声明文件。</p>
   </div>`;
   form.insertBefore(body, form.querySelector('.m-actions'));
 }
