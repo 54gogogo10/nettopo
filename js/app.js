@@ -8500,6 +8500,7 @@ function openAlertSoundConfig() {
         <label class="as-ck">最低发声等级 <select id="asMin">${lvOptions('warning')}</select></label>
         <label class="as-ck">音量 <input id="asVol" type="range" min="0" max="100" step="1" value="60" style="width:110px"/>
           <span id="asVolTxt" class="as-vol">60%</span></label>
+        <label class="as-ck" title="未确认的告警（警告及以上）超过该时长后，升一级并重发通知（系统通知 + 提示音 + Webhook 同源）；每条只升级一次，0 = 关闭">未确认升级重发 <input id="asEsc" type="number" min="0" max="1440" step="5" value="0" style="width:66px"/> 分钟（0 关闭）</label>
         <button type="button" class="tb as-tryall" id="asTryAll" title="依次试听四个等级的音型">依次试听</button>
       </div>
       <div class="as-sect">各等级音型</div>
@@ -8554,6 +8555,7 @@ function openAlertSoundConfig() {
     const snd = r.sound || {};
     ov.querySelector('#asEnabled').checked = snd.enabled !== false;
     ov.querySelector('#asMin').value = snd.minLevel || 'warning';
+    ov.querySelector('#asEsc').value = snd.escalateMin || 0;
     const pct = Math.round((snd.volume != null ? snd.volume : 0.6) * 100);
     volEl.value = String(pct);
     volTxt.textContent = pct + '%';
@@ -8568,6 +8570,7 @@ function openAlertSoundConfig() {
   ov.querySelector('[data-act=reset]').onclick = () => {
     ov.querySelector('#asEnabled').checked = true;
     ov.querySelector('#asMin').value = (ALV && ALV.DEFAULT_MIN_LEVEL) || 'warning';
+    ov.querySelector('#asEsc').value = 0;
     volEl.value = String(Math.round(((ALV && ALV.DEFAULT_VOLUME) || 0.6) * 100));
     volTxt.textContent = volEl.value + '%';
     ov.querySelectorAll('.as-ev').forEach(row => { row.querySelector('.as-ev-sel').value = alertLevelOf(row.dataset.type); syncDftChip(row); });
@@ -8580,7 +8583,7 @@ function openAlertSoundConfig() {
       // 只提交与默认不同的项：默认表升级后未被用户改写的类型自动跟随新默认
       if (v && v !== alertLevelOf(row.dataset.type)) levels2[row.dataset.type] = v;
     });
-    const sound = { enabled: ov.querySelector('#asEnabled').checked, minLevel: ov.querySelector('#asMin').value, volume: curVolume() };
+    const sound = { enabled: ov.querySelector('#asEnabled').checked, minLevel: ov.querySelector('#asMin').value, volume: curVolume(), escalateMin: Math.max(0, Math.min(1440, parseInt(ov.querySelector('#asEsc').value, 10) || 0)) };
     alertAudio.volume = sound.volume;
     try {
       if (bridge.setSound) await bridge.setSound(sound);

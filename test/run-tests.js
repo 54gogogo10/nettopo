@@ -9061,6 +9061,30 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
 
       // 双形态导出：渲染层无打包器，经 globalThis 取用同一份定义
       ok(!!globalThis.TopoAlertLevel && globalThis.TopoAlertLevel.LEVELS.length === 4, '双形态导出：挂载 globalThis.TopoAlertLevel（渲染层可用）');
+
+      // 告警升级（bumpLevel / pickEscalations）
+      eq(A.bumpLevel('warning'), 'critical', '升级：warning → critical');
+      eq(A.bumpLevel('critical'), 'emergency', '升级：critical → emergency');
+      eq(A.bumpLevel('emergency'), 'emergency', '升级：emergency 封顶不再升');
+      eq(A.normalizeSoundSettings({ escalateMin: 9999 }).escalateMin, 1440, '升级：设置分钟数钳制 0~1440');
+      eq(A.normalizeSoundSettings({}).escalateMin, 0, '升级：缺省关闭（0），不改变既有行为');
+      const now = Date.now();
+      const evs = [
+        { ts: now - 40 * 60000, type: 'offline', level: 'emergency', name: 'R1', detail: 'TCP 探测失败', deviceId: 'd1', host: 'h1', key: 'k1' },
+        { ts: now - 40 * 60000, type: 'offline', level: 'emergency', name: 'R2', ackAt: now - 1000, key: 'k2' },
+        { ts: now - 40 * 60000, type: 'offline', level: 'emergency', name: 'R3', escalatedAt: now - 1000, key: 'k3' },
+        { ts: now - 40 * 60000, type: 'recovery', level: 'info', name: 'R4', key: 'k4' },
+        { ts: now - 1 * 60000, type: 'alert', level: 'critical', name: 'R5', key: 'k5' },
+        { ts: now - 40 * 60000, type: 'alert-escalate', level: 'emergency', name: 'R1', key: 'k1e' }
+      ];
+      const picks = A.pickEscalations(evs, { now, minMinutes: 30, maxPerRun: 5 });
+      eq(picks.length, 1, '升级挑选：仅未确认+未升级+达门槛+超时的入选（已确认/已升级/info/未超时/升级条目均排除）');
+      eq(picks[0].name, 'R1', '升级挑选：命中 R1');
+      eq(picks[0].newLevel, 'emergency', '升级挑选：emergency 已封顶');
+      eq(picks[0].ageMin, 40, '升级挑选：携带未确认时长');
+      eq(A.pickEscalations(evs, { now, minMinutes: 30, maxPerRun: 5, minLevel: 'emergency' }).length, 1, '升级挑选：门槛 emergency 仍含 emergency 事件');
+      eq(A.pickEscalations(evs, { now, minMinutes: 0 }).length, 0, '升级挑选：0 分钟 = 关闭');
+      eq(A.pickEscalations(evs.slice(0, 1).concat(evs.slice(1)).map((e, i) => i === 1 ? Object.assign({}, e, { ackAt: 0, escalatedAt: 0 }) : e), { now, minMinutes: 30, maxPerRun: 1 }).length, 1, '升级挑选：单轮封顶生效');
     }
 
     /* ================= 告警外发 Webhook（js/webhook-notify.js） ================= */

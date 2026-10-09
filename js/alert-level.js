@@ -38,6 +38,7 @@ const EVENT_LEVELS = {
   'if-up': 'info',
   'if-error': 'warning',       // 接口错包速率超阈值（链路质量劣化早期信号，未中断）
   'if-error-clear': 'info',
+  'alert-escalate': 'critical', // 告警升级重发（未确认超时；自身永不参与升级，见 pickEscalations）
   metric: 'warning',           // 磁盘/内存/负载超阈值
   'metric-clear': 'info',
   'http-fail': 'critical',     // HTTP 健康探测失败
@@ -142,16 +143,21 @@ function normalizeOverrides(raw) {
   return out;
 }
 
-/** 归一化声音设置：任何输入都返回可用的 {enabled, minLevel, volume} */
+/** 归一化声音设置：任何输入都返回可用的 {enabled, minLevel, volume, escalateMin}
+ *  escalateMin：未确认告警升级重发的分钟数（0 = 关闭，默认关闭不改变既有行为） */
 function normalizeSoundSettings(raw) {
   const r = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
   let vol = Number(r.volume);
   if (!Number.isFinite(vol)) vol = DEFAULT_VOLUME;
   vol = Math.max(0, Math.min(1, vol));
+  let esc = parseInt(r.escalateMin, 10);
+  if (!Number.isFinite(esc)) esc = 0;
+  esc = Math.max(0, Math.min(1440, esc));
   return {
     enabled: r.enabled !== false,
     minLevel: isLevel(r.minLevel) ? r.minLevel : DEFAULT_MIN_LEVEL,
-    volume: vol
+    volume: vol,
+    escalateMin: esc
   };
 }
 /** 该等级此刻是否应当发声（总开关 + 最低等级门槛） */
@@ -159,6 +165,39 @@ function shouldPlay(level, sound) {
   const st = normalizeSoundSettings(sound);
   if (!st.enabled) return false;
   return meetsMin(normalizeLevel(level), st.minLevel);
+}
+/** 等级升一档（emergency 封顶）：告警升级重发用 */
+function bumpLevel(level) {
+  const v = normalizeLevel(level);
+  return LEVELS[Math.min(LEVELS.length - 1, LEVELS.indexOf(v) + 1)];
+}
+/** 告警升级挑选（纯函数，主进程扫描器与单测共用）：
+ *  未确认 + 未升级过 + 等级达门槛 + 超时未确认 → 升一级重发。
+ *  opts: { now, minMinutes(>0 才启用), minLevel(默认 warning), maxPerRun(默认 5) }
+ *  返回 [{ts, type, level, newLevel, name, detail, deviceId, host, key, ageMin}]；
+ *  升级产生的时间线条目（type='alert-escalate'）自身永不入选——防自我连锁。 */
+function pickEscalations(events, opts) {
+  const o = opts || {};
+  const now = Number.isFinite(o.now) ? o.now : Date.now();
+  const minMs = (Math.max(0, Number(o.minMinutes) || 0)) * 60000;
+  if (!(minMs > 0)) return [];
+  const minRank = rankOf(isLevel(o.minLevel) ? o.minLevel : 'warning');
+  const cap = Math.max(1, Number(o.maxPerRun) || 5);
+  const out = [];
+  for (const e of (Array.isArray(events) ? events : [])) {
+    if (out.length >= cap) break;
+    if (!e || !Number.isFinite(e.ts) || e.ackAt || e.escalatedAt) continue;
+    if (e.type === 'alert-escalate') continue;
+    if ((rankOf(normalizeLevel(e.level)) || 0) < minRank) continue;
+    const age = now - e.ts;
+    if (age < minMs) continue;
+    out.push({
+      ts: e.ts, type: String(e.type || ''), level: normalizeLevel(e.level), newLevel: bumpLevel(e.level),
+      name: e.name || '', detail: e.detail || '', deviceId: e.deviceId || '', host: e.host || '', key: e.key || '',
+      ageMin: Math.floor(age / 60000)
+    });
+  }
+  return out;
 }
 /** 某等级的音效规格（未知等级按 DEFAULT_LEVEL） */
 function soundSpec(level) {
@@ -200,6 +239,7 @@ const API = {
   isLevel: isLevel, rankOf: rankOf, levelName: levelName, normalizeLevel: normalizeLevel, meetsMin: meetsMin,
   levelFor: levelFor, normalizeOverrides: normalizeOverrides,
   normalizeSoundSettings: normalizeSoundSettings, shouldPlay: shouldPlay,
+  bumpLevel: bumpLevel, pickEscalations: pickEscalations,
   soundSpec: soundSpec, soundDurationMs: soundDurationMs,
   levelFromSyslogSeverity: levelFromSyslogSeverity, levelFromTrap: levelFromTrap
 };

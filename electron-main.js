@@ -422,6 +422,34 @@ function recordMonitorEvent(info, type, detail, level) {
   monitorEvents.push({ ts: Date.now(), type: type, level: AL.normalizeLevel(level || levelOf(type)), key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' });
   if (monitorEvents.length > 500) monitorEvents.splice(0, monitorEvents.length - 500);
 }
+
+/* ---- 告警升级（未确认超时升一级重发）：settings.alertSound.escalateMin 分钟（0 关闭）----
+ * 挑选口径见 js/alert-level.js 的 pickEscalations（未确认 + 未升级过 + warning 及以上 + 超时，
+ * 单轮封顶 5 条；升级条目自身永不入选）。每条升级：① 标记 escalatedAt 防重复 ② 时间线入账
+ * （type=alert-escalate，升后的等级）③ 走统一通知出口（系统通知 + 分级提示音 + Webhook 同源）。 */
+let escalateBusy = false;
+function escalateTick() {
+  if (escalateBusy) return; // 上一轮还没跑完（如 Webhook 冷启动慢）就跳过本轮，不堆积
+  escalateBusy = true;
+  try {
+    const min = Number(alertSoundSettings().escalateMin) || 0;
+    if (!(min > 0)) return;
+    const picks = AL.pickEscalations(monitorEvents, { now: Date.now(), minMinutes: min, minLevel: 'warning', maxPerRun: 5 });
+    for (const p of picks) {
+      const ev = monitorEvents.find(x => x && x.ts === p.ts);
+      if (ev) ev.escalatedAt = Date.now();
+      const name = p.name || p.host || '设备';
+      recordMonitorEvent({ key: p.key, deviceId: p.deviceId, host: p.host, name: p.name }, 'alert-escalate',
+        `「${name}」的 ${p.type} 告警已 ${p.ageMin} 分钟未确认，升级为「${AL.levelName(p.newLevel)}」重发`, p.newLevel);
+      notifyForDevice(p.deviceId, '告警升级：' + name, `${name} 的 ${p.type} 告警已 ${p.ageMin} 分钟未确认，升级为「${AL.levelName(p.newLevel)}」重发。`, p.newLevel);
+    }
+  } catch (e) {
+    logCrash('escalate', e);
+  } finally {
+    escalateBusy = false;
+  }
+}
+setInterval(escalateTick, 60000);
 // 在线探测状态 → 主窗口；离线/恢复转换时弹系统通知（受 settings.monitorNotify 开关控制）
 const lastProbeOk = new Map();      // key -> 上次探测结果
 const lastAlertOn = new Map();      // key -> 上次告警状态
