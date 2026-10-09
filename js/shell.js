@@ -299,7 +299,7 @@ class ShellManager extends EventEmitter {
       while (fs.existsSync(path.join(dateDir, fname))) { seq++; fname = hostSan + '_' + base.port + '_' + logStamp() + '_' + seq + '.log'; }
       const rec = { stream: null, hostSan, port: base.port, bytes: 0, seq: 0,
         // 凭据掩码：恶意服务端可在认证后回显密码，原样留痕会把凭据写进日志文件——写前打码
-        masks: [base.password, base.keyPassphrase, base.jump && base.jump.password]
+        masks: [base.password, base.keyPassphrase, base.jump && base.jump.password, base.jump && base.jump.keyPassphrase]
           .filter(s => typeof s === 'string' && s.length >= 3) };
       rec.stream = this._makeLogStream(rec, dateDir, fname);
       rec.stream.write('[' + logStamp() + '] ===== 会话开始 ' + String(base.protocol).toUpperCase() + ' ' + base.host + ':' + base.port + ' 用户名: ' + base.username + ' =====\r\n');
@@ -343,6 +343,19 @@ class ShellManager extends EventEmitter {
   ownerOf(id) {
     const base = this._params.get(id);
     return base ? (base.owner === 'monitor' ? 'monitor' : 'ui') : null;
+  }
+  /** 当前全部在册会话的凭据明文集合：供主进程侧的录像等通道打码使用（与审计日志 masks 同口径）。
+   *  会话关闭即参数清掉，集合随之收敛——只覆盖「本进程自己发起的连接」的凭据，属尽力而为防护。 */
+  activeSecretMasks() {
+    const out = [];
+    for (const base of this._params.values()) {
+      if (!base) continue;
+      for (const s of [base.password, base.keyPassphrase,
+        base.jump && base.jump.password, base.jump && base.jump.keyPassphrase]) {
+        if (typeof s === 'string' && s.length >= 3 && out.indexOf(s) < 0) out.push(s);
+      }
+    }
+    return out;
   }
   resize(id, cols, rows) {
     const s = this.sessions.get(id);
@@ -472,6 +485,13 @@ class ShellManager extends EventEmitter {
       });
       if (!r.ok) { resolve({ ok: false, outputs: [], fingerprint: null, error: r.error || '连接失败', errors: [] }); return; }
       const sid = r.id;
+      // 凭据打码（与审计日志 _logSessionChunk 同口径）：Telnet 未关回显/恶意服务端故意回显时，
+      // 捕获输出不得把明文口令带回渲染层或写进采集留痕——比会话日志宽松的等价威胁，此处补齐
+      const pwMasks = [String(opts.password || ''),
+        typeof opts.keyPassphrase === 'string' ? opts.keyPassphrase : '',
+        opts.jump && typeof opts.jump.password === 'string' ? opts.jump.password : '',
+        opts.jump && typeof opts.jump.keyPassphrase === 'string' ? opts.jump.keyPassphrase : '']
+        .filter(s => s.length >= 3);
       const sleep = (ms) => new Promise(x => setTimeout(x, ms));
       const eol = protocol === 'telnet' ? '\r\n' : '\n';
       // 就绪/提示符判据（与 monitor.js PROMPT_RE 同形态，不锚定行尾：首包提示符常与协商残渣粘连）
@@ -517,9 +537,10 @@ class ShellManager extends EventEmitter {
         const parts = lineBuf.split('\n');
         lineBuf = parts.pop(); // 半行留缓冲（More 提示/提示符常不带换行）
         for (const ln of parts) {
-          const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          let t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
           if (!t) continue;
           if (!promptSeen && PROMPT_RE.test(t.trim())) promptSeen = true;
+          if (pwMasks.length) { for (const p of pwMasks) { if (t.indexOf(p) >= 0) t = t.split(p).join('******'); } }
           if (curCap && curCap.chars + t.length + 1 <= 1024 * 1024) { curCap.lines.push(t); curCap.chars += t.length + 1; }
         }
         maybeMore();
@@ -725,6 +746,13 @@ class ShellManager extends EventEmitter {
       });
       if (!r.ok) { bail(r.error || '连接失败'); return; }
       const sid = r.id;
+      // 凭据打码（与 runOneShot/审计日志同口径）：前置备份/下发回显/保存输出都源于捕获行，
+      // 打码后明文口令不随 backup.content 落盘、不随结果回渲染层
+      const pwMasks = [String(opts.password || ''),
+        typeof opts.keyPassphrase === 'string' ? opts.keyPassphrase : '',
+        opts.jump && typeof opts.jump.password === 'string' ? opts.jump.password : '',
+        opts.jump && typeof opts.jump.keyPassphrase === 'string' ? opts.jump.keyPassphrase : '']
+        .filter(s => s.length >= 3);
       const sleep = (ms) => new Promise(x => setTimeout(x, ms));
       const eol = protocol === 'telnet' ? '\r\n' : '\n';
       const PROMPT_RE = /^[A-Za-z0-9_.\-\[\]()/:<> +]{0,80}[>#\]]/;
@@ -787,9 +815,10 @@ class ShellManager extends EventEmitter {
         const parts = lineBuf.split('\n');
         lineBuf = parts.pop();
         for (const ln of parts) {
-          const t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+          let t = ln.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
           if (!t) continue;
           if (!promptSeen && PROMPT_RE.test(t.trim())) promptSeen = true;
+          if (pwMasks.length) { for (const p of pwMasks) { if (t.indexOf(p) >= 0) t = t.split(p).join('******'); } }
           if (curCap && curCap.chars + t.length + 1 <= 4 * 1024 * 1024) { curCap.lines.push(t); curCap.chars += t.length + 1; }
         }
         maybeMore();

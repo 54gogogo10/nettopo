@@ -244,5 +244,5 @@ const API = {
   levelFromSyslogSeverity: levelFromSyslogSeverity, levelFromTrap: levelFromTrap
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = API;
-if (global) global.TopoAlertLevel = API;
+if (typeof globalThis !== 'undefined') globalThis.TopoAlertLevel = API; // 浏览器无 `global` 标识符，裸引用会 ReferenceError 致挂载失败
 })(typeof globalThis !== 'undefined' ? globalThis : this);

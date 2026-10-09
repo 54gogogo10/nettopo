@@ -1245,7 +1245,7 @@ class MonitorManager extends EventEmitter {
       probeOk: null, probeLatency: null, probeFailSince: null, probeTimer: null, _probeBusy: false,
       alerting: false, alertInfo: null, _cycleActive: false, _alertPending: [], _alertPendingChars: 0, _alertChecking: false,
       // 凭据掩码（日志防回显泄密）：密码/私钥口令/跳板密码出现在设备输出时写日志前打码
-      pwMasks: [cfg.password, cfg.keyPassphrase, cfg.jump && cfg.jump.password]
+      pwMasks: [cfg.password, cfg.keyPassphrase, cfg.jump && cfg.jump.password, cfg.jump && cfg.jump.keyPassphrase]
         .filter(s => typeof s === 'string' && s.length >= 3),
       backupTimer: null, backupRunning: false, backupLast: null, _backupCap: null,
       sid: null, state: 'connecting', statusText: '连接中…',

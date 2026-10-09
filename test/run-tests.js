@@ -3685,6 +3685,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
           const cmd = s.replace(/\r\n$/, '');
           if (cmd === 'display lldp neighbor') {
             sock.write(cmd + '\r\n GE0/0/1  SW2  GE0/0/24\r\n GE0/0/2  SW3  GE0/0/3\r\n<SW1>');
+          } else if (cmd === 'leak-cmd') {
+            // 模拟未关回显/恶意的 Telnet 设备：把客户端口令回显进输出
+            sock.write(cmd + '\r\nPassword is EchoSecret7 here\r\n<SW1>');
           } else if (cmd === 'page-cmd') {
             sock.write(cmd + '\r\nfirst page line\r\n---- More ----'); // 等空格翻页
           } else {
@@ -3716,6 +3719,15 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         ok(serverData.some((b) => b.toString('latin1') === ' '), 'runOneShot：More 提示时发送了空格');
         ok(Array.isArray(r.errors) && r.errors.length === 0, 'runOneShot：无会话错误');
         ok(r.fingerprint === null, 'runOneShot：Telnet 无指纹事件');
+        // 凭据打码：设备未关回显/恶意回显时，捕获输出不得把明文口令带回渲染层（与审计日志同口径）
+        const rMask = await mgr.runOneShot({
+          protocol: 'telnet', host: '127.0.0.1', port, username: 'admin', password: 'EchoSecret7',
+          commands: ['leak-cmd'],
+          waitMs: 400, cmdTimeoutMs: 4000, readyTimeoutMs: 4000
+        });
+        ok(rMask.ok === true && rMask.outputs.length === 1, 'runOneShot：打码用例采集成功');
+        ok(!JSON.stringify(rMask.outputs).includes('EchoSecret7'), 'runOneShot：设备回显的口令已打码（明文不回渲染层）');
+        ok(rMask.outputs[0].text.includes('******'), 'runOneShot：打码留痕为 ******');
       } finally {
         for (const s of socks) s.destroy();
         await new Promise((res) => { server.close(res); setTimeout(res, 500); });
@@ -6973,6 +6985,24 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       upd3.pendingFile = __filename; // 任意存在中的文件即可触发平台分支
       const ap3 = upd3.apply();
       ok(ap3.ok === false && ap3.manual === true, '升级 apply：非 Windows 降级手动');
+      // apply 换入前复验（二阶防护）：updates 目录在 userData 下（同用户可写），下载验证与
+      // apply 之间升级包可能被替换——此前只查存在性即换入，现在无清单/复验不符都必须拒绝
+      {
+        const updDir2 = fs.mkdtempSync(path.join(require('os').tmpdir(), 'nettopo-apl-'));
+        const pkg = path.join(updDir2, 'a.exe');
+        fs.writeFileSync(pkg, 'payload-bytes');
+        const uw = new U2.Updater({ isPackaged: true, platform: 'win32', updateDir: updDir2, exePath: pkg });
+        uw.pendingFile = pkg;
+        const noSha = await uw.apply();
+        ok(noSha.ok === false && noSha.error.indexOf('清单缺失') >= 0, '升级 apply：win32 换入前无校验清单拒绝');
+        const shaF = pkg + '.sha256';
+        fs.writeFileSync(shaF, require('crypto').createHash('sha256').update('other').digest('hex') + '\n');
+        uw.pendingShaFile = shaF;
+        const bad = await uw.apply();
+        ok(bad.ok === false && bad.error.indexOf('复验失败') >= 0, '升级 apply：换入前复验不符拒绝');
+        ok(uw.pendingFile === null && uw.state === 'idle', '升级 apply：复验不符后待应用状态作废并复位 idle');
+        rmTmp(updDir2);
+      }
       // 下载失败路径的状态收尾（审计修复）：任一步失败都必须回到 idle 并清理残留，
       // 否则 state 永远停在 downloading —— check() 恒答「正在下载升级包」、再次下载恒答
       // 「已在下载中」，升级功能直到重启应用才恢复

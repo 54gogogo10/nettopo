@@ -203,6 +203,7 @@ class Updater extends EventEmitter {
     this.isPackaged = !!opts.isPackaged;
     this.state = 'idle';
     this.pendingFile = null; // 已下载且通过校验的升级包路径（apply 只接受它）
+    this.pendingShaFile = null; // 下载时通过校验的 .sha256 清单路径（apply 换入前复验用）
     this._dlAbort = null;
   }
 
@@ -316,6 +317,7 @@ class Updater extends EventEmitter {
       const v = await verifySha256File(dest, shaFile);
       if (!v.ok) return { ok: false, error: v.error };
       this.pendingFile = dest;
+      this.pendingShaFile = shaFile;
       done = true;                                  // 成功：保留 exe 与清单，交由 apply 使用
       this._setState('verified', { file: dest });
       return { ok: true, file: dest, sha256: v.sha256 };
@@ -378,10 +380,29 @@ class Updater extends EventEmitter {
    *  返回 {ok, restart:true, warn?} 或 {ok:false, manual:true}（目标目录不可写时降级手动安装）。 */
   apply() {
     if (!this.isPackaged) return { ok: false, error: '开发环境不支持在线升级（npm start）', manual: false };
-    if (!this.pendingFile || !fs.existsSync(this.pendingFile)) return { ok: false, error: '尚未下载升级包' };
+    if (!this.pendingFile || !fs.existsSync(this.pendingFile)) return { ok: false, error: '尚未下载升级包', manual: false };
     if (this.platform !== 'win32') return { ok: false, error: '当前平台请到发布页手动下载', manual: true };
     const exePath = this.exePath;
     if (!exePath || !fs.existsSync(exePath)) return { ok: false, error: '未找到当前程序文件', manual: true };
+    // 换入前复验：updates 目录在 userData 下（同用户可写），下载验证与 apply 之间升级包可能被
+    // 同权限进程替换（二阶攻击）。此前只查存在性即换入——现在对照下载时通过校验的清单再验一次
+    return this._reverifyThenApply(exePath);
+  }
+
+  /** apply 的复验 + 换入（拆出以便 await 校验 Promise，对外语义不变） */
+  async _reverifyThenApply(exePath) {
+    if (!this.pendingShaFile || !fs.existsSync(this.pendingShaFile)) {
+      return { ok: false, error: '升级校验清单缺失，请重新下载升级包', manual: false };
+    }
+    const rv = await verifySha256File(this.pendingFile, this.pendingShaFile);
+    if (!rv.ok) {
+      // 复验不符：作废待应用状态并清理两份残留，防止下次 apply 继续使用可疑文件
+      const badFile = this.pendingFile;
+      this.pendingFile = null; this.pendingShaFile = null;
+      try { if (badFile) fs.unlinkSync(badFile); } catch (e) { /* ignore */ }
+      this._setState('idle');
+      return { ok: false, error: '升级包复验失败（下载后可能已被篡改），请重新下载：' + rv.error, manual: false };
+    }
     const stamp = Date.now();
     const oldPath = exePath + '.old-' + stamp;
     // 快路径：Windows 允许改名普通运行中映像（句柄随文件名）；便携版启动器会锁自身映像（EBUSY）

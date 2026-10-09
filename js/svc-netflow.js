@@ -118,6 +118,10 @@ function parseNetflowPacket(buf, exporter, tmpl) {
   if (!Buffer.isBuffer(buf) || buf.length < 8) return { ok: false, error: '包过短', records: out, templates: [], dropped: 0 };
   const version = buf.readUInt16BE(0);
   if (version !== 5 && version !== 9 && version !== 10) return { ok: false, error: '不支持的版本 ' + version, records: out, templates: [], dropped: 0 };
+  // 按版本的最小头长：v5=24、v9=20、IPFIX=16。短包在此如实丢弃——否则下方 readUInt32BE(12/16)
+  // 抛 RangeError，违反「畸形包一律丢弃不抛错」的模块契约（虽有 _onPacket 兜底 try/catch）
+  const minHdr = version === 5 ? 24 : (version === 10 ? 16 : 20);
+  if (buf.length < minHdr) return { ok: false, error: '包过短', records: out, templates: [], dropped: 0 };
   if (version === 5) {
     const r = parseV5(buf, out);
     return { ok: true, version: 5, records: out, templates: [], headerCount: r.headerCount, dropped: 0 };
@@ -168,7 +172,11 @@ function parseNetflowPacket(buf, exporter, tmpl) {
         for (const f of t.fields) {
           if (f.len === 65535) {                               // IPFIX 可变长：1 字节长度（255 时 3 字节）
             let vl = body[fOff];
-            if (vl === 255) { vl = body.readUInt16BE(fOff + 1); fOff += 3; } else fOff += 1;
+            if (vl === 255) {
+              // 长度域自身越界：本条记录余下不可信，交由统一的越界出口按 dropped 计
+              if (fOff + 3 > body.length) { fOff = body.length + 1; break; }
+              vl = body.readUInt16BE(fOff + 1); fOff += 3;
+            } else fOff += 1;
             fOff += vl;
             continue;
           }

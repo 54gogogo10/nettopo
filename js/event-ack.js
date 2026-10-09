@@ -51,5 +51,6 @@ function clearAck(events, payload) {
   return { ok: true, unacked: unackedCount(list) };
 }
 
-module.exports = { applyAck, clearAck, unackedCount, normalizeNote, MAX_NOTE };
+// 双形态导出：Node 走 CommonJS，渲染层直接以 <script> 加载时挂 globalThis（裸 module 引用在浏览器抛 ReferenceError）
+if (typeof module !== 'undefined' && module.exports) module.exports = { applyAck, clearAck, unackedCount, normalizeNote, MAX_NOTE };
 if (typeof globalThis !== 'undefined') globalThis.TopoEventAck = { applyAck, clearAck, unackedCount, normalizeNote, MAX_NOTE };

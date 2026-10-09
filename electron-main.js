@@ -796,7 +796,17 @@ ipcMain.handle('shell:record-append', (e, p) => {
   if (shellRecOwner && e.sender !== shellRecOwner) return { ok: false, error: 'forbidden' };
   const lines = String((p && p.lines) || '');
   if (!lines || lines.length > 1024 * 1024) return { ok: false, error: '录制数据为空或过大' };
-  try { fs.appendFileSync(shellRecFile, lines.endsWith('\n') ? lines : lines + '\n', 'utf8'); return { ok: true }; }
+  // 凭据打码（与 shell 审计日志同口径）：录像只录输出方向，但设备未关回显/恶意回显时明文口令
+  // 仍会出现——落盘前按当前活跃会话的凭据集合打码。lines 是渲染层序列化好的 JSONL：口令含
+  // 会被 JSON 转义的字符（" \ 等）时序列化形态与原文不同，两种形态一并替换（替换串为纯 ASCII，
+  // 不会破坏 JSON 结构）。凭据恰好跨追加批次边界时无法命中，属尽力而为（审计日志同此限制）
+  let safe = lines;
+  for (const pw of shell.activeSecretMasks()) {
+    safe = safe.split(pw).join('******');
+    let esc = null; try { esc = JSON.stringify(pw); } catch (e2) { esc = null; }
+    if (esc && esc.length >= 4) { const inner = esc.slice(1, -1); if (inner !== pw) safe = safe.split(inner).join('******'); }
+  }
+  try { fs.appendFileSync(shellRecFile, safe.endsWith('\n') ? safe : safe + '\n', 'utf8'); return { ok: true }; }
   catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
 });
 ipcMain.handle('shell:record-stop', (e) => {
@@ -1740,9 +1750,9 @@ ipcMain.handle('update:download', async (e) => {
   if (!c.ok || !c.update || !c.assets) return { ok: false, error: (c && c.error) || '当前没有可下载的升级资产' };
   return u.downloadAndVerify(c.assets);
 });
-ipcMain.handle('update:apply', (e) => {
+ipcMain.handle('update:apply', async (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
-  const r = getUpdater().apply();
+  const r = await getUpdater().apply();
   if (r && r.ok && r.restart) {
     // 先让 invoke 应答送达渲染层再退出；trayQuitting 置位绕过「关闭即隐藏到托盘」
     setTimeout(() => { trayQuitting = true; app.quit(); }, 600);

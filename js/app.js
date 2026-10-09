@@ -12120,6 +12120,8 @@ function openMonitorLogs(devicePreset) {
         if (lines[i].toLowerCase().indexOf(lower) >= 0) matches.push(i);
       }
     }
+    // 行号命中集合：4MB 日志数万行时数组 includes 是二次方扫描，Set 判定 O(1)
+    const matchSet = kw ? new Set(matches) : null;
     const targetIdx = targetLine >= 0 ? targetLine : (matches.length ? matches[0] : -1);
     const headNote = rawTruncated ? '<div class="lb-note" style="color:var(--muted,#64748b)">（文件超过 4MB，仅显示末尾 4MB；完整内容请用「打开目录」查看）</div>' : '';
     contentEl.innerHTML = headNote + lines.map((ln, i) => {
@@ -12128,7 +12130,7 @@ function openMonitorLogs(devicePreset) {
         const idx = ln.toLowerCase().indexOf(lower);
         if (idx >= 0) html = U.escHtml(ln.slice(0, idx)) + '<mark>' + U.escHtml(ln.slice(idx, idx + kw.length)) + '</mark>' + U.escHtml(ln.slice(idx + kw.length));
       }
-      return '<div class="lb-line' + (matches.includes(i) ? ' hit' : '') + (i === targetIdx ? ' cur' : '') + '">' + html + '</div>';
+      return '<div class="lb-line' + (matchSet && matchSet.has(i) ? ' hit' : '') + (i === targetIdx ? ' cur' : '') + '">' + html + '</div>';
     }).join('');
     ov.querySelector('#lbCount').textContent = rawContent ? (matches.length ? matches.length + ' 处匹配' : lines.length + ' 行') : '';
     if (targetIdx >= 0) {
@@ -13074,13 +13076,14 @@ function openNetServices() {
     const hostF = String(ov.querySelector('#nsvLogHost').value || '').trim().toLowerCase();
     const html = [];
     for (const m of msgs) {
-      if (m.severity != null && m.severity > sevMax) continue;
+      // severity 是 3 位字段（合法 0-7）：畸形包越界值按不显示处理，防查表出 undefined 样式
+      if (m.severity != null && !(m.severity >= 0 && m.severity <= 7 && m.severity <= sevMax)) continue;
       if (hostF && String(m.host || '').toLowerCase().indexOf(hostF) < 0) continue;
       const d = new Date(m.ts);
       const hitTitle = m.alert ? (' title="日志告警：命中「' + U.escHtml((m.alert.matched || []).join('、') || '级别阈值') + '」"') : '';
-      html.push('<div class="nsv-lg ' + (m.alert ? 's-hit ' : '') + (m.severity != null ? NSV_SEV_CLS[m.severity] : '') + '"' + hitTitle + '>' +
+      html.push('<div class="nsv-lg ' + (m.alert ? 's-hit ' : '') + (m.severity != null ? (NSV_SEV_CLS[m.severity] || '') : '') + '"' + hitTitle + '>' +
         '<span class="t">' + pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()) + ':' + pad2s(d.getSeconds()) + '</span>' +
-        '<span class="sev">' + (m.severity != null ? NSV_SEV_NAME[m.severity] : '-') + '</span>' +
+        '<span class="sev">' + (m.severity != null ? (NSV_SEV_NAME[m.severity] || '-') : '-') + '</span>' +
         '<span class="h" title="' + U.escHtml(m.host || '') + '">' + U.escHtml(m.host || '-') + '</span>' +
         '<span class="m">' + U.escHtml(m.msg || '') + '</span></div>');
     }

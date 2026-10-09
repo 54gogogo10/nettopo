@@ -213,4 +213,11 @@ const fmtTime = (ts) => {
   return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
 };
 
-module.exports = { buildReport, rangeOf, outagesOf, fmtPct, fmtDur, fmtTime, DAY_MS, dayKey, startOfDay };
+// 双形态导出（与 alert-level.js 同范式）：Node 走 CommonJS，渲染层以 <script> 加载时挂 globalThis；
+// 不引入顶层临时标识符，避免与其他脚本的顶层词法声明冲突
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { buildReport, rangeOf, outagesOf, fmtPct, fmtDur, fmtTime, DAY_MS, dayKey, startOfDay };
+}
+if (typeof globalThis !== 'undefined') {
+  globalThis.TopoSlaReport = { buildReport, rangeOf, outagesOf, fmtPct, fmtDur, fmtTime, DAY_MS, dayKey, startOfDay };
+}
