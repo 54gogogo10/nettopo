@@ -4590,9 +4590,13 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(ir.html.includes('在线探测失败：超时'), '巡检报告：事件详情（转义后原样呈现）');
       ok(ir.html.indexOf('<script') < 0, '巡检报告：无脚本（自包含纯静态，可打印）');
       ok(ir.css.indexOf('.ir-') >= 0 && ir.body.includes('ir-wrap'), '巡检报告：样式 .ir- 前缀 + body 片段（弹窗预览复用）');
-      // 预览把 css 注入主文档：选择器必须全量作用域化，裸 body/table/th/td 会覆盖主界面样式（暗色模式下报告黑字落暗底不可读）
+      // 预览把 css 注入主文档：选择器必须全量作用域化，裸 body/table/th/td 会覆盖主界面样式（此前暗色模式下报告黑字落暗底不可读）
       ok(!/^(body|table|th|td)\b[\s,{]/m.test(ir.css), '巡检报告：CSS 无裸 body/table/th/td 选择器（预览注入不污染主文档）');
       ok(/^\.ir-doc\{/m.test(ir.css) && ir.html.includes('<body class="ir-doc">'), '巡检报告：独立 HTML 挂 .ir-doc 文档类（纸面样式自持）');
+      // 暗色预览：cssDark 全部 html[data-theme=dark] 前缀限定，只进预览不进独立 HTML（交付口径固定浅色）
+      ok(typeof ir.cssDark === 'string' && ir.cssDark.length > 0, '巡检报告：提供暗色预览覆盖 cssDark');
+      ok(!/^(body|table|th|td)\b[\s,{]/m.test(ir.cssDark) && !/^html\[data-theme/m.test(ir.html) && ir.html.indexOf('cssDark') < 0 && ir.html.indexOf('data-theme="dark"') < 0, '巡检报告：cssDark 全前缀作用域且独立 HTML 保持浅色');
+      ok(/^html\[data-theme="dark"\] \.ir-doc\{/m.test(ir.cssDark) && ir.cssDark.indexOf('var(--panel2)') > 0, '巡检报告：cssDark 纸面/文字随主题变量');
       const irEmpty = U.buildInspectionReport({ genAt: 1 });
       ok(irEmpty.html.includes('（无数据）') || irEmpty.html.includes('需桌面版'), '巡检报告：空数据按降级文案呈现');
       ok(!/undefined|NaN>/.test(irEmpty.html), '巡检报告：空数据无 undefined/NaN 泄漏');

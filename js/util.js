@@ -1336,7 +1336,8 @@ U.buildRackView = (nodes, opts) => {
  *   backups:{items:[{device,host,count,lastAt}]},
  *   racks:{racks:[{name,uHeight,used,free,devices,occupancy}],unplaced:[names],conflicts},
  *   events:[{ts,name,type,level,detail}]}
- *  返回 {title, css, body, html}：html 为完整文档；css/body 供弹窗预览复用（样式以 .ir-doc 文档类 + .ir-wrap/.ir- 前缀全量作用域化，预览注入不污染主界面） */
+ *  返回 {title, css, cssDark, body, html}：html 为完整文档；css/cssDark/body 供弹窗预览复用
+ *  （样式以 .ir-doc 文档类 + .ir-wrap/.ir- 前缀全量作用域化，注入不污染主界面；cssDark 仅暗色主题生效） */
 U.buildInspectionReport = (data) => {
   const d = data && typeof data === 'object' ? data : {};
   const esc = U.escHtml;
@@ -1408,7 +1409,9 @@ U.buildInspectionReport = (data) => {
     : '<div class="ir-mut">暂无事件。</div>'));
   const title = '网络巡检报告';
   // 样式全部作用域化：文档级 .ir-doc（独立 HTML 挂在 <body>、弹窗预览挂在纸张容器）+ 内容级 .ir-wrap/.ir- 前缀——
-  // 预览把 css 原样注入主文档，裸 body/table/th 选择器会污染主界面（暗色模式下报告黑字落暗底不可读）
+  // 预览把 css 原样注入主文档，裸 body/table/th 选择器会污染主界面。
+  // cssDark 仅供弹窗预览：html[data-theme=dark] 前缀限定，暗色主题下报告渲染暗色版、且主题切换即时生效；
+  // 独立 HTML/打印产物不含它，保持浅色纸面（交付文档口径固定）。
   const css = [
     '.ir-doc{font:13px/1.7 "Microsoft YaHei",system-ui,sans-serif;color:#111;margin:26px;background:#fff}',
     '.ir-wrap h1{font-size:20px;margin:0 0 4px}',
@@ -1425,10 +1428,23 @@ U.buildInspectionReport = (data) => {
     '.ir-ok{color:#15803d}.ir-bad{color:#c00}.ir-mut{color:#666;font-size:12px;margin-top:6px}',
     '.ir-note{color:#666;font-size:11.5px;margin-top:16px;line-height:1.8;border-top:1px solid #ddd;padding-top:8px}'
   ].join('\n');
+  const cssDark = [
+    'html[data-theme="dark"] .ir-doc{background:var(--panel2);color:var(--text)}',
+    'html[data-theme="dark"] .ir-wrap h2{border-bottom-color:var(--accent)}',
+    'html[data-theme="dark"] .ir-meta,html[data-theme="dark"] .ir-wrap .ir-mut,html[data-theme="dark"] .ir-wrap .ir-note{color:var(--muted)}',
+    'html[data-theme="dark"] .ir-wrap .ir-note{border-top-color:var(--border)}',
+    'html[data-theme="dark"] .ir-wrap th,html[data-theme="dark"] .ir-wrap td{border-color:#334155}',
+    'html[data-theme="dark"] .ir-wrap th{background:#1e293b}',
+    'html[data-theme="dark"] .ir-card{border-color:#334155}',
+    'html[data-theme="dark"] .ir-card span{color:var(--muted)}',
+    'html[data-theme="dark"] .ir-card.ok b,html[data-theme="dark"] .ir-wrap .ir-ok{color:#4ade80}',
+    'html[data-theme="dark"] .ir-card.bad b,html[data-theme="dark"] .ir-wrap .ir-bad{color:#f87171}',
+    'html[data-theme="dark"] .ir-card.warn b{color:#fbbf24}'
+  ].join('\n');
   const meta = '<div class="ir-meta">工程：' + esc(d.project || 'NetTopo 拓扑工程') + '　生成时间：' + esc(fmtTs(d.genAt)) + '　工具：' + esc(d.appVersion || '') + '</div>';
   const body = '<div class="ir-wrap"><h1>' + title + '</h1>' + meta + parts.join('') + '<div class="ir-note">口径说明：在线/离线来自「设备监控」在线探测最近一次结果；CPU/内存/温度为 SNMP 采集最近一次采样（未启用采集显示 —）；可用率按在线探测 10 分钟桶统计（近 7 天），中断明细超出保留期时如实标注；机柜占用来自设备自定义字段「机柜」「U 位」。本报告由 NetTopo 一键生成，数据取自本机。</div></div>';
   const html = '<!DOCTYPE html>\n<html lang="zh-CN"><head><meta charset="utf-8"/><title>' + title + ' ' + esc(fmtTs(d.genAt)) + '</title><style>\n' + css + '\n</style></head><body class="ir-doc">\n' + body + '\n</body></html>';
-  return { title, css, body, html };
+  return { title, css, cssDark, body, html };
 };
 /** 机柜立面 SVG（自包含字符串，可直接保存/打印）：U1 在底部、按 U 位向上堆叠。
  *  opts: {uH(每 U 像素高，默认 22), width(默认 420), title} */

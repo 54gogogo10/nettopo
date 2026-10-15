@@ -10566,9 +10566,10 @@ function openInspectionReport() {
       events: (o && o.ok && Array.isArray(o.events)) ? o.events.slice(0, 20).map(e => ({ ts: e.ts, name: e.name || e.deviceId, type: e.type, level: e.level, detail: e.detail })) : []
     });
     html = report.html;
-    // .ir-doc 纸张容器：报告是「可打印的浅色文档」，预览以白纸形态呈现——暗色模式下深底衬白纸，
-    // 与打印/下载产物所见即所得；css 已全量作用域化（.ir-doc/.ir-wrap），注入不再波及主界面
-    bodyEl.innerHTML = '<style>' + report.css + '</style><div class="ir-doc" style="box-shadow:var(--shadow-sm)">' + report.body + '</div>';
+    // 预览注入 css + cssDark：cssDark 以 html[data-theme=dark] 前缀限定，暗色主题下报告渲染暗色版
+    // （主题切换即时生效）；下载/打印用的是不含 cssDark 的独立 HTML，保持浅色纸面交付口径。
+    // 全部规则作用域化（.ir-doc/.ir-wrap），注入不波及主界面
+    bodyEl.innerHTML = '<style>' + report.css + '\n' + report.cssDark + '</style><div class="ir-doc" style="box-shadow:var(--shadow-sm)">' + report.body + '</div>';
     downloadBtn.disabled = false;
     printBtn.disabled = false;
   })().catch(() => { bodyEl.innerHTML = '<div class="bk-empty">数据收集失败：' + U.escHtml('请重试') + '</div>'; });
