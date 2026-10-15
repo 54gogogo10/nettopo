@@ -4590,6 +4590,9 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(ir.html.includes('在线探测失败：超时'), '巡检报告：事件详情（转义后原样呈现）');
       ok(ir.html.indexOf('<script') < 0, '巡检报告：无脚本（自包含纯静态，可打印）');
       ok(ir.css.indexOf('.ir-') >= 0 && ir.body.includes('ir-wrap'), '巡检报告：样式 .ir- 前缀 + body 片段（弹窗预览复用）');
+      // 预览把 css 注入主文档：选择器必须全量作用域化，裸 body/table/th/td 会覆盖主界面样式（暗色模式下报告黑字落暗底不可读）
+      ok(!/^(body|table|th|td)\b[\s,{]/m.test(ir.css), '巡检报告：CSS 无裸 body/table/th/td 选择器（预览注入不污染主文档）');
+      ok(/^\.ir-doc\{/m.test(ir.css) && ir.html.includes('<body class="ir-doc">'), '巡检报告：独立 HTML 挂 .ir-doc 文档类（纸面样式自持）');
       const irEmpty = U.buildInspectionReport({ genAt: 1 });
       ok(irEmpty.html.includes('（无数据）') || irEmpty.html.includes('需桌面版'), '巡检报告：空数据按降级文案呈现');
       ok(!/undefined|NaN>/.test(irEmpty.html), '巡检报告：空数据无 undefined/NaN 泄漏');
