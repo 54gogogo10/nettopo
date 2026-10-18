@@ -775,6 +775,8 @@ U.sanitizeGraph = (nodes, links, texts) => {
       w: Math.max(Math.min(num(n.w, U.NODE_W), 1e5), 40), h: Math.max(Math.min(num(n.h, U.NODE_H), 1e5), 24),
       // 手动缩放标志：置位后改名/管理地址变化不再自动改写宽高（右键「恢复自适应尺寸」可清除）
       sized: n.sized === true,
+      // 规划态标记（规划中 / 尚未实施）：随工程保存；画布用琥珀色虚线区分，规划核对据此列出待核对项
+      plan: n.plan === true,
       mgmt: str(n.mgmt).slice(0, 200), note: str(n.note).slice(0, 2000), web: U.normalizeWebUrl(n.web) || '',
       model: str(n.model).slice(0, 64), osver: str(n.osver).slice(0, 64), // 设备型号 / 软件版本（资产清单；SNMP 识别可自动回填版本）
       fields: U.cleanNodeFields(n.fields), // 自定义字段值（责任人/部门/资产编号/维保到期/机柜/U 位…）
@@ -812,6 +814,7 @@ U.sanitizeGraph = (nodes, links, texts) => {
       aMask: maskBitsOf(l.aMask), bMask: maskBitsOf(l.bMask),
       // SNMP 二层推断出来的链路：inferred 标记随工程保存，画布以虚线与实测（LLDP/CDP）链路区分。
       // 不做进白名单的话，清洗（合并/导入/打开工程都会走）会把标记静默抹掉——推断结果就冒充实测结果了
+      plan: l.plan === true,
       inferred: !!l.inferred,
       inferredBy: str(l.inferredBy).slice(0, 32),
       evidence: str(l.evidence).slice(0, 200)
@@ -1452,6 +1455,137 @@ U.buildInspectionReport = (data) => {
 };
 /** 机柜立面 SVG（自包含字符串，可直接保存/打印）：U1 在底部、按 U 位向上堆叠。
  *  opts: {uH(每 U 像素高，默认 22), width(默认 420), title} */
+/** 故障复盘报告（自包含 HTML，无脚本、无外链）：把一次故障的事件时间线、自动取证输出、
+ *  受影响设备/链路、配置变化汇总成可交付的复盘材料，并留出根因/处置/改进项供值班人填写。
+ *  data: {title,from,to,genAt,appVersion,events,evidence,impacts,links,configChanges,notes}
+ *  返回 {title,css,cssDark,body,html}（与 U.buildInspectionReport 同口径，预览注入 css/cssDark）。 */
+U.buildIncidentReport = (data) => {
+  const d = data && typeof data === 'object' ? data : {};
+  const esc = U.escHtml;
+  const p2 = (n) => String(n).padStart(2, '0');
+  const fmtTs = (t) => { const x = new Date(t); return Number.isFinite(x.getTime()) ? x.getFullYear() + '-' + p2(x.getMonth() + 1) + '-' + p2(x.getDate()) + ' ' + p2(x.getHours()) + ':' + p2(x.getMinutes()) + ':' + p2(x.getSeconds()) : '—'; };
+  const levelName = { info: '提示', warning: '警告', critical: '严重', emergency: '紧急' };
+  const typeName = {
+    offline: '设备离线', recovery: '设备恢复', alert: '关键字告警', 'alert-clear': '告警解除',
+    backup: '配置备份', 'backup-change': '配置有变化', 'backup-error': '备份失败', compliance: '合规违规',
+    'if-down': '接口离线', 'if-up': '接口恢复', 'if-error': '接口错包', 'if-error-clear': '错包恢复', reboot: '设备重启',
+    metric: '指标告警', 'metric-clear': '指标恢复', 'http-fail': 'HTTP 失败', 'http-ok': 'HTTP 恢复', cert: '证书告警', 'cert-clear': '证书恢复',
+    trap: 'SNMP Trap', 'syslog-alert': 'Syslog 告警', deploy: '配置下发', 'deploy-error': '下发失败', proto: '三层邻居', 'proto-clear': '三层邻居恢复',
+    'link-down': '链路中断', 'link-up': '链路恢复', 'alert-escalate': '告警升级'
+  };
+  const events = (Array.isArray(d.events) ? d.events : []).slice().sort((a, b) => (a.ts - b.ts));
+  const evidence = Array.isArray(d.evidence) ? d.evidence : [];
+  const impacts = Array.isArray(d.impacts) ? d.impacts : [];
+  const links = Array.isArray(d.links) ? d.links : [];
+  const configChanges = Array.isArray(d.configChanges) ? d.configChanges : [];
+  const from = Number(d.from) || (events.length ? events[0].ts : Date.now());
+  const to = Number(d.to) || (events.length ? events[events.length - 1].ts : Date.now());
+  const durMin = Math.max(0, Math.round((to - from) / 60000));
+  const durText = durMin >= 1440 ? Math.round(durMin / 144) / 10 + ' 天' : durMin >= 60 ? Math.round(durMin / 6) / 10 + ' 小时' : durMin + ' 分钟';
+  let topLevel = 'info';
+  const rank = { info: 0, warning: 1, critical: 2, emergency: 3 };
+  for (const e of events) if (rank[e.level] != null && rank[e.level] > rank[topLevel]) topLevel = e.level;
+  const devices = new Set();
+  for (const e of events) { if (e.name || e.host) devices.add(e.name || e.host); }
+  for (const x of impacts) { if (x.name || x.host) devices.add(x.name || x.host); }
+
+  const table = (head, rows, cls) => '<table' + (cls ? ' class="' + cls + '"' : '') + '><thead><tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>'
+    + (rows.length ? rows.map(r => '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>').join('') : '<tr><td colspan="' + head.length + '" class="inc-mut">（无数据）</td></tr>') + '</tbody></table>';
+  const sec = (t, inner) => '<h2>' + t + '</h2>' + inner;
+  const parts = [];
+
+  parts.push(sec('一、事件概要', '<div class="inc-cards">'
+    + '<div class="inc-card"><b>' + esc(events.length) + '</b><span>事件</span></div>'
+    + '<div class="inc-card"><b>' + esc(devices.size) + '</b><span>涉及设备</span></div>'
+    + '<div class="inc-card"><b>' + esc(evidence.length) + '</b><span>取证份数</span></div>'
+    + '<div class="inc-card ' + (topLevel === 'emergency' || topLevel === 'critical' ? 'bad' : (topLevel === 'warning' ? 'warn' : 'ok')) + '"><b>' + esc(levelName[topLevel] || topLevel) + '</b><span>最高等级</span></div>'
+    + '<div class="inc-card"><b>' + esc(durText) + '</b><span>时间跨度</span></div>'
+    + '</div>'
+    + '<div class="inc-meta-line">统计窗口：' + esc(fmtTs(from)) + ' ~ ' + esc(fmtTs(to)) + '</div>'));
+
+  parts.push(sec('二、事件时间线', events.length
+    ? table(['时间', '等级', '设备', '类型', '详情', '确认'],
+      events.map(e => [
+        esc(fmtTs(e.ts)),
+        '<span class="inc-lv ' + esc(e.level || 'info') + '">' + esc(levelName[e.level] || e.level || '—') + '</span>',
+        esc(e.name || e.host || '—'),
+        esc(typeName[e.type] || e.type || '—'),
+        esc(String(e.detail || '').slice(0, 300)),
+        e.ackAt ? '已确认 ' + esc(fmtTs(e.ackAt)) + (e.ackNote ? '（' + esc(e.ackNote) + '）' : '') : '未确认'
+      ]))
+    : '<div class="inc-mut">窗口内没有事件。</div>'));
+
+  parts.push(sec('三、告警时刻取证', evidence.length
+    ? evidence.map(ev => '<div class="inc-ev">'
+      + '<div class="inc-ev-head"><b>' + esc(ev.name || ev.deviceId || '设备') + '</b>'
+      + '<span>' + esc(ev.host || '') + ' · 事件 ' + esc(fmtTs(ev.eventTs)) + ' · ' + esc(typeName[ev.eventType] || ev.eventType || '事件') + '</span>'
+      + '<span class="' + (ev.ok ? 'inc-ok' : 'inc-bad') + '">' + (ev.ok ? '取证成功' : '取证失败' + (ev.error ? '：' + esc(ev.error) : '')) + '</span></div>'
+      + (ev.commands || []).map(c => '<div class="inc-cmd">' + esc(c.cmd || '（未记录命令）') + '</div>'
+        + '<pre class="inc-pre">' + esc(String(c.text || '').slice(0, 20000)) + (String(c.text || '').length > 20000 ? '\n…（报告内截断，完整内容见取证库）' : '') + '</pre>').join('')
+      + '</div>').join('')
+    : '<div class="inc-mut">本次故障没有自动取证记录。可在「告警等级与提示音 / 取证设置」确认自动取证已开启，或手动在事件上补采。</div>'));
+
+  parts.push(sec('四、受影响设备与链路', (impacts.length || links.length)
+    ? (impacts.length ? table(['设备', '管理地址', '类型', '影响说明'],
+      impacts.map(x => [esc(x.name || '—'), esc(x.host || '—'), esc(x.type || '—'), esc(x.reason || '—')])) : '')
+      + (links.length ? table(['链路任务', '状态', '断点', '最近错误'],
+        links.map(l => [esc(l.name || l.key || '—'), esc(l.state || '—'), esc((l.brokenFrom || '—') + ' → ' + (l.brokenTarget || '—')), esc(String(l.lastError || '').slice(0, 200))])) : '')
+    : '<div class="inc-mut">窗口内没有持续中的受影响设备或链路（或未配置监控）。</div>'));
+
+  parts.push(sec('五、期间配置变化', configChanges.length
+    ? table(['时间', '设备', '变化'], configChanges.map(c => [esc(fmtTs(c.ts)), esc(c.name || '—'), esc(String(c.detail || '').slice(0, 300))]))
+    : '<div class="inc-mut">窗口内没有配置变化事件。</div>'));
+
+  parts.push(sec('六、根因与处置（由值班人填写）', ''
+    + '<div class="inc-field"><b>根因判断</b><div class="inc-lines"></div></div>'
+    + '<div class="inc-field"><b>处置过程</b><div class="inc-lines"></div></div>'
+    + '<div class="inc-field"><b>改进项 / 待办</b><div class="inc-lines"></div></div>'
+    + '<div class="inc-mut">打印后手写，或在 Word / 文档工具中补齐。</div>'));
+
+  const title = String(d.title || '网络故障复盘报告').slice(0, 120);
+  const css = [
+    '.inc-doc{font:13px/1.7 "Microsoft YaHei",system-ui,sans-serif;color:#111;margin:26px;background:#fff}',
+    '.inc-wrap h1{font-size:20px;margin:0 0 4px}',
+    '.inc-wrap h2{font-size:15px;margin:22px 0 8px;border-bottom:2px solid #dc2626;padding-bottom:4px}',
+    '.inc-meta{color:#555;font-size:12px;margin-bottom:14px}',
+    '.inc-meta-line{color:#555;font-size:12px;margin-top:6px}',
+    '.inc-wrap table{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}',
+    '.inc-wrap th,.inc-wrap td{border:1px solid #bbb;padding:5px 7px;text-align:left;vertical-align:top}',
+    '.inc-wrap th{background:#f2f4f7}',
+    '.inc-cards{display:flex;gap:10px;flex-wrap:wrap}',
+    '.inc-card{border:1px solid #d5dbe3;border-radius:6px;padding:8px 14px;min-width:86px;text-align:center}',
+    '.inc-card b{display:block;font-size:19px}',
+    '.inc-card span{color:#666;font-size:11px}',
+    '.inc-card.ok b{color:#15803d}.inc-card.bad b{color:#c00}.inc-card.warn b{color:#b45309}',
+    '.inc-ok{color:#15803d}.inc-bad{color:#c00}.inc-mut{color:#666;font-size:12px;margin-top:6px}',
+    '.inc-lv{font-weight:600}.inc-lv.emergency{color:#c00}.inc-lv.critical{color:#d9480f}.inc-lv.warning{color:#b45309}.inc-lv.info{color:#555}',
+    '.inc-ev{border:1px solid #d5dbe3;border-radius:6px;padding:8px 10px;margin:10px 0}',
+    '.inc-ev-head{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;margin-bottom:4px}',
+    '.inc-ev-head span{color:#555;font-size:12px}',
+    '.inc-cmd{font-family:Consolas,monospace;font-size:11.5px;color:#334155;margin:8px 0 2px}',
+    '.inc-pre{background:#f8fafc;border:1px solid #d5dbe3;border-radius:4px;padding:8px;font:11.5px/1.5 Consolas,monospace;white-space:pre-wrap;word-break:break-all;margin:0;max-height:420px;overflow:auto}',
+    '.inc-field{border:1px solid #d5dbe3;border-radius:6px;padding:8px 10px;margin:8px 0}',
+    '.inc-field b{font-size:12.5px}',
+    '.inc-lines{height:62px;margin-top:6px;background:repeating-linear-gradient(to bottom,transparent 0,transparent 27px,#e5e7eb 27px,#e5e7eb 28px)}',
+    '.inc-note{color:#666;font-size:11.5px;margin-top:16px;line-height:1.8;border-top:1px solid #ddd;padding-top:8px}'
+  ].join('\n');
+  const cssDark = [
+    'html[data-theme="dark"] .inc-doc{background:var(--panel2);color:var(--text)}',
+    'html[data-theme="dark"] .inc-wrap h2{border-bottom-color:#f87171}',
+    'html[data-theme="dark"] .inc-meta,html[data-theme="dark"] .inc-wrap .inc-mut,html[data-theme="dark"] .inc-wrap .inc-note,html[data-theme="dark"] .inc-meta-line{color:var(--muted)}',
+    'html[data-theme="dark"] .inc-wrap .inc-note{border-top-color:var(--border)}',
+    'html[data-theme="dark"] .inc-wrap th,html[data-theme="dark"] .inc-wrap td,html[data-theme="dark"] .inc-card,html[data-theme="dark"] .inc-ev,html[data-theme="dark"] .inc-field{border-color:#334155}',
+    'html[data-theme="dark"] .inc-wrap th{background:#1e293b}',
+    'html[data-theme="dark"] .inc-pre{background:#0f172a;border-color:#334155;color:#e2e8f0}',
+    'html[data-theme="dark"] .inc-lines{background:repeating-linear-gradient(to bottom,transparent 0,transparent 27px,#334155 27px,#334155 28px)}'
+  ].join('\n');
+  const meta = '<div class="inc-meta">窗口：' + esc(fmtTs(from)) + ' ~ ' + esc(fmtTs(to)) + '　生成时间：' + esc(fmtTs(Number(d.genAt) || Date.now())) + '　工具：' + esc(d.appVersion || '') + '</div>';
+  const body = '<div class="inc-wrap"><h1>' + esc(title) + '</h1>' + meta + parts.join('')
+    + '<div class="inc-note">口径说明：时间线来自本机事件记录（受时间线容量上限滚动淘汰）；取证为告警触发时自动执行的<b>只读</b>命令输出，设备不可达或未开启自动取证时如实为空；取证文本与配置变化均可能含敏感信息，外发前请复核。本报告由 NetTopo 生成，数据取自本机。</div></div>';
+  const html = '<!DOCTYPE html>\n<html lang="zh-CN"><head><meta charset="utf-8"/><title>' + esc(title) + ' ' + esc(fmtTs(Number(d.genAt) || Date.now())) + '</title><style>\n' + css + '\n</style></head><body class="inc-doc">\n' + body + '\n</body></html>';
+  return { title, css, cssDark, body, html };
+};
+
 U.buildRackSvg = (rack, opts) => {
   opts = opts || {};
   const esc = (s) => U.escHtml(String(s == null ? '' : s));
@@ -3268,6 +3402,20 @@ U.INSPECT_PRESETS = {
   ruijie: ['terminal length 0', 'show version', 'show clock', 'show cpu', 'show memory', 'show ip interface brief'],
   linux: ['uname -a', 'uptime', 'free -m', 'df -h']
 };
+
+/** 告警自动取证命令集（只读，必须全部通过 U.checkInspectCommands 白名单）：
+ *  目标是「告警时刻的现场」——接口状态、路由/邻居、日志尾部；不抓全量配置，避免把口令类内容带进证据。 */
+U.EVIDENCE_PRESETS = {
+  auto: ['display interface brief', 'show ip interface brief', 'display version', 'show version'],
+  huawei: ['screen-length 0 temporary', 'display interface brief', 'display ip routing-table', 'display logbuffer level 6', 'display lldp neighbor'],
+  h3c: ['screen-length disable', 'display interface brief', 'display ip routing-table', 'display logbuffer level 6', 'display lldp neighbor-information'],
+  cisco: ['terminal length 0', 'show ip interface brief', 'show ip route', 'show logging', 'show lldp neighbors'],
+  ruijie: ['terminal length 0', 'show ip interface brief', 'show ip route', 'show logging', 'show lldp neighbors'],
+  linux: ['uname -a', 'uptime', 'free -m', 'df -h', 'ip -br a', 'ip neigh']
+};
+
+/** 终端输出去 ANSI 转义（取证/巡检结果落盘前统一清洗：颜色码会污染证据文本与 HTML 报告） */
+U.stripAnsi = (s) => String(s == null ? '' : s).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
 
 /** 批量巡检只读白名单校验：每条命令必须命中只读前缀（display/show/关分页/Linux 只读），防止配置类命令混入。
  *  非数组输入一律拒绝（防误用）。返回 {ok:true} 或 {ok:false, error}（首条不合规命令）。 */

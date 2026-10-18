@@ -1527,3 +1527,69 @@ input[type="radio"]:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
+
+
+
+
+
+/* ================= 规划态 ================= */
+.plan-hide { display: none !important; }
+.node.planned .shape { stroke: #f59e0b; stroke-width: 2; stroke-dasharray: 7 4; }
+.node.planned .nm { fill: #b45309; }
+.link.planned .ln { stroke: #f59e0b !important; stroke-dasharray: 8 5; }
+.link.planned .lb { fill: #b45309; }
+
+/* ================= 故障取证（详情里的命令块；复盘报告样式随报告注入） ================= */
+.inc-cmd { font-family: Consolas, monospace; font-size: 11.5px; color: var(--muted); margin: 8px 0 2px; }
+
+/* ================= 运维工作台 ================= */
+.wb-cards { display: flex; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap; }
+.wb-card { flex: 1 1 118px; border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; background: var(--panel2); display: flex; flex-direction: column; gap: 1px; cursor: pointer; }
+.wb-card:hover { border-color: var(--accent); }
+.wb-card b { font-size: 20px; line-height: 1.15; }
+.wb-card span { font-size: 11.5px; color: var(--muted); }
+.wb-card.bad b { color: #dc2626; }
+.wb-card.warn b { color: #d97706; }
+.wb-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-left: 4px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--panel); cursor: pointer; }
+.wb-item:hover { background: var(--panel2); }
+.wb-sev0 { border-left-color: #dc2626; }
+.wb-sev1 { border-left-color: #f97316; }
+.wb-sev2 { border-left-color: #f59e0b; }
+.wb-sev3 { border-left-color: #64748b; }
+.wb-flag { flex: 0 0 auto; font-size: 11px; padding: 1px 6px; border-radius: 10px; background: var(--panel2); color: var(--muted); border: 1px solid var(--border); }
+.wb-sev0 .wb-flag { color: #dc2626; border-color: rgba(220, 38, 38, .4); }
+.wb-sev1 .wb-flag { color: #ea580c; border-color: rgba(234, 88, 12, .4); }
+.wb-main { flex: 1; min-width: 0; }
+.wb-main b { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+/* ================= 容量趋势与 95th ================= */
+.cap-detail { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 6px; }
+.cap-detail.hidden { display: none; }
+.cap-detail-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+.cap-detail-head .sub { opacity: .68; font-size: 12px; }
+.cap-svg { width: 100%; height: 210px; color: var(--text); }
+.cap-table td { vertical-align: top; }
+.cap-sub { font-size: 11px; color: var(--muted); }
+.cap-row { cursor: pointer; }
+.cap-row:hover { background: var(--accent-soft, rgba(79, 70, 229, .08)); }
+.cap-row.sel { background: var(--accent-soft, rgba(79, 70, 229, .12)); }
+
+/* ================= 配置备份全文检索 ================= */
+.cs-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0 4px; }
+.cs-bar select { height: 30px; }
+.ck-inline { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; white-space: nowrap; color: var(--text); }
+.ck-inline input { margin: 0; }
+.cs-body { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--border); padding-top: 8px; }
+.cs-file { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; background: var(--panel); }
+.cs-file-head { display: flex; align-items: center; gap: 10px; padding: 7px 10px; background: var(--panel2); }
+.cs-file-head .sub { opacity: .68; font-size: 12px; }
+.cs-file-head .cs-count { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.cs-hit { display: flex; border-top: 1px solid var(--border); font-family: ui-monospace, Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.55; }
+.cs-hit:first-of-type { border-top: 0; }
+.cs-ln { flex: 0 0 54px; width: 54px; text-align: right; padding: 4px 8px; color: var(--muted); user-select: none; }
+.cs-code { flex: 1; min-width: 0; padding: 4px 10px 4px 0; }
+.cs-main { background: rgba(250, 204, 21, .16); white-space: pre-wrap; word-break: break-all; }
+.cs-main mark { background: rgba(250, 204, 21, .7); color: inherit; border-radius: 2px; padding: 0 1px; }
+.cs-ctx { opacity: .55; white-space: pre-wrap; word-break: break-all; }

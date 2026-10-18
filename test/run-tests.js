@@ -11,11 +11,12 @@ const root = path.join(__dirname, '..');
 const sandbox = { console, Uint8Array, TextEncoder, TextDecoder, structuredClone, Map, Set, Promise, Math, requestAnimationFrame: (fn) => setTimeout(fn, 0), localStorage: { getItem: () => null, setItem: () => {} }, crypto: require('crypto').webcrypto, btoa: (s) => Buffer.from(s, 'binary').toString('base64'), atob: (s) => Buffer.from(s, 'base64').toString('binary') };
 vmx.createContext(sandbox);
 
-for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/visio.js', 'js/pdf.js']) {
+for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/visio.js', 'js/pdf.js', 'js/port-ledger.js']) {
   const code = fs.readFileSync(path.join(root, f), 'utf8');
   vmx.runInContext(code, sandbox, { filename: f });
 }
 const U = sandbox.TopoUtil, M = sandbox.TopoModel, Layout = sandbox.TopoLayout, V = sandbox.TopoVisio;
+const PL = sandbox.TopoPortLedger;
 
 let pass = 0, fail = 0, skipped = 0;
 // 断言/段落定位：未捕获异常终止测试进程时，唯一能说明「死在哪」的线索就是最后输出的一行。
@@ -9897,6 +9898,262 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ok(/视图/.test(snmpAdviceText({ error: 'noSuchObject', v3: true })), 'SNMP 诊断：noSuchObject → 读视图');
     ok(snmpAdviceText({ error: '未知错误', reachable: null }) === '', 'SNMP 诊断：未知错误不编造建议');
   }
+
+  {
+    // 配置备份全文检索（js/config-search.js）：文件名时间、打码、查询归一化、扫描/排序/上下文/截断、工作线程
+    console.log('== 配置备份全文检索 ==');
+    const os = require('os');
+    const CS = require('../js/config-search.js');
+    eq(CS.parseBackupName('cfg_20261018_120000.cfg'), new Date(2026, 9, 18, 12, 0, 0).getTime(), '检索：备份文件名解析为本地时间');
+    eq(CS.parseBackupName('cfg_20261018_120000_2.cfg'), new Date(2026, 9, 18, 12, 0, 0).getTime(), '检索：同秒重复备份带 _n 后缀仍可解析');
+    eq(CS.parseBackupName('not-a-backup.txt'), null, '检索：非备份文件名忽略');
+    eq(CS.maskSecrets('username admin password 7 082245'), 'username admin password ******', '检索：口令行从关键字起打码');
+    eq(CS.maskSecrets('snmp-server community public RO'), 'snmp-server community ******', '检索：团体字打码');
+    eq(CS.maskSecrets(' key chain KC1'), ' key chain KC1', '检索：key chain 不是口令，不打码');
+    ok(CS.normalizeConfigQuery({ keyword: '' }).ok === false, '检索：空关键字拒绝');
+    ok(CS.normalizeConfigQuery({ keyword: '[', regex: true }).ok === false, '检索：非法正则拒绝');
+    eq(CS.normalizeConfigQuery({ keyword: 'x', context: 99, maxResults: 9999 }).query.context, 5, '检索：上下文行数上限 5');
+    eq(CS.normalizeConfigQuery({ keyword: 'x', maxResults: 9999 }).query.maxResults, CS.MAX_HITS, '检索：命中上限钳制');
+
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-cs-'));
+    try {
+      const h1 = path.join(base, 'SW1', '10.0.0.1');
+      const h2 = path.join(base, 'SW2', '10.0.0.2');
+      fs.mkdirSync(h1, { recursive: true });
+      fs.mkdirSync(h2, { recursive: true });
+      fs.writeFileSync(path.join(h1, 'cfg_20261018_120000.cfg'),
+        'hostname SW1\ninterface Gi0/1\n description uplink\n ip address 10.1.1.1 255.255.255.0\nsnmp-server community public RO\n');
+      fs.writeFileSync(path.join(h1, 'cfg_20261017_120000.cfg'),
+        'hostname SW1-old\ninterface Gi0/2\n ip address 10.2.2.2 255.255.255.0\n');
+      fs.writeFileSync(path.join(h2, 'cfg_20261018_130000.cfg'),
+        'hostname SW2\ninterface Gi0/1\n ip address 10.1.1.1 255.255.255.0\nusername admin password 7 0822455D0A16\n');
+      const r1 = CS.scanConfigs({ baseDir: base, query: { keyword: '10.1.1.1', context: 1 } });
+      ok(r1.ok && r1.total === 2, '检索：整库命中两处');
+      eq(r1.items[0].device, 'SW2', '检索：最新备份优先');
+      eq(r1.items[0].name, 'cfg_20261018_130000.cfg', '检索：同时间按文件名定序');
+      eq(r1.items[0].matches[0].line, 3, '检索：行号 1 基');
+      eq(r1.items[0].matches[0].before.length, 1, '检索：命中行前上下文');
+      eq(r1.items[0].matches[0].after[0], 'username admin password ******', '检索：上下文行同样打码');
+      eq(CS.scanConfigs({ baseDir: base, query: { keyword: 'HOSTNAME', caseSensitive: true } }).total, 0, '检索：区分大小写时不命中');
+      eq(CS.scanConfigs({ baseDir: base, query: { keyword: 'HOSTNAME' } }).total, 3, '检索：默认不区分大小写');
+      eq(CS.scanConfigs({ baseDir: base, query: { keyword: '^\\s*ip address', regex: true } }).total, 3, '检索：正则模式');
+      eq(CS.scanConfigs({ baseDir: base, query: { keyword: '10.1.1.1', device: 'SW1' } }).total, 1, '检索：设备过滤');
+      eq(CS.scanConfigs({ baseDir: base, query: { keyword: 'hostname', from: new Date(2026, 9, 18, 12, 30, 0).getTime() } }).total, 1, '检索：起始时间过滤');
+      const rMask = CS.scanConfigs({ baseDir: base, query: { keyword: 'password', maskSecrets: true } });
+      eq(rMask.items[0].matches[0].text, 'username admin password ******', '检索：命中行默认打码');
+      ok(CS.scanConfigs({ baseDir: base, query: { keyword: 'password', maskSecrets: false } }).items[0].matches[0].text.includes('0822455D0A16'), '检索：可显式关闭打码');
+      ok(CS.scanConfigs({ baseDir: base, query: { keyword: 'ip address', maxResults: 1 } }).truncated === true, '检索：达到命中上限时标注截断');
+      ok(CS.scanConfigs({ baseDir: path.join(base, 'nope'), query: { keyword: 'x' } }).ok === true, '检索：备份库不存在时返回空结果而非报错');
+      const rw = await CS.searchConfigBackups(base, { keyword: 'hostname' });
+      ok(rw.ok && rw.total === 3, '检索：工作线程端到端');
+    } finally {
+      try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* Windows 句柄延迟回收 */ }
+    }
+  }
+
+
+  {
+    // 容量趋势库（js/capacity-store.js）：日聚合、直方图 P95、跨重启、清理与损坏文件容错
+    console.log('== 容量趋势与 95th ==');
+    const os2 = require('os');
+    const CAP = require('../js/capacity-store.js');
+    const day0 = new Date(2026, 9, 18, 12, 0, 0).getTime();
+    eq(CAP.dayKey(day0), '2026-10-18', '容量：本地日期键');
+    eq(CAP.dayStart('2026-10-18'), new Date(2026, 9, 18).getTime(), '容量：日期键解析为零点');
+    eq(CAP.bucketOf(0), 0, '容量：0 落首桶');
+    eq(CAP.bucketOf(15), 1, '容量：15kbps 落第二桶');
+    const hp = CAP.histP95([0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    ok(hp && hp.kbps === 125000 && hp.low === 100000 && hp.high === 150000, '容量：P95 落桶并给出上下界');
+
+    const dir = fs.mkdtempSync(path.join(os2.tmpdir(), 'nettopo-cap-'));
+    try {
+      const st = new CAP.CapacityStore(dir, { histDays: 1, keepDays: 10 });
+      for (let i = 0; i < 10; i++) {
+        st.record(day0 + i * 60000, 'SW1@10.0.0.1', 'SW1', '10.0.0.1', [{ n: 'Gi0/1', oper: 'up', speed: 1e9, in: (i % 2 ? 100e6 : 10e6), out: 5e6 }]);
+      }
+      st.flush();
+      const rep = st.report({ now: day0 + 3600000, from: day0 - 86400000, to: day0 + 86400000 });
+      ok(rep.ok && rep.rows.length === 1, '容量：报表按接口出一行');
+      const row = rep.rows[0];
+      eq(row.samples, 10, '容量：样本数累计');
+      eq(row.inAvgKbps, 55000, '容量：入均值（kbps）');
+      eq(row.inMaxKbps, 100000, '容量：入峰值');
+      eq(row.inP95Kbps, 125000, '容量：P95 中点');
+      eq(row.availPct, 100, '容量：可用率按在线样本');
+      eq(row.utilizationPct, 10, '容量：峰值利用率按链路速率换算');
+      eq(row.p95Coverage, 100, '容量：直方图覆盖率');
+      eq(st.trend('SW1@10.0.0.1', 'Gi0/1', { from: day0 - 86400000, to: day0 + 86400000 }).days.length, 1, '容量：趋势按日一行');
+      const st2 = new CAP.CapacityStore(dir, { histDays: 3, keepDays: 10 });
+      eq(st2.report({ now: day0 + 3600000, from: day0 - 86400000, to: day0 + 86400000 }).rows[0].inMaxKbps, 100000, '容量：落盘后重载');
+      eq(st.record(day0, 'SW1@10.0.0.1', 'SW1', '10.0.0.1', [{ n: 'Gi0/2', oper: 'down', speed: 1e9, in: null, out: null }]).ok, false, '容量：无速率样本不计入');
+      st.record(day0 + 60000, 'SW1@10.0.0.1', 'SW1', '10.0.0.1', [{ n: 'Gi0/2', oper: 'down', speed: 1e9, in: 1e6, out: null }]);
+      st.record(day0 + 120000, 'SW1@10.0.0.1', 'SW1', '10.0.0.1', [{ n: 'Gi0/2', oper: 'up', speed: 1e9, in: 1e6, out: null }]);
+      const row2 = st.report({ now: day0 + 3600000, from: day0 - 86400000, to: day0 + 86400000 }).rows.find(r => r.ifName === 'Gi0/2');
+      eq(row2.availPct, 50, '容量：down 样本计入可用率分母');
+      // 直方图只留 histDays：第 2 天记录后，第 0 天的 P95 折算成日 P95，报表用加权估算并标近似
+      st.record(day0 + 2 * 86400000, 'SW1@10.0.0.1', 'SW1', '10.0.0.1', [{ n: 'Gi0/1', oper: 'up', speed: 1e9, in: 50e6, out: 5e6 }]);
+      const rep2 = st.report({ now: day0 + 2 * 86400000 + 3600000, from: day0 - 86400000, to: day0 + 3 * 86400000 });
+      const row3 = rep2.rows.find(r => r.ifName === 'Gi0/1');
+      ok(row3 && row3.inP95Approx === true && row3.p95Coverage < 100, '容量：直方图过期后按日 P95 估算并标注');
+      // 损坏文件：不抛异常、计入 badFiles
+      const crypto2 = require('crypto');
+      const bad = 'k_' + crypto2.createHash('sha1').update('BAD@1.1.1.1').digest('hex').slice(0, 16) + '.json';
+      fs.writeFileSync(path.join(dir, bad), '{not json');
+      const stBad = new CAP.CapacityStore(dir);
+      ok(stBad.listKeys().length >= 1 && stBad.status().stats.badFiles >= 1, '容量：损坏文件跳过并计数');
+      const goodFile = 'k_' + crypto2.createHash('sha1').update('SW1@10.0.0.1').digest('hex').slice(0, 16) + '.json';
+      ok(fs.existsSync(path.join(dir, goodFile)), '容量：设备文件已生成');
+      st.remove('SW1@10.0.0.1');
+      ok(!fs.existsSync(path.join(dir, goodFile)), '容量：删除设备文件');
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    }
+  }
+
+
+  {
+    // 故障取证库（js/evidence-store.js）与复盘报告（U.buildIncidentReport）
+    console.log('== 故障取证与复盘 ==');
+    const os3 = require('os');
+    const { EvidenceStore } = require('../js/evidence-store.js');
+    const edir = fs.mkdtempSync(path.join(os3.tmpdir(), 'nettopo-ev-'));
+    try {
+      const es = new EvidenceStore(edir, { maxFiles: 10 });
+      const t = Date.now();
+      eq(es.save({}).ok, false, '取证：缺事件时间戳拒绝');
+      eq(es.save({ eventTs: t, deviceId: 'SW1', commands: [] }).ok, false, '取证：无命令输出拒绝');
+      const r1 = es.save({
+        eventTs: t, eventType: 'offline', eventDetail: '探测失败', deviceId: 'SW1', name: 'SW1', host: '10.0.0.1',
+        vendor: 'huawei', ok: true, ms: 1200,
+        commands: [{ cmd: 'display interface brief', text: 'GE0/0/1 up\nGE0/0/2 down' }]
+      });
+      ok(r1.ok && /^ev_\d{13}_[0-9a-f]{8}$/.test(r1.id), '取证：保存并生成编号');
+      const r2 = es.save({ eventTs: t, eventType: 'offline', deviceId: 'SW2', name: 'SW2', host: '10.0.0.2', ok: false, error: '连接超时', commands: [{ cmd: '（连接 / 采集）', text: '取证失败' }] });
+      ok(r2.ok && r2.id !== r1.id, '取证：同事件不同设备各自一份');
+      const ls = es.list({});
+      eq(ls.items.length, 2, '取证：列表');
+      ok(ls.items.every(x => !x.commands || x.commands.length === 1), '取证：列表带命令摘要');
+      const rd = es.read(r1.id);
+      ok(rd.ok && rd.item.commands[0].text.includes('GE0/0/1'), '取证：读全文');
+      eq(es.byEvent(t).items.length, 2, '取证：按事件时间关联');
+      eq(es.read('ev_123_bad').ok, false, '取证：非法编号拒绝');
+      ok(es.remove(r2.id).ok && !fs.existsSync(path.join(edir, r2.id + '.json')), '取证：删除单份');
+      const big = es.save({ eventTs: t + 1, deviceId: 'SW3', commands: [{ cmd: 'show logging', text: 'x'.repeat(100000) }] });
+      ok(big.ok && big.truncated, '取证：超长输出截断并标注');
+      ok(es.read(big.id).item.commands[0].text.length <= 64 * 1024, '取证：单条输出上限');
+      for (let i = 0; i < 12; i++) es.save({ eventTs: t + 10 + i, deviceId: 'D' + i, commands: [{ cmd: 'show', text: 'ok' }] });
+      ok(es.status().files <= 10, '取证：按份数滚动淘汰');
+      fs.writeFileSync(path.join(edir, 'ev_9999999999999_deadbeef.json'), '{bad');
+      es.list({});
+      ok(es.status().stats.badFiles >= 1, '取证：损坏文件计数');
+      const cl = es.clear();
+      ok(cl.ok && es.status().files === 0, '取证：清空');
+    } finally {
+      try { fs.rmSync(edir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    }
+
+    const t2 = new Date(2026, 9, 18, 10, 0, 0).getTime();
+    const rep = U.buildIncidentReport({
+      title: '核心交换机离线复盘', from: t2, to: t2 + 30 * 60000, genAt: t2 + 3600000, appVersion: 'v-test',
+      events: [
+        { ts: t2, level: 'emergency', type: 'offline', name: '<img src=x onerror=1>', host: '10.0.0.1', detail: '<script>alert(1)</script>', ackAt: t2 + 60000, ackNote: '已到现场' },
+        { ts: t2 + 60000, level: 'info', type: 'recovery', name: 'SW1', host: '10.0.0.1', detail: '恢复' }
+      ],
+      evidence: [{ id: 'ev_1', eventTs: t2, eventType: 'offline', name: 'SW1', host: '10.0.0.1', ok: true, ms: 800, commands: [{ cmd: 'display interface brief', text: '<b>GE0/0/1</b> down' }] }],
+      impacts: [{ name: 'SW1', host: '10.0.0.1', type: '离线', reason: '探测失败' }],
+      links: [{ key: 'lk1', name: 'SW1-SW2', state: 'down', brokenFrom: 'SW1', brokenTarget: 'SW2', lastError: 'ICMP 超时' }],
+      configChanges: [{ ts: t2 + 120000, name: 'SW1', detail: '配置有变化（+1/-0 行）' }]
+    });
+    ok(rep.html.indexOf('<!DOCTYPE html>') === 0, '复盘：输出独立 HTML');
+    ok(rep.html.indexOf('<script>') < 0, '复盘：不含脚本');
+    ok(rep.body.indexOf('<script>') < 0 && rep.body.indexOf('&lt;script&gt;') >= 0, '复盘：事件内容转义');
+    ok(rep.body.indexOf('&lt;b&gt;GE0/0/1&lt;/b&gt;') >= 0, '复盘：取证输出转义');
+    ok(rep.body.indexOf('三、告警时刻取证') >= 0 && rep.body.indexOf('六、根因与处置') >= 0, '复盘：章节齐全');
+    ok(rep.body.indexOf('已确认') >= 0 && rep.body.indexOf('已到现场') >= 0, '复盘：确认留痕');
+    const rep2 = U.buildIncidentReport({ title: '空窗口', events: [], evidence: [] });
+    ok(rep2.html.indexOf('没有自动取证记录') >= 0 && rep2.html.indexOf('窗口内没有事件') >= 0, '复盘：空数据如实降级');
+  }
+
+
+  {
+    // 端口/线缆台账与 VLAN 一致性（js/port-ledger.js）
+    console.log('== 端口台账与 VLAN 一致性 ==');
+    const NL = String.fromCharCode(10);
+    eq(PL.parseVlanList('10-12,20 30').list.join(','), '10,11,12,20,30', 'VLAN：区间与逗号混合解析');
+    eq(PL.parseVlanList('10 to 12').list.join(','), '10,11,12', 'VLAN：to 区间');
+    ok(PL.parseVlanList('all').all === true, 'VLAN：all 语义');
+    eq(PL.parseVlanList('10 abc 4095').list.join(','), '10', 'VLAN：非法 token 忽略');
+    const hwCfg = [
+      'vlan batch 10 20 30', '#',
+      'interface GigabitEthernet0/0/1', ' description uplink', ' port link-type trunk', ' port trunk allow-pass vlan 10 20 30', '#',
+      'interface GigabitEthernet0/0/2', ' port link-type access', ' port default vlan 40', ' shutdown', '#',
+      'interface Vlanif10', ' ip address 10.1.1.1 255.255.255.0'
+    ].join(NL);
+    const hw = PL.parseConfig(hwCfg, 'huawei');
+    eq(hw.interfaces.length, 3, '端口：华为配置解析出 3 个接口');
+    eq(hw.vlans.join(','), '10,20,30', '端口：vlan batch 解析');
+    const hw1 = hw.interfaces.find(i => /GigabitEthernet0\/0\/1$/i.test(i.name));
+    ok(hw1 && hw1.desc === 'uplink' && hw1.mode === 'trunk' && hw1.trunkVlans.join(',') === '10,20,30', '端口：华为 trunk 描述与放行 VLAN');
+    const hw2 = hw.interfaces.find(i => /GigabitEthernet0\/0\/2$/i.test(i.name));
+    ok(hw2 && hw2.mode === 'access' && hw2.accessVlan === 40 && hw2.shutdown === true, '端口：华为 access / shutdown');
+    const hw3 = hw.interfaces.find(i => /Vlanif10/i.test(i.name));
+    ok(hw3 && hw3.ip === '10.1.1.1' && hw3.mask === '255.255.255.0', '端口：三层接口 IP/掩码');
+    const ciscoCfg = [
+      'vlan 10,20', '!',
+      'interface Gi0/1', ' switchport mode trunk', ' switchport trunk allowed vlan 10,20', ' switchport trunk allowed vlan add 30', '!',
+      'interface Gi0/2', ' no switchport', ' ip address 10.0.0.1 255.255.255.252'
+    ].join(NL);
+    const cs = PL.parseConfig(ciscoCfg, 'cisco');
+    const cs1 = cs.interfaces.find(i => i.name === 'Gi0/1');
+    ok(cs1 && cs1.mode === 'trunk' && cs1.trunkVlans.join(',') === '10,20,30', '端口：思科 trunk allowed + add');
+    const cs2 = cs.interfaces.find(i => i.name === 'Gi0/2');
+    ok(cs2 && cs2.mode === 'routed' && cs2.ip === '10.0.0.1', '端口：思科 no switchport 转三层');
+    eq(PL.canon('GigabitEthernet1/0/1'), PL.canon('GE1/0/1'), '端口：接口名跨厂家规范化');
+
+    const devs = [
+      { name: 'A', vlans: [10, 20], interfaces: [
+        { name: 'GE0/0/1', mode: 'trunk', trunkVlans: [10, 20, 30] },
+        { name: 'GE0/0/2', mode: 'access', accessVlan: 40 }
+      ] },
+      { name: 'B', vlans: [10, 20, 30, 40], interfaces: [
+        { name: 'GE0/0/1', mode: 'trunk', trunkVlans: [10, 20] },
+        { name: 'GE0/0/2', mode: 'access', accessVlan: 10 }
+      ] }
+    ];
+    const links = [
+      { aDevice: 'A', aIf: 'GE0/0/1', bDevice: 'B', bIf: 'GE0/0/1' },
+      { aDevice: 'A', aIf: 'GE0/0/2', bDevice: 'B', bIf: 'GE0/0/2', aVlan: '50', bVlan: '10' },
+      { aDevice: 'A', aIf: 'GE0/0/2', bDevice: 'B', bIf: 'GE0/0/1' }
+    ];
+    const chk = PL.checkVlans(devs, links);
+    eq(chk.summary.accessUndef, 1, 'VLAN 检查：access 用了未创建 VLAN');
+    eq(chk.summary.trunkUndef, 1, 'VLAN 检查：trunk 放行未创建 VLAN');
+    eq(chk.summary.mismatch, 1, 'VLAN 检查：两端 trunk 放行不一致');
+    eq(chk.summary.topo, 1, 'VLAN 检查：拓扑登记与配置 access VLAN 不一致');
+    eq(chk.summary.accessNotAllowed, 1, 'VLAN 检查：access VLAN 未被对端 trunk 放行');
+    ok(PL.checkVlans([{ name: 'X', vlans: [], interfaces: [{ name: 'GE0/0/1', mode: 'access', accessVlan: 99 }] }], []).issues.length === 0, 'VLAN 检查：无 VLAN 定义时不误报');
+  }
+
+
+  {
+    // 规划态数据清洗与规划核对（规划 vs 配置）
+    console.log('== 规划态与规划核对 ==');
+    const g1 = U.sanitizeGraph([{ id: 'n1', name: 'A', plan: true }, { id: 'n2', name: 'B' }], [{ id: 'l1', a: 'n1', b: 'n2', plan: true }], []);
+    ok(g1.nodes[0].plan === true && g1.nodes[1].plan === false, '规划：节点标记随清洗保留');
+    ok(g1.links[0].plan === true, '规划：链路标记随清洗保留');
+    const plan = {
+      nodes: [{ name: 'A', mgmt: '10.9.9.9' }, { name: 'C', mgmt: '1.1.1.1' }],
+      links: [{ id: 'l1', aDevice: 'A', aIf: 'GE0/0/1', aIp: '10.0.0.2', aVlan: '20', aMode: 'trunk', bDevice: 'B', bIf: 'GE0/0/2', bIp: '10.0.0.3' }]
+    };
+    const devs = [{ name: 'A', text: 'hostname A', interfaces: [{ name: 'GigabitEthernet0/0/1', ip: '10.0.0.1', mode: 'access', accessVlan: 10 }] }];
+    const pc = PL.checkPlan(plan, devs);
+    eq(pc.summary.noConfig, 2, '规划核对：A 侧以外无配置如实计数');
+    eq(pc.summary.mismatch, 2, '规划核对：IP 与 VLAN 不一致');
+    eq(pc.summary.info, 2, '规划核对：管理地址未见与模式不一致归提示');
+    ok(pc.issues.some(i => i.kind === 'ip-mismatch' && i.detail.indexOf('10.0.0.2') >= 0), '规划核对：IP 差异详情');
+    ok(pc.issues.some(i => i.kind === 'vlan-mismatch'), '规划核对：VLAN 差异');
+  }
+
 })().then(() => {
   suiteFinished = true;
   console.log('');

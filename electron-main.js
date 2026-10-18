@@ -7,6 +7,9 @@ const { ShellManager, sftpRemoteJoin, forbiddenHit, warnHit, selfLockHit, aiConf
 const { BackupStore, MAX_CONTENT_BYTES } = require('./js/backup-store.js');
 const { MonitorManager, UptimeStore, fmtUptimeTicks, snmpWalk, snmpGetValue, snmpAdviceText } = require('./js/monitor.js');
 const { ConfigBackupStore } = require('./js/config-backup.js');
+const { searchConfigBackups } = require('./js/config-search.js');
+const { CapacityStore } = require('./js/capacity-store.js');
+const { EvidenceStore } = require('./js/evidence-store.js');
 const { DEFAULT_IGNORE_RULES, normalizeIgnoreRules } = require('./js/config-backup.js');
 const { CredentialStore } = require('./js/credential-store.js');
 const { AlertDeps } = require('./js/alert-deps.js');
@@ -125,6 +128,13 @@ const alertDeps = new AlertDeps();
 const uptimeStore = new UptimeStore(path.join(app.getPath('userData'), 'monitor-uptime.json'));
 monitor.on('probe', (info) => { try { uptimeStore.record(info.key, info.ok === true); } catch (e) { /* ignore */ } });
 setInterval(() => uptimeStore.flush(), 5 * 60 * 1000).unref();
+
+/* ---- 容量趋势（接口流量降采样落盘：日聚合 + 直方图，供 95th / 趋势报表；每台设备一个文件） ---- */
+const capacity = new CapacityStore(path.join(app.getPath('userData'), 'capacity'));
+setInterval(() => { try { capacity.flush(); } catch (e) { /* ignore */ } }, 5 * 60 * 1000).unref();
+
+/* ---- 故障取证（告警触发时由渲染层按只读白名单采集，主进程落盘成证据包） ---- */
+const evidenceStore = new EvidenceStore(path.join(app.getPath('userData'), 'evidence'));
 
 /* ---- 内置网络服务（TFTP / FTP / Syslog）：接收设备推送的配置文件与集中收集日志 ---- */
 const netSvc = new NetServices({
@@ -419,8 +429,36 @@ function recordMonitorEvent(info, type, detail, level) {
       if (it && it.name) name = it.name;
     } catch (e) { /* ignore */ }
   }
-  monitorEvents.push({ ts: Date.now(), type: type, level: AL.normalizeLevel(level || levelOf(type)), key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' });
+  const ev = { ts: Date.now(), type: type, level: AL.normalizeLevel(level || levelOf(type)), key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' };
+  monitorEvents.push(ev);
   if (monitorEvents.length > 500) monitorEvents.splice(0, monitorEvents.length - 500);
+  // 告警自动取证：只发请求（采集在渲染层，按只读白名单与设备监控凭据），主进程负责落盘与限流
+  try { requestEvidence(ev); } catch (e) { logCrash('evidence-request', e); }
+}
+
+/* ---- 告警自动取证：触发与限流 ----
+ * 只在「需要看现场」的事件上取证；同一设备 10 分钟内最多一次，避免告警风暴时对设备反复登录。
+ * 渲染层若关闭自动取证或该设备没有保存凭据，会直接忽略请求（主进程不重复判断设备配置）。 */
+const EVIDENCE_TYPES = new Set(['offline', 'alert', 'if-down', 'if-error', 'metric', 'cert', 'http-fail', 'link-down', 'trap', 'syslog-alert', 'reboot', 'compliance', 'deploy-error']);
+const evidenceRequestAt = new Map();
+function requestEvidence(ev) {
+  if (!ev || !EVIDENCE_TYPES.has(ev.type)) return;
+  if (ev.level === 'info') return;                 // 提示级（恢复 / 配置变化）不打扰设备
+  if (!mainWin || mainWin.isDestroyed()) return;
+  const dev = ev.deviceId || ev.key || ev.host;
+  if (!dev) return;
+  const now = Date.now();
+  const last = evidenceRequestAt.get(dev) || 0;
+  if (now - last < 10 * 60 * 1000) return;
+  if (evidenceRequestAt.size >= 200) {
+    const oldest = [...evidenceRequestAt.entries()].sort((a, b) => a[1] - b[1]).slice(0, 50);
+    for (const [k] of oldest) evidenceRequestAt.delete(k);
+  }
+  evidenceRequestAt.set(dev, now);
+  mainWin.webContents.send('monitor:evidence-request', {
+    eventTs: ev.ts, eventType: ev.type, level: ev.level, detail: ev.detail,
+    key: ev.key, deviceId: ev.deviceId, host: ev.host, name: ev.name
+  });
 }
 
 /* ---- 告警升级（未确认超时升一级重发）：settings.alertSound.escalateMin 分钟（0 关闭）----
@@ -609,7 +647,11 @@ monitor.on('reboot', (info) => {
   if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备重启', info.name + '（' + info.host + '）' + detail, levelOf('reboot'));
 });
 // SNMP 接口流量：实时采样推送主窗口；接口 up/down 跳变记入事件时间线并弹通知（接口离线才弹）
-monitor.on('iftraffic', (info) => sendMonitor('monitor:iftraffic', info));
+monitor.on('iftraffic', (info) => {
+  sendMonitor('monitor:iftraffic', info);
+  // 容量趋势落盘：内存环形缓冲重启即丢，95th/月报需要跨重启的降采样数据（见 js/capacity-store.js）
+  try { capacity.record(info.ts, info.key, info.name, info.host, info.ifs); } catch (e) { /* 采集异常不影响监控 */ }
+});
 monitor.on('ifstatus', (info) => {
   for (const ch of (info.changes || [])) {
     if (!ch || (ch.to !== 'up' && ch.to !== 'down')) continue;
@@ -1476,6 +1518,39 @@ ipcMain.handle('monitor:sla', (e, p) => {
     summaryText: rep.summary.uptimePct == null ? '（区间内无采样）' : slaFmtPct(rep.summary.uptimePct)
   });
 });
+/* 容量趋势与 95th 报表（跨重启的日聚合 + 直方图，见 js/capacity-store.js）：
+ * 查询由主进程读盘/合并，渲染层只拿聚合结果；不提供任意路径读取。 */
+ipcMain.handle('capacity:report', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden', rows: [] };
+  return capacity.report(p || {});
+});
+ipcMain.handle('capacity:trend', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden', days: [] };
+  return capacity.trend((p && p.key) || '', (p && p.ifName) || '', p || {});
+});
+ipcMain.handle('capacity:status', (e) => monitorGuard(e) ? capacity.status() : { ok: false, error: 'forbidden' });
+
+/* ---- 故障取证库 IPC：保存时把 evidenceId 挂回对应事件（事件时间线点「证据」直接读） ---- */
+ipcMain.handle('evidence:save', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const r = evidenceStore.save(p || {});
+  if (r.ok) {
+    try {
+      const ts = Number(p && p.eventTs);
+      const ev = monitorEvents.find(x => x && x.ts === ts && (!p.deviceId || x.deviceId === p.deviceId));
+      if (ev) ev.evidenceId = r.id;
+    } catch (err) { /* 挂接失败不影响取证本身 */ }
+  }
+  return r;
+});
+ipcMain.handle('evidence:list', (e, p) => monitorGuard(e) ? evidenceStore.list(p || {}) : { ok: false, error: 'forbidden', items: [] });
+ipcMain.handle('evidence:read', (e, p) => monitorGuard(e) ? evidenceStore.read((p && p.id) || '') : { ok: false, error: 'forbidden' });
+ipcMain.handle('evidence:by-event', (e, p) => monitorGuard(e) ? evidenceStore.byEvent(Number(p && p.eventTs)) : { ok: false, error: 'forbidden', items: [] });
+ipcMain.handle('evidence:remove', (e, p) => monitorGuard(e) ? evidenceStore.remove((p && p.id) || '') : { ok: false, error: 'forbidden' });
+ipcMain.handle('evidence:clear', (e) => monitorGuard(e) ? evidenceStore.clear() : { ok: false, error: 'forbidden' });
+ipcMain.handle('evidence:status', (e) => monitorGuard(e) ? evidenceStore.status() : { ok: false, error: 'forbidden' });
+ipcMain.handle('capacity:flush', (e) => monitorGuard(e) ? capacity.flush() : { ok: false, error: 'forbidden' });
+
 // 接口流量历史（监控中心「接口流量」页按需拉取采样序列）
 ipcMain.handle('monitor:ifhistory', (e, key) => monitorGuard(e)
   ? monitor.ifHistory(String((key && key.key) || key || ''))
@@ -1942,6 +2017,12 @@ ipcMain.handle('backupcfg:diff-cross', (e, p) => {
   if (!na || !nb) return { ok: false, error: '请为两台设备各选择一份备份' };
   if (A.device === B.device && A.host === B.host && na === nb) return { ok: false, error: '请选择不同的备份' };
   return diffBackupFiles({ device: A.device, host: A.host, name: na }, { device: B.device, host: B.host, name: nb });
+});
+/* 配置备份全文检索：跨设备/跨时间找一行配置。扫描在独立工作线程内完成，避免大备份库冻结主进程；
+ * 备份库根目录由主进程给，渲染层只能提交查询条件，拿不到任意路径。 */
+ipcMain.handle('backupcfg:search', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  return searchConfigBackups(configBackup.baseDir, p || {});
 });
 ipcMain.handle('backupcfg:open', (e) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -2614,6 +2695,7 @@ app.on('will-quit', () => {
   linkMon.stopAll();
   shell.closeAll();
   uptimeStore.flush();
+  try { capacity.flush(); } catch (e) { /* ignore */ }
   netSvc.stopAll();
   if (tray) { try { tray.destroy(); } catch (e) { /* ignore */ } tray = null; }
 });

@@ -129,7 +129,29 @@ contextBridge.exposeInMainWorld('topoMonitor', {
   alertDeps: () => ipcRenderer.invoke('monitor:alert-deps'),
   /* 事件时间线确认/取消确认（确认时刻与备注留痕，随事件滚动淘汰） */
   eventAck: (p) => ipcRenderer.invoke('monitor:event-ack', p),
-  eventUnack: (p) => ipcRenderer.invoke('monitor:event-unack', p)
+  eventUnack: (p) => ipcRenderer.invoke('monitor:event-unack', p),
+  /* 告警自动取证请求：主进程只发事件摘要，命令由渲染层按只读白名单与设备监控凭据执行 */
+  onEvidenceRequest: sub('monitor:evidence-request')
+});
+
+/* 容量趋势与 95th 报表（监控 ▾ 巡检与报表 ▸ 容量趋势与 95th 报表…）：
+ * 主进程按日聚合接口流量并落盘（跨重启），渲染层只提交时间窗口与查询条件 */
+contextBridge.exposeInMainWorld('topoCapacity', {
+  report: (p) => ipcRenderer.invoke('capacity:report', p),
+  trend: (p) => ipcRenderer.invoke('capacity:trend', p),
+  status: () => ipcRenderer.invoke('capacity:status'),
+  flush: () => ipcRenderer.invoke('capacity:flush')
+});
+
+/* 故障取证库（告警自动取证 / 复盘）：主进程落盘，渲染层只提交采集结果与查询条件 */
+contextBridge.exposeInMainWorld('topoEvidence', {
+  save: (p) => ipcRenderer.invoke('evidence:save', p),
+  list: (p) => ipcRenderer.invoke('evidence:list', p),
+  read: (id) => ipcRenderer.invoke('evidence:read', { id }),
+  byEvent: (eventTs) => ipcRenderer.invoke('evidence:by-event', { eventTs }),
+  remove: (id) => ipcRenderer.invoke('evidence:remove', { id }),
+  clear: () => ipcRenderer.invoke('evidence:clear'),
+  status: () => ipcRenderer.invoke('evidence:status')
 });
 
 /* 端到端链路连通性监测（监控 ▾ 链路连通性监测…）：任务由渲染层按拓扑算好后下发（js/link-path.js），
@@ -163,6 +185,8 @@ contextBridge.exposeInMainWorld('topoConfigBackup', {
   read: (device, host, name) => ipcRenderer.invoke('backupcfg:read', { device, host, name }),
   remove: (device, host, name) => ipcRenderer.invoke('backupcfg:remove', { device, host, name }),
   diff: (device, host, a, b) => ipcRenderer.invoke('backupcfg:diff', { device, host, a, b }),
+  /* 配置备份全文检索：跨设备/跨时间按关键字或正则查找配置行（扫描在主进程工作线程内） */
+  search: (q) => ipcRenderer.invoke('backupcfg:search', q),
   /* 跨设备配置漂移对比：a/b 各为 {device, host, name} */
   diffCross: (a, b) => ipcRenderer.invoke('backupcfg:diff-cross', { a, b }),
   /* 配置变更判定的易变行忽略规则（时钟/运行时长等噪声行，避免「配置有变化」天天误报） */

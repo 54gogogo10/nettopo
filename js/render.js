@@ -475,6 +475,9 @@ class Renderer {
     for (const n of this.nodes) {
       const g = this.nodeEls.get(n.id);
       if (!g) continue;
+      // 规划态：琥珀色虚线；planView 为 plan/actual 时隐藏另一类（类切换很轻，每帧做无妨）
+      g.classList.toggle('planned', !!n.plan);
+      g.classList.toggle('plan-hide', this.planView === 'plan' ? !n.plan : (this.planView === 'actual' ? !!n.plan : false));
       // 位置未变不重写 transform（纯缩放/平移视图时节点世界坐标不变；元素重建后 _tx 为 undefined 必写一次）
       if (g._tx === n.x && g._ty === n.y) continue;
       g._tx = n.x; g._ty = n.y;
@@ -538,6 +541,8 @@ class Renderer {
       g.classList.toggle('lk-unknown', lk === 'unknown' || lk === 'degraded');
       // SNMP 转发表推断出来的链路：虚线显示，与实测（LLDP/CDP）链路一眼可分（绝不冒充实测结果）
       g.classList.toggle('inferred', !!l.inferred);
+      g.classList.toggle('planned', !!l.plan);
+      g.classList.toggle('plan-hide', this.planView === 'plan' ? !l.plan : (this.planView === 'actual' ? !!l.plan : false));
       // 带宽颜色（图上不显示带宽文字）：带宽值只在编辑链路时变化，命中缓存时跳过 6 个正则的规格化
       if (parts.bw !== l.bw) { parts.bw = l.bw; g.style.setProperty('--bw-c', U.bwColor(l.bw)); }
       // 直角模式走 pts 折线，直线模式退化为两段式 path（元素统一为 path，命中/样式不变）
