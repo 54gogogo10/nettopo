@@ -1447,8 +1447,15 @@ input[type="radio"]:focus-visible,
   margin-top: 0; padding: 12px 22px 16px; flex: 0 0 auto;
   border-top: 1px solid var(--border); background: var(--panel);
 }
-/* 其它可滚动弹窗的操作区同样贴底，避免滚到内容之外才看见 */
-.modal > .m-actions { position: sticky; bottom: 0; background: var(--panel); padding-top: 10px; }
+/* 其它可滚动弹窗的操作区贴底：直接子级 .m-actions 撑满宽度并压住底部，
+ * 避免吸底后按钮下方还露出被滚动的内容（设备监控弹窗曾出现「保存」下透出一行维护窗口） */
+.modal:has(> .m-actions:last-child) { padding-bottom: 0; }
+.modal > .m-actions:last-child {
+  position: sticky; bottom: 0; z-index: 3;
+  margin: 18px -22px 0; padding: 12px 22px 16px;
+  background: var(--panel); border-top: 1px solid var(--border);
+  border-radius: 0 0 15px 15px;
+}
 
 /* 表单行内错误（比只把边框变红更可读） */
 .frow-err { display: none; color: var(--danger); font-size: 11.5px; margin-top: 4px; }
