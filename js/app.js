@@ -7139,10 +7139,10 @@ function openTypeManager() {
           <input type="file" id="tmFile" accept="image/*"/>
           <div class="hint2">上传后自动压缩为 96×96，用于拓扑中的设备图标；也可在下方列表中为任意类型单独上传</div>
         </div>
-        <div class="m-actions">
-          <button class="tb" data-act="close">关闭</button>
-          <button class="tb primary" id="tmAdd">添加类型</button>
-        </div>
+      </div>
+      <div class="m-actions">
+        <button class="tb" data-act="close">关闭</button>
+        <button class="tb primary" id="tmAdd">添加类型</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -7449,7 +7449,9 @@ function openHelp() {
     <h4>许可证</h4>
     <p>本软件遵循 <b>GNU AGPL-3.0</b> 许可证并附带附加条款发布（全文见项目根目录 <code>LICENSE</code> 文件）：个人和非营利组织可按 AGPL-3.0 条款自由使用；<b>公司、组织和营利性实体在使用、分发或修改本软件之前必须获得商业许可</b>（商业用途需单独授权）。商业许可查询：<code>gogogo10@163.com</code>。所集成的第三方组件许可见项目 <code>THIRD-PARTY-NOTICES.md</code> 与 <code>lib/</code> 内声明文件。</p>
   </div>`;
-  form.insertBefore(body, form.querySelector('.m-actions'));
+  const bodyHost = form.querySelector('.mf-body');
+  if (bodyHost) bodyHost.appendChild(body);
+  else form.insertBefore(body, form.querySelector('.m-actions'));
 }
 
 function openAbout() {
@@ -7484,7 +7486,9 @@ function openAbout() {
     <div class="about-license">本软件遵循 <b>GNU AGPL-3.0</b> 许可证并附带附加条款发布：个人和非营利组织可按 AGPL-3.0 条款自由使用；公司、组织和营利性实体在使用、分发或修改前须获得商业许可，商业用途需单独授权。商业许可查询：<span class="about-url">gogogo10@163.com</span>。全文见项目 LICENSE 文件；第三方组件许可见 THIRD-PARTY-NOTICES.md 与 lib/ 内声明。</div>
     <div class="about-note">数据仅保存在本机；Web Shell 与设备管理 Web 页为桌面版功能。</div>
   </div>`;
-  form.insertBefore(body, form.querySelector('.m-actions'));
+  const aboutHost = form.querySelector('.mf-body');
+  if (aboutHost) aboutHost.appendChild(body);
+  else form.insertBefore(body, form.querySelector('.m-actions'));
   const ABOUT_URL = 'https://github.com/54gogogo10/nettopo';
   const aboutCopy = ov.querySelector('#aboutCopy');
   if (aboutCopy) aboutCopy.onclick = () => {
@@ -7576,7 +7580,9 @@ function showUpdateDialog(res) {
     </div>
     <div class="about-note">升级包经 SHA256 校验后才会安装；安装时程序会自动重启。</div>
   </div>`;
-  form.insertBefore(body, form.querySelector('.m-actions'));
+  const updHost = form.querySelector('.mf-body');
+  if (updHost) updHost.appendChild(body);
+  else form.insertBefore(body, form.querySelector('.m-actions'));
   updateBarEl = ov.querySelector('#updBar');
   updateTextEl = ov.querySelector('#updText');
   const bridge = updateBridge();

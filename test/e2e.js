@@ -899,6 +899,40 @@ function findChrome() {
     if (!cpOk) errors.push('[palette] 命令面板未按预期工作: ' + JSON.stringify({ cp, cpMatch, cpTitle, cpAfter }));
   }
 
+  // ---- 帮助弹窗：长内容必须限制在 .mf-body 内滚动，底部操作区不能被顶出视口 ----
+  {
+    await page.evaluate(() => document.getElementById('btnHelp').click());
+    await new Promise(r => setTimeout(r, 400));
+    const help = await page.evaluate(() => {
+      const md = document.querySelector('#modalRoot .modal');
+      if (!md) return null;
+      const body = md.querySelector('.mf-body');
+      const foot = md.querySelector('.m-actions');
+      const r = md.getBoundingClientRect();
+      const fr = foot ? foot.getBoundingClientRect() : null;
+      return {
+        bodyScroll: body ? body.scrollHeight > body.clientHeight + 40 : false,
+        bodyOverflow: body ? getComputedStyle(body).overflowY : '',
+        footVisible: !!fr && fr.top >= r.top - 1 && fr.bottom <= r.bottom + 1,
+        dialogBottomInView: r.bottom <= innerHeight + 1
+      };
+    });
+    await page.evaluate(() => { const b = document.querySelector('#modalRoot .mf-body'); if (b) b.scrollTop = 999999; });
+    await new Promise(r => setTimeout(r, 150));
+    const helpBottom = await page.evaluate(() => {
+      const md = document.querySelector('#modalRoot .modal');
+      const foot = md && md.querySelector('.m-actions');
+      const r = md && md.getBoundingClientRect();
+      const fr = foot && foot.getBoundingClientRect();
+      return { footVisible: !!fr && fr.top >= r.top - 1 && fr.bottom <= r.bottom + 1 };
+    });
+    await page.keyboard.press('Escape');
+    await new Promise(r => setTimeout(r, 200));
+    const helpOk = help && help.bodyScroll && help.bodyOverflow === 'auto' && help.footVisible && help.dialogBottomInView && helpBottom.footVisible;
+    console.log('帮助弹窗滚动壳:', helpOk ? 'OK' : 'FAIL', JSON.stringify({ help, helpBottom }));
+    if (!helpOk) errors.push('[help-shell] 帮助弹窗长内容未在窗内滚动或底部操作区不可见: ' + JSON.stringify({ help, helpBottom }));
+  }
+
   // ---- 画布快速搜索（Ctrl+F）：呼出 → 输入匹配 → Enter 定位选中 → Esc 关闭 ----
   {
     await page.evaluate(() => {

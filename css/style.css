@@ -1441,8 +1441,8 @@ input[type="radio"]:focus-visible,
 .modal-form .mf-head { padding: 18px 22px 0; flex: 0 0 auto; }
 .modal-form .mf-head h3 { margin-bottom: 4px; }
 .modal-form .mf-head .m-sub { margin-bottom: 12px; }
-.modal-form form { display: flex; flex-direction: column; min-height: 0; }
-.modal-form .mf-body { padding: 2px 22px 8px; overflow-y: auto; min-height: 0; }
+.modal-form form { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; overflow: hidden; }
+.modal-form .mf-body { padding: 2px 22px 8px; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
 .modal-form .m-actions {
   margin-top: 0; padding: 12px 22px 16px; flex: 0 0 auto;
   border-top: 1px solid var(--border); background: var(--panel);
