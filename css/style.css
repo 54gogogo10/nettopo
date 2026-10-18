@@ -524,6 +524,21 @@ body:not(.panel-off) #panelOpen { display: none; }
 #drop .ci.mode-on { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
 #drop .ci .ic svg { width: 14px; height: 14px; }
 #drop .d-sep { height: 1px; background: var(--border); margin: 4px 8px; }
+/* 分组项与二级面板：分组菜单在 #drop 内绝对定位，右侧/下方空间不足时由脚本翻转 */
+#drop .d-item { position: relative; }
+#drop .d-lb { flex: 1; }
+#drop .d-caret { margin-left: 6px; opacity: .55; }
+#drop .d-caret svg { width: 11px; height: 11px; transform: rotate(-90deg); }
+#drop .d-item.open > .ci { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+#drop .d-item.open > .ci .d-caret { opacity: 1; }
+#drop .d-sub {
+  position: absolute; z-index: 2; left: calc(100% + 4px); top: -6px;
+  width: max-content; min-width: 200px; max-width: min(440px, 92vw); max-height: calc(100vh - 12px); overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 11px;
+  box-shadow: var(--shadow); padding: 5px;
+}
+#drop .d-sub.left { left: auto; right: calc(100% + 4px); }
+#drop .d-head { padding: 5px 10px 3px; font-size: 10.5px; color: var(--muted); font-weight: 600; }
 
 
 /* ============ 路径高亮 ============ */

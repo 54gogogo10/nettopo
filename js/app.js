@@ -488,7 +488,7 @@ function openNeighborImport(prefillText, presetLocalId) {
   setTimeout(() => { if (document.body.contains(ov)) ov.querySelector('#nbText').focus(); }, 250);
 }
 
-/* ================= 统一凭据库（监控 ▾ 凭据库…） =================
+/* ================= 统一凭据库（监控 ▾ 服务与凭据 ▸ 凭据库…） =================
  * 设备访问凭据集中在一处维护，各采集/下发面板改为「优先选档案、必要时手填」。
  * 机密语义：选中档案时只把 id（credId）交给主进程解析，口令明文不回渲染层；手填账号仍是渲染层内存态。
  * credCache 只缓存清单元数据（hasPassword / hasKey 布尔，不含任何机密），增删改后 loadCreds(true) 刷新。 */
@@ -524,7 +524,7 @@ function credOptionsHtml(list, selected) {
 function credPickerHtml(pfx, list, opts) {
   const o = opts || {};
   const defU = o.userDefault == null ? 'admin' : o.userDefault;
-  return `<div class="frow" style="margin:0"><label>凭据库</label><select id="${pfx}Cred" style="max-width:210px" title="凭据库档案（监控 ▾ 凭据库… 维护）：只把档案标识交给主进程解析，口令不回界面">${credOptionsHtml(list, o.selected)}</select></div>`
+  return `<div class="frow" style="margin:0"><label>凭据库</label><select id="${pfx}Cred" style="max-width:210px" title="凭据库档案（监控 ▾ 服务与凭据 ▸ 凭据库… 维护）：只把档案标识交给主进程解析，口令不回界面">${credOptionsHtml(list, o.selected)}</select></div>`
     + `<div class="frow" style="margin:0" data-cred-manual="${pfx}"><label>${U.escHtml(o.userLabel || '账号')}</label><input id="${pfx}User" type="text" style="width:${o.userWidth || 90}px" value="${U.escHtml(defU)}" spellcheck="false" autocomplete="off"/></div>`
     + `<div class="frow" style="margin:0" data-cred-manual="${pfx}"><label>${U.escHtml(o.passLabel || '密码')}</label><input id="${pfx}Pass" type="password" style="width:${o.passWidth || 100}px" autocomplete="new-password"/></div>`;
 }
@@ -5864,15 +5864,94 @@ function clearPathHl() {
 
 /* ================= 弹窗 ================= */
 
-/* ================= 工具栏下拉菜单 ================= */
+/* ================= 工具栏下拉菜单 =================
+ * 条目形态：
+ *   { sep: true }                              分隔线
+ *   { head: '文案' }                           分组标题（仅展示，不可点）
+ *   { ic, label, act, active, danger }         叶子项：点击关闭菜单并执行
+ *   { ic, label, sub: [...] }                  分组项：悬停/点击展开二级面板（可继续嵌套）
+ * 二级面板在 #drop 内绝对定位（右展，空间不足自动左展/上移），主菜单关闭时一并收起。 */
+function dropItemHtml(it) {
+  if (it.sep) return '<div class="d-sep"></div>';
+  if (it.head) return '<div class="d-head">' + U.escHtml(T(it.head)) + '</div>';
+  const cls = 'ci' + (it.danger ? ' danger' : '') + (it.active ? ' mode-on' : '') + (it.sub ? ' d-sub-btn' : '');
+  const icon = '<i class="ic" data-ic="' + U.escHtml(it.ic || '') + '"></i>';
+  if (!it.sub) return '<button type="button" class="' + cls + '">' + icon + '<span class="d-lb">' + U.escHtml(T(it.label)) + '</span></button>';
+  return '<div class="d-item has-sub"><button type="button" class="' + cls + '" aria-haspopup="true" aria-expanded="false">' +
+    icon + '<span class="d-lb">' + U.escHtml(T(it.label)) + '</span><i class="ic d-caret" data-ic="caret"></i></button>' +
+    '<div class="d-sub hidden">' + it.sub.map(dropItemHtml).join('') + '</div></div>';
+}
+/* 收起单个分组（含它自己的嵌套） */
+function closeDropSub(item) {
+  item.classList.remove('open');
+  const btn = item.querySelector(':scope > .ci');
+  const panel = item.querySelector(':scope > .d-sub');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  if (panel) {
+    panel.classList.add('hidden');
+    panel.querySelectorAll('.d-item.has-sub.open').forEach(closeDropSub);
+  }
+}
+/* 展开分组：同级只留一个展开，右侧/下方空间不足时翻转 */
+function openDropSub(item) {
+  const box = item.parentElement;
+  if (!box) return;
+  for (const el of box.children) {
+    if (el !== item && el.classList.contains('has-sub')) closeDropSub(el);
+  }
+  const panel = item.querySelector(':scope > .d-sub');
+  const btn = item.querySelector(':scope > .ci');
+  if (!panel) return;
+  if (!item.classList.contains('open')) {
+    panel.classList.remove('hidden');
+    item.classList.add('open');
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+  }
+  panel.classList.remove('left');
+  if (panel.getBoundingClientRect().right > innerWidth - 4) panel.classList.add('left');
+  const ir = item.getBoundingClientRect();
+  const top = Math.max(4, Math.min(ir.top - 6, innerHeight - 4 - panel.offsetHeight));
+  panel.style.top = (top - ir.top) + 'px';
+}
+/* 点击分组：只负责展开（悬停已经展开时不再收起——鼠标点击前必然先悬停，
+ * 若做成开关会出现「刚移上去已展开、一点就收起」的反直觉行为）；收起走 Esc / 点外部。 */
+function showDropSub(item) {
+  if (item.querySelector(':scope > .d-sub')) openDropSub(item);
+}
+/* 收起整个下拉里所有展开的分组（保留主菜单） */
+function closeDropSubs(drop) {
+  drop.querySelectorAll('.d-item.has-sub.open').forEach(closeDropSub);
+}
+/* 按条目结构递归绑定：容器子元素与 items 一一对应（sep/head 也占一个元素） */
+function bindDropItems(container, items) {
+  const kids = Array.from(container.children);
+  items.forEach((it, i) => {
+    const el = kids[i];
+    if (!el) return;
+    if (it.sep || it.head) return;
+    if (it.sub) {
+      const btn = el.querySelector(':scope > .ci');
+      const panel = el.querySelector(':scope > .d-sub');
+      if (!btn || !panel) return;
+      btn.onclick = (e) => { e.stopPropagation(); showDropSub(el); };
+      el.addEventListener('mouseenter', () => openDropSub(el));
+      bindDropItems(panel, it.sub);
+    } else {
+      el.onclick = () => { closeDrop(); it.act && it.act(); };
+      // 悬停叶子项时收起同级已展开的其它分组（自身所属分组保持展开）
+      el.addEventListener('mouseenter', () => {
+        const drop = $('#drop');
+        for (const open of drop.querySelectorAll('.d-item.has-sub.open')) {
+          if (!open.contains(el)) closeDropSub(open);
+        }
+      });
+    }
+  });
+}
 function openDrop(anchor, items) {
   const drop = $('#drop');
   drop._anchor = anchor;
-  drop.innerHTML = items.map(it => {
-    if (it.sep) return '<div class="d-sep"></div>';
-    const active = it.active ? ' mode-on' : '';
-    return `<button class="ci${it.danger ? ' danger' : ''}${active}" data-k="${it.key || ''}"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(T(it.label))}</button>`;
-  }).join('');
+  drop.innerHTML = items.map(dropItemHtml).join('');
   U.fillIcons();
   drop.classList.remove('hidden');
   const r = anchor.getBoundingClientRect();
@@ -5880,18 +5959,16 @@ function openDrop(anchor, items) {
   drop.style.left = Math.max(4, Math.min(r.left, innerWidth - mw - 4)) + 'px';
   drop.style.top = (r.bottom + 4) + 'px';
   if (r.bottom + 4 + mh > innerHeight - 4) drop.style.top = Math.max(4, r.top - mh - 4) + 'px';
-  let bi = 0;
-  for (const it of items) {
-    if (it.sep || it.head) continue;
-    const b = drop.querySelectorAll('.ci')[bi++];
-    b.onclick = () => { closeDrop(); it.act && it.act(); };
-  }
+  bindDropItems(drop, items);
+  // 指针离开整个下拉（含二级面板）时收起分组，主菜单仍等点击外部/Esc 关闭
+  drop.onmouseleave = () => closeDropSubs(drop);
   anchor.classList.add('mode-on');
 }
 function closeDrop() {
   const drop = $('#drop');
   if (!drop.classList.contains('hidden')) {
     drop.classList.add('hidden');
+    closeDropSubs(drop);
     if (drop._anchor) drop._anchor.classList.remove('mode-on');
     drop._anchor = null;
   }
@@ -6927,7 +7004,7 @@ function openHelp() {
       <li><b>布局</b>：力导向 / 环形 / 分层 / 三层架构 / 拓扑分层 / 网格、适应视图、路径分析、网段分析、拓扑校验、单点故障分析</li>
       <li><b>显示</b>：链路标注、子网分组、清除故障标记、清除路径高亮</li>
       <li><b>导出</b>：CSV / Excel / 资产清单 / PDF / 图片(PNG/SVG) / 复制图片 / Visio / 设计报告 / 生成设备配置 / IP 规划清单（见⑧）</li>
-      <li><b>监控 / AI</b>（桌面版）：监控中心、设备监控、诊断工具箱、MAC/ARP 终端定位、网络服务、合规检查、AI 助手等，见⑪~⑯</li>
+      <li><b>监控 / AI</b>（桌面版）：监控 ▾ 一级是监控中心，其余按「监控视图 / 采集与告警 / 配置与日志 / 巡检与报表 / 诊断与协议 / 服务与凭据」分二级菜单（设备监控、诊断工具箱、MAC/ARP 终端定位、网络服务、合规检查等）；AI 助手见⑯</li>
     </ul>
     <h4>⑥ 设备、连线与接口总表</h4>
     <ul>
@@ -6980,30 +7057,30 @@ function openHelp() {
     <h4>⑫ 监控中心与告警（桌面版）</h4>
     <ul>
       <li><b>监控中心…</b>（监控 ▾ 或右键设备）：聚合全部设备状态与统计、<b>近 7 天在线率</b>；「事件时间线 / 配置备份 / 接口流量 / 性能」标签页切换，点击设备名或管理地址可筛选时间线，事件带设备徽标、告警显示匹配内容；接口流量页「<b>流量报表…</b>」按窗口聚合每接口收发均值 / 峰值与在线率（TopN 排序，可导出 CSV）；「导出巡检数据」一键导出指标与 HTTP / 证书历史 CSV</li>
-      <li><b>巡检报告（一键生成）…</b>（监控 ▾）：把拓扑概况、设备监控状态（含温度）、近 7 天可用性、配置备份概况、机柜占用与最近事件汇总成<b>自包含、可打印</b>的 HTML 报告——弹窗预览、系统打印（可另存 PDF）或下载 HTML；全部数据取自本机，不发往任何服务器</li>
+      <li><b>巡检报告（一键生成）…</b>（监控 ▾ 巡检与报表）：把拓扑概况、设备监控状态（含温度）、近 7 天可用性、配置备份概况、机柜占用与最近事件汇总成<b>自包含、可打印</b>的 HTML 报告——弹窗预览、系统打印（可另存 PDF）或下载 HTML；全部数据取自本机，不发往任何服务器</li>
       <li><b>监控日志…</b>：按设备 / 日期浏览，支持<b>全局跨文件搜索</b>，点击结果定位到对应行</li>
       <li><b>告警静默</b>：右键设备「告警静默 1 小时」快速静默；或在监控配置弹窗设每日<b>维护窗口</b>（支持跨午夜）——静默期内通知不弹、<b>事件时间线照常记录</b>，计划内重启不再刷屏</li>
-      <li><b>告警等级与提示音…</b>（监控 ▾）：告警分<b>提示 / 警告 / 严重 / 紧急</b>四级，不同等级发出不同音型（本机合成，无需音频文件）；可设<b>最低发声等级</b>与<b>音量</b>，也可<b>整体关闭提示音</b>（关闭后系统通知一并静音，事件照常记录）；每种事件的等级可逐项改写，事件时间线按等级标注</li>
+      <li><b>告警等级与提示音…</b>（监控 ▾ 采集与告警）：告警分<b>提示 / 警告 / 严重 / 紧急</b>四级，不同等级发出不同音型（本机合成，无需音频文件）；可设<b>最低发声等级</b>与<b>音量</b>，也可<b>整体关闭提示音</b>（关闭后系统通知一并静音，事件照常记录）；每种事件的等级可逐项改写，事件时间线按等级标注</li>
       <li><b>告警升级</b>：「告警等级与提示音…」可设<b>未确认升级重发</b>分钟数（默认 0 关闭）——未确认的警告及以上告警超时后自动升一级并重发通知（系统通知 + 提示音 + Webhook 同源），时间线入账「升级重发」条目；每条只升级一次，单轮封顶 5 条</li>
-      <li><b>监控历史回放…</b>（监控 ▾）：拖时间轴看过去 7 天任意时刻的<b>设备在线状态</b>——开启「监控状态叠加」后节点角标随回放着色（在线率 10 分钟采样，30 分钟回看窗口），故障复盘不用翻日志；进入前保存原状态，退出即还原实时监控</li>
-      <li><b>告警外发（Webhook）…</b>（监控 ▾）：把告警转发到<b>企业微信 / 钉钉 / 飞书群机器人</b>或自建接收端（通用 JSON），人不在电脑前手机也能收到；与系统通知同源同等级，可设<b>最低外发等级</b>与冷却间隔；钉钉/飞书加签密钥经系统加密落盘、界面只见「已设置」，弹窗内可「发送测试」验证连通</li>
-      <li><b>链路连通性监测…</b>（监控 ▾）：把<b>链路本身</b>当监测对象——「为全部连线生成」给每条连线建「两端接口 IP 互探」任务；「＋ 端到端路径监测」指定起止设备后<b>沿拓扑自动选路并逐段探测</b>，断在哪一段是测出来的。探测可选<b>本机</b>（零配置，本机逐跳 ICMP/TCP）或<b>设备侧</b>（从每段起点设备执行 ping，复用监控/凭据库凭据，各厂家语法已内置）；结论连通/中断/未知，中断与恢复记入事件时间线并按<b>分级告警</b>通知。画布连线按结论着色（连通绿 / 中断红虚线闪烁 / 未知灰，可关），侧栏设备带链路标记（方形小点），监控中心新增「<b>链路</b>」页签看逐段明细与断点。解析不出结论时保持原状态不误报；默认「首轮探测只建基线」，避免本机天生不可达的地址刷屏</li>
-      <li><b>拓扑状态叠加</b>（监控 ▾）：节点右上角状态圆点实时刷新（绿=在线 / 红=离线·告警 / 橙=连接中）</li>
-      <li><b>链路流量叠加</b>（监控 ▾）：连线中点徽标显示实时利用率（绿 &lt;50% / 橙 &lt;80% / 红 ≥80%，接口 DOWN 灰显）——数据取各设备「接口流量」SNMP 采集的收发速率，按跨厂家规范化接口名对齐连线两端，悬浮查看收发速率与采样时间</li>
+      <li><b>监控历史回放…</b>（监控 ▾ 监控视图）：拖时间轴看过去 7 天任意时刻的<b>设备在线状态</b>——开启「监控状态叠加」后节点角标随回放着色（在线率 10 分钟采样，30 分钟回看窗口），故障复盘不用翻日志；进入前保存原状态，退出即还原实时监控</li>
+      <li><b>告警外发（Webhook）…</b>（监控 ▾ 采集与告警）：把告警转发到<b>企业微信 / 钉钉 / 飞书群机器人</b>或自建接收端（通用 JSON），人不在电脑前手机也能收到；与系统通知同源同等级，可设<b>最低外发等级</b>与冷却间隔；钉钉/飞书加签密钥经系统加密落盘、界面只见「已设置」，弹窗内可「发送测试」验证连通</li>
+      <li><b>链路连通性监测…</b>（监控 ▾ 采集与告警）：把<b>链路本身</b>当监测对象——「为全部连线生成」给每条连线建「两端接口 IP 互探」任务；「＋ 端到端路径监测」指定起止设备后<b>沿拓扑自动选路并逐段探测</b>，断在哪一段是测出来的。探测可选<b>本机</b>（零配置，本机逐跳 ICMP/TCP）或<b>设备侧</b>（从每段起点设备执行 ping，复用监控/凭据库凭据，各厂家语法已内置）；结论连通/中断/未知，中断与恢复记入事件时间线并按<b>分级告警</b>通知。画布连线按结论着色（连通绿 / 中断红虚线闪烁 / 未知灰，可关），侧栏设备带链路标记（方形小点），监控中心新增「<b>链路</b>」页签看逐段明细与断点。解析不出结论时保持原状态不误报；默认「首轮探测只建基线」，避免本机天生不可达的地址刷屏</li>
+      <li><b>拓扑状态叠加</b>（监控 ▾ 监控视图）：节点右上角状态圆点实时刷新（绿=在线 / 红=离线·告警 / 橙=连接中）</li>
+      <li><b>链路流量叠加</b>（监控 ▾ 监控视图）：连线中点徽标显示实时利用率（绿 &lt;50% / 橙 &lt;80% / 红 ≥80%，接口 DOWN 灰显）——数据取各设备「接口流量」SNMP 采集的收发速率，按跨厂家规范化接口名对齐连线两端，悬浮查看收发速率与采样时间</li>
       <li><b>托盘常驻</b>：开启后关闭主窗口仅最小化到托盘，后台监控继续运行</li>
     </ul>
     <h4>⑬ 诊断与终端定位（桌面版）</h4>
     <ul>
-      <li><b>设备纳管预配…</b>（监控 ▾）：按厂家生成开通 SNMP v3 / Stelnet / LLDP 的命令清单——<b>非交互行</b>一键进「配置变更下发」安全闸门下发，<b>控制台交互行</b>（usm-user 建号弹口令提示）带口令说明复制到设备控制台执行；新设备上线第一天即可纳管</li>
-      <li><b>诊断工具箱…</b>（监控 ▾）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（v2c 团体字或 v3 USM 用户遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀；<b>失败诊断</b>：采集失败时自动附 ICMP 可达性判定与中文处置建议（区分超时 / 授权错误 / 视图权限））</li>
-      <li><b>三层邻居与协议视图…</b>（监控 ▾）：并发登录设备执行只读命令采集 <b>BGP / OSPF 邻接</b>（华为 <code>display ospf peer</code> / <code>display bgp peer</code>、思科 <code>show ip ospf neighbor</code> / <code>show ip bgp summary</code>），匹配到拓扑后在连线中点叠加状态徽标；异常清单区分<b>邻居状态异常</b>（未建立 / 未达 Full）、<b>拓扑外邻居</b>与<b>规划外邻接</b>，可导出 CSV、一键记入事件时间线。<b>持续监控</b>：按间隔自动轮询勾选设备，状态类异常<b>连续 2 轮才告警、连续 2 轮正常才恢复</b>（防邻接翻动刷屏），记入事件时间线并走分级通知；面板关闭后继续、随本机保存自动恢复，凭据走监控配置或凭据库档案</li>
-      <li><b>MAC/ARP 终端定位…</b>（监控 ▾）：输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置，可填备用账号），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮；接口名跨厂家规范化匹配（GE / Gi / GigabitEthernet 视为同一接口），下游未查询设备可一键续查</li>
-      <li><b>批量巡检…</b>（监控 ▾）：勾选设备并发执行<b>只读白名单命令</b>（自动尝试 / 华为 / H3C / 思科 / 锐捷 / Linux 命令集：版本 / 时钟 / CPU / 内存 / 接口概览等），凭据取自各设备监控配置、可填备用账号；结果汇总可按设备查看输出、一键复制、<b>导出 CSV</b>——白名单拦截配置类命令，不会修改设备</li>
-      <li><b>配置变更下发…</b>（监控 ▾）：把「生成设备配置」的产物或手写配置片段<b>安全地下发到设备</b>——整条链路「先看后做」：① 变更集解析 + 安全闸门（<b>重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝且不可覆盖</b>；删除与关闭类命令、可能中断管理连接的变更需分别勾选确认）② dry-run 预判（与最近一次配置备份逐行比对：新增 / 覆盖 / 删除 / 幂等，并提示「管理地址被改写」「关闭管理通道」等自断风险）③ 主进程在<b>一条会话内</b>完成：（可选）<b>前置命令</b>（部分设备如思科用户模式需先 <code>enable</code>）→ 强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停，兼容 FRR 的 <code>% [ZEBRA] Unknown command</code> 形式）→ 退出配置模式 → 可选保存配置 → 可选回采校验 ④ 失败时依前置备份<b>生成回滚变更单</b>（逐行求逆、逆序下发，回滚同样走 ①②③；<code>vtysh -c "…"</code> 这类外壳包装行列人工项）⑤ 每次下发落审计记录（<code>password</code>/<code>community</code> 等口令类内容<b>打码</b>后落盘），可回看 / 载入 / 导出 CSV</li>
+      <li><b>设备纳管预配…</b>（监控 ▾ 服务与凭据）：按厂家生成开通 SNMP v3 / Stelnet / LLDP 的命令清单——<b>非交互行</b>一键进「配置变更下发」安全闸门下发，<b>控制台交互行</b>（usm-user 建号弹口令提示）带口令说明复制到设备控制台执行；新设备上线第一天即可纳管</li>
+      <li><b>诊断工具箱…</b>（监控 ▾ 诊断与协议）：从本机发起 <b>Ping</b>（丢包 / 延迟统计，中英文输出通吃）、<b>路由跟踪</b>（tracert / traceroute / tracepath 自动回退）、<b>TCP 端口批量探测</b>（区间 + 常用预设）、<b>DNS 查询</b>（A 记录 + PTR 反查）、<b>网段存活扫描</b>（CIDR / 区间 / 单 IP 展开逐主机并发 Ping，附本机 ARP 解析的 MAC 与可选 PTR 反查）、<b>SNMP Walk</b>（v2c 团体字或 v3 USM 用户遍历任意 OID 子树，内置 system / ifDescr / ARP 表等常用前缀；<b>失败诊断</b>：采集失败时自动附 ICMP 可达性判定与中文处置建议（区分超时 / 授权错误 / 视图权限））</li>
+      <li><b>三层邻居与协议视图…</b>（监控 ▾ 诊断与协议）：并发登录设备执行只读命令采集 <b>BGP / OSPF 邻接</b>（华为 <code>display ospf peer</code> / <code>display bgp peer</code>、思科 <code>show ip ospf neighbor</code> / <code>show ip bgp summary</code>），匹配到拓扑后在连线中点叠加状态徽标；异常清单区分<b>邻居状态异常</b>（未建立 / 未达 Full）、<b>拓扑外邻居</b>与<b>规划外邻接</b>，可导出 CSV、一键记入事件时间线。<b>持续监控</b>：按间隔自动轮询勾选设备，状态类异常<b>连续 2 轮才告警、连续 2 轮正常才恢复</b>（防邻接翻动刷屏），记入事件时间线并走分级通知；面板关闭后继续、随本机保存自动恢复，凭据走监控配置或凭据库档案</li>
+      <li><b>MAC/ARP 终端定位…</b>（监控 ▾ 诊断与协议）：输入终端的 IP 或 MAC，并发登录范围内设备采集 ARP / MAC 地址表（凭据取自各设备监控配置，可填备用账号），<b>沿拓扑逐跳追踪到接入端口</b>并画布高亮；接口名跨厂家规范化匹配（GE / Gi / GigabitEthernet 视为同一接口），下游未查询设备可一键续查</li>
+      <li><b>批量巡检…</b>（监控 ▾ 巡检与报表）：勾选设备并发执行<b>只读白名单命令</b>（自动尝试 / 华为 / H3C / 思科 / 锐捷 / Linux 命令集：版本 / 时钟 / CPU / 内存 / 接口概览等），凭据取自各设备监控配置、可填备用账号；结果汇总可按设备查看输出、一键复制、<b>导出 CSV</b>——白名单拦截配置类命令，不会修改设备</li>
+      <li><b>配置变更下发…</b>（监控 ▾ 配置与日志）：把「生成设备配置」的产物或手写配置片段<b>安全地下发到设备</b>——整条链路「先看后做」：① 变更集解析 + 安全闸门（<b>重启 / 擦除 / 格式化 / 恢复出厂 / 删文件类命令一律拒绝且不可覆盖</b>；删除与关闭类命令、可能中断管理连接的变更需分别勾选确认）② dry-run 预判（与最近一次配置备份逐行比对：新增 / 覆盖 / 删除 / 幂等，并提示「管理地址被改写」「关闭管理通道」等自断风险）③ 主进程在<b>一条会话内</b>完成：（可选）<b>前置命令</b>（部分设备如思科用户模式需先 <code>enable</code>）→ 强制前置备份（拿不到基线即中止）→ 逐行下发（设备报错即停，兼容 FRR 的 <code>% [ZEBRA] Unknown command</code> 形式）→ 退出配置模式 → 可选保存配置 → 可选回采校验 ④ 失败时依前置备份<b>生成回滚变更单</b>（逐行求逆、逆序下发，回滚同样走 ①②③；<code>vtysh -c "…"</code> 这类外壳包装行列人工项）⑤ 每次下发落审计记录（<code>password</code>/<code>community</code> 等口令类内容<b>打码</b>后落盘），可回看 / 载入 / 导出 CSV</li>
       <li><b>配置备份一键恢复</b>（备份中心「恢复此备份…」）：勾选一份历史备份，与最近一份备份自动生成<b>恢复变更单</b>——消失的配置行取反删除（<code>undo</code>/<code>no</code>）、缺失的行回填、同键不同值直接覆盖，块上下文自动补齐；思科 interface、banner 自由文本这类无法可靠求逆的行列「需人工」。确认后进入「配置变更下发」走同一套 dry-run → 强制前置备份 → 逐行下发的安全闸门，失败同样可生成回滚</li>
     </ul>
     <h4>⑭ 网络服务：TFTP / FTP / Syslog / Trap / NetFlow（桌面版）</h4>
-    <p>「监控 ▾ 网络服务…」把本机变成一台内网运维服务器：</p>
+    <p>「监控 ▾ 服务与凭据 ▸ 网络服务…」把本机变成一台内网运维服务器：</p>
     <ul>
       <li><b>TFTP / FTP 服务器</b>：接收设备主动推送的配置文件（思科 <b>copy running-config tftp://本机地址/文件名</b>、华为/H3C <b>tftp 本机地址 put vrpcfg.zip</b>；FTP 需在面板配置账号），文件<b>按来源 IP 分目录</b>落盘、收到弹通知，可查看 / 删除并<b>一键导入配置备份库</b>（按来源 IP 自动匹配拓扑设备，进入备份 / 对比 / 合规体系）</li>
       <li><b>Syslog 服务器</b>（UDP 可选 TCP）：收集设备日志（<b>info-center loghost</b> / <b>logging host</b> 指向本机），按来源主机 / 日期归档，实时滚动、级别与来源过滤、关键字检索历史；可配置<b>日志告警</b>（级别阈值如 err 及以上、或自定义关键字），命中弹系统通知并记入事件时间线（受设备静默 / 维护窗口约束，同主机同规则 5 分钟冷却防刷屏），命中的日志行实时视图红色高亮</li>
@@ -7013,7 +7090,7 @@ function openHelp() {
     </ul>
     <h4>⑮ 配置合规基线检查（桌面版）</h4>
     <ul>
-      <li><b>入口</b>：「监控 ▾ 配置合规检查…」对配置备份库各地址的<b>最新配置</b>执行本地规则扫描（纯本机，不上传）</li>
+      <li><b>入口</b>：「监控 ▾ 配置与日志 ▸ 配置合规检查…」对配置备份库各地址的<b>最新配置</b>执行本地规则扫描（纯本机，不上传）</li>
       <li><b>模板</b>：内置 5 套基线——等保通用（11 条，推荐）/ 最小基线 / 华为 VRP / 思科 IOS / 接入层交换机；当前规则可<b>另存为模板</b>多套自定义（同名覆盖、可删除）</li>
       <li><b>规则</b>：按「时间同步 / 日志审计 / 认证与授权 / 服务与协议 / 路由与网关」五组，逐行正则（必须存在 / 禁止出现）；禁止类自动排除 undo / no 关闭命令与 stelnet 误命中</li>
       <li><b>结果</b>：违规定位到具体配置行，一键导出报告（Excel / CSV）；监控「自动合规」在每次备份后按当前规则集自动扫描</li>
@@ -7316,53 +7393,69 @@ function wire() {
   ]);
   $('#btnDropMonitor').onclick = (e) => openDrop(e.currentTarget, [
     { ic: 'grid', label: '监控中心…', act: () => openMonitorCenter() },
-    { ic: 'clock', label: '监控历史回放…', act: () => openUptimeReplay() },
-    { ic: 'pulse', label: (monOverlayOn() ? '✓ ' : '') + '监控状态叠加（节点角标）', act: () => {
-      const on = !monOverlayOn();
-      try { localStorage.setItem(MON_OVERLAY_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
-      if (on) seedMonOverlay(); else syncMonOverlay();
-      toast(on ? '已开启监控状态叠加：节点右上角显示状态圆点' : '已关闭监控状态叠加');
-    } },
-    { ic: 'pulse', label: (linkFlowOn() ? '✓ ' : '') + '链路流量叠加（连线徽标）', act: () => {
-      const on = !linkFlowOn();
-      try { localStorage.setItem(LINK_FLOW_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
-      if (on) seedLinkFlow(); else syncLinkFlow();
-      toast(on ? '已开启链路流量叠加：连线中点显示实时利用率（需设备开启「接口流量」SNMP 采集）' : '已关闭链路流量叠加');
-    } },
-    { ic: 'archive', label: '配置合规检查…', act: () => openComplianceCheck() },
-    { ic: 'pulse', label: '设备监控（静默采集）…', act: () => {
-      const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds && renderer.selIds.size ? [...renderer.selIds][0] : '');
-      if (selId) openMonitorConfig(selId); else toast('请先选中一台设备，或右键设备进入');
-    } },
-    { ic: 'bell', label: '告警等级与提示音…', act: openAlertSoundConfig },
-    { ic: 'bell', label: '告警外发（Webhook）…', act: openWebhookConfig },
-    { ic: 'link', label: '链路连通性监测…', act: openLinkMonitor },
-    { ic: 'link', label: (linkOverlayOn() ? '✓ ' : '') + '链路状态叠加（连线着色）', act: () => {
-      const on = !linkOverlayOn();
-      try { localStorage.setItem(LINK_OVERLAY_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
-      syncLinkMonOverlay();
-      toast(on ? '已开启链路状态叠加：连通绿 / 中断红（虚线闪烁）/ 未知灰' : '已关闭链路状态叠加');
-    } },
-    { ic: 'shield', label: '凭据库（设备访问凭据集中维护）…', act: () => openCredManager() },
-    { ic: 'shield', label: '设备纳管预配…', act: () => openOnboardWizard() },
     { sep: true },
-    { ic: 'doc', label: '监控日志…', act: () => {
-      const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
-      openMonitorLogs(selId || '');
-    } },
-    { ic: 'archive', label: '配置备份…', act: () => {
-      const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
-      openConfigBackups(selId || '');
-    } },
-    { ic: 'server', label: '网络服务（TFTP / FTP / Syslog / Trap）…', act: openNetServices },
-    { ic: 'clock', label: '诊断工具箱（Ping / 路由跟踪 / 端口 / 网段 / SNMP）…', act: () => openDiagTools() },
-    { ic: 'grid', label: '二层拓扑推断（SNMP 转发表）…', act: () => openL2Infer() },
-    { ic: 'pulse', label: '可用性报表（SLA）…', act: () => openSlaReport() },
-    { ic: 'doc', label: '巡检报告（一键生成）…', act: () => openInspectionReport() },
-    { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
-    { ic: 'grid', label: '批量巡检（只读命令）…', act: () => openBatchInspect() },
-    { ic: 'terminal', label: '配置变更下发…', act: () => openConfigDeploy() },
-    { ic: 'pulse', label: '三层邻居与协议视图（BGP / OSPF）…', act: () => openProtoNeighbors() },
+    { ic: 'layers', label: '监控视图', sub: [
+      { ic: 'pulse', label: (monOverlayOn() ? '✓ ' : '') + '监控状态叠加（节点角标）', act: () => {
+        const on = !monOverlayOn();
+        try { localStorage.setItem(MON_OVERLAY_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+        if (on) seedMonOverlay(); else syncMonOverlay();
+        toast(on ? '已开启监控状态叠加：节点右上角显示状态圆点' : '已关闭监控状态叠加');
+      } },
+      { ic: 'pulse', label: (linkFlowOn() ? '✓ ' : '') + '链路流量叠加（连线徽标）', act: () => {
+        const on = !linkFlowOn();
+        try { localStorage.setItem(LINK_FLOW_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+        if (on) seedLinkFlow(); else syncLinkFlow();
+        toast(on ? '已开启链路流量叠加：连线中点显示实时利用率（需设备开启「接口流量」SNMP 采集）' : '已关闭链路流量叠加');
+      } },
+      { ic: 'link', label: (linkOverlayOn() ? '✓ ' : '') + '链路状态叠加（连线着色）', act: () => {
+        const on = !linkOverlayOn();
+        try { localStorage.setItem(LINK_OVERLAY_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+        syncLinkMonOverlay();
+        toast(on ? '已开启链路状态叠加：连通绿 / 中断红（虚线闪烁）/ 未知灰' : '已关闭链路状态叠加');
+      } },
+      { ic: 'clock', label: '监控历史回放…', act: () => openUptimeReplay() }
+    ] },
+    { ic: 'pulse', label: '采集与告警', sub: [
+      { ic: 'pulse', label: '设备监控（静默采集）…', act: () => {
+        const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : (renderer.selIds && renderer.selIds.size ? [...renderer.selIds][0] : '');
+        if (selId) openMonitorConfig(selId); else toast('请先选中一台设备，或右键设备进入');
+      } },
+      { ic: 'link', label: '链路连通性监测…', act: openLinkMonitor },
+      { sep: true },
+      { ic: 'bell', label: '告警等级与提示音…', act: openAlertSoundConfig },
+      { ic: 'bell', label: '告警外发（Webhook）…', act: openWebhookConfig }
+    ] },
+    { ic: 'archive', label: '配置与日志', sub: [
+      { ic: 'doc', label: '监控日志…', act: () => {
+        const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
+        openMonitorLogs(selId || '');
+      } },
+      { ic: 'archive', label: '配置备份…', act: () => {
+        const selId = state.sel && state.sel.kind === 'node' ? state.sel.id : '';
+        openConfigBackups(selId || '');
+      } },
+      { sep: true },
+      { ic: 'archive', label: '配置合规检查…', act: () => openComplianceCheck() },
+      { ic: 'terminal', label: '配置变更下发…', act: () => openConfigDeploy() }
+    ] },
+    { ic: 'doc', label: '巡检与报表', sub: [
+      { ic: 'doc', label: '巡检报告（一键生成）…', act: () => openInspectionReport() },
+      { ic: 'pulse', label: '可用性报表（SLA）…', act: () => openSlaReport() },
+      { ic: 'grid', label: '批量巡检（只读命令）…', act: () => openBatchInspect() }
+    ] },
+    { ic: 'terminal', label: '诊断与协议', sub: [
+      { ic: 'clock', label: '诊断工具箱（Ping / 路由 / 端口 / SNMP）…', act: () => openDiagTools() },
+      { ic: 'search', label: 'MAC/ARP 终端定位…', act: () => openMacTrace() },
+      { sep: true },
+      { ic: 'grid', label: '二层拓扑推断（SNMP 转发表）…', act: () => openL2Infer() },
+      { ic: 'pulse', label: '三层邻居与协议视图（BGP / OSPF）…', act: () => openProtoNeighbors() }
+    ] },
+    { ic: 'server', label: '服务与凭据', sub: [
+      { ic: 'server', label: '网络服务（TFTP / FTP / Syslog / Trap）…', act: openNetServices },
+      { sep: true },
+      { ic: 'shield', label: '凭据库…', act: () => openCredManager() },
+      { ic: 'shield', label: '设备纳管预配…', act: () => openOnboardWizard() }
+    ] },
     { sep: true },
     { ic: 'tray', label: '托盘常驻（关闭窗口后台继续监控）', act: async () => {
       if (!window.topoMonitor || !window.topoMonitor.setTray) { toast('托盘常驻需要桌面版软件'); return; }
@@ -7651,7 +7744,7 @@ function wire() {
   // 供 __topo 顶层导出桥接（函数为 wire 作用域私有，顶层无法直接引用）
   globalThis.__monOverlay = { sync: () => syncMonOverlay(), seed: () => seedMonOverlay() };
 
-  /* ---- 监控历史回放（监控 ▾）：拖时间轴看过去 7 天任意时刻的设备在线状态着色 ----
+  /* ---- 监控历史回放（监控 ▾ 监控视图）：拖时间轴看过去 7 天任意时刻的设备在线状态着色 ----
    * 数据 = 在线率 10 分钟明细采样（UptimeStore，键 deviceId@host）。回放把该时刻的状态写入
    * state.monitorStatus 后走既有「监控状态叠加」渲染；进入前保存原状态、退出时还原——
    * 不写盘、不碰实时监控任务。链路历史不入画布（v1，链路事件在时间线可查）。 */
@@ -7885,7 +7978,7 @@ function wire() {
   // 供 __topo 顶层导出桥接（e2e/调试用）
   globalThis.__linkFlow = { sync: () => syncLinkFlow(), seed: () => seedLinkFlow() };
 
-  /* ---- 拓扑画布三层协议视图叠加（监控 ▾ 三层邻居与协议视图）：
+  /* ---- 拓扑画布三层协议视图叠加（监控 ▾ 诊断与协议 ▸ 三层邻居与协议视图）：
      在已匹配到连线的邻接上画徽标（BGP AS65002 Established / OSPF Full），异常红闪；
      数据由 openProtoNeighbors 采集后经 __protoView.set 注入，与「路径高亮」共用同一套高亮 ---- */
   let protoViewData = null;
@@ -8935,7 +9028,7 @@ function openWebhookConfig() {
   };
 }
 
-/* ================= 端到端链路连通性监测（监控 ▾ 链路连通性监测…） =================
+/* ================= 端到端链路连通性监测（监控 ▾ 采集与告警 ▸ 链路连通性监测…） =================
  * 拓扑 → 任务（逐段与目标地址）由 js/link-path.js 的公用逻辑算好，下发主进程后按间隔探测
  * （本机 ICMP/TCP，或从段起点设备执行 ping），结果经 link:result / link:state 回推，
  * 逐段明细与状态翻转事件都在面板与监控中心「链路」页签里呈现。
@@ -9051,7 +9144,7 @@ function linkBadgeHtml(nodeId) {
   }
   if (!total) return '';
   return down
-    ? '<span class="lk-badge down" title="端到端链路监测：' + down + '/' + total + ' 条中断（监控 ▾ 链路连通性监测…）"></span>'
+    ? '<span class="lk-badge down" title="端到端链路监测：' + down + '/' + total + ' 条中断（监控 ▾ 采集与告警 ▸ 链路连通性监测…）"></span>'
     : '<span class="lk-badge ok" title="端到端链路监测：' + total + ' 条全部连通"></span>';
 }
 /** 拉取主进程运行态并刷新画布着色 / 面板 / 监控中心 */
@@ -9252,7 +9345,7 @@ function openLinkPathDialog() {
     t.credMode = ov.querySelector('#lkCred') && ov.querySelector('#lkCred').value === 'cred' ? 'cred' : 'monitor';
     if (t.mode === 'device' && t.credMode === 'cred') {
       const cid = String(ov.querySelector('#lkCredId').value || '');
-      if (!cid) { toast('请先选择统一凭据库条目（或在「监控 ▾ 凭据库…」中新增）'); return; }
+      if (!cid) { toast('请先选择统一凭据库条目（或在「监控 ▾ 服务与凭据 ▸ 凭据库…」中新增）'); return; }
       t.credId = cid;
     }
     linkTasks().push(t);
@@ -9416,7 +9509,7 @@ function openLinkMonitor() {
       + '<span class="lm-st bad">中断 <b>' + st.down + '</b></span>'
       + '<span class="lm-st unk">未知/未探测 <b>' + st.unknown + '</b></span>'
       + '<span class="lm-st off">未启用 <b>' + st.off + '</b></span>';
-    ov.querySelector('#lmHint').textContent = linkOverlayOn() ? '画布连线已按监测结论着色' : '（画布着色已关闭：监控 ▾ 链路状态叠加）';
+    ov.querySelector('#lmHint').textContent = linkOverlayOn() ? '画布连线已按监测结论着色' : '（画布着色已关闭：监控 ▾ 监控视图 ▸ 链路状态叠加）';
     if (!tasks.length) {
       listEl.innerHTML = '<div class="lm-empty">暂无链路监测任务：点「为全部连线生成」批量建立，或用「＋ 端到端路径监测」指定起止设备。</div>';
       return;
@@ -11700,7 +11793,7 @@ function openMonitorCenter() {
     const badge = ov.querySelector('#mcLinkBad');
     if (badge) { badge.hidden = !down; badge.textContent = down ? String(down) : ''; }
     if (!tasks.length) {
-      linksEl.innerHTML = '<div class="mc-empty">暂无链路监测任务：在「监控 ▾ 链路连通性监测…」里为全部连线批量生成，或建立端到端路径监测</div>';
+      linksEl.innerHTML = '<div class="mc-empty">暂无链路监测任务：在「监控 ▾ 采集与告警 ▸ 链路连通性监测…」里为全部连线批量生成，或建立端到端路径监测</div>';
       return;
     }
     linksEl.innerHTML = '<div class="mc-lk-sum">任务 <b>' + tasks.length + '</b> · 连通 <b class="t-ok">' + up
@@ -11844,7 +11937,7 @@ function openMonitorCenter() {
     }
     el.innerHTML = '<div class="mc-if-devs">' + chips + '</div>'
       + '<div class="mc-if-sub">主机 ' + U.escHtml(cur.host) + ' · CPU/内存为设备视角（≥75% 橙 / ≥90% 红），sysUpTime 骤减判定为设备重启并记入事件时间线；SSH 指标与 HTTP 探测来自「设备监控」勾选项，证书剩余天数低于阈值时告警'
-      + (lastJob.perf || (last && (last.cpu != null || last.mem != null)) ? '' : (lastJob.env ? ' · 未启用 CPU/内存采集（环境温度已启用）' : ' · <b>该设备未启用 CPU/内存采集</b>：在「监控 ▾ 设备监控（静默采集）」里勾选「CPU/内存」并填 OID（可选厂家预设）')) + '</div>'
+      + (lastJob.perf || (last && (last.cpu != null || last.mem != null)) ? '' : (lastJob.env ? ' · 未启用 CPU/内存采集（环境温度已启用）' : ' · <b>该设备未启用 CPU/内存采集</b>：在「监控 ▾ 采集与告警 ▸ 设备监控（静默采集）」里勾选「CPU/内存」并填 OID（可选厂家预设）')) + '</div>'
       + '<div class="mc-if-body">' + rowsHtml + '</div>';
     el.querySelectorAll('.mc-ifdev').forEach(ch => {
       ch.onclick = () => { curPerfDev = ch.dataset.pkey; perfCache.delete(curPerfDev); metricCache.delete(curPerfDev); httpCache.delete(curPerfDev); load(); };
@@ -11933,7 +12026,7 @@ function openMonitorCenter() {
         // 告警等级徽标（提示级不标：时间线里绝大多数是提示，标出来只剩噪声）
         const evLv = (e.level && alertLevelRank(e.level) >= 1) ? e.level : '';
         const lvTag = evLv
-          ? '<span class="mc-tag as-lv lvl-' + U.escHtml(evLv) + '" title="告警等级：' + U.escHtml(alertLevelName(evLv)) + '（可在「监控 ▾ 告警等级与提示音…」中逐项调整）">' + U.escHtml(alertLevelName(evLv)) + '</span>'
+          ? '<span class="mc-tag as-lv lvl-' + U.escHtml(evLv) + '" title="告警等级：' + U.escHtml(alertLevelName(evLv)) + '（可在「监控 ▾ 采集与告警 ▸ 告警等级与提示音…」中逐项调整）">' + U.escHtml(alertLevelName(evLv)) + '</span>'
           : '';
         // 确认状态：未确认的条目左侧加竖条提示，已确认显示确认时刻 + 备注（值班交接一眼看出谁看过）
         const acked = !!e.ackAt;
@@ -13130,7 +13223,7 @@ function openNetServices() {
     }).join('');
     v.innerHTML = '<div class="modal" role="dialog" style="width:460px">' +
       '<h3>导入配置备份库</h3>' +
-      '<div class="m-sub">把 ' + U.escHtml(f.name) + '（来源 ' + U.escHtml(f.ip || '—') + '）保存为设备的配置备份：可在「监控 ▾ 配置备份…」浏览 / 对比 / 合规检查。</div>' +
+      '<div class="m-sub">把 ' + U.escHtml(f.name) + '（来源 ' + U.escHtml(f.ip || '—') + '）保存为设备的配置备份：可在「监控 ▾ 配置与日志 ▸ 配置备份…」浏览 / 对比 / 合规检查。</div>' +
       '<div class="frow"><label>设备</label><select id="nsvImpDev">' + (opts || '<option value="">（画布中没有设备）</option>') + '</select></div>' +
       '<div class="frow"><label>归属地址</label><input type="text" id="nsvImpHost" value="' + U.escHtml(f.ip || '') + '"/></div>' +
       '<div class="m-actions"><button type="button" class="tb" data-act="cancel">取消</button><button type="button" class="tb primary" data-act="ok">导入</button></div></div>';
