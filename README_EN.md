@@ -214,6 +214,8 @@ You can also open `index.html` in a browser (Chrome / Edge) or serve it from any
 
 **UI language**: the 🌐 (Language / 语言) button on the toolbar switches between **Chinese / English** — menus, canvas context menu, common buttons and prompts translate immediately; the choice is remembered locally. **Language packs** (JSON dictionaries) can be exported / imported to fix translations or contribute new languages, with one-click restore to the built-in dictionary; user data (device names, notes) is always shown verbatim.
 
+**Keyboard & layout**: the toolbar 🔍 or **Ctrl+K** opens the command palette — type a feature, device, interface or IP and run it without memorising menu paths. **View ▾ UI Scale** offers 90%–150% native zoom (desktop app, remembered locally). At the 1024 minimum width the device panel collapses and the brand shrinks to the logo. Form dialogs pin their header/footer, cycle Tab inside, close on Esc and return focus to the opener; required-field errors appear under the field.
+
 Three steps to a diagram:
 
 1. "File ▾ Import Spreadsheet…" picks a link spreadsheet, or "File ▾ Import from Neighbor Table…" pastes device neighbor output, or "New Blank Canvas" draws from scratch
@@ -349,6 +351,7 @@ Without headers, columns are read as "deviceA, deviceB, interfaceA, IP A, interf
 | Shortcut | Action | Where |
 | --- | --- | --- |
 | Ctrl+F | Canvas quick search / terminal search | Canvas / Web Shell |
+| Ctrl+K | Command palette (features / devices / links) | Global |
 | Ctrl+P | Quick command palette (buttons / bookmarks / history) | Web Shell |
 | Ctrl+Z / Ctrl+Y | Undo / redo | Canvas |
 | Delete | Delete selection (devices/links/batch) | Canvas |

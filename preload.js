@@ -55,6 +55,13 @@ contextBridge.exposeInMainWorld('topoWeb', {
   allowCert: (payload) => ipcRenderer.invoke('web:cert-allow', payload)
 });
 
+/* 界面缩放（显示 ▾ 界面缩放）：桌面版由主进程执行 webContents.setZoomFactor，
+ * 保证弹窗、固定遮罩与画布坐标一致；浏览器打开时渲染层退回 CSS zoom。 */
+contextBridge.exposeInMainWorld('topoUI', {
+  setZoom: (factor) => ipcRenderer.invoke('ui:set-zoom', factor),
+  getZoom: () => ipcRenderer.invoke('ui:get-zoom')
+});
+
 contextBridge.exposeInMainWorld('topoBackup', {
   save: (payload) => ipcRenderer.invoke('backup:save', payload),
   list: () => ipcRenderer.invoke('backup:list'),

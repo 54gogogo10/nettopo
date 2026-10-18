@@ -22,6 +22,7 @@ const state = {
   undoStack: [],
   redoStack: [],
   theme: lsGet('nettopo.theme', 'light'),
+  uiZoom: Math.min(1.5, Math.max(0.8, Number(lsGet('nettopo.uiZoom', '1')) || 1)),
   search: '',
   tab: 'nodes',
   blank: false,   // 用户主动新建空白画布（无表格也能直接画）
@@ -188,6 +189,171 @@ function qsJump(i) {
 function quickSearchNext(dir) {
   if (!qsMatches.length) return;
   qsJump(((qsIdx < 0 ? (dir > 0 ? -1 : 0) : qsIdx) + dir + qsMatches.length) % qsMatches.length);
+}
+
+/* ================= 全局命令面板（Ctrl+K） =================
+ * 把工具栏菜单动作与拓扑实体（设备/连线）放进同一个检索框：
+ * 输入即筛、↑↓ 选择、↵ 执行、Esc 关闭。菜单仍是单一事实来源（MENU_DEFS）。 */
+let commandPaletteApi = null;
+function openCommandPalette() { if (commandPaletteApi) commandPaletteApi.open(); }
+function initCommandPalette(menuDefs) {
+  let ov = null, input = null, listEl = null, rows = [], idx = -1;
+  const label = (s) => U.escHtml(T(s));
+  const flatten = () => {
+    const out = [];
+    const walk = (arr, menuLabel, groupLabel) => {
+      for (const it of arr || []) {
+        if (!it || it.sep || it.head) continue;
+        if (it.sub) { walk(it.sub, menuLabel, it.label); continue; }
+        if (typeof it.act !== 'function' || it.danger) continue;
+        const active = !!it.active || /^\s*✓/.test(it.label);
+        const text = T(it.label).replace(/^\s*✓\s*/, '');
+        out.push({
+          lb: text + (active ? ' ✓' : ''),
+          grp: [T(menuLabel), groupLabel ? T(groupLabel) : ''].filter(Boolean).join(' › '),
+          ic: it.ic || 'grid',
+          act: it.act
+        });
+      }
+    };
+    for (const m of menuDefs) walk(m.items(), m.label, '');
+    return out;
+  };
+  const extras = () => [
+    { lb: T('撤销'), grp: T('通用'), ic: 'undo', act: undo, kw: 'undo ctrl+z' },
+    { lb: T('重做'), grp: T('通用'), ic: 'redo', act: redo, kw: 'redo ctrl+y' },
+    { lb: T('切换明暗主题'), grp: T('通用'), ic: 'moon', act: toggleTheme },
+    { lb: T('界面语言…'), grp: T('通用'), ic: 'web', act: () => $('#btnLang').click() },
+    { lb: T('使用帮助'), grp: T('通用'), ic: 'help', act: openHelp },
+    { lb: T('新建图纸页'), grp: T('通用'), ic: 'fileplus', act: addSheet },
+    { lb: T('画布快速搜索（Ctrl+F）'), grp: T('通用'), ic: 'search', act: openQuickSearch },
+    { lb: T('筛选设备面板…'), grp: T('通用'), ic: 'search', act: () => { const i = $('#searchInput'); if (i) { i.focus(); i.select(); } } },
+    { lb: T('收起/展开设备面板'), grp: T('通用'), ic: 'panel', act: togglePanel }
+  ];
+  const allCommands = () => {
+    const list = extras();
+    for (const c of flatten()) {
+      if (!list.some(x => x.lb === c.lb && x.grp === c.grp)) list.push(c);
+    }
+    return list;
+  };
+  const score = (c, q) => {
+    if (!q) return 1;
+    const lb = c.lb.toLowerCase(), grp = c.grp.toLowerCase();
+    if (lb.startsWith(q)) return 100;
+    if (lb.includes(q)) return 60;
+    if (grp.includes(q)) return 30;
+    return 0;
+  };
+  const topologyRows = (q) => {
+    if (!q) return [];
+    return U.searchTopology(state.nodes, state.links, q, 6).map(m => ({
+      lb: m.title || '', grp: T(m.kind === 'node' ? '设备' : '连线') + (m.sub ? ' · ' + m.sub : ''),
+      ic: m.kind === 'node' ? 'node' : 'link',
+      act: () => select(m.kind, m.id, { center: true })
+    }));
+  };
+  const close = () => {
+    if (!ov) return;
+    const el = ov; ov = null; input = null; listEl = null; rows = []; idx = -1;
+    el.remove();
+  };
+  const run = (i) => {
+    const it = rows[i];
+    if (!it) return;
+    close();
+    try { it.act(); } catch (e) { toast('执行失败：' + ((e && e.message) || e), 'error'); }
+  };
+  const updateSel = () => {
+    if (!listEl) return;
+    listEl.querySelectorAll('.cp-row.sel').forEach(el => el.classList.remove('sel'));
+    if (idx < 0 || !rows[idx]) { input.removeAttribute('aria-activedescendant'); return; }
+    const el = listEl.querySelector('[data-i="' + idx + '"]');
+    if (!el) return;
+    listEl.querySelectorAll('.cp-row').forEach(x => x.setAttribute('aria-selected', x === el ? 'true' : 'false'));
+    el.classList.add('sel');
+    input.setAttribute('aria-activedescendant', el.id);
+    el.scrollIntoView({ block: 'nearest' });
+  };
+  const render = () => {
+    if (!listEl) return;
+    const q = input.value.trim().toLowerCase();
+    let cmds = allCommands().filter(c => score(c, q) > 0);
+    if (q) cmds.sort((a, b) => score(b, q) - score(a, q) || a.lb.length - b.lb.length);
+    cmds = cmds.slice(0, 50);
+    const devs = topologyRows(q);
+    rows = cmds.concat(devs);
+    idx = rows.length ? 0 : -1;
+    if (!rows.length) {
+      listEl.innerHTML = '<div class="cp-empty">' + T('没有匹配的功能或设备') + '</div>';
+      input.removeAttribute('aria-activedescendant');
+      return;
+    }
+    let html = '', n = 0;
+    if (cmds.length) {
+      html += '<div class="cp-sec">' + label('功能') + '</div>';
+      html += cmds.map(c => {
+        const i = n++;
+        return '<div class="cp-row" id="cpOpt' + i + '" data-i="' + i + '" role="option" aria-selected="false">' +
+          '<i class="ic" data-ic="' + c.ic + '"></i><span class="cp-lb">' + U.escHtml(c.lb) + '</span><span class="cp-grp">' + U.escHtml(c.grp) + '</span></div>';
+      }).join('');
+    }
+    if (devs.length) {
+      html += '<div class="cp-sec">' + label('设备与连线') + '</div>';
+      html += devs.map(c => {
+        const i = n++;
+        return '<div class="cp-row" id="cpOpt' + i + '" data-i="' + i + '" role="option" aria-selected="false">' +
+          '<i class="ic" data-ic="' + c.ic + '"></i><span class="cp-lb">' + U.escHtml(c.lb) + '</span><span class="cp-grp">' + U.escHtml(c.grp) + '</span></div>';
+      }).join('');
+    }
+    listEl.innerHTML = html;
+    U.fillIcons();
+    updateSel();
+  };
+  const open = () => {
+    if (ov) return;
+    const root = $('#modalRoot');
+    ov = document.createElement('div');
+    ov.className = 'overlay cp-overlay';
+    ov.innerHTML = `
+      <div class="cmd-palette" role="dialog" aria-label="${U.escHtml(T('命令面板'))}">
+        <div class="cp-head">
+          <i class="ic" data-ic="search"></i>
+          <input id="cpInput" type="text" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="cpList" aria-autocomplete="list" placeholder="${U.escHtml(T('搜索功能、设备、接口、IP…'))}"/>
+          <button type="button" class="cp-close" id="cpClose" title="${U.escHtml(T('关闭'))}"><i class="ic" data-ic="close"></i></button>
+        </div>
+        <div class="cp-list" id="cpList" role="listbox" aria-label="${U.escHtml(T('命令结果'))}"></div>
+        <div class="cp-foot"><span>${U.escHtml(T('↑↓ 选择 · ↵ 执行 · Esc 关闭'))}</span><span>Ctrl+K</span></div>
+      </div>`;
+    root.appendChild(ov);
+    input = ov.querySelector('#cpInput');
+    listEl = ov.querySelector('#cpList');
+    U.fillIcons();
+    input.addEventListener('input', render);
+    input.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return; // 中文输入法组合中，回车用于上屏而不是执行
+      if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); if (rows.length) { idx = (idx + 1) % rows.length; updateSel(); } }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); if (rows.length) { idx = (idx - 1 + rows.length) % rows.length; updateSel(); } }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); run(idx); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    });
+    listEl.addEventListener('mousemove', (e) => {
+      const row = e.target.closest && e.target.closest('.cp-row');
+      if (!row) return;
+      const i = Number(row.dataset.i);
+      if (i !== idx) { idx = i; updateSel(); }
+    });
+    listEl.addEventListener('click', (e) => {
+      const row = e.target.closest && e.target.closest('.cp-row');
+      if (row) run(Number(row.dataset.i));
+    });
+    ov.querySelector('#cpClose').onclick = close;
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    render();
+    input.focus();
+  };
+  commandPaletteApi = { open, close };
 }
 
 /* ================= 撤销 / 重做 ================= */
@@ -598,7 +764,7 @@ async function openCredManager() {
       <div class="m-actions">
         <span id="cmHint" class="m-sub" style="margin:0;flex:1"></span>
         <button type="button" class="tb" id="cmNew"><i class="ic" data-ic="shield"></i>新增凭据</button>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -776,7 +942,7 @@ function openMacTrace(prefill) {
       <div id="mtDevs" style="max-height:140px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px"></div>
       <div id="mtResult" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:8px;min-height:120px;margin-top:8px"><div class="bk-empty">填写目标后点「开始定位」。</div></div>
       <div class="m-actions">
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -970,7 +1136,7 @@ function openBatchInspect() {
       '<h3>' + U.escHtml(r.node.name) + '（' + U.escHtml(r.host || '—') + '）巡检输出</h3>' +
       '<div class="m-sub">' + (r.ok ? '巡检成功' : '巡检失败：' + U.escHtml(r.error || '未知错误')) + ' · ' + r.ms + ' ms · ' + (r.cmds || []).length + ' 条命令</div>' +
       '<div style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:4px">' + body + '</div>' +
-      '<div class="m-actions"><button type="button" class="tb" id="biCopy">复制全部输出</button><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+      '<div class="m-actions"><button type="button" class="tb" id="biCopy">复制全部输出</button><button type="button" class="tb" data-act="close">关闭</button></div></div>';
     $('#modalRoot').appendChild(v);
     v.tabIndex = -1; v.focus();
     const vc = () => v.remove();
@@ -1412,7 +1578,7 @@ function openConfigDeploy(presetNodeId, preset) {
     v.innerHTML = '<div class="modal" role="dialog" style="width:820px;height:70vh;display:flex;flex-direction:column">'
       + '<h3>命令回显</h3><div class="m-sub"><code>' + U.escHtml(a.line) + '</code></div>'
       + '<pre class="nsv-view" style="flex:1;overflow:auto" spellcheck="false">' + (a.out ? U.escHtml(a.out) : '（无回显）') + '</pre>'
-      + '<div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+      + '<div class="m-actions"><button type="button" class="tb" data-act="close">关闭</button></div></div>';
     $('#modalRoot').appendChild(v);
     v.tabIndex = -1; v.focus();
     const vc = () => v.remove();
@@ -1611,7 +1777,7 @@ function openDeployHistory(opts) {
       + '<div class="m-sub">' + U.escHtml(rec.at || '') + ' · ' + U.escHtml(rec.vendorLabel || '') + ' · ' + U.escHtml(rec.protocol) + ':' + rec.port + ' · 账号 ' + U.escHtml(rec.user || '') + ' · ' + (rec.result.ok ? '成功 ' + rec.result.appliedCount + '/' + rec.lineCount + ' 行' : '失败：' + U.escHtml(rec.result.error || '')) + (rec.maskedCount ? ' · 已打码 ' + rec.maskedCount + ' 行' : '') + '</div>'
       + '<div class="m-sub">前置备份：' + (rec.backup.file ? '<code>' + U.escHtml(rec.backup.file) + '</code>' : '<span style="color:#f59e0b">未入库</span>' + (rec.backup.error ? '（' + U.escHtml(rec.backup.error) + '）' : '')) + ' · 保存配置：' + (rec.saved.ok ? '成功' : (rec.saved.error ? '失败' : '未执行')) + ' · 回采：' + (rec.verify.ok ? '成功' : (rec.verify.error ? '失败' : '未执行')) + '</div>'
       + '<div style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:4px"><table class="nb-table"><tr><th style="width:36px">#</th><th>配置行</th><th style="width:40px">结果</th><th>失败原因</th></tr>' + lines + '</table></div>'
-      + '<div class="m-actions"><button type="button" class="tb" id="dhPlan">查看变更集原文</button><span style="flex:1"></span><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+      + '<div class="m-actions"><button type="button" class="tb" id="dhPlan">查看变更集原文</button><span style="flex:1"></span><button type="button" class="tb" data-act="close">关闭</button></div></div>';
     $('#modalRoot').appendChild(v);
     v.tabIndex = -1; v.focus();
     const vc = () => v.remove();
@@ -1623,7 +1789,7 @@ function openDeployHistory(opts) {
       w.className = 'overlay';
       w.innerHTML = '<div class="modal" role="dialog" style="width:820px;height:70vh;display:flex;flex-direction:column">'
         + '<h3>变更集原文（已打码）</h3><pre style="flex:1;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;border:1px solid var(--border);border-radius:8px;padding:8px" spellcheck="false">' + U.escHtml(rec.plan || '') + '</pre>'
-        + '<div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+        + '<div class="m-actions"><button type="button" class="tb" data-act="close">关闭</button></div></div>';
       $('#modalRoot').appendChild(w);
       w.tabIndex = -1; w.focus();
       const wc = () => w.remove();
@@ -2286,7 +2452,7 @@ function openIpam() {
         <button type="button" class="tb" data-act="audit">实网核对（存活扫描 + ARP/MAC 比对）…</button>
         <button type="button" class="tb" data-act="csv">导出 CSV</button>
         <span style="flex:1"></span>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -2736,7 +2902,7 @@ function openSubnetAnalysis() {
         <button type="button" class="tb" data-act="csv">导出 CSV</button>
         <button type="button" class="tb" data-act="clear">清除高亮</button>
         <span style="flex:1"></span>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -2898,7 +3064,7 @@ function showPathResult(hops, steps, bottleneck) {
       <div class="path-steps">${U.escHtml(steps)}</div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="clear">清除高亮</button>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -3063,7 +3229,7 @@ function openImpactAnalysis(kind, id) {
       ${body}
       <div class="m-actions">
         <button type="button" class="tb" data-act="clear">清除高亮</button>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -3183,7 +3349,7 @@ function openConfigGen() {
         <button type="button" class="tb" data-act="copy">复制配置</button>
         <button type="button" class="tb" data-act="dl">下载 .txt</button>
         <button type="button" class="tb" data-act="zip" title="全部选中设备各导出一个 .txt，按厂家分目录打包">下载 ZIP</button>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -3339,7 +3505,7 @@ function openConfigTemplateManager(done) {
       <div id="tplList" style="max-height:46vh;overflow:auto"></div>
       <div class="m-actions">
         <button type="button" class="tb" data-act="add">新增模板</button>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -3472,7 +3638,7 @@ function openIpPlan() {
         <button type="button" class="tb" data-act="copy">复制清单</button>
         <button type="button" class="tb" data-act="csv">导出 CSV</button>
         <button type="button" class="tb" data-act="xlsx">导出 Excel</button>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -3748,7 +3914,7 @@ function showProjectDiff(d, vsTitle, vsMeta) {
         <div><b style="color:var(--accent)">新增链路 ${d.addedLinks.length}</b>${row(d.addedLinks)}</div>
         <div><b style="color:var(--accent)">删除链路 ${d.removedLinks.length}</b>${row(d.removedLinks)}</div>
       </div>
-      <div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div>
+      <div class="m-actions"><button type="button" class="tb" data-act="close">关闭</button></div>
     </div>`;
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
@@ -4943,7 +5109,7 @@ function openRackView() {
         <span id="rvHint" class="m-sub" style="margin:0;flex:1"></span>
       </div>
       <div id="rvBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"></div>
-      <div class="m-actions"><span class="m-sub" style="margin:0;flex:1">提示：SVG 为矢量图，可直接插入交付文档或打印张贴。</span><button type="button" class="tb primary" data-act="close">关闭</button></div>
+      <div class="m-actions"><span class="m-sub" style="margin:0;flex:1">提示：SVG 为矢量图，可直接插入交付文档或打印张贴。</span><button type="button" class="tb" data-act="close">关闭</button></div>
     </div>`;
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
@@ -5974,6 +6140,102 @@ function closeDrop() {
   }
 }
 
+/* ================= 弹窗可访问性壳 =================
+ * 对 #modalRoot 下所有现有/将来创建的 .overlay 统一补齐：
+ *   role=dialog / aria-modal / aria-labelledby、焦点陷阱、初始焦点、背景 inert、
+ *   关闭后焦点回到打开它的元素。Esc 仍交给各弹窗既有处理器（保留各自的清理语义）。 */
+function installDialogA11y() {
+  const root = $('#modalRoot');
+  if (!root) return;
+  const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+  const stack = [];
+  let seq = 0;
+  // 焦点历史：弹窗创建时可能在观察者回调前就把焦点移到输入框，导致 activeElement 已不是触发元素。
+  // 记录最近获得焦点的元素，创建弹窗时回溯到第一个不在该弹窗内的可见元素作为“返回焦点”。
+  const focusHist = [];
+  document.addEventListener('focusin', (e) => {
+    const el = e.target;
+    if (!el || el === document.body || el === document.documentElement) return;
+    focusHist.push(el);
+    if (focusHist.length > 24) focusHist.shift();
+  }, true);
+  const prevFocusFor = (ov) => {
+    for (let i = focusHist.length - 1; i >= 0; i--) {
+      const el = focusHist[i];
+      if (!ov.contains(el) && document.body.contains(el) && el.getClientRects().length) return el;
+    }
+    return null;
+  };
+  const syncInert = () => {
+    const on = stack.length > 0;
+    for (const id of ['toolbar', 'main', 'status', 'sheetBar']) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      if (on) el.setAttribute('inert', '');
+      else el.removeAttribute('inert');
+    }
+  };
+  const visible = (el) => !!(el.getClientRects && el.getClientRects().length);
+  const focusables = (dlg) => [...dlg.querySelectorAll(FOCUSABLE)].filter(visible);
+  const setup = (ov) => {
+    if (ov._a11y) return;
+    ov._a11y = true;
+    const dlg = ov.querySelector('.modal, .cmd-palette, [role="dialog"]') || ov.firstElementChild;
+    if (!dlg) return;
+    if (!dlg.hasAttribute('role')) dlg.setAttribute('role', 'dialog');
+    dlg.setAttribute('aria-modal', 'true');
+    const title = dlg.querySelector('h3, .cp-title');
+    if (title) {
+      if (!title.id) title.id = 'dlgTitle' + (++seq);
+      dlg.setAttribute('aria-labelledby', title.id);
+    } else if (!dlg.getAttribute('aria-label') && !dlg.getAttribute('aria-labelledby')) {
+      dlg.setAttribute('aria-label', '对话框');
+    }
+    dlg.setAttribute('tabindex', '-1');
+    ov._prevFocus = prevFocusFor(ov);
+    stack.push(ov);
+    syncInert();
+    // 初始焦点：优先第一个输入控件，其次主按钮，最后弹窗本身（保证 Esc/键盘可达）
+    setTimeout(() => {
+      if (!document.body.contains(ov)) return;
+      const first = [...dlg.querySelectorAll('input:not([type="hidden"]):not([disabled]),textarea:not([disabled]),select:not([disabled])')].find(visible);
+      const primary = [...dlg.querySelectorAll('.tb.primary, [data-act="yes"], [data-act="ok"]')].find(visible);
+      const btn = primary || [...dlg.querySelectorAll('button:not([disabled])')].find(visible);
+      (first || btn || dlg).focus({ preventScroll: true });
+    }, 40);
+    ov.addEventListener('keydown', (e) => {
+      if (e.key !== 'Tab') return;
+      if (stack[stack.length - 1] !== ov) return; // 只约束最上层弹窗
+      const items = focusables(dlg);
+      if (!items.length) { e.preventDefault(); dlg.focus(); return; }
+      const first = items[0], last = items[items.length - 1];
+      const cur = document.activeElement;
+      if (!ov.contains(cur)) { e.preventDefault(); first.focus(); return; }
+      if (e.shiftKey && (cur === first || cur === dlg || cur === ov)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); }
+    }, true);
+  };
+  const observer = new MutationObserver((muts) => {
+    for (const m of muts) {
+      for (const n of m.addedNodes) {
+        if (n.nodeType === 1 && n.classList && n.classList.contains('overlay')) setup(n);
+      }
+      for (const n of m.removedNodes) {
+        if (!(n.nodeType === 1 && n.classList && n.classList.contains('overlay'))) continue;
+        const at = stack.indexOf(n);
+        if (at >= 0) stack.splice(at, 1);
+        syncInert();
+        const p = n._prevFocus;
+        if (p && document.body.contains(p) && !p.closest('[inert]')) {
+          try { p.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+        }
+      }
+    }
+  });
+  observer.observe(root, { childList: true });
+  root.querySelectorAll('.overlay').forEach(setup);
+}
+
 function openModal(opts) {
   closeDrop();
   const root = $('#modalRoot');
@@ -6023,14 +6285,17 @@ function openModal(opts) {
     } else {
       ctrl = `<input name="${f.name}" type="text" value="${U.escHtml(f.value || '')}" placeholder="${U.escHtml(f.ph || '')}"/>`;
     }
-    return `<div class="frow"><label>${U.escHtml(T(f.label))}${req}</label>${ctrl}</div>`;
+    return `<div class="frow"><label>${U.escHtml(T(f.label))}${req}</label>${ctrl}${f.required ? `<div class="frow-err" data-err="${f.name}"></div>` : ''}</div>`;
   }).join('');
 
   ov.innerHTML = `
-    <div class="modal" role="dialog">
-      <h3>${U.escHtml(T(opts.title))}</h3>
-      ${opts.sub ? `<div class="m-sub">${U.escHtml(opts.sub)}</div>` : ''}
-      <form>${rowsHtml}
+    <div class="modal modal-form" role="dialog">
+      <div class="mf-head">
+        <h3>${U.escHtml(T(opts.title))}</h3>
+        ${opts.sub ? `<div class="m-sub">${U.escHtml(opts.sub)}</div>` : ''}
+      </div>
+      <form>
+        <div class="mf-body">${rowsHtml}</div>
         <div class="m-actions">
           <button type="button" class="tb" data-act="cancel">${T('取消')}</button>
           <button type="submit" class="tb primary">${U.escHtml(T(opts.submit || '确定'))}</button>
@@ -6155,16 +6420,34 @@ function openModal(opts) {
   };
   const submit = () => {
     const v = grab();
+    let firstBad = null;
     for (const f of fields) {
-      if (f.required && f.type !== 'mgmts' && !String(v[f.name]).trim()) {
-        const el2 = form.elements[f.name];
-        el2.focus(); el2.style.borderColor = 'var(--danger)';
-        return;
+      const bad = !!(f.required && f.type !== 'mgmts' && !String(v[f.name] == null ? '' : v[f.name]).trim());
+      const errEl = form.querySelector('.frow-err[data-err="' + f.name + '"]');
+      if (errEl) {
+        errEl.textContent = bad ? '此项为必填' : '';
+        errEl.classList.toggle('show', bad);
       }
+      const el2 = form.elements[f.name];
+      if (el2 && el2.classList) {
+        el2.classList.toggle('invalid', bad);
+        el2.setAttribute('aria-invalid', bad ? 'true' : 'false');
+      }
+      if (bad && !firstBad) firstBad = el2;
     }
+    if (firstBad) { firstBad.focus(); return; }
     close();
     opts.onSubmit && opts.onSubmit(v);
   };
+
+  // 输入即清掉该行的错误标记：避免用户改完后红框/错误文案还挂着
+  form.addEventListener('input', (e) => {
+    const row = e.target.closest && e.target.closest('.frow');
+    if (!row) return;
+    const err = row.querySelector('.frow-err');
+    if (err) { err.textContent = ''; err.classList.remove('show'); }
+    if (e.target.classList) { e.target.classList.remove('invalid'); e.target.removeAttribute('aria-invalid'); }
+  });
 
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.querySelector('[data-act=cancel]').addEventListener('click', close);
@@ -6172,23 +6455,29 @@ function openModal(opts) {
   ov.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.stopPropagation(); close(); }
   });
-  const first = form.querySelector('input, select, textarea');
+  const first = [...form.querySelectorAll('input:not([type=hidden]), select, textarea')].find(el => el.getClientRects().length);
   // 弹窗动画（rise .2s）完成后再聚焦，避免个别环境下动画期间聚焦被重置
   if (first) setTimeout(() => { if (document.body.contains(ov)) first.focus(); }, 250);
 }
 
-function toast(msg) {
+function toast(msg, type) {
   let t = $('#toastTmp');
   if (!t) {
     t = document.createElement('div');
     t.id = 'toastTmp';
-    t.style.cssText = 'position:fixed;left:50%;bottom:44px;transform:translateX(-50%);z-index:90;pointer-events:none;background:var(--tooltip-bg);color:var(--tooltip-tx);padding:9px 18px;border-radius:10px;font-size:12.5px;box-shadow:0 10px 30px rgba(0,0,0,.3);transition:opacity .3s;max-width:70vw';
+    t.setAttribute('role', 'status');
+    t.setAttribute('aria-live', 'polite');
     document.body.appendChild(t);
   }
-  t.textContent = T(msg);
+  const KIND = { ok: 'ok', success: 'ok', warn: 'warn', warning: 'warn', error: 'error', danger: 'error', info: 'info' };
+  const ICON = { ok: 'ok', success: 'ok', warn: 'warn', warning: 'warn', error: 'close', danger: 'warn', info: 'info' };
+  const kind = type && KIND[type] ? KIND[type] : '';
+  t.className = kind ? ('toast-' + kind) : '';
+  t.innerHTML = (kind ? '<i class="ic" data-ic="' + ICON[type] + '"></i>' : '') + '<span>' + U.escHtml(T(msg)) + '</span>';
+  U.fillIcons();
   t.style.opacity = '1';
   clearTimeout(t._h);
-  t._h = setTimeout(() => { t.style.opacity = '0'; }, 2600);
+  t._h = setTimeout(() => { t.style.opacity = '0'; }, 3200);
 }
 
 /* ================= 应用内确认框（替代原生 confirm，避免 Electron 原生对话框后的焦点问题） ================= */
@@ -6315,7 +6604,7 @@ function openCtx(e, kind, id) {
   }
   menu.innerHTML = items.map(it => {
     if (it.sep) return '<div style="height:1px;background:var(--border);margin:4px 8px"></div>';
-    if (it.head) return `<div style="padding:5px 10px 3px;font-size:10.5px;color:var(--muted);font-weight:600">${U.escHtml(it.head)}</div>`;
+    if (it.head) return `<div style="padding:5px 10px 3px;font-size:11px;color:var(--muted);font-weight:600">${U.escHtml(it.head)}</div>`;
     return `<button class="ci ${it.danger ? 'danger' : ''}"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(T(it.label))}</button>`;
   }).join('');
   U.fillIcons();
@@ -6777,11 +7066,24 @@ function restoreGraph() {
 }
 
 /* ================= 主题 ================= */
-function togglePanel() {
-  document.body.classList.toggle('panel-off');
-  const off = document.body.classList.contains('panel-off');
-  $('#btnPanel').title = off ? '展开面板' : '收起面板';
-  if (!off) renderer.fit(); // 面板展开后画布宽度变化，重新适应视图
+function setPanelOff(off, persist, fit) {
+  const was = document.body.classList.contains('panel-off');
+  document.body.classList.toggle('panel-off', !!off);
+  const el = $('#btnPanel');
+  if (el) el.title = off ? '展开面板' : '收起面板';
+  if (persist) { try { localStorage.setItem('nettopo.panelUser', '1'); } catch (e) { /* ignore */ } }
+  if (fit && was !== !!off && !off) renderer.fit(); // 手动展开后画布宽度变化，重新适应视图
+}
+function togglePanel() { setPanelOff(!document.body.classList.contains('panel-off'), true, true); }
+/* 最小窗口（1024~1099）默认收起侧栏，把宽度让给画布；用户手动切换过则尊重用户选择 */
+function initResponsivePanel() {
+  const mq = window.matchMedia('(max-width: 1099px)');
+  const apply = () => {
+    if (lsGet('nettopo.panelUser', '')) return;
+    setPanelOff(mq.matches, false, false);
+  };
+  apply();
+  if (mq.addEventListener) mq.addEventListener('change', apply);
 }
 function applyTheme() {
   document.documentElement.setAttribute('data-theme', state.theme);
@@ -6793,6 +7095,28 @@ function toggleTheme() {
   state.theme = state.theme === 'dark' ? 'light' : 'dark';
   localStorage.setItem('nettopo.theme', state.theme);
   applyTheme();
+}
+
+/* 界面缩放：桌面版走 Electron 的 webContents zoom（原生缩放，弹窗/坐标都正确）。
+ * 浏览器路径不启用：CSS zoom 会让 fixed 遮罩与 vh 尺寸失真，宁可明确提示桌面版专属。 */
+function applyUiZoom(z, persist) {
+  const v = Math.min(1.5, Math.max(0.8, Number(z) || 1));
+  if (!(window.topoUI && window.topoUI.setZoom)) {
+    state.uiZoom = 1;
+    if (persist) toast('界面缩放需要桌面版（Electron）环境', 'warn');
+    return false;
+  }
+  state.uiZoom = v;
+  try {
+    const p = window.topoUI.setZoom(v);
+    if (p && p.catch) p.catch(() => {});
+  } catch (e) { /* ignore */ }
+  if (persist) { try { localStorage.setItem('nettopo.uiZoom', String(v)); } catch (e) { /* ignore */ } }
+  return true;
+}
+function setUiZoom(z) {
+  if (!applyUiZoom(z, true)) return;
+  toast(T('界面缩放已设为') + ' ' + Math.round(state.uiZoom * 100) + '%', 'info');
 }
 
 /* ================= 设备类型管理 ================= */
@@ -7002,9 +7326,11 @@ function openHelp() {
       <li><b>文件</b>：新建 / 导入表格 / 从邻居表导入 / 示例 / 保存·打开工程(.nettopo) / 对比工程 / 自动备份 / 备份管理</li>
       <li><b>编辑</b>：添加设备·连线·文本框·区域 / 从模板添加 / 对齐分布 / 批量重命名 / IP 批量改段 / IP 子网计算器 / <b>接口总表</b> / IP 地址管理 / 自定义字段 / 机柜视图 / 类型管理</li>
       <li><b>布局</b>：力导向 / 环形 / 分层 / 三层架构 / 拓扑分层 / 网格、适应视图、路径分析、网段分析、拓扑校验、单点故障分析</li>
-      <li><b>显示</b>：链路标注、子网分组、清除故障标记、清除路径高亮</li>
+      <li><b>显示</b>：链路标注、子网分组、界面缩放（90%~150%）、清除故障标记、清除路径高亮</li>
       <li><b>导出</b>：CSV / Excel / 资产清单 / PDF / 图片(PNG/SVG) / 复制图片 / Visio / 设计报告 / 生成设备配置 / IP 规划清单（见⑧）</li>
       <li><b>监控 / AI</b>（桌面版）：监控 ▾ 一级是监控中心，其余按「监控视图 / 采集与告警 / 配置与日志 / 巡检与报表 / 诊断与协议 / 服务与凭据」分二级菜单（设备监控、诊断工具箱、MAC/ARP 终端定位、网络服务、合规检查等）；AI 助手见⑯</li>
+      <li><b>命令面板（Ctrl+K）</b>：工具栏 🔍 或 Ctrl+K 打开，输入功能名 / 设备名 / 接口 / IP 即可筛选并回车执行，不用背菜单路径</li>
+      <li><b>窗口与键盘</b>：1024 宽度自动收起右侧设备栏、品牌收为图标；弹窗 Tab 在窗内循环、Esc 关闭并把焦点还给打开它的按钮；必填项错误直接显示在字段下方；界面缩放随本机记住（桌面版）</li>
     </ul>
     <h4>⑥ 设备、连线与接口总表</h4>
     <ul>
@@ -7327,6 +7653,7 @@ if (window.topoUpdate && window.topoUpdate.onAvailable) {
 /* ================= 事件接线 ================= */
 function wire() {
   U.fillIcons();
+  installDialogA11y();
 
   // ---- 工具栏下拉菜单（文件 / 编辑 / 布局 / 导出） ----
   const loadSample = () => {
@@ -7335,7 +7662,7 @@ function wire() {
   const togglePlace = () => setMode(state.mode === 'place' ? 'normal' : 'place');
   const toggleLink = () => setMode(state.mode === 'link' ? 'normal' : 'link');
 
-  $('#btnDropFile').onclick = (e) => openDrop(e.currentTarget, [
+  const menuFile = () => [
     { ic: 'fileplus', label: '新建空白画布', act: newGraph },
     { ic: 'upload', label: '导入表格…', act: () => $('#fileInput').click() },
     { ic: 'search', label: '从邻居表导入（LLDP/CDP）…', act: openNeighborImport },
@@ -7347,8 +7674,8 @@ function wire() {
     { ic: 'git', label: '对比工程…', act: openProjectDiff },
     { ic: 'clock', label: '自动备份工程…', act: openAutoBackup },
     { ic: 'archive', label: '备份管理…', act: openBackupManager }
-  ]);
-  $('#btnDropEdit').onclick = (e) => openDrop(e.currentTarget, [
+  ];
+  const menuEdit = () => [
     { ic: 'node', label: '添加设备', active: state.mode === 'place', act: togglePlace },
     { ic: 'link', label: '添加连线', active: state.mode === 'link', act: toggleLink },
     { ic: 'edit', label: '添加文本框', act: () => { const c = viewCenter(); addTextAt(c.x, c.y); } },
@@ -7367,8 +7694,8 @@ function wire() {
     { sep: true },
     { ic: 'tag', label: '类型管理…', act: openTypeManager },
     { ic: 'trash', label: '删除选中', danger: true, act: () => deleteSelection() }
-  ]);
-  $('#btnDropLayout').onclick = (e) => openDrop(e.currentTarget, [
+  ];
+  const menuLayout = () => [
     { ic: 'layout', label: '自动布局（力导向）(L)', act: () => autoLayout() },
     { ic: 'layout', label: '环形布局', act: () => applyLayoutPreset('ring') },
     { ic: 'layout', label: '分层布局（按类型）', act: () => applyLayoutPreset('layer') },
@@ -7390,8 +7717,8 @@ function wire() {
     { sep: true },
     { ic: 'shield', label: '拓扑校验', act: runValidation },
     { ic: 'shield', label: '单点故障分析', act: openSpofAnalysis }
-  ]);
-  $('#btnDropMonitor').onclick = (e) => openDrop(e.currentTarget, [
+  ];
+  const menuMonitor = () => [
     { ic: 'grid', label: '监控中心…', act: () => openMonitorCenter() },
     { sep: true },
     { ic: 'layers', label: '监控视图', sub: [
@@ -7464,25 +7791,30 @@ function wire() {
       const r = await window.topoMonitor.setTray(!cur);
       toast(r && r.ok ? (r.enabled ? '已启用托盘常驻：关闭窗口后监控在后台继续，点击托盘图标恢复' : '已关闭托盘常驻') : '设置失败');
     } }
-  ]);
-  $('#btnDropAI').onclick = (e) => openDrop(e.currentTarget, [
+  ];
+  const menuAI = () => [
     { ic: 'wand', label: '解析设备配置…', act: () => openAiAnalysis('config') },
     { ic: 'list', label: '解析设备日志…', act: () => openAiAnalysis('logs') },
     { ic: 'clock', label: '巡检日报定时…', act: openAiDailySchedule },
     { sep: true },
     { ic: 'clock', label: '分析记录…', act: openAiHistory },
     { ic: 'cloud', label: 'AI 设置…', act: openAiSettings }
-  ]);
-  $('#btnDropView').onclick = (e) => openDrop(e.currentTarget, [
+  ];
+  const menuView = () => [
     { ic: 'eye', label: '链路标注', active: state.showLabels, act: toggleLabels },
     { ic: 'layers', label: '子网分组', active: state.showSubnets, act: toggleSubnets },
     { ic: 'image', label: state.underlay ? ('底图：' + (state.underlay.name || '已导入')) : '机房平面图底图…', act: () => openUnderlayPanel() },
+    { ic: 'eye', label: '界面缩放', sub: [0.9, 1, 1.1, 1.25, 1.5].map(z => ({
+      ic: 'grid', label: Math.round(z * 100) + '%',
+      active: Math.abs(state.uiZoom - z) < 0.01,
+      act: () => setUiZoom(z)
+    })) },
     { sep: true },
     { ic: 'pulse', label: '监控大屏模式（值班投屏）', act: openDashboard },
     { ic: 'undo', label: state.downLinks.size ? '清除故障标记（' + state.downLinks.size + '）' : '清除故障标记', act: clearDownLinks },
     { ic: 'close', label: '清除路径高亮', active: !!renderer.pathHl, act: clearPathHl }
-  ]);
-  $('#btnDropExport').onclick = (e) => openDrop(e.currentTarget, [
+  ];
+  const menuExport = () => [
     { ic: 'csv', label: '导出 CSV 表格', act: exportCSV },
     { ic: 'xlsx', label: '导出 Excel 表格', act: exportXlsx },
     { ic: 'cloud', label: '导出交互式拓扑 HTML（可点击看详情）', act: exportInteractiveHtml },
@@ -7495,7 +7827,23 @@ function wire() {
     { ic: 'list', label: '导出设计报告（HTML）', act: exportReport },
     { ic: 'code', label: '生成设备配置…', act: openConfigGen },
     { ic: 'list', label: '导出 IP 规划清单…', act: openIpPlan }
-  ]);
+  ];
+  const MENU_DEFS = [
+    { id: 'btnDropFile', label: '文件', items: menuFile },
+    { id: 'btnDropEdit', label: '编辑', items: menuEdit },
+    { id: 'btnDropLayout', label: '布局', items: menuLayout },
+    { id: 'btnDropView', label: '显示', items: menuView },
+    { id: 'btnDropMonitor', label: '监控', items: menuMonitor },
+    { id: 'btnDropAI', label: 'AI', items: menuAI },
+    { id: 'btnDropExport', label: '导出', items: menuExport }
+  ];
+  for (const m of MENU_DEFS) {
+    const btn = $('#' + m.id);
+    if (btn) btn.onclick = (e) => openDrop(e.currentTarget, m.items());
+  }
+  const cmdBtn = $('#btnCmd');
+  if (cmdBtn) cmdBtn.onclick = openCommandPalette;
+  initCommandPalette(MENU_DEFS);
 
   $('#btnEmptyImport').onclick = () => $('#fileInput').click();
   $('#fileInput').addEventListener('change', (e) => {
@@ -7655,6 +8003,8 @@ function wire() {
   document.addEventListener('keydown', (e) => {
     // Ctrl+F 画布快速搜索：即便焦点在输入框（面板搜索等）也优先呼出
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); openQuickSearch(); return; }
+    // Ctrl+K 命令面板：同样不受焦点限制（输入框里也能唤出）
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCommandPalette(); return; }
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
     if (state.mode !== 'normal') {
@@ -7677,7 +8027,6 @@ function wire() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelection(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveProject(); return; }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#searchInput').focus(); $('#searchInput').select(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') { e.preventDefault(); $('#btnDropExport').click(); return; }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); toggleLabels(); return; }
     // 裸字母快捷键只认无修饰键：Ctrl+L/Ctrl+F 等组合键（浏览器地址栏/查找）不得触发自动布局/适应视图
@@ -10237,7 +10586,7 @@ function openUnderlayPanel() {
       <div class="m-actions">
         <button type="button" class="tb" id="ulRemove"${u ? '' : ' disabled'}>移除底图</button>
         <span style="flex:1"></span>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -10717,7 +11066,7 @@ async function openSlaReport() {
         <button type="button" class="tb" id="slaXlsx" disabled>导出 Excel</button>
         <button type="button" class="tb" id="slaHtml" disabled title="自包含、可直接打印为 PDF 的 HTML 报表（发给同事/附在验收材料里）">导出报表 HTML</button>
         <span style="flex:1"></span>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -11162,7 +11511,7 @@ function openDiagTools(prefillHost) {
       <pre id="dgOut" style="max-height:40vh;overflow:auto;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px;font:11.5px/1.7 Consolas,monospace;white-space:pre-wrap;word-break:break-all;margin:8px 0 0"></pre>
       <div class="m-actions">
         <button type="button" class="tb" data-act="clear">清空</button>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -11330,7 +11679,7 @@ function openMonitorCenter() {
         <button type="button" class="tb" data-act="export" title="导出全部设备的 SSH 指标采样（磁盘/内存/负载）与 HTTP 探测 / 证书历史为 CSV">导出巡检数据</button>
         <button type="button" class="tb" data-act="trust" title="查看已自动信任的 SSH 主机指纹，可撤销（后续连接按首次连接重新确认）">信任的主机</button>
         <button type="button" class="tb" data-act="refresh">刷新</button>
-        <button type="button" class="tb primary" data-act="close">关闭</button>
+        <button type="button" class="tb" data-act="close">关闭</button>
       </div>
     </div>`;
   root.appendChild(ov);
@@ -11454,7 +11803,7 @@ function openMonitorCenter() {
           <div class="m-sub">SSH 首次连接时自动信任并钉扎的主机指纹（TOFU）。设备更换硬件或重装系统导致指纹变化被拒连时，可在此撤销后重新连接确认。</div>
           <div class="lb-files" id="trustList" style="max-height:50vh;overflow:auto">${items.length ? '' : '<div class="lb-empty">暂无已信任的主机</div>'}</div>
           <div class="m-actions">
-            <button type="button" class="tb primary" data-act="tclose">关闭</button>
+            <button type="button" class="tb" data-act="tclose">关闭</button>
           </div>
         </div>`;
       tRoot.appendChild(tOv);
@@ -11724,7 +12073,7 @@ function openMonitorCenter() {
           <span class="m-sub" id="trHint" style="margin:0;flex:1"></span>
         </div>
         <div id="trBody" style="flex:1;overflow:auto;border-top:1px solid var(--border);padding-top:6px"><div class="mc-empty">选择设备与窗口后点「生成」。</div></div>
-        <div class="m-actions"><span class="m-sub" style="margin:0;flex:1">口径：均值只计有效速率采样（首采样无差值不计入）；利用率峰值 = max(收,发) ÷ 标称带宽。</span><button type="button" class="tb primary" data-act="close">关闭</button></div>
+        <div class="m-actions"><span class="m-sub" style="margin:0;flex:1">口径：均值只计有效速率采样（首采样无差值不计入）；利用率峰值 = max(收,发) ÷ 标称带宽。</span><button type="button" class="tb" data-act="close">关闭</button></div>
       </div>`;
     root.appendChild(ov);
     ov.tabIndex = -1; ov.focus();
@@ -12160,7 +12509,7 @@ function openMonitorLogs(devicePreset) {
             <button type="button" class="tb" id="lbNext" title="下一个匹配">↓</button>
             <button type="button" class="tb" data-act="ai">AI 解析</button>
             <button type="button" class="tb" data-act="openfolder">打开目录</button>
-            <button type="button" class="tb primary" data-act="close">关闭</button>
+            <button type="button" class="tb" data-act="close">关闭</button>
           </div>
           <pre class="lb-content" id="lbContent" spellcheck="false"></pre>
         </div>
@@ -12412,7 +12761,7 @@ function openConfigCrossDiff() {
       </div>
       <div id="cdInfo" class="bk-diffinfo" style="margin:0 0 6px"></div>
       <pre class="bk-content" id="cdOut" spellcheck="false">在上方选择两台设备（默认各取最近一份备份）后点「对比」。</pre>
-      <div style="text-align:right;margin-top:10px"><button type="button" class="tb primary" data-act="close">关闭</button></div>
+      <div style="text-align:right;margin-top:10px"><button type="button" class="tb" data-act="close">关闭</button></div>
     </div>`;
   const rootEl = $('#modalRoot');
   rootEl.appendChild(ov);
@@ -12504,7 +12853,7 @@ function openConfigBackups(devicePreset) {
             <button type="button" class="tb" id="bkIgnores" title="配置里时钟/运行时长/时间戳这类天天变却不代表有人改配置的行，在此按正则忽略，避免「配置有变化」天天误报">变更忽略规则…</button>
             <button type="button" class="tb" id="bkNow">立即备份当前地址</button>
             <button type="button" class="tb" data-act="openfolder">打开目录</button>
-            <button type="button" class="tb primary" data-act="close">关闭</button>
+            <button type="button" class="tb" data-act="close">关闭</button>
           </div>
           <pre class="bk-content" id="bkContent" spellcheck="false"></pre>
         </div>
@@ -13203,7 +13552,7 @@ function openNetServices() {
         '<h3>' + U.escHtml(f.name) + '</h3>' +
         '<div class="m-sub">' + (f.svc === 'tftp' ? 'TFTP' : 'FTP') + ' 收到 · 来源 ' + U.escHtml(f.ip || '—') + ' · ' + U.fmtSize(f.size) + '</div>' +
         '<pre class="nsv-view" spellcheck="false">' + (r && r.ok ? U.escHtml(r.content) : '（读取失败：' + U.escHtml((r && r.error) || '未知错误') + '）') + '</pre>' +
-        '<div class="m-actions"><button type="button" class="tb primary" data-act="close">关闭</button></div></div>';
+        '<div class="m-actions"><button type="button" class="tb" data-act="close">关闭</button></div></div>';
       $('#modalRoot').appendChild(v);
       v.tabIndex = -1; v.focus();
       const vc = () => v.remove();
@@ -14121,7 +14470,7 @@ async function openAiHistory() {
             <button type="button" class="tb" id="ahCopy" disabled>复制</button>
             <button type="button" class="tb" id="ahExport" disabled>导出 Markdown</button>
             <button type="button" class="tb" id="ahDelete" disabled>删除此条</button>
-            <button type="button" class="tb primary" data-act="close">关闭</button>
+            <button type="button" class="tb" data-act="close">关闭</button>
           </div>
           <pre class="ai-result" id="ahResult" spellcheck="false">（选择左侧记录查看）</pre>
           <div class="ai-meta" id="ahMeta"></div>
@@ -14224,7 +14573,9 @@ document.title = '网络拓扑管理软件 ' + U.APP_VERSION;
 $('#tooltip').classList.add('hidden');
 $('#hintBar').classList.add('hidden');
 applyTheme();
+applyUiZoom(state.uiZoom, false);
 wire();
+initResponsivePanel();
 renderer.orthoLinks = state.orthoLinks;
 refreshSheets();
 updateUndoBtns();

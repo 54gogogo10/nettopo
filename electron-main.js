@@ -1069,6 +1069,19 @@ ipcMain.handle('web:open', (e, opts) => {
   openWebTab({ url, title: String(opts.title || url).slice(0, 80) });
   return { ok: true };
 });
+/* ---- 界面缩放（显示 ▾ 界面缩放）：只允许主窗口调整，范围 80%~150% ----
+ * 用 webContents zoom 而不是 CSS zoom：固定遮罩、弹窗与画布坐标都保持同一缩放口径。 */
+ipcMain.handle('ui:set-zoom', (e, factor) => {
+  if (!mainWin || mainWin.isDestroyed() || e.sender !== mainWin.webContents) return { ok: false, error: 'forbidden' };
+  const f = Number(factor);
+  if (!(f >= 0.8 && f <= 1.5)) return { ok: false, error: '缩放范围 80%~150%' };
+  mainWin.webContents.setZoomFactor(f);
+  return { ok: true, factor: f };
+});
+ipcMain.handle('ui:get-zoom', (e) => {
+  if (!mainWin || mainWin.isDestroyed() || e.sender !== mainWin.webContents) return { ok: false, error: 'forbidden' };
+  return { ok: true, factor: mainWin.webContents.getZoomFactor() };
+});
 ipcMain.handle('shell:connect', (e, opts) => {
   if (!shellSender(e)) return { ok: false, error: 'forbidden' };
   opts = opts || {};

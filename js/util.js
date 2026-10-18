@@ -1028,6 +1028,10 @@ I.cloud = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-wid
 I.other = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9.8 9.3a2.4 2.4 0 0 1 4.5 1.1c0 1.6-2.3 2.1-2.3 3.6"/><path d="M12 17.2h.01"/></svg>';
 /* 告警铃铛（告警等级与提示音菜单项）：等级越高声音越急，图标只做入口标识 */
 I.bell = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 10a5.5 5.5 0 0 1 11 0c0 4 1.5 5.5 1.5 5.5H5S6.5 14 6.5 10z"/><path d="M10 18.2a2.2 2.2 0 0 0 4 0"/></svg>';
+/* 状态反馈图标（toast / 校验用）：圆勾、警告三角、信息圆 */
+I.ok = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.2l2.6 2.6L16.2 9"/></svg>';
+I.warn = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6L22 20H2z"/><path d="M12 9.2v4.8"/><circle cx="12" cy="17.2" r=".7" fill="currentColor" stroke="none"/></svg>';
+I.info = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.2"/><circle cx="12" cy="7.8" r=".9" fill="currentColor" stroke="none"/></svg>';
 U.ICONS = I;
 
 /* 节点可用图标 key（设备级自定义图标选择器） */

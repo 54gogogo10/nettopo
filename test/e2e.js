@@ -867,6 +867,38 @@ function findChrome() {
     if (!ctxOk) errors.push('[impact] 右键故障影响分析未生效: ' + JSON.stringify({ ctxItems: ctx.length, imp }));
   }
 
+  // ---- 命令面板（Ctrl+K）：智能匹配功能 → Enter 执行 → Esc 关闭且焦点回到触发按钮 ----
+  {
+    await page.evaluate(() => { const b = document.getElementById('btnCmd'); b.focus(); b.click(); });
+    await new Promise(r => setTimeout(r, 300));
+    const cp = await page.evaluate(() => {
+      const ov = document.querySelector('#modalRoot .cp-overlay');
+      return { open: !!ov, rows: ov ? ov.querySelectorAll('.cp-row').length : 0, focused: document.activeElement.id };
+    });
+    await page.evaluate(() => {
+      const i = document.querySelector('#cpInput');
+      i.value = '拓扑校验';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 200));
+    const cpMatch = await page.evaluate(() => [...document.querySelectorAll('#modalRoot .cp-row')].some(r => r.textContent.includes('拓扑校验')));
+    await page.keyboard.press('Enter');
+    await new Promise(r => setTimeout(r, 600));
+    const cpTitle = await page.evaluate(() => {
+      const m = document.querySelector('#modalRoot .modal h3');
+      return m ? m.textContent : '';
+    });
+    await page.keyboard.press('Escape');
+    await new Promise(r => setTimeout(r, 250));
+    const cpAfter = await page.evaluate(() => ({
+      closed: !document.querySelector('#modalRoot .cp-overlay') && !document.querySelector('#modalRoot .modal'),
+      focus: document.activeElement.id
+    }));
+    const cpOk = cp.open && cp.rows > 0 && cp.focused === 'cpInput' && cpMatch && cpTitle === '拓扑校验报告' && cpAfter.closed && cpAfter.focus === 'btnCmd';
+    console.log('命令面板:', cpOk ? 'OK' : 'FAIL', JSON.stringify({ cp, cpMatch, cpTitle, cpAfter }));
+    if (!cpOk) errors.push('[palette] 命令面板未按预期工作: ' + JSON.stringify({ cp, cpMatch, cpTitle, cpAfter }));
+  }
+
   // ---- 画布快速搜索（Ctrl+F）：呼出 → 输入匹配 → Enter 定位选中 → Esc 关闭 ----
   {
     await page.evaluate(() => {

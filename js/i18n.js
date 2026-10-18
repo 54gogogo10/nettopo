@@ -91,6 +91,17 @@
     '导入拓扑': 'Import Topology',
     '导入连线表格': 'Import Link Spreadsheet', '新建空白画布': 'New Blank Canvas', '载入示例拓扑': 'Load Sample Topology',
     '切换明暗主题': 'Toggle Light/Dark Theme', '使用帮助': 'Usage Help', '关于': 'About',
+    // ---- 命令面板 / 界面缩放 / 通用 ----
+    '命令面板 (Ctrl+K)': 'Command Palette (Ctrl+K)', '命令面板': 'Command Palette',
+    '搜索功能、设备、接口、IP…': 'Search commands, devices, interfaces, IP…',
+    '命令结果': 'Command results', '功能': 'Commands', '通用': 'General', '设备与连线': 'Devices & Links',
+    '设备': 'Device', '连线': 'Link', '没有匹配的功能或设备': 'No matching commands or devices',
+    '↑↓ 选择 · ↵ 执行 · Esc 关闭': '↑↓ select · ↵ run · Esc close',
+    '界面缩放': 'UI Scale', '界面缩放已设为': 'UI scale set to',
+    '界面缩放需要桌面版（Electron）环境': 'UI scaling requires the desktop (Electron) app',
+    '筛选设备面板…': 'Filter device panel…', '收起/展开设备面板': 'Toggle device panel',
+    '画布快速搜索（Ctrl+F）': 'Canvas Quick Search (Ctrl+F)', '新建图纸页': 'New Sheet Page',
+    '界面语言…': 'Language…', '此项为必填': 'This field is required',
     '文件：新建 / 导入表格 / 示例 / 保存工程 / 打开工程': 'File: New / Import / Sample / Save / Open project',
     '编辑：添加设备 / 添加连线 / 类型管理 / 删除': 'Edit: Add device / link / type manager / delete',
     '布局：自动布局 / 适应视图 / 拓扑校验': 'Layout: Auto layout / fit view / validation',
@@ -269,6 +280,7 @@
   const applyChrome = (doc) => {
     const d = doc || (typeof document !== 'undefined' ? document : null);
     if (!d) return false;
+    try { d.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN'; } catch (e) { /* ignore */ }
     let n = 0;
     for (const b of d.querySelectorAll('#toolbar .tb, .tb-group .tb')) {
       for (const sp of b.querySelectorAll(':scope > span')) {
