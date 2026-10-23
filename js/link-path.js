@@ -33,12 +33,17 @@ const DEFAULT_VENDOR = 'generic';
  *          同一参数两套量纲没法两全；两代设备缺省超时都是 2 秒，省略 -t 两代通用，会话层另有 cmdTimeoutMs 兜底）
  *  - H3C Comware / 锐捷：-c 次数
  *  - 思科 IOS：ping <ip> repeat N timeout S（交互式 ping 的管道形态，一行可下发）
+ *  - Juniper Junos：ping <ip> count N rapid（rapid = 连发不等间隔；两参数均为管道安全的非交互形态）
+ *  - FortiGate：execute ping <ip>（FortiOS 唯一形态，次数固定为系统默认，回显判定按通用丢包口径解析；
+ *    解析不出结论时状态机记「无法判定」并保持原状态，不会把好链路误判为断）
  *  - Linux / 通用（含 FRR、net-snmp 主机）：-c 次数 -W 超时（秒） */
 const VENDOR_PING = {
   huawei: (t, o) => 'ping -c ' + o.count + ' ' + t,
   h3c: (t, o) => 'ping -c ' + o.count + ' ' + t,
   cisco: (t, o) => 'ping ' + t + ' repeat ' + o.count + ' timeout ' + o.timeoutSec,
   ruijie: (t, o) => 'ping -c ' + o.count + ' ' + t,
+  juniper: (t, o) => 'ping ' + t + ' count ' + o.count + ' rapid',
+  fortinet: (t) => 'execute ping ' + t,
   linux: (t, o) => 'ping -c ' + o.count + ' -W ' + o.timeoutSec + ' ' + t,
   generic: (t, o) => 'ping -c ' + o.count + ' -W ' + o.timeoutSec + ' ' + t
 };

@@ -21,6 +21,7 @@ const { NetflowServer } = require('./svc-netflow.js');
 const READ_CAP = 2 * 1024 * 1024;   // 单文件预览上限
 const LIST_CAP = 300;               // 文件列表条数上限
 const LIST_SCAN_CAP = 20000;        // 编目扫描的目录项上限（TFTP 无认证且无配额，洪流下不能全量枚举）
+const NF_HOURLY_KEEP_HOURS = 24 * 30; // NetFlow 小时快照保留（30 天，720 行）
 
 /** 默认配置（端口 69/21/514/162 为协议标准端口；Linux 非 root 绑定失败时面板会提示改高位端口） */
 function defaultConfig() {
@@ -167,6 +168,67 @@ class NetServices extends EventEmitter {
     this.syslog.on('alert', (a) => this.emit('syslog-alert', a));
     this.trap.on('trap', (t) => this.emit('trap', t));
     this.netflow.on('flows', (f) => this.emit('netflow-flows', f));
+    // NetFlow 小时快照：会话聚合只活在内存（重启即清），每小时把累计 TopN 落一行 JSONL（保留 30 天）
+    this.nfHourlyFile = path.join(this.baseDir, 'netflow-hourly.jsonl');
+    this._nfHourlyTimer = setInterval(() => { try { this.snapshotNetflowHourly(); } catch (e) { /* ignore */ } }, 3600000);
+    if (typeof this._nfHourlyTimer.unref === 'function') this._nfHourlyTimer.unref();
+  }
+
+  /* ---- NetFlow 小时快照：回答「昨天这条链路上的大流量会话是谁」——明细与会话聚合此前
+   *  全在内存（net-services.js 注释明示「重启即清」）。每行 {at, total, top:[会话 TopN]}；
+   *  会话为自启动累计口径（与服务面板「会话 TopN」同数）；保留 30 天，超期行滚动清理。 ---- */
+  /** 落一行小时快照（定时器与测试直接调用）。未启用 / 无会话时跳过（不写空行）。 */
+  snapshotNetflowHourly(now) {
+    try {
+      if (!(this.cfg.netflow && this.cfg.netflow.enabled && this.applied.netflow)) return { ok: true, skipped: true };
+      const s = this.netflow.sessions(30);
+      if (!s.total) return { ok: true, skipped: true };
+      const at = Number.isFinite(now) ? now : Date.now();
+      const line = JSON.stringify({ at, total: s.total, top: s.items }) + '\n';
+      fs.appendFileSync(this.nfHourlyFile, line, 'utf8');
+      this._pruneNfHourly(at);
+      return { ok: true, at, total: s.total };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  /** 超期快照行清理（按 at 字段过滤重写；文件缺失/损坏静默跳过——下次写入自然重建） */
+  _pruneNfHourly(now) {
+    try {
+      const st = fs.statSync(this.nfHourlyFile);
+      if (st.size < 512 * 1024) return; // 小文件不折腾
+      const keepAt = now - NF_HOURLY_KEEP_HOURS * 3600000;
+      const lines = fs.readFileSync(this.nfHourlyFile, 'utf8').split('\n').filter(Boolean);
+      const keep = lines.filter(l => { try { return JSON.parse(l).at >= keepAt; } catch (e) { return false; } });
+      if (keep.length !== lines.length) fs.writeFileSync(this.nfHourlyFile, keep.join('\n') + '\n', 'utf8');
+    } catch (e) { /* ignore */ }
+  }
+
+  /** 历史快照查询（面板「小时快照」）：返回最近 hours 小时的快照行（时间倒序、封顶 720 行） */
+  netflowHourly(lastHours) {
+    const hours = Math.max(1, Math.min(NF_HOURLY_KEEP_HOURS, Math.floor(Number(lastHours) || 24)));
+    try {
+      const since = Date.now() - hours * 3600000;
+      const lines = fs.readFileSync(this.nfHourlyFile, 'utf8').split('\n').filter(Boolean);
+      const out = [];
+      for (let i = lines.length - 1; i >= 0 && out.length < 720; i--) {
+        let j;
+        try { j = JSON.parse(lines[i]); } catch (e) { continue; }
+        if (!j || !Number.isFinite(j.at) || j.at < since) continue;
+        out.push({
+          at: j.at, total: Math.max(0, Math.floor(j.total || 0)),
+          top: (Array.isArray(j.top) ? j.top : []).slice(0, 30).map(s => ({
+            src: String(s.src || ''), dst: String(s.dst || ''),
+            sport: Number(s.sport) || 0, dport: Number(s.dport) || 0,
+            proto: String(s.proto || ''), bytes: Math.max(0, Math.floor(s.bytes || 0)), pkts: Math.max(0, Math.floor(s.pkts || 0))
+          }))
+        });
+      }
+      return { ok: true, items: out };
+    } catch (e) {
+      return { ok: true, items: [], empty: true }; // 无文件=还没有快照，如实空表
+    }
   }
 
   getConfig() { return JSON.parse(JSON.stringify(this.cfg)); }

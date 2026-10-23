@@ -685,8 +685,11 @@ U.SNMP_VENDORS = [
   { key: 'fortinet', label: '飞塔 FortiGate（百分比型）', enterprise: 12356, verified: 'doc',
     cpu: { oid: '1.3.6.1.4.1.12356.101.4.1.3.0', mode: 'direct' },
     mem: { oid: '1.3.6.1.4.1.12356.101.4.1.4.0', mode: 'percent' } },
-  /* 以下仅按企业号识别厂商（不给 OID 预设，避免给出未经核实的值）：面板会提示按设备手册填写 */
-  { key: 'ruijie', label: '锐捷 Ruijie RGOS（需按手册填 OID）', enterprise: 4881, verified: 'none' },
+  /* 锐捷按公开 RG-PLATFORMCOMMON-MIB 预填（未经真机逐一核验，面板提示先用 snmpwalk 核对）；
+   * 其余厂商仅按企业号识别（不给 OID 预设，避免给出未经核实的值）：面板会提示按设备手册填写 */
+  { key: 'ruijie', label: '锐捷 Ruijie RGOS（RG-PLATFORMCOMMON-MIB，百分比型）', enterprise: 4881, verified: 'doc',
+    cpu: { oid: '1.3.6.1.4.1.4881.1.1.1.1.1.4.0', mode: 'direct' },
+    mem: { oid: '1.3.6.1.4.1.4881.1.1.1.1.1.7.0', mode: 'percent' } },
   { key: 'zte', label: '中兴 ZTE ZXR（需按手册填 OID）', enterprise: 3902, verified: 'none' },
   { key: 'arista', label: 'Arista EOS（需按手册填 OID）', enterprise: 30065, verified: 'none' },
   { key: 'hpe', label: 'HPE / Aruba（需按手册填 OID）', enterprise: 11, verified: 'none' },
@@ -2258,8 +2261,12 @@ U.parseVlans = (v) => {
 /* 子网分组配色（按组序号循环取色） */
 U.SUBNET_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316', '#84cc16', '#ec4899', '#06b6d4', '#a3e635'];
 /* 按接口 IP 网段（优先）/ 管理 IP 网段（兜底）把设备归组，返回可绘制区域 */
-U.subnetGroups = (nodes, links, names) => {
-  names = names || {};
+U.subnetGroups = (nodes, links, names) => U.subnetGroupsFrom(U.subnetPartition(nodes, links), nodes, names);
+
+/* 网段归组（纯数据段，与节点坐标无关）：[{key, nodeIds[]}]，key 升序。
+ * 独立导出供渲染层缓存——拖拽/缩放只改坐标，归组结果不必每帧重算；
+ * subnetGroupsFrom 的几何段是 O(组成员) 的轻量计算，随坐标照算。 */
+U.subnetPartition = (nodes, links) => {
   const linkIps = new Map(); // nodeId -> [ip...]
   for (const l of links || []) {
     if (!linkIps.has(l.a)) linkIps.set(l.a, []);
@@ -2281,17 +2288,23 @@ U.subnetGroups = (nodes, links, names) => {
     return m0 ? U.subnetOf(m0) : null;
   };
   const groups = new Map();
-  const byId = new Map(); // id -> 节点：组内成员解析用（每成员线性 find 是 O(节点×成员)）
-  for (const n of nodes) {
-    byId.set(n.id, n);
+  for (const n of nodes || []) {
     const s = primaryOf(n);
     if (!s) continue;
     if (!groups.has(s)) groups.set(s, { key: s, nodeIds: [] });
     groups.get(s).nodeIds.push(n.id);
   }
-  const pad = 26;
-  const out = [...groups.values()]
+  return [...groups.values()]
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map(g => ({ key: g.key, nodeIds: g.nodeIds }));
+};
+
+/** 由归组结果 + 节点当前坐标生成分组框（subnetGroups 的几何段；names 为自定义分组名） */
+U.subnetGroupsFrom = (parts, nodes, names) => {
+  names = names || {};
+  const byId = new Map((nodes || []).map(n => [n.id, n])); // id -> 节点：组内成员解析用
+  const pad = 26;
+  return (parts || [])
     .map((g, i) => {
       const rects = g.nodeIds.map(id => byId.get(id)).filter(Boolean);
       const [rx0] = U.spreadMinMax(rects.map(r => r.x));
@@ -2313,7 +2326,6 @@ U.subnetGroups = (nodes, links, names) => {
         x: x0, y: y0, w: x1 - x0, h: y1 - y0
       };
     });
-  return out;
 };
 
 /* ---------- 设备配置生成（模板驱动，支持自定义厂家风格） ---------- */
@@ -3392,7 +3404,7 @@ U.buildLinkFlow = (nodes, links, traffic, opts) => {
 /* ---------- 批量只读巡检（监控 ▾ 批量巡检）：厂家命令预设与只读白名单 ---------- */
 /** 各厂家巡检命令预设（全部只读；首条为关分页命令；auto 双厂家 flavor 逐条尝试，与邻居表采集同思路） */
 U.INSPECT_PRESETS = {
-  auto: ['display version', 'show version', 'display clock', 'show clock', 'display cpu-usage', 'show processes cpu',
+  auto: ['display version', 'show version', 'get system status', 'display clock', 'show clock', 'display cpu-usage', 'show processes cpu',
     'display memory-usage', 'show memory summary', 'display interface brief', 'show ip interface brief'],
   huawei: ['screen-length 0 temporary', 'display version', 'display clock', 'display cpu-usage', 'display memory-usage',
     'display interface brief', 'display ip routing-table statistics', 'display device'],
@@ -3400,17 +3412,21 @@ U.INSPECT_PRESETS = {
     'display interface brief', 'display ip routing-table statistics', 'display device'],
   cisco: ['terminal length 0', 'show version', 'show clock', 'show processes cpu', 'show memory summary', 'show ip interface brief'],
   ruijie: ['terminal length 0', 'show version', 'show clock', 'show cpu', 'show memory', 'show ip interface brief'],
+  juniper: ['show version', 'show system uptime', 'show chassis environment', 'show system storage', 'show interfaces terse'],
+  fortinet: ['get system status', 'get system performance status', 'get router info routing-table summary', 'get system interface physical'],
   linux: ['uname -a', 'uptime', 'free -m', 'df -h']
 };
 
 /** 告警自动取证命令集（只读，必须全部通过 U.checkInspectCommands 白名单）：
  *  目标是「告警时刻的现场」——接口状态、路由/邻居、日志尾部；不抓全量配置，避免把口令类内容带进证据。 */
 U.EVIDENCE_PRESETS = {
-  auto: ['display interface brief', 'show ip interface brief', 'display version', 'show version'],
+  auto: ['display interface brief', 'show ip interface brief', 'get system interface physical', 'display version', 'show version'],
   huawei: ['screen-length 0 temporary', 'display interface brief', 'display ip routing-table', 'display logbuffer level 6', 'display lldp neighbor'],
   h3c: ['screen-length disable', 'display interface brief', 'display ip routing-table', 'display logbuffer level 6', 'display lldp neighbor-information'],
   cisco: ['terminal length 0', 'show ip interface brief', 'show ip route', 'show logging', 'show lldp neighbors'],
   ruijie: ['terminal length 0', 'show ip interface brief', 'show ip route', 'show logging', 'show lldp neighbors'],
+  juniper: ['show interfaces terse', 'show system alarms', 'show lldp neighbors', 'show version'],
+  fortinet: ['get system interface physical', 'get system performance status', 'get system status'],
   linux: ['uname -a', 'uptime', 'free -m', 'df -h', 'ip -br a', 'ip neigh']
 };
 
@@ -3423,6 +3439,7 @@ U.checkInspectCommands = (cmds) => {
   if (!Array.isArray(cmds)) return { ok: false, error: '命令集必须是数组' };
   const ALLOW = [
     /^display\b/, /^show\b/,
+    /^get\b/,   // FortiGate 的 get 系列为只读查询（get system status 等）；其写/执行类前缀 config/execute/set 一律不放行
     /^screen-length 0 temporary$/, /^screen-length disable$/, /^terminal length 0$/, /^terminal monitor$/,
     /^uname\b/, /^uptime$/, /^free\b/, /^df\b/, /^ip neigh\b/, /^ip -br\b/
   ];

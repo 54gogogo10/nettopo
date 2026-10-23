@@ -16,6 +16,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { RegexLab } = require('./regex-lab.js');
 const { ConfigBackupStore, sameAfterIgnore } = require('./config-backup.js');
+const { DiskQuota } = require('./disk-quota.js');
 
 /** 文件名/目录名安全化：去掉 Windows 与常见控制字符，去空白、限长。
  *  注意：正则必须独立匹配字符类（不得写成 "/字符类"——那要求字面 / 前缀，永不匹配），
@@ -885,6 +886,26 @@ const DEFAULTS = {
   retrySec: 30
 };
 
+/** FNV-1a 32 位哈希 → [0, winMs) 相位：按任务 key 稳定散列（同一任务每次启动相位一致） */
+function phaseOf(key, winMs) {
+  const s = String(key == null ? '' : key);
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0) % Math.max(1, Math.floor(winMs));
+}
+/* 启动相位错峰窗口：批量启动（应用启动恢复全部任务）时，几十台设备的 SNMP 多列 walk /
+ * HTTP 探测 / own 备份独立连接此前全部落在同一 2~3 秒窗口。窗口 8 秒——错峰够用，
+ * 又不让单台配置的用户等太久；命令循环首轮与在线探测首轮不加相位（交互响应优先、负载轻） */
+const START_JITTER_MS = 8000;
+
+/** 连续失败退避倍数：第 n 次失败 → 2^(n-1)，封顶 8。首次失败 1× = 原间隔
+ *  （单次失败行为与旧版完全一致，只有持续失败才逐步拉长——设备关机/不可达时
+ *  反复重试对双方都是无谓负载）；成功后由调用方清零计数。 */
+function backoffFactor(fails) {
+  const n = Math.min(Math.max(1, Math.floor(Number(fails) || 1)), 4);
+  return Math.pow(2, n - 1);
+}
+
 /** 单个日志文件大小上限（超出即滚动新文件，防高输出设备占满磁盘） */
 const MAX_LOG_BYTES = 32 * 1024 * 1024;
 /** 无换行输出的强制断行阈值（防行缓冲无界增长） */
@@ -901,6 +922,7 @@ const MAX_LOG_FILES_PER_DAY = 24;
 /** 监控日志保留天数（跨天清理，与内置 syslog/trap 服务同口径）：此前只有单文件滚动与单日文件数
  *  封顶，历史日期目录从不回收——多设备 7×24 长期运行会把 userData 所在盘无界写满 */
 const LOG_KEEP_DAYS = 90;
+const LOG_MAX_TOTAL_BYTES = 1024 * 1024 * 1024; // 监控日志全库字节配额（1GB，与 Syslog/Trap 同口径；超限删最旧日期目录）
 
 class MonitorManager extends EventEmitter {
   /** @param {import('./shell').ShellManager} shell 共享的会话管理器
@@ -915,6 +937,9 @@ class MonitorManager extends EventEmitter {
     this.backupStore = opts.backupStore || null;
     // 配置变更判定的易变行忽略规则提供者（宿主注入：返回规则字符串数组）。缺省不过滤。
     this._ignoreRules = typeof opts.ignoreRules === 'function' ? opts.ignoreRules : null;
+    // 统一凭据库解析器（宿主注入：credId → {ok, patch:{username,password,privateKey,keyPassphrase,protocol,port}}）。
+    // 明文只在主进程内存里补齐，不落盘、不回渲染层；monitor.js 保持纯 Node 不依赖凭据存储实现
+    this._resolveCredential = typeof opts.resolveCredential === 'function' ? opts.resolveCredential : null;
     this.regexLab = new RegexLab({ timeoutMs: 5000 }); // 用户正则的工作线程超时执行器（防灾难性回溯挂死主进程）
     this.jobs = new Map();       // key -> job
     this._bySid = new Map();     // sid -> key
@@ -959,7 +984,126 @@ class MonitorManager extends EventEmitter {
         }
         try { fs.rmdirSync(devDir); } catch (e) { /* 非空：保留 */ }
       }
+      this._enforceLogQuota();
     } catch (e) { /* 目录不存在等：忽略 */ }
+  }
+
+  /** 监控日志全库字节配额（默认 1GB，与 Syslog/Trap 同口径）：此前只按 90 天日期删，
+   *  7×24 高输出设备（含 Web Shell 审计日志）可把磁盘写满且毫无防线。
+   *  过期清理后仍超限时按日期目录从最旧开始整目录删除（跳过近 1 小时有写入与活跃任务正在写的目录），
+   *  直到回到配额内；删除量写一条日志说明。 */
+  _enforceLogQuota() {
+    const quota = new DiskQuota({ maxBytes: LOG_MAX_TOTAL_BYTES });
+    quota.scan(this.logBaseDir);
+    if (quota.ok()) return;
+    // 收集全部「设备/日期」目录按日期从旧到新排序，逐个整目录删除直到回配额
+    const dirs = [];
+    for (const dev of fs.readdirSync(this.logBaseDir)) {
+      const devDir = path.join(this.logBaseDir, dev);
+      let st;
+      try { st = fs.lstatSync(devDir); } catch (e) { continue; }
+      if (!st.isDirectory() || st.isSymbolicLink()) continue;
+      for (const d of fs.readdirSync(devDir)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+        const dd = path.join(devDir, d);
+        let dst;
+        try { dst = fs.lstatSync(dd); } catch (e) { continue; }
+        if (dst.isSymbolicLink() || dst.mtimeMs > Date.now() - 3600000) continue; // 近 1 小时有写入不动
+        let active = false;
+        for (const j of this.jobs.values()) { if (j && j.logDate === d) { active = true; break; } }
+        if (active) continue;
+        dirs.push({ dir: dd, date: d });
+      }
+    }
+    dirs.sort((a, b) => (a.date < b.date ? -1 : 1));
+    let removed = 0;
+    for (const it of dirs) {
+      if (quota.ok()) break;
+      // 整目录字节合计（删前求和用于配额记账）
+      let size = 0;
+      const walk = (d) => {
+        let names = [];
+        try { names = fs.readdirSync(d); } catch (e) { return; }
+        for (const nm of names) {
+          const p = path.join(d, nm);
+          try {
+            const s2 = fs.lstatSync(p);
+            if (s2.isFile()) size += s2.size; else if (s2.isDirectory()) walk(p);
+          } catch (e) { /* ignore */ }
+        }
+      };
+      walk(it.dir);
+      try {
+        fs.rmSync(it.dir, { recursive: true, force: true });
+        quota.release(size);
+        removed++;
+      } catch (e) { /* 句柄占用等：跳过该目录 */ }
+    }
+    try { console.warn('[monitor] 监控日志超过 ' + Math.round(LOG_MAX_TOTAL_BYTES / 1024 / 1024) + 'MB 配额：已删除最旧日期目录 ' + removed + ' 个（保留期内日志优先，配额是更硬的约束）'); } catch (e) { /* ignore */ }
+  }
+
+  /* ---------------- 指标历史归档（跨重启：磁盘/内存/负载、HTTP、CPU/内存/温度） ----------------
+   * 这些采样此前只活在内存环（IF_HIST_MAX 120 条），重启即丢——监控中心「性能」页只剩约 2 小时。
+   * 接口流量不在此列：capacity-store 已做跨重启日聚合。宿主定时调 saveHistories + 退出兜底。 */
+  /** 全部任务的指标历史快照（纯收集：每类截尾 120 条，键数封顶，条目仅做 ts 数值校验） */
+  historiesSnapshot() {
+    const out = [];
+    for (const job of this.jobs.values()) {
+      if (!job || !job.key) continue;
+      const clip = (arr) => (Array.isArray(arr) ? arr : [])
+        .filter(e => e && typeof e === 'object' && Number.isFinite(Number(e.ts)))
+        .slice(-IF_HIST_MAX);
+      const metric = clip(job.metricHist), http = clip(job.httpHist), perf = clip(job.perfHist);
+      if (!metric.length && !http.length && !perf.length) continue;
+      out.push({
+        key: String(job.key).slice(0, 128),
+        deviceId: String(job.deviceId || '').slice(0, 128),
+        name: String(job.name || '').slice(0, 128),
+        host: String(job.host || '').slice(0, 128),
+        metric: metric, http: http, perf: perf
+      });
+      if (out.length >= 1000) break; // 键数封顶：异常规模的任务集不让归档文件无界
+    }
+    return out;
+  }
+
+  /** 归档落盘（tmp+rename 原子写）。返回是否实际写入。 */
+  saveHistories(filePath) {
+    if (!filePath) return false;
+    const items = this.historiesSnapshot();
+    // 运行中的任务之外，_teardown 转存的最近历史（改配置重启任务的空窗）也一并带走
+    const extra = [];
+    if (this._histArch) {
+      const seen = new Set(items.map(i => i.key));
+      for (const [key, h] of this._histArch.entries()) {
+        if (seen.has(key) || extra.length >= 200) continue;
+        extra.push({ key: String(key).slice(0, 128), deviceId: '', name: '', host: '', metric: (h.metric || []).slice(-IF_HIST_MAX), http: (h.http || []).slice(-IF_HIST_MAX), perf: (h.perf || []).slice(-IF_HIST_MAX) });
+      }
+    }
+    const tmp = filePath + '.tmp-' + process.pid;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify({ v: 1, at: Date.now(), items: items.concat(extra) }), 'utf8');
+      fs.renameSync(tmp, filePath);
+      return true;
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch (e2) { /* ignore */ }
+      return false;
+    }
+  }
+
+  /** 启动加载归档：按 key 建索引供 start() 回填（文件缺失/损坏一律从空开始，不覆盖原文件） */
+  loadHistories(filePath) {
+    this._histArch = new Map();
+    if (!filePath) return { ok: true, items: 0 };
+    let raw;
+    try { raw = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (e) { return { ok: false, items: 0, error: String((e && e.message) || e) }; }
+    const items = (raw && Array.isArray(raw.items)) ? raw.items : [];
+    const clean = (arr) => (Array.isArray(arr) ? arr.filter(e => e && typeof e === 'object' && Number.isFinite(Number(e.ts))).slice(-IF_HIST_MAX) : []);
+    for (const it of items) {
+      if (!it || typeof it.key !== 'string' || !it.key || this._histArch.size >= 1000) continue;
+      this._histArch.set(it.key.slice(0, 128), { metric: clean(it.metric), http: clean(it.http), perf: clean(it.perf) });
+    }
+    return { ok: true, items: this._histArch.size };
   }
 
   /** 更新易变行忽略规则提供者（宿主在设置变更后调用；规则用于「无变化不新增」与变更 diff） */
@@ -998,6 +1142,22 @@ class MonitorManager extends EventEmitter {
     opts = opts || {};
     const key = String(opts.key || '').trim();
     if (!key || key.length > 64) return { ok: false, error: '监控标识（key）缺失或过长' };
+    // 统一凭据库档案（credId）：账号/口令/私钥/协议端口由宿主注入的解析器补齐——此前设备监控弹窗
+    // 只能逐台手填账号密码，给几十台设备开监控要开几十次弹窗。调用方显式给过的字段优先
+    // （与 credPatchOf 同语义）；档案不可用如实报错，绝不静默回退成默认/匿名账号
+    if (String(opts.credId || '').trim()) {
+      const credId = String(opts.credId).trim().slice(0, 128);
+      if (typeof this._resolveCredential !== 'function') return { ok: false, error: '当前环境不支持凭据库档案（监控凭据解析器未注入）' };
+      const rc = this._resolveCredential(credId);
+      if (!rc || !rc.ok) return { ok: false, error: '凭据不可用：' + ((rc && rc.error) || '未知错误') };
+      const p = (rc.patch && typeof rc.patch === 'object') ? rc.patch : {};
+      if (!String(opts.username || '').trim() && p.username) opts.username = p.username;
+      if (!opts.password && p.password) opts.password = p.password;
+      if (!opts.privateKey && p.privateKey) opts.privateKey = p.privateKey;
+      if (!opts.keyPassphrase && p.keyPassphrase) opts.keyPassphrase = p.keyPassphrase;
+      if (!opts.protocol && p.protocol) opts.protocol = p.protocol;
+      if (!(parseInt(opts.port, 10) > 0) && p.port) opts.port = p.port;
+    }
     // 期望的 SSH 主机指纹（SHA256:<base64>）：渲染层复用 Web Shell 已信任指纹时传入，非空则严格比对
     const expectFp = String(opts.expectFp || '').trim().slice(0, 256);
     // key 形如 <deviceId>@<host>：同一设备多个管理口对应多个任务，按 deviceId 聚合
@@ -1304,6 +1464,17 @@ class MonitorManager extends EventEmitter {
     const old = this.jobs.get(cfg.key);
     if (old) this._teardown(old, true);
     const job = this._newJob(cfg);
+    // 历史归档回填：上次运行的指标采样（磁盘/内存/负载、HTTP、CPU/内存/温度）重启不丢——
+    // 监控中心「性能」页此前重启后只剩内存环里的 2 小时；用后即删，长任务运行期不再重复贴档
+    if (this._histArch) {
+      const arch = this._histArch.get(cfg.key);
+      if (arch) {
+        job.metricHist = arch.metric || [];
+        job.httpHist = arch.http || [];
+        job.perfHist = arch.perf || [];
+        this._histArch.delete(cfg.key);
+      }
+    }
     this.jobs.set(cfg.key, job);
     this._emit(job);
     // SNMP 轮询（接口流量 / 重启检测 / CPU·内存 / 环境传感器）：独立于 SSH/Telnet 连接的 UDP 定时轮询（任务级，重连不重启）
@@ -1312,7 +1483,7 @@ class MonitorManager extends EventEmitter {
     // HTTP 健康探测 / 证书到期：独立于 SSH/Telnet 会话的本机定时探测（任务级，重连不重启）
     if (cfg.httpProbe && cfg.httpProbe.enabled) {
       clearTimeout(job.httpTimer);
-      job.httpTimer = setTimeout(() => this._httpProbeOnce(job), 2000);
+      job.httpTimer = setTimeout(() => this._httpProbeOnce(job), 2000 + phaseOf(job.key, START_JITTER_MS));
     }
     this._startConnect(job);
     return { ok: true, id: cfg.key };
@@ -1454,6 +1625,11 @@ class MonitorManager extends EventEmitter {
     job.stopping = true;
     job.gen++;
     this.jobs.delete(job.key);
+    // 任务停止（用户改配置重启任务 / 应用退出）时把指标历史转存：重启后 start 回填，性能页不清零
+    if (job.metricHist && (job.metricHist.length || job.httpHist.length || job.perfHist.length)) {
+      if (!this._histArch) this._histArch = new Map();
+      this._histArch.set(job.key, { metric: job.metricHist.slice(), http: job.httpHist.slice(), perf: job.perfHist.slice() });
+    }
     if (job.sid) this._bySid.delete(job.sid);
     if (job.loopTimer) { clearTimeout(job.loopTimer); job.loopTimer = null; }
     if (job.retryTimer) { clearTimeout(job.retryTimer); job.retryTimer = null; }
@@ -1506,6 +1682,7 @@ class MonitorManager extends EventEmitter {
     }
     job.sid = r.id;
     this._bySid.set(r.id, job.key);
+    job.connFails = 0; // 连接成功：重连退避清零
   }
 
   _scheduleReconnect(job, gen) {
@@ -1513,9 +1690,13 @@ class MonitorManager extends EventEmitter {
     job.state = 'reconnecting';
     this._emit(job);
     clearTimeout(job.retryTimer);
+    // 连续失败指数退避（1×→2×→4×→8× 封顶）：设备关机/不可达时每次重连都是完整的
+    // TCP+SSH 握手开销，固定 30 秒重试对设备和本机都是无谓负载；连接成功即清零
+    job.connFails = Math.min(8, (job.connFails || 0) + 1);
+    const delayMs = job.retrySec * 1000 * backoffFactor(job.connFails);
     job.retryTimer = setTimeout(() => {
       if (job.enabled && !job.stopping && gen === job.gen) this._startConnect(job);
-    }, job.retrySec * 1000);
+    }, delayMs);
   }
 
   /* ---------------- 日志 ---------------- */
@@ -1645,7 +1826,7 @@ class MonitorManager extends EventEmitter {
         job.gen++;
         const gen = job.gen;
         clearTimeout(job.backupTimer);
-        job.backupTimer = setTimeout(() => this._runBackup(job, gen), Math.max(job.initDelayMs, 1000) + 1500);
+        job.backupTimer = setTimeout(() => this._runBackup(job, gen), Math.max(job.initDelayMs, 1000) + 1500 + (job.backup.mode === 'own' ? phaseOf(job.key, START_JITTER_MS) : 0));
       }
       return;
     }
@@ -1668,7 +1849,7 @@ class MonitorManager extends EventEmitter {
     // 配置自动备份：先于命令循环执行一次，之后按备份间隔调度（用当前 gen，避免快照过期）
     if (job.backup.enabled) {
       clearTimeout(job.backupTimer);
-      job.backupTimer = setTimeout(() => this._runBackup(job, gen), Math.max(job.initDelayMs, 1000) + 1500);
+      job.backupTimer = setTimeout(() => this._runBackup(job, gen), Math.max(job.initDelayMs, 1000) + 1500 + (job.backup.mode === 'own' ? phaseOf(job.key, START_JITTER_MS) : 0));
     }
     // SNMP 自动识别：每次会话建立后执行一次（延迟 2s 等设备就绪），结果经 sysinfo 事件回填
     if (job.sysinfo && job.sysinfo.enabled) {
@@ -1702,7 +1883,7 @@ class MonitorManager extends EventEmitter {
   /* ---------------- SSH 指标采集（复用监控会话执行 df/free/loadavg，超阈值告警） ---------------- */
   _startMetrics(job) {
     clearTimeout(job.metricTimer);
-    job.metricTimer = setTimeout(() => this._runMetrics(job), Math.max(job.initDelayMs, 1000) + 2000);
+    job.metricTimer = setTimeout(() => this._runMetrics(job), Math.max(job.initDelayMs, 1000) + 2000 + phaseOf(job.key, START_JITTER_MS));
   }
   async _runMetrics(job) {
     if (!job.enabled || job.stopping || !job.metrics || !job.metrics.enabled || job.readOnly) return;
@@ -1823,7 +2004,8 @@ class MonitorManager extends EventEmitter {
   /* ---------------- SNMP 轮询（接口流量 ifTable / 重启检测 sysUpTime / CPU·内存，独立于连接的 UDP 采集） ---------------- */
   _startSnmpPoll(job) {
     clearTimeout(job.snmpTimer);
-    job.snmpTimer = setTimeout(() => this._pollSnmp(job), 3000);
+    // 首轮带相位错峰：批量启动时各设备的 walk 不同刻开始（见 START_JITTER_MS 注释）
+    job.snmpTimer = setTimeout(() => this._pollSnmp(job), 3000 + phaseOf(job.key, START_JITTER_MS));
   }
 
   async _pollSnmp(job) {
@@ -1831,6 +2013,7 @@ class MonitorManager extends EventEmitter {
     const wantIf = !!job.sysinfo.ifTable;
     const perf = job.sysinfo.perf || {};
     const wantPerf = !!job.sysinfo.sysUpTime || !!perf.enabled || !!(perf.env && perf.env.enabled);
+    job._snmpPollFailed = false; // _collectIfTable 首列 walk 失败时置位（设备不可达的明确信号）
     if (wantIf || wantPerf) {
       if (!job._snmpBusy) {
         job._snmpBusy = true;
@@ -1847,7 +2030,16 @@ class MonitorManager extends EventEmitter {
     }
     if (!job.enabled || job.stopping) return;
     clearTimeout(job.snmpTimer);
-    job.snmpTimer = setTimeout(() => this._pollSnmp(job), (job.sysinfo.intervalSec || 60) * 1000);
+    // 连续失败指数退避（首次失败 1×，之后 2×→4×→8× 封顶，成功即清零）：设备不可达时
+    // 每轮 ifTable 是 7 列 × 3 秒超时的白等；设备恢复后第一轮成功即回到正常间隔
+    const baseMs = (job.sysinfo.intervalSec || 60) * 1000;
+    if (job._snmpPollFailed) {
+      job._snmpFails = Math.min(8, (job._snmpFails || 0) + 1);
+      job.snmpTimer = setTimeout(() => this._pollSnmp(job), baseMs * backoffFactor(job._snmpFails));
+    } else {
+      job._snmpFails = 0;
+      job.snmpTimer = setTimeout(() => this._pollSnmp(job), baseMs);
+    }
   }
 
   async _collectIfTable(job) {
@@ -1856,6 +2048,7 @@ class MonitorManager extends EventEmitter {
     // 1. 接口名表（ifDescr walk 拿到全部 ifIndex）
     const descr = await snmpWalk(OID_IF_DESCR, host, target, 3000, port);
     if (!descr.ok || !descr.varbinds.length) {
+      job._snmpPollFailed = true; // 轮询失败信号：_pollSnmp 据此做指数退避
       if (process.env.NETTOPO_SMOKE) console.error('[snmp-if] ifDescr walk 失败', host, descr.error || ('0 行 · target=' + (target && target.user ? 'v3:' + target.user : 'v2c')));
       return;
     }
@@ -2792,5 +2985,5 @@ function snmpAdviceText(opts) {
   return reachTxt;
 }
 
-module.exports = { MonitorManager, UptimeStore, sanitizeFilename, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, snmpAdviceText, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, errRatePps, ifErrOver, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, envLevels, parseEnvSensors, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT, OID_IF_INERR, OID_IF_OUTERR, OID_ENV_TYPE, OID_ENV_SCALE, OID_ENV_PREC, OID_ENV_VALUE };
+module.exports = { MonitorManager, UptimeStore, sanitizeFilename, phaseOf, backoffFactor, cpuPctOf, memPctOf, MEM_MODES, snmpV3Reset: () => require('./snmp-v3.js').v3EngineReset(), cleanBackupLines, compileComplianceRules, runCompliance, snmpGet, snmpGetNext, snmpGetValue, snmpWalk, snmpAdviceText, parseSnmpResponse, snmpResponseMeta, extractVersion, rateBps, errRatePps, ifErrOver, fmtUptimeTicks, parseLinuxDf, parseLinuxFree, parseLinuxLoadavg, metricLevels, envLevels, parseEnvSensors, httpCheck, certDaysLeft, OID_SYSDESCR, OID_SYSOBJECT, OID_SYSUPTIME, OID_IF_DESCR, OID_IF_SPEED, OID_IF_OPER, OID_IF_IN32, OID_IF_OUT32, OID_IF_HCIN, OID_IF_HCOUT, OID_IF_INERR, OID_IF_OUTERR, OID_ENV_TYPE, OID_ENV_SCALE, OID_ENV_PREC, OID_ENV_VALUE };
 

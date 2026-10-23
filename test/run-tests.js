@@ -1156,6 +1156,19 @@ console.log('== MAC/ARP 表解析与终端定位（normMac / canonIfname / parse
     ok(U.checkInspectCommands(['display version']).ok === true && U.checkInspectCommands([]).ok === true, '白名单：空命令集视为通过（拒绝逻辑在 runOneShot）');
     ok(U.checkInspectCommands(['display version ' + 'x'.repeat(300)]).ok === false, '白名单拒绝超长命令');
     ok(U.checkInspectCommands('display version').ok === false, '白名单：非数组输入拒绝（防误用）');
+    // FortiGate get 前缀（只读查询）：放行 get、拒绝 execute / config / set（其写与执行类前缀）
+    ok(U.checkInspectCommands(['get system status', 'get system performance status']).ok === true, '白名单放行 FortiGate get 只读查询');
+    ok(U.checkInspectCommands(['get system status', 'execute reboot']).ok === false, '白名单拒绝 execute 执行类命令');
+    ok(U.checkInspectCommands(['config system global']).ok === false, '白名单拒绝 config 配置类命令');
+    ok(U.checkInspectCommands(['set admin-port 8443']).ok === false, '白名单拒绝 set 写命令');
+    // 厂家覆盖：锐捷 OID 预填（公开 MIB 口径）、Juniper/FortiGate 巡检与取证命令集存在且过白名单
+    const rj = U.snmpVendorByEnterprise(4881);
+    ok(rj && rj.cpu && rj.cpu.oid && rj.mem && rj.mem.oid, '锐捷：CPU/内存 OID 已按 RG-PLATFORMCOMMON-MIB 预填');
+    eq(rj.verified, 'doc', '锐捷：标记为文档口径（面板提示先 snmpwalk 核对）');
+    ok(Array.isArray(U.INSPECT_PRESETS.juniper) && U.INSPECT_PRESETS.juniper.length >= 4, '巡检预设：Juniper Junos 命令集存在');
+    ok(Array.isArray(U.INSPECT_PRESETS.fortinet) && U.INSPECT_PRESETS.fortinet.every(c => /^get /.test(c)), '巡检预设：FortiGate 命令集全部为 get 只读');
+    ok(Array.isArray(U.EVIDENCE_PRESETS.juniper) && Array.isArray(U.EVIDENCE_PRESETS.fortinet), '取证预设：Juniper / FortiGate 命令集存在');
+    ok(U.INSPECT_PRESETS.auto.indexOf('get system status') >= 0, '自动尝试集：含 FortiGate get（同双厂家混试语义，失败命令跳过）');
   }
   // parseArpMacTables：多厂家混合文本一次解析
   const mixed = [
@@ -9264,6 +9277,266 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       fs.rmSync(dir, { recursive: true, force: true });
     }
 
+    /* ================= 设备监控接统一凭据库（monitor.js credId 解析） ================= */
+    {
+      const { MonitorManager } = require('../js/monitor.js');
+      const os = require('os');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ntmon-cred-'));
+      const stubShell = { on() {}, connect() { return { ok: true, id: 's1' }; }, close() {}, trustFingerprint() { return true; } };
+      const CRED = { username: 'netops', password: 'secret', protocol: 'ssh', port: 2222, privateKey: 'KEYPEM', keyPassphrase: 'kp' };
+      const mk = (resolver) => new MonitorManager(stubShell, dir, null, resolver ? { resolveCredential: resolver } : {});
+      // 档案字段补齐（此前设备监控只能逐台手填账号密码）
+      const m1 = mk((id) => id === 'c1' ? { ok: true, patch: CRED } : { ok: false, error: '档案不存在' });
+      const v1 = m1._validate({ key: 'd1@10.0.0.1', deviceId: 'd1', host: '10.0.0.1', credId: 'c1', commands: ['display version'] });
+      ok(v1.ok === true, 'credId：带档案校验通过');
+      eq(v1.cfg.username, 'netops', 'credId：档案账号补齐');
+      eq(v1.cfg.password, 'secret', 'credId：档案口令补齐');
+      eq(v1.cfg.port, 2222, 'credId：档案端口补齐（调用方未显式给）');
+      ok(v1.cfg.privateKey === 'KEYPEM' && v1.cfg.keyPassphrase === 'kp', 'credId：私钥与私钥口令补齐');
+      eq(v1.cfg.protocol, 'ssh', 'credId：协议随档案');
+      // 调用方显式字段优先（与 credPatchOf 同语义）
+      const v2 = m1._validate({ key: 'd1@10.0.0.1', host: '10.0.0.1', credId: 'c1', username: 'admin2', port: 23, commands: ['x'] });
+      eq(v2.cfg.username, 'admin2', 'credId：显式账号优先于档案');
+      eq(v2.cfg.port, 23, 'credId：显式端口优先于档案');
+      // 档案不可用：如实报错，绝不静默回退成默认/匿名账号
+      const v3 = m1._validate({ key: 'd1@10.0.0.1', host: '10.0.0.1', credId: 'gone', commands: ['x'] });
+      ok(v3.ok === false && /凭据不可用/.test(v3.error), 'credId：档案不可用如实报错（不静默回退）');
+      // 未注入解析器（纯 Node / 测试环境）：明确报错
+      const m2 = mk(null);
+      const v4 = m2._validate({ key: 'd1@10.0.0.1', host: '10.0.0.1', credId: 'c1', commands: ['x'] });
+      ok(v4.ok === false && /不支持凭据库档案/.test(v4.error), 'credId：未注入解析器明确报错');
+      // 无 credId：手填路径不受影响
+      const v5 = m2._validate({ key: 'd1@10.0.0.1', host: '10.0.0.1', username: 'admin', commands: ['x'] });
+      ok(v5.ok === true && v5.cfg.username === 'admin', '无 credId：手填路径不受影响');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+
+    /* ================= 设备级告警通知聚合（js/notify-merge.js） ================= */
+    {
+      const NM = require('../js/notify-merge.js');
+      eq(NM.kindOf('网络拓扑管理软件 · 接口离线'), '接口离线', '分类：从标题提取类型名');
+      eq(NM.kindOf('无分隔符标题'), '无分隔符标题', '分类：无「·」时整题作类型');
+      const agg = new NM.NotifyAggregator({ windowMs: 60000, maxPerDevice: 3 });
+      eq(agg.push('d1', '网络拓扑管理软件 · 接口离线', 'SW1 接口 Gi0/1 DOWN', 'critical', 1000), 'now', '聚合：窗口内第一条立即发出');
+      eq(agg.push('d1', '网络拓扑管理软件 · 接口离线', 'SW1 接口 Gi0/2 DOWN', 'critical', 2000), 'hold', '聚合：第二条缓存（不再逐条弹）');
+      eq(agg.push('d1', '网络拓扑管理软件 · 指标告警', 'SW1 CPU 99%', 'warning', 3000), 'hold', '聚合：同设备异类告警同样缓存');
+      eq(agg.push('d2', '网络拓扑管理软件 · 接口离线', 'SW2 Gi0/1 DOWN', 'critical', 3500), 'now', '聚合：设备之间互不干扰（各自开窗）');
+      const s1 = agg.flushOne('d1');
+      eq(s1.count, 2, '聚合：窗口到期取回 2 条缓存');
+      eq(s1.byKind['接口离线'], 1, '聚合：接口离线计数（首条已发出不计入）');
+      eq(s1.byKind['指标告警'], 1, '聚合：指标告警计数');
+      eq(s1.level, 'critical', '聚合：摘要取缓存中最高等级');
+      ok(s1.firstBody.indexOf('Gi0/1 DOWN') >= 0, '聚合：摘要携带首条内容');
+      ok(agg.flushOne('d1') === null, '聚合：flush 后缓存清空（不重复发）');
+      ok(agg.flushOne('nobody') === null, '聚合：无缓存设备返回 null');
+      // 窗口过期：重新开窗，本条作为新窗口首条立即发
+      eq(agg.push('d1', '网络拓扑管理软件 · 接口离线', 'SW1 Gi0/9 DOWN', 'critical', 1000 + 60000), 'now', '聚合：窗口过期后重新开窗（新告警立即发）');
+      // 单设备缓存上限：超出只计数，flush 如实标注
+      const agg2 = new NM.NotifyAggregator({ windowMs: 60000, maxPerDevice: 2 });
+      agg2.push('x', '软件 · 接口离线', 'a', 'critical', 0);
+      agg2.push('x', '软件 · 接口离线', 'b', 'critical', 1);
+      agg2.push('x', '软件 · 接口离线', 'c', 'critical', 2);
+      agg2.push('x', '软件 · 接口离线', 'd', 'critical', 3);
+      const s2 = agg2.flushOne('x');
+      eq(s2.count, 2, '上限：缓存封顶 2 条');
+      eq(s2.dropped, 1, '上限：超出条目如实计数（摘要标注「另有 N 条」）');
+      eq(agg2.stats().devices, 0, '统计：flush 后设备数为 0');
+      eq(NM.NotifyAggregator && new NM.NotifyAggregator({}).windowMs, NM.DEFAULT_WINDOW_MS, '默认：窗口 60 秒');
+    }
+
+    /* ================= 磁盘字节配额（js/disk-quota.js + 配置备份库全库配额） ================= */
+    {
+      const DQ = require('../js/disk-quota.js');
+      const cb = require('../js/config-backup.js');
+      const os = require('os');
+      // 模块：记账 / 超限拒绝不记账 / 释放不减到负 / 下限回落（配额下限 1MB，测试值须 ≥ 下限）
+      const q = new DQ.DiskQuota({ maxBytes: 1024 * 1024 });
+      ok(q.check(600 * 1024) === true, '配额：配额内记账通过');
+      ok(q.check(500 * 1024) === false, '配额：超限拒绝');
+      ok(q.check(400 * 1024) === true, '配额：拒绝的那次未记账（余量准确，600K+400K 恰满 1MB）');
+      q.release(100 * 1024 * 1024);
+      eq(q.usedBytes, 0, '配额：释放不减到负数（满额后释放 100MB 归零）');
+      eq(new DQ.DiskQuota({ maxBytes: 10 }).maxBytes, DQ.DEFAULT_MAX_BYTES, '配额：低于下限回落默认 1GB');
+      // 实扫：目录树求和、符号链接不计入
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ntdq-'));
+      fs.mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'a', 'x.bin'), Buffer.alloc(100));
+      fs.writeFileSync(path.join(dir, 'a', 'b', 'y.bin'), Buffer.alloc(50));
+      const q2 = new DQ.DiskQuota({ maxBytes: 1024 * 1024 });
+      eq(q2.scan(dir), 150, '配额：目录树求和（含子目录）');
+      ok(q2.truncated === false, '配额：未截断');
+      try { fs.symlinkSync(path.join(dir, 'a', 'x.bin'), path.join(dir, 'link.bin')); } catch (e) { /* Windows 无权限时跳过（断言对两种情形都成立） */ }
+      eq(q2.scan(dir), 150, '配额：符号链接不计入');
+      fs.rmSync(dir, { recursive: true, force: true });
+      // 配置备份库：全库配额超限 → 先跨设备淘汰最旧再保存；单份超总配额 → 直接拒绝
+      const bdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ntbkq-'));
+      const store = new cb.ConfigBackupStore(bdir, { maxTotalBytes: 1024 * 1024 });
+      eq(store.quota.maxBytes, 1024 * 1024, '备份库：配额可配置（默认 2GB）');
+      const big = 'x'.repeat(300 * 1024);
+      ok(store.save('D1', '10.0.0.1', big).ok === true, '备份库：第 1 份入库（300KB）');
+      ok(store.save('D1', '10.0.0.1', big + big).ok === true, '备份库：第 2 份入库（600KB，累计 900KB）');
+      ok(store.save('D2', '10.0.0.2', big).ok === true, '备份库：第 3 份入库（触发超限淘汰最旧后成功）');
+      eq(store.list('D1', '10.0.0.1').items.length, 1, '备份库：D1 最旧一份被全局淘汰（余 1 份）');
+      eq(store.list('D2', '10.0.0.2').items.length, 1, '备份库：D2 保留');
+      // remove 负记账：删掉一份后小份可再入（配额回落生效）
+      const lst = store.list('D2', '10.0.0.2').items;
+      ok(store.remove('D2', '10.0.0.2', lst[0].name).ok === true, '备份库：删除一份');
+      ok(store.save('D2', '10.0.0.2', big).ok === true, '备份库：删除后配额回落，可再保存');
+      // 单份超总配额：立即拒绝（不清空整库）
+      const r4 = store.save('D3', '10.0.0.3', 'y'.repeat(1024 * 1024 + 100));
+      ok(r4.ok === false && /超过备份库配额上限/.test(r4.error), '备份库：单份超总配额如实拒绝（' + (r4.error || '').slice(0, 30) + '…）');
+      ok(store.list('D1', '10.0.0.1').items.length === 1, '备份库：拒绝路径不动已有备份');
+      fs.rmSync(bdir, { recursive: true, force: true });
+    }
+
+    /* ================= 采集调度错峰与失败退避（monitor.js phaseOf / backoffFactor） ================= */
+    {
+      const { phaseOf, backoffFactor } = require('../js/monitor.js');
+      // 相位：同 key 稳定、落在 [0, win)、不同 key 分散（批量启动不再同刻）
+      eq(phaseOf('dev1@10.0.0.1', 8000), phaseOf('dev1@10.0.0.1', 8000), '错峰：同一任务每次启动相位一致');
+      let inRange = true, distinct = new Set();
+      for (let i = 0; i < 200; i++) {
+        const p = phaseOf('task-' + i, 8000);
+        if (!(p >= 0 && p < 8000)) inRange = false;
+        distinct.add(Math.floor(p / 1000));
+      }
+      ok(inRange, '错峰：相位始终落在 [0, 8000)');
+      ok(distinct.size >= 6, '错峰：不同任务相位充分分散（' + distinct.size + '/8 个桶）');
+      eq(phaseOf('', 8000) >= 0, true, '错峰：空 key 也有合法相位');
+      eq(phaseOf('k', 1), 0, '错峰：窗口 1ms 时相位为 0');
+      // 退避倍数：首败 1×（与旧行为一致），持续失败 2×/4×/8× 封顶，非法值钳制
+      eq(backoffFactor(1), 1, '退避：首次失败 1×（单次失败行为不变）');
+      eq(backoffFactor(2), 2, '退避：连续第 2 次失败 2×');
+      eq(backoffFactor(3), 4, '退避：连续第 3 次失败 4×');
+      eq(backoffFactor(4), 8, '退避：连续第 4 次失败 8×');
+      eq(backoffFactor(9), 8, '退避：封顶 8×');
+      eq(backoffFactor(0), 1, '退避：非法计数钳制为 1×');
+      eq(backoffFactor(-3), 1, '退避：负数钳制为 1×');
+    }
+
+    /* ================= 指标历史归档（monitor.js：性能页跨重启不清零） ================= */
+    {
+      const { MonitorManager } = require('../js/monitor.js');
+      const os = require('os');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ntmon-hist-'));
+      const stubShell = { on() {}, connect() { return { ok: true, id: 's1' }; }, close() {}, trustFingerprint() { return true; } };
+      const fakeJob = () => ({
+        key: 'd1@10.0.0.1', deviceId: 'd1', name: 'SW1', host: '10.0.0.1',
+        enabled: true, stopping: false, gen: 0, sid: null,
+        loopTimer: null, retryTimer: null, probeTimer: null, backupTimer: null, httpTimer: null,
+        snmpTimer: null, metricTimer: null, _sysInfoTimer: null, _alertTimer: null, _moreRetry: null,
+        metricHist: [{ ts: 1000, mem: 50 }], httpHist: [{ ts: 2000, ok: true, latency: 12 }],
+        perfHist: [{ ts: 3000, cpu: 10, temp: 40 }], ifHist: [{ ts: 4000, ifs: [] }]
+      });
+      const mgr = new MonitorManager(stubShell, dir, null, {});
+      mgr.jobs.set('d1@10.0.0.1', fakeJob());
+      const snap = mgr.historiesSnapshot();
+      eq(snap.length, 1, '归档：快照含 1 个任务');
+      ok(snap[0].metric.length === 1 && snap[0].http[0].latency === 12 && snap[0].perf[0].temp === 40, '归档：磁盘/HTTP/CPU·温度三类采样齐全');
+      ok(snap[0].if === undefined, '归档：接口流量不落盘（capacity-store 已做跨重启日聚合）');
+      // 清洗：无 ts 的坏条目剔除
+      mgr.jobs.get('d1@10.0.0.1').metricHist.push({ bad: 1 });
+      eq(mgr.historiesSnapshot()[0].metric.length, 1, '归档：无 ts 条目剔除');
+      // save → load 往返（原子写 + 索引回填）
+      const f = path.join(dir, 'hist.json');
+      ok(mgr.saveHistories(f) === true, '归档：落盘成功');
+      const mgr2 = new MonitorManager(stubShell, dir, null, {});
+      const ld = mgr2.loadHistories(f);
+      eq(ld.items, 1, '归档：加载索引 1 个任务');
+      ok(mgr2._histArch.get('d1@10.0.0.1').http.length === 1, '归档：按 key 建索引（供 start 回填）');
+      // teardown 转存：任务停止（改配置重启）历史不随 job 丢弃
+      const j2 = fakeJob();
+      mgr2.jobs.set(j2.key, j2);
+      mgr2._teardown(j2, false);
+      ok(mgr2._histArch.get('d1@10.0.0.1') && mgr2._histArch.get('d1@10.0.0.1').perf.length === 1, '转存：teardown 后历史进归档索引');
+      // 坏文件：如实报错不覆盖
+      fs.writeFileSync(f, '{broken', 'utf8');
+      const mgr3 = new MonitorManager(stubShell, dir, null, {});
+      ok(mgr3.loadHistories(f).ok === false, '容错：坏文件如实报错（从空开始）');
+      eq(mgr3.loadHistories(path.join(dir, 'none.json')).items, 0, '容错：文件不存在空索引');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+
+    /* ================= NetFlow 小时快照（net-services.js：会话排行跨重启） ================= */
+    {
+      const { NetServices } = require('../js/net-services.js');
+      const os = require('os');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ntnf-hourly-'));
+      const svc = new NetServices({ baseDir: dir });
+      // 未启用 / 无会话：跳过不写空行
+      eq(svc.snapshotNetflowHourly().skipped, true, '快照：未启用 NetFlow 跳过');
+      svc.cfg.netflow.enabled = true;
+      svc.applied.netflow = { port: 9995, sig: 'x' };
+      eq(svc.snapshotNetflowHourly().skipped, true, '快照：无会话不写空行');
+      // 有会话：落一行 + 读回（at 取 2 小时前：仍在 24 小时窗口内，稍后用于验证窄窗口过滤）
+      const atOld = Date.now() - 2 * 3600000;
+      svc.netflow = { sessions: () => ({ ok: true, total: 2, items: [{ src: '10.0.0.1', dst: '10.0.0.2', sport: 1234, dport: 80, proto: 'TCP', bytes: 1024000, pkts: 900, flows: 3, exporter: 'SW1' }] }) };
+      const r = svc.snapshotNetflowHourly(atOld);
+      ok(r.ok === true && r.total === 2 && r.at === atOld, '快照：落一行会话 TopN');
+      ok(fs.existsSync(path.join(dir, 'netflow-hourly.jsonl')), '快照：JSONL 文件生成');
+      const hh = svc.netflowHourly(24);
+      eq(hh.items.length, 1, '查询：读回 1 行');
+      eq(hh.items[0].top[0].dst, '10.0.0.2', '查询：会话字段完整（清洗后保留 src/dst/端口/字节）');
+      eq(hh.items[0].top[0].bytes, 1024000, '查询：字节数值完整');
+      // 新快照 + 时间窗过滤：2 小时前的旧快照落在「最近 1 小时」窗口外
+      svc.netflow = { sessions: () => ({ ok: true, total: 5, items: [{ src: 'a', dst: 'b', dport: 443, proto: 'TCP', bytes: 1, pkts: 1 }] }) };
+      svc.snapshotNetflowHourly(Date.now());
+      const hh2 = svc.netflowHourly(1); // 最近 1 小时
+      eq(hh2.items.length, 1, '查询：时间窗外的旧快照被过滤（时间倒序）');
+      eq(hh2.items[0].total, 5, '查询：最新快照在前');
+      // 无文件：空表不报错
+      const svc2 = new NetServices({ baseDir: path.join(dir, 'nope') });
+      eq(svc2.netflowHourly(24).items.length, 0, '容错：无快照文件返回空表');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+
+    /* ================= 超大画布 PDF 分页（pdf.js buildMultiPagePDF） ================= */
+    {
+      const P = sandbox.TopoPdf;
+      const fake = new Uint8Array([0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9]);
+      const pdf1 = P.buildMultiPagePDF([{ jpegBytes: fake, widthPx: 100, heightPx: 80 }, { jpegBytes: fake, widthPx: 90, heightPx: 70 }]);
+      const s = Buffer.from(pdf1).toString('latin1');
+      ok(s.indexOf('%PDF-1.4') === 0 && s.indexOf('%%EOF') > 0, '分页：文件头尾完整');
+      ok(s.indexOf('/Count 2') > 0, '分页：Pages 计数 2');
+      eq((s.match(/\/Type\/Page[^s]/g) || []).length, 2, '分页：两个 Page 对象');
+      ok(s.indexOf('MediaBox[0 0 100 80]') > 0 && s.indexOf('MediaBox[0 0 90 70]') > 0, '分页：各页独立 MediaBox');
+      ok(s.indexOf('xref') > 0 && s.indexOf('/Size 9') > 0, '分页：xref 与对象数正确（2 + 3×2 + 1）');
+      // 二进制 JPEG 原样内嵌（不因字符串拼接被编码破坏）
+      const at = s.indexOf(String.fromCharCode(0xFF, 0xD8, 0xFF, 0xE0));
+      ok(at > 0, '分页：JPEG 二进制内嵌');
+      eq(P.buildMultiPagePDF([]).length, 0, '分页：空页列表返回空');
+      eq(P.buildMultiPagePDF([{ jpegBytes: fake }]).length, 0, '分页：缺尺寸的页被过滤');
+    }
+
+    /* ================= 画布归组缓存（util.js subnetPartition/subnetGroupsFrom 拆分） ================= */
+    {
+      const nodes = [
+        { id: 'n1', name: 'A', x: 0, y: 0, w: 120, h: 48, mgmt: '10.1.0.1' },
+        { id: 'n2', name: 'B', x: 300, y: 10, w: 120, h: 48, mgmt: '10.1.0.2' },
+        { id: 'n3', name: 'C', x: 600, y: 20, w: 120, h: 48, mgmt: '10.2.0.1' }
+      ];
+      const links = [
+        { id: 'l1', a: 'n1', b: 'n2', aIp: '10.1.0.1', bIp: '10.1.0.2' },
+        { id: 'l2', a: 'n1', b: 'n3', aIp: '10.1.0.1', bIp: '10.2.0.1' }
+      ];
+      // 拆分后组合与原 subnetGroups 完全等价（回归保护：渲染层缓存依赖此口径）
+      const whole = U.subnetGroups(nodes, links, {});
+      const parts = U.subnetPartition(nodes, links);
+      const viaParts = U.subnetGroupsFrom(parts, nodes, {});
+      eq(parts.length, 2, '归组：两个网段（10.1.0.0/24 与 10.2.0.0/24）');
+      eq(whole.length, viaParts.length, '等价：分组数一致');
+      eq(JSON.stringify(whole.map(g => [g.key, g.nodeIds])), JSON.stringify(viaParts.map(g => [g.key, g.nodeIds])), '等价：键与成员完全一致');
+      eq(whole[0].x, viaParts[0].x, '等价：分组框几何一致');
+      // 坐标变化只影响几何段，归组结果（缓存对象）不变
+      const parts2 = U.subnetPartition([{ ...nodes[0], x: 9999 }, nodes[1], nodes[2]], links);
+      eq(JSON.stringify(parts2.map(g => g.nodeIds)), JSON.stringify(parts.map(g => g.nodeIds)), '缓存：坐标变化不改变归组（拖拽可复用缓存）');
+      const viaMoved = U.subnetGroupsFrom(parts, [{ ...nodes[0], x: 9999 }, nodes[1], nodes[2]], {});
+      ok(viaMoved[0].x > viaParts[0].x, '几何：坐标变化反映到分组框（几何段随帧计算）');
+      // 自定义分组名仍生效
+      const named = U.subnetGroupsFrom(parts, nodes, { '10.1.0.0/24': '核心区' });
+      ok(String(named[0].name).indexOf('核心区') === 0, '命名：自定义分组名沿用');
+    }
+
     /* ================= 告警等级与分级提示音（js/alert-level.js） ================= */
     {
       const A = require('../js/alert-level.js');
@@ -9748,6 +10021,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(L.probeCommand('h3c', '10.0.0.1', { count: 3, timeoutMs: 3000 }), 'ping -c 3 10.0.0.1', '命令：H3C 语法');
       eq(L.probeCommand('cisco', '10.0.0.1', { count: 2, timeoutMs: 4000 }), 'ping 10.0.0.1 repeat 2 timeout 4', '命令：思科 IOS 语法');
       eq(L.probeCommand('ruijie', '10.0.0.1', { count: 2, timeoutMs: 3000 }), 'ping -c 2 10.0.0.1', '命令：锐捷语法');
+      eq(L.probeCommand('juniper', '10.0.0.1', { count: 3, timeoutMs: 3000 }), 'ping 10.0.0.1 count 3 rapid', '命令：Juniper Junos 语法（count + rapid）');
+      eq(L.probeCommand('fortinet', '10.0.0.9', { count: 3, timeoutMs: 3000 }), 'execute ping 10.0.0.9', '命令：FortiGate 语法（execute ping，次数为系统默认）');
       eq(L.probeCommand('huawei', '-t', {}), '', '命令：目标地址非法时不出命令（防命令注入）');
 
       // 回显判定：四类厂家 + 判不出来返回 null（不改状态）

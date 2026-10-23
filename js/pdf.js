@@ -232,5 +232,53 @@ function buildImagePDF(jpegBytes, widthPx, heightPx, opts) {
   return out;
 }
 
-global.TopoPdf = { buildSvgImage, buildImagePDF };
+/* ---------- 多页 PDF（超大画布分页导出） ----------
+ * 单页 canvas 有浏览器尺寸上限（导出入口按 12000 留余量拦），此前超大拓扑直接导不出 PDF。
+ * 分页由导出入口切块渲染，本函数把 N 张 JPEG 组装成 N 页 PDF（每页独立 MediaBox，共享 Pages 树）。 */
+function buildMultiPagePDF(pages) {
+  const enc = new TextEncoder();
+  const list = (Array.isArray(pages) ? pages : []).filter(p => p && p.jpegBytes && p.widthPx > 0 && p.heightPx > 0);
+  const n = list.length;
+  if (!n) return new Uint8Array(0);
+  const kids = list.map((_, i) => (3 + 3 * i) + ' 0 R').join(' ');
+  const objTexts = [
+    '<</Type/Catalog/Pages 2 0 R>>',
+    `<</Type/Pages/Kids[${kids}]/Count ${n}>>`
+  ];
+  for (let i = 0; i < n; i++) {
+    const p = list[i];
+    const W = Math.round(p.widthPx), H = Math.round(p.heightPx);
+    const cs = `q ${W} 0 0 ${H} 0 0 cm /Im${i} Do Q\n`;
+    objTexts.push(`<</Type/Page/Parent 2 0 R/MediaBox[0 0 ${W} ${H}]/Resources<</XObject<</Im${i} ${4 + 3 * i} 0 R>>>>/Contents ${5 + 3 * i} 0 R>>`);
+    objTexts.push(`<</Type/XObject/Subtype/Image/Width ${W}/Height ${H}/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode/Length ${p.jpegBytes.length}>>\nstream\n`);
+    objTexts.push(`<</Length ${enc.encode(cs).length}>>\nstream\n${cs}endstream`);
+  }
+  const total = 2 + 3 * n;
+  const chunks = [], offsets = [];
+  let pos = 0;
+  const pushStr = (s) => { const b = enc.encode(s); chunks.push(b); pos += b.length; };
+  pushStr('%PDF-1.4\n');
+  for (let oi = 0; oi < total; oi++) {
+    offsets.push(pos);
+    pushStr((oi + 1) + ' 0 obj\n' + objTexts[oi]);
+    if (oi >= 3 && (oi - 3) % 3 === 0) {           // Image 对象：JPEG 二进制内嵌
+      const img = list[(oi - 3) / 3].jpegBytes;
+      chunks.push(img); pos += img.length;
+      pushStr('\nendstream\nendobj\n');
+    } else {
+      pushStr('\nendobj\n');
+    }
+  }
+  const xrefPos = pos;
+  pushStr(`xref\n0 ${total + 1}\n0000000000 65535 f \n`);
+  for (const o of offsets) pushStr(String(o).padStart(10, '0') + ' 00000 n \n');
+  pushStr(`trailer\n<</Size ${total + 1}/Root 1 0 R>>\nstartxref\n${xrefPos}\n%%EOF`);
+  const sum = chunks.reduce((s, c) => s + c.length, 0);
+  const out = new Uint8Array(sum);
+  let q = 0;
+  for (const c of chunks) { out.set(c, q); q += c.length; }
+  return out;
+}
+
+global.TopoPdf = { buildSvgImage, buildImagePDF, buildMultiPagePDF };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -241,9 +241,21 @@ class Renderer {
 
   /* ---------- 子网分组 ---------- */
   _buildGroups() {
-    const groups = this.showSubnets ? U.subnetGroups(this.nodes, this.links, this.subnetNames) : [];
+    // 归组缓存：分组归属只由 IP 数据（链路两端 IP + 节点管理地址）决定，与坐标无关——
+    // 拖拽/缩放不再每帧重算 O(节点+链路) 的 subnetGroups 归组，只剩 O(组成员) 的几何段随帧计算
+    let groups = [];
+    if (this.showSubnets) {
+      let partSig = '';
+      for (const l of this.links) partSig += (l.aIp || '') + ',' + (l.bIp || '') + ';';
+      for (const n of this.nodes) partSig += n.id + '=' + U.nodeMgmts(n).join(';') + '|';
+      if (partSig !== this._partSig) {
+        this._partSig = partSig;
+        this._parts = U.subnetPartition(this.nodes, this.links);
+      }
+      groups = U.subnetGroupsFrom(this._parts || [], this.nodes, this.subnetNames);
+    }
     // update() 是拖拽/缩放等指针级高频路径：分组几何/名称/缩放未变时跳过整层 DOM 重建
-    // （subnetGroups 仍每帧重算——O(节点+链路)；省的是 O(分组×元素) 的销毁重建）
+    // （归组已由上方签名缓存；这里省的是 O(分组×元素) 的销毁重建）
     let sig = (this.showSubnets ? 1 : 0) + '/' + this.zoom.toFixed(4) + '/' + groups.length;
     for (const g of groups) {
       sig += `|${g.key},${(Number(g.x) || 0).toFixed(2)},${(Number(g.y) || 0).toFixed(2)},${(Number(g.w) || 0).toFixed(2)},${(Number(g.h) || 0).toFixed(2)},${g.name},${g.color},${g.nodeIds.length}`;

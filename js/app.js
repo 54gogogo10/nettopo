@@ -1135,7 +1135,7 @@ function openBatchInspect() {
     .filter(n => U.nodeMgmts(n).length || normalizeMonitorHosts(state.monitorCfg[n.id]).length)
     .map(n => ({ node: n, cred: monitorCredOf(n.id) }));
   if (!cands.length) { toast('当前没有配置管理地址或监控凭据的设备：先为设备填写管理地址'); return; }
-  const BI_VENDOR_LB = { auto: '自动尝试', huawei: '华为 VRP', h3c: 'H3C Comware', cisco: '思科 IOS', ruijie: '锐捷', linux: 'Linux' };
+  const BI_VENDOR_LB = { auto: '自动尝试', huawei: '华为 VRP', h3c: 'H3C Comware', cisco: '思科 IOS', ruijie: '锐捷', juniper: 'Juniper Junos', fortinet: '飞塔 FortiGate', linux: 'Linux' };
   const biVendorOpts = Object.keys(U.INSPECT_PRESETS)
     .map(k => `<option value="${k}">${BI_VENDOR_LB[k] || k}（${U.INSPECT_PRESETS[k].length} 条）</option>`).join('');
   const root = $('#modalRoot');
@@ -4409,7 +4409,12 @@ function exportPdf() {
   const img = new Image();
   img.onload = () => {
     const scale = exportCanvasScale(img, 2);
-    if (exportCanvasTooLarge(img, scale)) { URL.revokeObjectURL(url); toast('PDF 导出失败：画布尺寸 ' + img.width + '×' + img.height + ' 超出浏览器上限，请缩小画布或减少设备后重试'); return; }
+    if (exportCanvasTooLarge(img, scale)) {
+      // 超出单 canvas 上限不再直接失败：PDF 走网格分页（矢量源按区域重采样，每页独立画布），
+      // 页数有上限兜底；PNG 仍受 canvas 硬限制无法分页
+      exportPdfTiled(img, scale, () => URL.revokeObjectURL(url));
+      return;
+    }
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
@@ -4435,6 +4440,41 @@ function exportPdf() {
 }
 
 /* ================= 导出图片（PNG / SVG / 剪贴板） ================= */
+/** 超大画布的 PDF 分页导出：单页 canvas 有浏览器上限（12000 留余量），把大图切成 ≤TILE 的
+ *  网格逐页渲染（SVG 矢量源按源区域重采样到各页画布，清晰度不降），页数封顶兜底。 */
+function exportPdfTiled(img, scale, revoke) {
+  const TILE = 11000, MAX_PAGES = 36;
+  const W = Math.round(img.width * scale), H = Math.round(img.height * scale);
+  const cols = Math.ceil(W / TILE), rows = Math.ceil(H / TILE);
+  if (cols * rows > MAX_PAGES) {
+    revoke();
+    toast('PDF 导出失败：画布尺寸 ' + W + '×' + H + ' 需分 ' + (cols * rows) + ' 页（超过 ' + MAX_PAGES + ' 页上限），请缩小画布或减少设备后重试');
+    return;
+  }
+  const pages = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const pw = Math.min(TILE, W - c * TILE), ph = Math.min(TILE, H - r * TILE);
+      const cv = document.createElement('canvas');
+      cv.width = pw; cv.height = ph;
+      const cx = cv.getContext('2d');
+      cx.fillStyle = '#ffffff';
+      cx.fillRect(0, 0, pw, ph);
+      cx.drawImage(img, c * TILE / scale, r * TILE / scale, pw / scale, ph / scale, 0, 0, pw, ph);
+      const b64 = cv.toDataURL('image/jpeg', 0.92).split(',')[1];
+      if (!b64 || !b64.length) { revoke(); toast('PDF 渲染失败：图像尺寸超出浏览器上限'); return; }
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      pages.push({ jpegBytes: bytes, widthPx: pw, heightPx: ph });
+    }
+  }
+  const pdf = TopoPdf.buildMultiPagePDF(pages);
+  U.download(`网络拓扑图_${U.fmtDate()}.pdf`, new Blob([pdf], { type: 'application/pdf' }));
+  revoke();
+  toast('已导出 PDF（超大画布自动分 ' + pages.length + ' 页）');
+}
+
 function renderTopologyPng(cb) {
   const svg = TopoPdf.buildSvgImage({ nodes: state.nodes, links: state.links, texts: state.texts, regions: state.regions, underlay: state.underlay }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
@@ -6765,10 +6805,12 @@ function renderSelCard() {
       <div class="sc-row">拖动任意一台可整体移动；Delete 删除选中</div>
       <div class="sc-actions">
         <button class="tb" data-act="batch">批量编辑</button>
+        <button class="tb" data-act="batchmon">批量监控…</button>
         <button class="tb danger" data-act="del">删除</button>
         <button class="tb" data-act="clear">取消选择</button>
       </div>`;
     card.querySelector('[data-act=batch]').onclick = () => batchEditNodes();
+    card.querySelector('[data-act=batchmon]').onclick = () => openBatchMonitor();
     card.querySelector('[data-act=del]').onclick = () => deleteSelection();
     card.querySelector('[data-act=clear]').onclick = () => select(null, null);
     return;
@@ -6892,10 +6934,32 @@ function updateStats() {
   $('#cntLinks').textContent = state.links.length;
 }
 
+/* 侧栏列表内容签名：点选/拖拽结束等高频 refreshPanel 调用里，签名没变说明列表内容相同
+ * （含监控/链路徽标状态），此时只同步选中态 class、不重建 DOM——数千设备时点一下画布
+ * 不再触发整个侧栏重排。签名是 O(节点/链路) 的字符串拼接，远轻于重建列表。 */
+let _panelSig = '';
+function panelSigOf(q) {
+  const mon = Object.keys(state.monitorStatus).map(k => k + '\x03' + (state.monitorStatus[k] && state.monitorStatus[k].state || '')).join('\x04');
+  const lnk = linkTasks().filter(t => t.enabled).map(t => t.id).join(',');
+  if (state.tab === 'nodes') {
+    return 'N\x01' + q + '\x02' + state.nodes.map(n => n.id + '\x03' + n.name + '\x03' + (n.note || '') + '\x03' + (n.type || '')).join('\x04') + '\x05' + mon + '\x06' + lnk;
+  }
+  return 'L\x01' + q + '\x02' + state.links.map(l => l.id + '\x03' + (l.aIf || '') + '\x03' + (l.bIf || '') + '\x03' + (l.aIp || '') + '\x03' + (l.bIp || '') + '\x03' + (l.bw || '')).join('\x04') + '\x05' + mon;
+}
 function refreshPanel() {
   scheduleAlertTopology();   // 拓扑/监控配置变化后重推邻接表（防抖 + 去重，供主进程归并上游失联告警）
   const wrap = $('#listWrap');
   const q = state.search.trim().toLowerCase();
+  const sig = panelSigOf(q);
+  if (sig === _panelSig) {
+    // 内容未变：只同步选中态（select/拖拽结束路径），不重建列表 DOM
+    const selKey = (state.sel.kind === 'node' || state.sel.kind === 'link') ? state.sel.kind + ':' + state.sel.id : '';
+    $$('.pitem', wrap).forEach(it => {
+      it.classList.toggle('sel', !!selKey && it.getAttribute('data-kind') + ':' + it.getAttribute('data-id') === selKey);
+    });
+    return;
+  }
+  _panelSig = sig;
   if (state.tab === 'nodes') {
     // 度数索引一次建好：逐节点对全量链路 filter 是 O(节点×链路)，数千节点大图上一次刷新即数千万次比较
     const linkCnt = new Map();
@@ -7284,7 +7348,17 @@ function openTypeManager() {
         U.setTypeImage(key, '');
         afterChange();
       });
-      row.querySelector('.tm-color').addEventListener('input', (e) => {
+      // 取色器拖动：数据即时生效（写覆盖表，导出 SVG/后续视图读到新色），但不触发 afterChange
+      // 全量重建——大拓扑上每拖一像素 setData + 刷新面板会明显卡顿；画布视觉只改 defs 渐变 stop，
+      // 松手（change）统一走 afterChange 重建（修正描边色、持久化、刷新面板）
+      const colorInp = row.querySelector('.tm-color');
+      colorInp.addEventListener('input', (e) => {
+        const c = String(e.target.value || '');
+        if (!/^#[0-9a-fA-F]{6}$/.test(c)) return;
+        U.setTypeColor(key, c);
+        for (const st of document.querySelectorAll('#g-' + key + ' stop')) st.setAttribute('stop-color', c);
+      });
+      colorInp.addEventListener('change', (e) => {
         U.setTypeColor(key, e.target.value);
         afterChange();
       });
@@ -8047,9 +8121,12 @@ function wire() {
     $$('.tab').forEach(x => x.classList.toggle('active', x === t));
     refreshPanel();
   }));
+  // 侧栏搜索防抖（150ms）：数千设备时逐字符全量重建列表明显卡顿
+  let _panelSearchTimer = null;
   $('#searchInput').addEventListener('input', (e) => {
     state.search = e.target.value;
-    refreshPanel();
+    if (_panelSearchTimer) clearTimeout(_panelSearchTimer);
+    _panelSearchTimer = setTimeout(() => { _panelSearchTimer = null; refreshPanel(); }, 150);
   });
 
   // 画布快速搜索（Ctrl+F 呼出）：输入即搜，Enter/↑/↓ 循环定位，点击结果直接跳转
@@ -8947,6 +9024,7 @@ function normalizeMonitorHosts(cfg) {
     if (h && typeof h === 'object' && String(h.host || '').trim()) {
       return {
         host: String(h.host).trim(),
+        credId: typeof h.credId === 'string' ? h.credId.trim().slice(0, 128) : '',
         protocol: h.protocol || 'ssh',
         port: h.port != null ? String(h.port) : '',
         username: h.username || 'admin',
@@ -9136,9 +9214,13 @@ async function applyMonitor(id, cfg, enabled) {
       for (const r of hosts) {
         // 复用 Web Shell 已信任的指纹（若此前通过 Web Shell 信任过该主机，则直接严格校验）
         const expectFp = trustedFpOf(r.host, r.port);
+        // 凭据库档案：只交 credId，账号/口令/私钥/协议端口由主进程按档案补齐（明文不经过渲染层）
+        const credPart = r.credId
+          ? { credId: r.credId }
+          : { protocol: r.protocol, port: r.port, username: r.username, password: r.password, privateKey: r.privateKey || '', keyPassphrase: r.keyPass || '', jump: r.jump || null };
         const res = await bridge.start(Object.assign(
           { key: monitorKey(id, r.host), deviceId: id, name: node ? node.name : '', expectFp, host: r.host },
-          { protocol: r.protocol, port: r.port, username: r.username, password: r.password, privateKey: r.privateKey || '', keyPassphrase: r.keyPass || '', jump: r.jump || null },
+          credPart,
           { commands: r.readOnly ? [] : r.commands, readOnly: !!r.readOnly, onConnect: r.onConnect || [], intervalSec: cleanCfg.intervalSec, cmdDelayMs: cleanCfg.cmdDelayMs },
           { probe: { enabled: r.probeEnabled, type: r.probeType, intervalSec: r.probeIntervalSec, port: r.probePort || 0 } },
           { alerts: r.alerts },
@@ -9565,6 +9647,8 @@ function linkPayloadOf(t) {
     const row = rows.find(r => String(r.host) === String(f.host)) || rows[0];
     if (!row) continue;                       // 无凭据：主进程会以「缺少管理地址」如实拒绝启动
     f.host = f.host || String(row.host || '');
+    // 该管理口的监控配置走凭据库档案：渲染层没有明文可取，直接转交 credId 由主进程补齐
+    if (row.credId) { f.credId = row.credId; continue; }
     f.port = row.port || ''; f.protocol = row.protocol || 'ssh';
     f.username = row.username || ''; f.password = row.password || '';
     f.privateKey = row.privateKey || ''; f.keyPassphrase = row.keyPass || '';
@@ -9740,6 +9824,8 @@ function openLinkPathDialog() {
         <option value="h3c">H3C Comware（ping -c N）</option>
         <option value="cisco">思科 IOS（ping ip repeat N timeout S）</option>
         <option value="ruijie">锐捷（ping -c N）</option>
+        <option value="juniper">Juniper Junos（ping ip count N rapid）</option>
+        <option value="fortinet">飞塔 FortiGate（execute ping）</option>
       </select></div>
       <div class="frow" id="lkCredRow" hidden><label>探测凭据</label>
         <select id="lkCred">
@@ -9861,6 +9947,8 @@ function openLinkTaskEdit(key) {
           <option value="h3c"${t.vendor === 'h3c' ? ' selected' : ''}>H3C Comware</option>
           <option value="cisco"${t.vendor === 'cisco' ? ' selected' : ''}>思科 IOS</option>
           <option value="ruijie"${t.vendor === 'ruijie' ? ' selected' : ''}>锐捷</option>
+          <option value="juniper"${t.vendor === 'juniper' ? ' selected' : ''}>Juniper Junos</option>
+          <option value="fortinet"${t.vendor === 'fortinet' ? ' selected' : ''}>飞塔 FortiGate</option>
         </select></div>
         <div class="frow"><label>凭据来源</label><select id="leCred">
           <option value="monitor"${t.credMode !== 'cred' ? ' selected' : ''}>跟随设备监控配置</option>
@@ -10156,6 +10244,85 @@ async function syncMonitorStatus() {
   } catch (e) { /* 忽略 */ }
 }
 
+/* ---------------- 批量监控配置（多选设备一键套模板） ----------------
+ * 此前设备监控只能逐台打开弹窗手填账号密码，给几十台设备开监控要重复几十次。
+ * 选中 N 台后把同一份监控模板应用到每台的全部管理地址（各地址一个任务）：
+ * 凭据可走统一凭据库档案（只交 credId，主进程补齐）或手填同一组账号；无管理地址的设备如实跳过。 */
+function openBatchMonitor() {
+  const ids = renderer.selectedNodes();
+  if (!ids.length) { toast('请先选中要配置监控的设备（Ctrl 点选 / Shift 框选）'); return; }
+  const bridge = monitorBridge();
+  if (!bridge) { toast('批量监控配置需桌面版'); return; }
+  loadCreds().then((list) => {
+    const rootNode = $('#modalRoot');
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="modal ws-dialog" role="dialog" style="width:600px">
+        <h3>批量配置设备监控 — 已选 ${ids.length} 台</h3>
+        <div class="m-sub">把同一份监控模板应用到每台选中设备的<b>全部管理地址</b>（每地址一个任务，协议/账号同模板）；<b>无管理地址的设备自动跳过</b>，已有监控配置的设备会被该模板覆盖。</div>
+        <div class="frow">${credPickerHtml('bm', list, { userDefault: '' })}</div>
+        <div class="frow-inline" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="frow" style="margin:0"><label>协议</label><select id="bmProto"><option value="ssh">SSH</option><option value="telnet">Telnet</option></select></div>
+          <div class="frow" style="margin:0"><label>端口（空=默认）</label><input id="bmPort" type="number" min="1" max="65535" style="width:90px" placeholder="22 / 23"/></div>
+          <div class="frow" style="margin:0"><label>循环间隔（秒）</label><input id="bmInterval" type="number" min="1" value="300" style="width:80px"/></div>
+          <div class="frow" style="margin:0"><label>命令间隔（秒）</label><input id="bmDelay" type="number" min="0" step="0.1" value="1" style="width:70px"/></div>
+        </div>
+        <div class="frow"><label>执行命令（每行一条，全部地址相同；只读巡检类命令）</label>
+          <textarea id="bmCmds" rows="3" placeholder="display version&#10;display clock"></textarea></div>
+        <div class="frow" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;margin:0" title="按间隔 TCP 探测各管理地址连通性，离线告警（与执行命令二选一即可满足启动校验）"><input id="bmProbe" type="checkbox" checked/>在线探测（TCP，60 秒）</label>
+          <label style="display:flex;align-items:center;gap:6px;margin:0"><input id="bmEnable" type="checkbox" checked/>应用后立即启用</label>
+        </div>
+        <div class="m-actions">
+          <button type="button" class="tb" data-act="cancel">取消</button>
+          <button type="button" class="tb primary" data-act="apply">应用到 ${ids.length} 台</button>
+        </div>
+      </div>`;
+    rootNode.appendChild(ov);
+    ov.tabIndex = -1; ov.focus();
+    const close = () => ov.remove();
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    const bmCred = bindCredPicker(ov, 'bm');
+    const applyBtn = ov.querySelector('[data-act=apply]');
+    ov.querySelector('[data-act=cancel]').onclick = close;
+    applyBtn.onclick = async () => {
+      const commands = ov.querySelector('#bmCmds').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      const probeEnabled = ov.querySelector('#bmProbe').checked;
+      if (!commands.length && !probeEnabled) { toast('请填写执行命令，或勾选「在线探测」（至少一项）'); return; }
+      const patch = bmCred.patch();
+      if (!patch.credId && !patch.username && !patch.password) { toast('请选择凭据库档案，或填写账号/密码'); return; }
+      const enabled = ov.querySelector('#bmEnable').checked;
+      const okGo = await confirmBox(`将把监控模板应用到 ${ids.length} 台设备的全部管理地址，已有监控配置会被覆盖。继续？`);
+      if (!okGo) return;
+      applyBtn.disabled = true;
+      const cfgT = {
+        intervalSec: Math.max(1, parseInt(ov.querySelector('#bmInterval').value, 10) || 300),
+        cmdDelayMs: Math.round((parseFloat(ov.querySelector('#bmDelay').value) || 0) * 1000)
+      };
+      const hostT = Object.assign({
+        commands: commands.slice(), readOnly: false,
+        probeEnabled, probeType: 'tcp', probeIntervalSec: 60
+      }, patch.credId
+        ? { credId: patch.credId }
+        : { protocol: ov.querySelector('#bmProto').value, port: ov.querySelector('#bmPort').value.trim(), username: patch.username, password: patch.password, authMode: 'password' });
+      let applied = 0;
+      const skipped = [];
+      for (const id of ids) {
+        const n = state.nodes.find(x => x.id === id);
+        const mgmts = n ? U.nodeMgmts(n) : [];
+        if (!mgmts.length) { skipped.push(n ? n.name : id); continue; }
+        const hosts = mgmts.map(h => Object.assign({ host: h }, hostT));
+        const r = await applyMonitor(id, Object.assign({ hosts }, cfgT), enabled);
+        if (r !== false) applied++;
+      }
+      close();
+      toast('批量监控：已应用 ' + applied + ' 台' + (skipped.length ? '；跳过 ' + skipped.length + ' 台（无管理地址：' + skipped.slice(0, 3).join('、') + (skipped.length > 3 ? '…' : '') + '）' : ''));
+    };
+  });
+}
+
 /* ---------------- 监控配置弹窗 ---------------- */
 function openMonitorConfig(id) {
   const n = state.nodes.find(x => x.id === id);
@@ -10221,6 +10388,9 @@ function openMonitorConfig(id) {
       <div class="mh-cmds-wrap" hidden><textarea class="mh-cmds" rows="3" placeholder="该地址的执行命令（每行一条）：&#10;display version&#10;display current-configuration">${U.escHtml(Array.isArray(r.commands) ? r.commands.join('\n') : '')}</textarea></div>
       <div class="mh-ext">
         <div class="mh-sep">连接与认证</div>
+        <label class="mh-cred-row" title="统一凭据库档案（监控 ▾ 服务与凭据 ▸ 凭据库… 维护）：选中后账号/口令/私钥/协议端口由主进程按档案补齐（口令不回界面），协议端口输入框随之隐藏；档案不可用时该管理口启动会如实报错">凭据库
+          <select class="mh-cred-sel">${credOptionsHtml(credCache || [], r.credId)}</select>
+        </label>
         <label class="mh-onc" title="连接时执行命令：每次连接成功（含自动重连）仅执行一次，先于周期循环命令发出；每行一条，依次执行">连接时
           <textarea class="mh-onc-ta" rows="2" placeholder="命令（每行一条，连接成功时依次执行）">${U.escHtml(Array.isArray(r.onConnect) ? r.onConnect.join('\n') : (r.onConnect || ''))}</textarea>
         </label>
@@ -10390,6 +10560,17 @@ function openMonitorConfig(id) {
       if (hidden) alertsWrap.querySelector('textarea').focus();
     };
     rowEl.querySelector('.mh-del').onclick = () => rowEl.remove();
+    // 凭据库档案：选中后手填协议/端口/账号/密码隐藏（保存时只交 credId，主进程按档案补齐，口令不回界面）；
+    // 切回「手工输入」恢复显示，原值不清空
+    const credSel = rowEl.querySelector('.mh-cred-sel');
+    const applyCredUi = () => {
+      const useCred = !!(credSel && credSel.value);
+      for (const cls of ['.mh-proto', '.mh-port', '.mh-user', '.mh-pass']) {
+        const el = rowEl.querySelector(cls);
+        if (el) el.style.display = useCred ? 'none' : '';
+      }
+    };
+    if (credSel) { credSel.addEventListener('change', applyCredUi); applyCredUi(); }
     // 跳板机行内折叠区：填写地址即启用（清空即停用）
     const jumpBtn = rowEl.querySelector('.mh-jump-btn');
     const jumpWrap = rowEl.querySelector('.mh-jump-wrap');
@@ -10533,6 +10714,7 @@ function openMonitorConfig(id) {
       }).filter(a => a.pattern);
       return {
         host: rowEl.querySelector('.mh-host').value.trim(),
+        credId: String((rowEl.querySelector('.mh-cred-sel') || {}).value || '').trim().slice(0, 128),
         protocol: rowEl.querySelector('.mh-proto').value,
         port: rowEl.querySelector('.mh-port').value.trim(),
         username: rowEl.querySelector('.mh-user').value.trim(),
@@ -14296,6 +14478,7 @@ function openNetServices() {
           <input type="text" id="nsvNfKw" placeholder="过滤：地址 / 端口 / 协议 / 来源…" style="min-width:180px"/>
           <label class="nsv-mini"><input type="checkbox" id="nsvNfPause"/>暂停刷新</label>
           <span class="nsv-tabs-sp"></span>
+          <button type="button" class="tb nsv-mini-btn" id="nsvNfHourly" title="跨重启的小时级会话快照（每小时把会话 TopN 落盘一行，保留 30 天）——回答「昨天的大流量会话是谁」；内存明细重启即清，快照不丢">小时快照</button>
           <button type="button" class="tb nsv-mini-btn" id="nsvNfCsv">导出 CSV</button>
           <button type="button" class="tb nsv-mini-btn" id="nsvNfClear">清空</button>
           <span class="nsv-logcnt" id="nsvNfCnt"></span>
@@ -14833,9 +15016,30 @@ function openNetServices() {
     nfEl.scrollTop = 0;
   }
   let nfPaused = false;
+  let nfHourlyView = false; // 小时快照视图：暂停实时刷新覆写，再次点击回实时视图
   ov.querySelector('#nsvNfPause').addEventListener('change', (e) => { nfPaused = e.target.checked; });
+  ov.querySelector('#nsvNfHourly').addEventListener('click', async () => {
+    if (nfHourlyView) { nfHourlyView = false; refreshNetflow(); return; }
+    if (!(window.topoNetSvc && window.topoNetSvc.netflowHourly)) { toast('当前版本不支持小时快照'); return; }
+    let r;
+    try { r = await window.topoNetSvc.netflowHourly(72); } catch (e) { r = null; }
+    if (!r || !r.ok || !ov.isConnected) return;
+    nfHourlyView = true;
+    const items = r.items || [];
+    if (!items.length) {
+      nfEl.innerHTML = '<div class="nsv-empty">尚无小时快照：NetFlow 服务启用并收到流量后，每小时自动落一份会话 TopN 快照（保留 30 天，重启不丢）。再点「小时快照」回到实时视图。</div>';
+      return;
+    }
+    nfEl.innerHTML = '<div class="nsv-lg s-srchhead">小时快照（最近 ' + items.length + ' 份，时间倒序；会话为快照时刻的累计口径。再点「小时快照」回到实时视图）</div>' +
+      items.map(s => '<div class="nsv-lg">' +
+        '<span class="t">' + U.fmtDateTime(new Date(s.at)) + '</span>' +
+        '<span class="m"><b>' + s.total + '</b> 个会话 · Top：' + (s.top.slice(0, 3).map(t =>
+          U.escHtml(t.src) + ' ⇢ ' + U.escHtml(t.dst) + (t.dport ? ':' + t.dport : '') + '（' + U.fmtSize(t.bytes) + ')').join('；') || '-') + '</span>' +
+        '</div>').join('');
+    nfEl.scrollTop = 0;
+  });
   async function refreshNetflow() {
-    if (nfPaused) return;
+    if (nfPaused || nfHourlyView) return;
     const kw = String(ov.querySelector('#nsvNfKw').value || '').trim().toLowerCase();
     const sessMode = ov.querySelector('#nsvNfModeSess').checked;
     try {

@@ -109,7 +109,7 @@ const shell = new ShellManager({ logDir: path.join(app.getPath('userData'), 'mon
 const configBackup = new ConfigBackupStore(path.join(app.getPath('userData'), 'config-backups'));
 /* ---- 配置变更下发记录库（变更单/逐行结果/回滚留痕；口令打码后落盘） ---- */
 const deployStore = new DeployStore(path.join(app.getPath('userData'), 'deploy-records'));
-const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup, ignoreRules: () => configIgnoreRules() });
+const monitor = new MonitorManager(shell, path.join(app.getPath('userData'), 'monitor-logs'), path.join(app.getPath('userData'), 'monitor-trust.json'), { backupStore: configBackup, ignoreRules: () => configIgnoreRules(), resolveCredential: (id) => credPatchOf({ credId: id }) });
 // 指纹信任裁决统一收口到 monitor 的权威信任库：无人值守采集（runOneShot）也必须遵守
 // 「首连 TOFU、变化即拒」，否则已钉扎主机的指纹变化会被静默接受并反写渲染层长期钉扎
 shell.setTrustGate((host, port, fp) => monitor.verifyFingerprint(host, port, fp));
@@ -129,6 +129,15 @@ const alertDeps = new AlertDeps();
 const uptimeStore = new UptimeStore(path.join(app.getPath('userData'), 'monitor-uptime.json'));
 monitor.on('probe', (info) => { try { uptimeStore.record(info.key, info.ok === true); } catch (e) { /* ignore */ } });
 setInterval(() => uptimeStore.flush(), 5 * 60 * 1000).unref();
+
+/* ---- 指标历史归档（磁盘/内存/负载、HTTP、CPU/内存/温度跨重启：性能页不再重启清零；
+ *      接口流量不在此列——capacity-store 已做跨重启日聚合） ---- */
+const histFile = path.join(app.getPath('userData'), 'monitor-histories.json');
+try {
+  const ld = monitor.loadHistories(histFile);
+  if (ld.error) console.error('指标历史归档读取失败（从空开始）：', ld.error);
+} catch (e) { logCrash('hist-load', e); }
+setInterval(() => { try { monitor.saveHistories(histFile); } catch (e) { /* ignore */ } }, 10 * 60 * 1000).unref();
 
 /* ---- 容量趋势（接口流量降采样落盘：日聚合 + 直方图，供 95th / 趋势报表；每台设备一个文件） ---- */
 const capacity = new CapacityStore(path.join(app.getPath('userData'), 'capacity'));
@@ -289,9 +298,39 @@ const webhookSender = new WebhookSender({
 
 /** 设备告警的系统通知统一出口：静默期内（手动静默 / 维护窗口）不弹通知，事件时间线照常记录。
  *  level 省略时按事件默认等级；告警等级与提示音见 js/alert-level.js */
+const { NotifyAggregator } = require('./js/notify-merge.js');
+const notifyAgg = new NotifyAggregator({ windowMs: 60000 });
+const notifyAggTimers = new Map();
 function notifyForDevice(deviceId, title, body, level) {
   try { if (maintenance.isMuted(deviceId).muted) return; } catch (e) { /* 判定失败照常通知 */ }
+  // 设备级告警聚合（第二道闸，依赖抑制之外）：同一设备的告警级通知 60 秒窗口内首条立即发、
+  // 后续缓存到期合并为一条摘要——48 口交换机闪断不再弹 48 条「接口离线」。
+  // 恢复与提示级不聚合直接放行；事件时间线不受影响（各调用点照常全量记录）
+  if (deviceId && AL.rankOf(level) >= AL.rankOf('warning')) {
+    if (notifyAgg.push(deviceId, title, body, level) === 'hold') {
+      if (!notifyAggTimers.has(deviceId)) {
+        const t = setTimeout(() => {
+          notifyAggTimers.delete(deviceId);
+          try { flushDeviceAlerts(deviceId); } catch (e) { logCrash('notify-agg', e); }
+        }, notifyAgg.windowMs);
+        if (typeof t.unref === 'function') t.unref();
+        notifyAggTimers.set(deviceId, t);
+      }
+      return;
+    }
+  }
   notifyUser(title, body, level);
+}
+/* 聚合窗口到期：把该设备窗口内的告警合并成一条摘要发出（提示音 / Webhook 随摘要按最高等级走一次） */
+function flushDeviceAlerts(deviceId) {
+  const s = notifyAgg.flushOne(deviceId);
+  if (!s) return;
+  const parts = Object.keys(s.byKind).map(k => k + (s.byKind[k] > 1 ? '×' + s.byKind[k] : '')).join('、');
+  notifyUser('网络拓扑管理软件 · 设备连续告警',
+    '告警聚合窗口内 ' + s.count + ' 条告警：' + parts
+    + (s.dropped ? '（另有 ' + s.dropped + ' 条超出上限未逐条列出）' : '')
+    + '。首条：' + s.firstBody,
+    s.level);
 }
 
 /** 分级提示音：渲染层用 WebAudio 现场合成（无音频文件、离线可用、CSP 无外链）；
@@ -2137,6 +2176,8 @@ ipcMain.handle('netsvc:netflow-tail', (e, p) => monitorGuard(e) ? netSvc.netflow
 ipcMain.handle('netsvc:netflow-sessions', (e, p) => monitorGuard(e) ? netSvc.netflowSessions(p && p.topN) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:netflow-flows', (e, p) => monitorGuard(e) ? netSvc.netflowFlows(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:netflow-clear', (e) => monitorGuard(e) ? netSvc.netflowClear() : { ok: false, error: 'forbidden' });
+/* NetFlow 小时快照（跨重启的会话排行：内存聚合重启即清，小时快照按 JSONL 落盘保留 30 天） */
+ipcMain.handle('netsvc:netflow-hourly', (e, p) => monitorGuard(e) ? netSvc.netflowHourly(p && p.hours) : { ok: false, error: 'forbidden', items: [] });
 ipcMain.handle('netsvc:syslog-search', (e, p) => monitorGuard(e) ? netSvc.syslogSearch(p) : { ok: false, error: 'forbidden' });
 ipcMain.handle('netsvc:open-folder', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
@@ -2716,6 +2757,7 @@ app.on('will-quit', () => {
   shell.closeAll();
   uptimeStore.flush();
   try { capacity.flush(); } catch (e) { /* ignore */ }
+  try { monitor.saveHistories(histFile); } catch (e) { /* ignore */ }
   try { eventArchive.saveNow(); } catch (e) { /* ignore */ }
   netSvc.stopAll();
   if (tray) { try { tray.destroy(); } catch (e) { /* ignore */ } tray = null; }

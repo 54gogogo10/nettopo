@@ -10,9 +10,11 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { DiskQuota } = require('./disk-quota.js');
 
 const MAX_KEEP = 50;                          // 每台设备保留份数上限
 const MAX_BYTES = 8 * 1024 * 1024;            // 单份配置上限 8MB
+const DEFAULT_QUOTA_BYTES = 2 * 1024 * 1024 * 1024; // 全库字节配额默认 2GB（此前只按份数滚动，百台设备理论上限可写满磁盘）
 const NAME_RE = /^cfg_\d{8}_\d{6}(?:_\d+)?\.cfg$/;
 
 /* ---------- 配置变更漂移：易变行忽略规则 ----------
@@ -97,8 +99,14 @@ function ts(d) {
 }
 
 class ConfigBackupStore {
-  constructor(baseDir) {
+  /** @param {string} baseDir 备份库根目录
+   *  @param {object} [opts] { maxTotalBytes } 全库字节配额（默认 2GB；超限时先跨设备淘汰最旧备份，
+   *    仍不够则如实拒绝保存——磁盘满是比「每主机保留 N 份」更硬的约束） */
+  constructor(baseDir, opts) {
     this.baseDir = baseDir;
+    opts = opts || {};
+    this.quota = new DiskQuota({ maxBytes: opts.maxTotalBytes > 0 ? opts.maxTotalBytes : DEFAULT_QUOTA_BYTES });
+    this.quota.scan(baseDir); // 启动实扫校准；此后 save/remove/trim 增量记账
   }
 
   _hostDir(device, host) {
@@ -127,6 +135,18 @@ class ConfigBackupStore {
     }
     let tmpPath = '';
     try {
+      // 全库字节配额：超限时先跨设备淘汰最旧备份腾空间，仍不够则如实拒绝（不静默丢这份备份）
+      const bytes = Buffer.byteLength(content, 'utf8');
+      if (bytes > this.quota.maxBytes) {
+        return { ok: false, error: '单份备份（' + Math.round(bytes / 1024) + 'KB）超过备份库配额上限（' + Math.round(this.quota.maxBytes / 1024 / 1024) + 'MB）：请调大配额' };
+      }
+      if (!this.quota.check(bytes)) {
+        const need = bytes - (this.quota.maxBytes - this.quota.usedBytes);
+        const ev = this._evictOldestGlobal(need);
+        if (!this.quota.check(bytes)) {
+          return { ok: false, error: '备份库字节配额不足（上限 ' + Math.round(this.quota.maxBytes / 1024 / 1024) + 'MB）：已先淘汰最旧 ' + ev.count + ' 份仍不够，请手动清理备份库或调大配额' };
+        }
+      }
       fs.mkdirSync(dir, { recursive: true });
       const prevBefore = this.latest(device, host); // 写入前的最近一份（用于 diff 与 first 判定）
       let name = 'cfg_' + ts() + '.cfg';
@@ -143,6 +163,7 @@ class ConfigBackupStore {
       return { ok: true, name, first: !prevBefore, prev: prevBefore };
     } catch (err) {
       if (tmpPath) { try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ } }
+      try { this.quota.release(Buffer.byteLength(content, 'utf8')); } catch (e) { /* ignore */ } // 写入失败回滚配额记账
       return { ok: false, error: '备份写入失败：' + ((err && err.message) || err) };
     }
   }
@@ -184,7 +205,11 @@ class ConfigBackupStore {
   remove(device, host, name) {
     if (!ConfigBackupStore.validName(name)) return { ok: false, error: '非法的备份文件名' };
     try {
-      fs.unlinkSync(path.join(this._hostDir(device, host), name));
+      const full = path.join(this._hostDir(device, host), name);
+      let size = 0;
+      try { size = fs.lstatSync(full).size || 0; } catch (e) { /* 取不到按 0 释放记账 */ }
+      fs.unlinkSync(full);
+      this.quota.release(size);
       return { ok: true, removed: 1 };
     } catch (err) {
       // 如实区分「不存在」与真实失败（占用/权限等谎报会误导排查）
@@ -356,15 +381,61 @@ class ConfigBackupStore {
     const items = this.list(device, host).items || [];
     const failed = [];
     for (const it of items.slice(keep)) {
-      try { fs.unlinkSync(path.join(this._hostDir(device, host), it.name)); }
+      try { fs.unlinkSync(path.join(this._hostDir(device, host), it.name)); this.quota.release(it.size || 0); }
       catch (err) { failed.push({ name: it.name, code: (err && err.code) || String(err) }); }
     }
     return failed;
   }
+
+  /** 全库淘汰最旧备份（跨设备/主机，按文件名字典序=时间戳序），直到释放 needBytes 或删完。
+   *  供字节配额超限时腾空间；返回 {count, freedBytes}。删除失败跳过该份继续尝试下一份。 */
+  _evictOldestGlobal(needBytes) {
+    const all = [];
+    let devs = [];
+    try { devs = fs.readdirSync(this.baseDir); } catch (e) { return { count: 0, freedBytes: 0 }; }
+    for (const dev of devs) {
+      const devDir = path.join(this.baseDir, dev);
+      try {
+        const ds = fs.lstatSync(devDir);
+        if (!ds.isDirectory() || ds.isSymbolicLink()) continue;
+      } catch (e) { continue; }
+      let hosts = [];
+      try { hosts = fs.readdirSync(devDir); } catch (e) { continue; }
+      for (const h of hosts) {
+        const hd = path.join(devDir, h);
+        try {
+          const hs = fs.lstatSync(hd);
+          if (!hs.isDirectory() || hs.isSymbolicLink()) continue;
+        } catch (e) { continue; }
+        let names = [];
+        try { names = fs.readdirSync(hd); } catch (e) { continue; }
+        for (const nm of names) {
+          if (!NAME_RE.test(nm)) continue;
+          const full = path.join(hd, nm);
+          try {
+            const st = fs.lstatSync(full);
+            if (st.isFile() && !st.isSymbolicLink()) all.push({ full, name: nm, size: st.size });
+          } catch (e) { /* 取不到大小的份不参与淘汰 */ }
+        }
+      }
+    }
+    all.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    let freed = 0, count = 0;
+    for (const it of all) {
+      if (freed >= needBytes) break;
+      try {
+        fs.unlinkSync(it.full);
+        freed += it.size;
+        count++;
+        this.quota.release(it.size);
+      } catch (e) { /* 单份删除失败继续更旧的下一份 */ }
+    }
+    return { count, freedBytes: freed };
+  }
 }
 
 module.exports = {
-  ConfigBackupStore, MAX_KEEP, MAX_BYTES,
+  ConfigBackupStore, MAX_KEEP, MAX_BYTES, DEFAULT_QUOTA_BYTES,
   DEFAULT_IGNORE_RULES, MAX_IGNORE_RULES,
   normalizeIgnoreRules, applyIgnoreRules, sameAfterIgnore
 };

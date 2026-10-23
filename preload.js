@@ -257,6 +257,7 @@ contextBridge.exposeInMainWorld('topoNetSvc', {
   netflowSessions: (topN) => ipcRenderer.invoke('netsvc:netflow-sessions', { topN }),
   netflowFlows: (p) => ipcRenderer.invoke('netsvc:netflow-flows', p),
   netflowClear: () => ipcRenderer.invoke('netsvc:netflow-clear'),
+  netflowHourly: (hours) => ipcRenderer.invoke('netsvc:netflow-hourly', { hours }),
   openFolder: (svc) => ipcRenderer.invoke('netsvc:open-folder', { svc }),
   onFile: sub('netsvc:file'),
   onStatus: sub('netsvc:status'),
