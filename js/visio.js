@@ -225,7 +225,7 @@ ${cText('Label', t.label)}${cText('Value', t.label)}
     <Prop Name='note'>
 ${cText('Label', '备注')}${cText('Value', n.note || '')}
     </Prop>
-    <Text><pp IX='0'/><cp IX='0'/>${X(n.name)}</Text>
+    <Text><pp IX='0'/><cp IX='0'/>${X(U.truncate(n.name, 40))}</Text>
   </Shape>`);
   }
 

@@ -242,7 +242,9 @@ class NetflowServer extends EventEmitter {
     const n = Math.floor(Number(port));
     const p = (Number.isInteger(n) && n >= 0 && n <= 65535) ? n : 9995;
     const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
-    const want = list.length ? list : ['0.0.0.0'];
+    // 未配置地址时缺省仅回环：NetFlow 无认证，不默认暴露到全部网卡（net-services 管理路径
+    // 总会传入归一化后的地址列表，此回落只影响直接实例化）
+    const want = list.length ? list : ['127.0.0.1'];
     const failures = [];
     let realPort = 0;
     for (const h of want) {

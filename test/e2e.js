@@ -1853,7 +1853,7 @@ function findChrome() {
       && s7d.nodes === 0 && JSON.stringify(s7d.page0) === JSON.stringify(['A页改名设备']);
     console.log('集成7 第2页撤销不串页:', crossOk ? 'OK' : 'FAIL', JSON.stringify({ s7c, s7d }));
     if (!crossOk) errors.push('[sheets] 撤销串页或第 2 页撤销未生效: ' + JSON.stringify({ s7c, s7d }));
-    // 切回第 1 页：数据与 DOM 一致，撤销栈为空（切页清栈语义）
+    // 切回第 1 页：数据与 DOM 一致；每页独立撤销栈——A 页编辑历史保留（撤销可用，不再切页清栈）
     await page.evaluate(() => document.querySelector('#sheetTabs .sheet-tab[data-idx="0"]').click());
     await new Promise(r => setTimeout(r, 500));
     const s7e = await page.evaluate(() => ({
@@ -1863,7 +1863,7 @@ function findChrome() {
       tabs: [...document.querySelectorAll('#sheetTabs .sheet-tab')].map(t => t.textContent)
     }));
     const backOk = s7e.idx === 0 && JSON.stringify(s7e.nodes) === JSON.stringify(['A页改名设备'])
-      && JSON.stringify(s7e.dom) === JSON.stringify(['A页改名设备']) && s7e.undoDisabled && s7e.tabs.length === s7b.sheets;
+      && JSON.stringify(s7e.dom) === JSON.stringify(['A页改名设备']) && !s7e.undoDisabled && s7e.tabs.length === s7b.sheets;
     console.log('集成7 切回第1页:', backOk ? 'OK' : 'FAIL', JSON.stringify(s7e));
     if (!backOk) errors.push('[sheets] 切回图纸页后数据/DOM/撤销栈不符: ' + JSON.stringify(s7e));
   }
@@ -2005,7 +2005,8 @@ function findChrome() {
       && detail.panelSel.length === 1 && detail.panelSel[0].includes('E2E定位目标设备ZQ') && detail.panelSel[0].includes('2 线');
     console.log('集成9 快速搜索定位/详情字段:', qsOk ? 'OK' : 'FAIL', JSON.stringify({ q1, detail }));
     if (!qsOk) errors.push('[quicksearch] 搜索定位后详情卡/面板字段与节点状态不一致: ' + JSON.stringify({ q1, detail }));
-    // Esc 关闭：浮层隐藏但选中与详情保持；重新呼出输入与结果已重置；按接口可命中连线并定位
+    // Esc 关闭：浮层隐藏但选中与详情保持；重新呼出记忆上次关键词并带出结果（输入框全选可直接覆盖）；按接口可命中连线并定位
+    const preCloseVal = await page.evaluate(() => document.querySelector('#qsInput').value);
     await page.evaluate(() => document.querySelector('#qsInput').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
     await new Promise(r => setTimeout(r, 200));
     const afterEsc = await page.evaluate(() => ({
@@ -2036,7 +2037,7 @@ function findChrome() {
     });
     await page.evaluate(() => document.querySelector('#qsInput').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
     const escOk = afterEsc.hidden && afterEsc.selId === detail.selId && afterEsc.cardVisible
-      && reopened.value === '' && reopened.count === '' && reopened.items === 0
+      && reopened.value === preCloseVal && reopened.count.includes('匹配') && reopened.items > 0
       && q2.length === 1 && q2[0].kind === '连线' && q2[0].sub.includes('GE0/0/2')
       && linkSel.kind === 'link' && linkSel.aIf === 'GE0/0/2';
     console.log('集成9 Esc 复原/连线搜索:', escOk ? 'OK' : 'FAIL', JSON.stringify({ afterEsc, reopened, q2, linkSel }));

@@ -117,20 +117,28 @@ function buildZip(entries) {
 }
 
 /* ================= 图片嵌入工具 ================= */
-function b64ToBytes(b64) {
+/* base64 字符值查表：模块级建一次（同 CRC_TABLE 模式），-1 = 非法字符 */
+const B64_VAL = (() => {
+  const t = new Int8Array(128).fill(-1);
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const map = {};
-  for (let i = 0; i < chars.length; i++) map[chars[i]] = i;
-  b64 = String(b64).replace(/=+$/, '');
-  const out = [];
-  let buf = 0, bits = 0;
-  for (const ch of b64) {
-    if (map[ch] === undefined) continue;
-    buf = (buf << 6) | map[ch];
+  for (let i = 0; i < chars.length; i++) t[chars.charCodeAt(i)] = i;
+  return t;
+})();
+function b64ToBytes(b64) {
+  // '=' 填充与空白一并剔除（不影响剩余字符的分组还原），预分配定长 Uint8Array 后按 4 字符→3 字节
+  // 分块解码——旧实现普通数组逐字节 push 再整转，5MB 图标的内存峰值约 8 倍（≈40MB）
+  const s = String(b64).replace(/[\s=]/g, '');
+  const out = new Uint8Array(Math.floor(s.length * 3 / 4));
+  let o = 0, buf = 0, bits = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    const v = c < 128 ? B64_VAL[c] : -1;
+    if (v < 0) continue;
+    buf = (buf << 6) | v;
     bits += 6;
-    if (bits >= 8) { bits -= 8; out.push((buf >> bits) & 0xff); }
+    if (bits >= 8) { bits -= 8; out[o++] = (buf >> bits) & 0xff; }
   }
-  return new Uint8Array(out);
+  return out.subarray(0, o);
 }
 // 可嵌入的位图格式：扩展名 → OPC ContentType + ForeignData CompressionType。
 // webp/gif 与 U.isValidImg 的白名单对齐，否则工程文件里带 WebP/GIF 图标时画布能显示、导出却静默丢图。

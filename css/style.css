@@ -1462,24 +1462,31 @@ input[type="radio"]:focus-visible,
 .frow-err.show { display: block; }
 .frow input.invalid, .frow select.invalid, .frow textarea.invalid { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(220, 38, 38, .12); }
 
-/* toast：提升到弹窗遮罩之上（overlay=110），带类型色条与图标 */
-#toastTmp {
+/* toast：提升到弹窗遮罩之上（overlay=110），带类型色条与图标。
+   堆叠容器（最多 3 条同时显示，各自计时淡出）：此前单元素复用，第二条提示直接覆盖第一条；
+   最新一条携带 id=toastTmp（兼容既有断言/锚点），样式挂在 .toast-item 上与 id 无关 */
+#toastStack {
   position: fixed; left: 50%; bottom: 44px; transform: translateX(-50%);
-  z-index: 130; pointer-events: none; display: flex; align-items: center; gap: 8px;
+  z-index: 130; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+#toastStack .toast-item {
+  display: flex; align-items: center; gap: 8px;
   background: var(--tooltip-bg); color: var(--tooltip-tx);
   padding: 9px 16px; border-radius: 10px; border-left: 3px solid transparent;
   font-size: 12.5px; box-shadow: 0 10px 30px rgba(0, 0, 0, .3);
   transition: opacity .3s; max-width: 70vw; opacity: 0;
 }
-#toastTmp .ic svg { width: 15px; height: 15px; }
-#toastTmp.toast-ok { border-left-color: #22c55e; }
-#toastTmp.toast-warn { border-left-color: #f59e0b; }
-#toastTmp.toast-error { border-left-color: #ef4444; }
-#toastTmp.toast-info { border-left-color: #60a5fa; }
-#toastTmp.toast-ok .ic { color: #4ade80; }
-#toastTmp.toast-warn .ic { color: #fbbf24; }
-#toastTmp.toast-error .ic { color: #f87171; }
-#toastTmp.toast-info .ic { color: #60a5fa; }
+#toastStack .toast-item.show { opacity: 1; }
+#toastStack .toast-item .ic svg { width: 15px; height: 15px; }
+#toastStack .toast-item.toast-ok { border-left-color: #22c55e; }
+#toastStack .toast-item.toast-warn { border-left-color: #f59e0b; }
+#toastStack .toast-item.toast-error { border-left-color: #ef4444; }
+#toastStack .toast-item.toast-info { border-left-color: #60a5fa; }
+#toastStack .toast-item.toast-ok .ic { color: #4ade80; }
+#toastStack .toast-item.toast-warn .ic { color: #fbbf24; }
+#toastStack .toast-item.toast-error .ic { color: #f87171; }
+#toastStack .toast-item.toast-info .ic { color: #60a5fa; }
 
 /* 命令面板（Ctrl+K）：顶部居中，输入即筛，↑↓ 选择 / ↵ 执行 */
 .cp-overlay { align-items: flex-start; padding-top: 11vh; }

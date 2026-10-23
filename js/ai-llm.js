@@ -107,6 +107,21 @@ function maskKey(k) {
   return s.slice(0, 4) + '****' + s.slice(-4);
 }
 
+/** 网络错误归一：e.message 原样回传渲染层会把 ECONNREFUSED 10.0.0.5:3306 这类主机/端口
+ *  细节带出去（baseUrl 由渲染层逐次指定，错误差异 = 借主进程探测内网存活/端口的侧信道）。
+ *  按错误码归一为固定文案，不回显地址；错误码本身不含主机信息，保留用于区分场景 */
+function netErrText(e) {
+  const code = String((e && e.code) || '');
+  if (code === 'ECONNREFUSED') return '无法连接到目标服务（连接被拒绝）';
+  if (code === 'ETIMEDOUT') return '连接目标服务超时';
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return '目标服务的域名无法解析';
+  if (code === 'ECONNRESET') return '连接被目标服务重置';
+  if (code === 'EPROTO' || code === 'ERR_TLS_CERT_ALTNAME_INVALID' || code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || code === 'CERT_HAS_EXPIRED') return '与目标服务的安全连接失败（协议/证书问题）';
+  if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') return '目标服务所在网络不可达';
+  if (code === 'ECONNABORTED') return '连接已中止';
+  return '网络请求失败' + (code ? '（' + code + '）' : '');
+}
+
 /** 去掉 UTF-8 多字节序列被拦腰截断产生的残缺尾部（末尾替换符会在界面显示为乱码） */
 function _trimPartialUtf8(buf) {
   let i = buf.length - 1;
@@ -607,7 +622,7 @@ class AiClient extends EventEmitter {
         res.on('error', () => fail(new Error('响应中断')));
         res.on('aborted', () => fail(new Error('响应中断')));
       });
-      req.on('error', (e) => fail(new Error('网络错误：' + e.message)));
+      req.on('error', (e) => fail(new Error(netErrText(e))));
       req.end();
     });
   }
@@ -742,7 +757,7 @@ class AiClient extends EventEmitter {
       });
       req.on('error', (e) => {
         if (this._wasCancelled) return fail(new Error('已取消'));
-        fail(new Error('网络错误：' + e.message));
+        fail(new Error(netErrText(e)));
       });
       this._req = req;
       req.end(payload);

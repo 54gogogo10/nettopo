@@ -355,6 +355,9 @@ Without headers, columns are read as "deviceA, deviceB, interfaceA, IP A, interf
 | Ctrl+K | Command palette (features / devices / links) | Global |
 | Ctrl+P | Quick command palette (buttons / bookmarks / history) | Web Shell |
 | Ctrl+Z / Ctrl+Y | Undo / redo | Canvas |
+| Ctrl+C / Ctrl+V | Copy / paste selected devices (multi-select carries internal links) | Canvas |
+| Ctrl+A | Select all devices | Canvas |
+| Arrows / Shift+Arrows | Nudge selection 1px / 10px (consecutive presses merge into one undo step) | Canvas |
 | Delete | Delete selection (devices/links/batch) | Canvas |
 | L / F | Auto layout / fit view | Canvas |
 | Enter / ↑ / ↓ | Cycle search matches | Canvas search box |

@@ -363,6 +363,10 @@ console.log('== 类型数据安全清洗 ==');
   const good = U.sanitizeTypeData({ router: { c1: '#ff0000', img: 'data:image/png;base64,AAA' } }, []);
   ok(good.overrides.router && good.overrides.router.c1 === '#ff0000' && good.overrides.router.img === 'data:image/png;base64,AAA', '合法颜色/图片保留');
   ok(U.isValidColor('#aBcDeF') && !U.isValidColor('red') && !U.isValidColor('#12345'), '颜色校验只接受 #rrggbb');
+  // Object.prototype 方法名 key 拒绝（回归）：ICONS 是普通对象，继承键 toString/valueOf truthy，
+  // 若当作类型 key 放行会在图标查表时把函数串写进 innerHTML
+  const proto = U.sanitizeTypeData({}, [{ key: 'toString', label: '继承键', c1: '#112233' }]);
+  ok(proto.customTypes.length === 1 && proto.customTypes[0].key !== 'toString' && /^ct\d+$/.test(proto.customTypes[0].key), '清洗：Object.prototype 方法名 key 被换为安全自动键');
 }
 
 console.log('== 类型覆盖（颜色/图片） ==');
@@ -2040,6 +2044,27 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     const r2 = mgr.connect({ host: '127.0.0.1', protocol: 'ssh', port: 1 });
     ok(r2 && r2.ok === true && /^s\d+$/.test(r2.id), 'Shell 发起连接返回会话 ID');
     mgr.close(r2.id);
+  }
+
+  // 指纹待确认队列按 host:port 粒度放行（回归：用户只核对了触发弹窗那一个端口的指纹，
+  // 同主机其它端口——如 NAT 映射到别的设备——必须等各自的确认，不得一并放行）
+  {
+    const mgr = new ShellManager();
+    const fired = [];
+    const rec = (fp, port) => ({ verify: (v) => fired.push(port + ':' + v), fp: fp, port: port, owner: 'ui' });
+    mgr._pendingVerify.set('jp1', [rec('AA', 22)]);
+    mgr._pendingVerify.set('jp1:2222', [rec('BB', 2222)]);
+    ok(mgr.trustFingerprint('jp1', true, null, 22) === true, 'trustFingerprint：带端口命中本端口队列');
+    eq(fired.join(','), '22:true', 'trustFingerprint：只放行该 host:port（22 缺省无后缀键）');
+    ok(mgr._pendingVerify.has('jp1:2222'), 'trustFingerprint：同主机其它端口队列保持排队');
+    ok(mgr.trustFingerprint('jp1', true, null, 2222) === true, 'trustFingerprint：2222 端口随后单独放行');
+    eq(fired.join(','), '22:true,2222:true', 'trustFingerprint：两端口先后放行互不代放');
+    // 旧口径（不带 port）：裁决该主机全部端口的排队记录（过渡期兼容）
+    fired.length = 0;
+    mgr._pendingVerify.set('jp2', [rec('CC', 22)]);
+    mgr._pendingVerify.set('jp2:2200', [rec('DD', 2200)]);
+    mgr.trustFingerprint('jp2', true);
+    eq(fired.filter(x => x === '22:true' || x === '2200:true').length, 2, 'trustFingerprint：不带端口时旧口径全端口放行');
   }
 
   // Telnet：连接超时（服务器接受但无任何响应）
@@ -5622,7 +5647,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const qRoot = path.join(root, 'test', '_r3b', 'tftp-quota');
       rmTmp(qRoot);
       fs.mkdirSync(qRoot, { recursive: true });
-      const tsq = new TftpServer({ rootDir: qRoot, maxFileSize: 1024, maxFilesPerHost: 2, maxTotalBytes: 4096 });
+      const tsq = new TftpServer({ rootDir: qRoot, maxFileSize: 1024, maxFilesPerHost: 2, maxTotalBytes: 4096, quotaScanTtlMs: 0 });
       const hostDir = path.join(qRoot, '10.0.0.1');
       fs.mkdirSync(hostDir, { recursive: true });
       ok(tsq._quotaCheck(hostDir).ok === true, 'TFTP 配额：空目录放行');
@@ -5635,7 +5660,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       fs.writeFileSync(path.join(other, 'big.bin'), Buffer.alloc(8192));
       const q2 = tsq._quotaCheck(other);
       ok(q2.ok === false && /容量上限/.test(q2.why), 'TFTP 配额：全库字节超限即拒绝（' + q2.why + '）');
-      const tsq2 = new TftpServer({ rootDir: qRoot, maxFileSize: 1024, maxFilesPerHost: 10, maxTotalBytes: 1024 * 1024 });
+      const tsq2 = new TftpServer({ rootDir: qRoot, maxFileSize: 1024, maxFilesPerHost: 10, maxTotalBytes: 1024 * 1024, quotaScanTtlMs: 0 });
       ok(tsq2._quotaCheck(hostDir).ok === true, 'TFTP 配额：未超限（含其他来源文件）照常放行');
       // 收件编目扫描上限：洪流下不整库枚举（此处把上限下调以便复现）
       const nsq = new NetServices({ baseDir: path.join(qRoot, 'nsv'), listScanCap: 10 });
@@ -5675,16 +5700,17 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
     ok(ncAlert.syslog.alert.enabled === true && ncAlert.syslog.alert.severity === 4 && ncAlert.syslog.alert.keywords.length === 1 && ncAlert.syslog.alert.cooldownSec === 300, '配置归一化：Syslog 告警规则清洗与钳制');
     // 监听地址列表归一化（多宿主机限定暴露面，可多选）：''/'*'/'0.0.0.0' 与具体地址互斥
     // （出现即整体收敛全部网卡）；localhost → 127.0.0.1；非法项剔除；去重封顶 8 个；
-    // 全部非法/为空回落全部网卡；旧版单地址字符串兼容（转数组）
+    // 未配置/全非法回落仅回环（无认证服务不默认暴露全部网卡）；'*'/'0.0.0.0' 为显式全网卡（互斥收敛）；
+    // 旧版单地址字符串兼容（转数组）
     const bindCases = [
-      [undefined, ['0.0.0.0']], ['', ['0.0.0.0']], ['*', ['0.0.0.0']], ['0.0.0.0', ['0.0.0.0']],
+      [undefined, ['127.0.0.1']], ['', ['127.0.0.1']], ['*', ['0.0.0.0']], ['0.0.0.0', ['0.0.0.0']],
       ['localhost', ['127.0.0.1']], ['127.0.0.1', ['127.0.0.1']], ['192.168.10.5', ['192.168.10.5']],
-      ['eth0', ['0.0.0.0']], ['999.1.1.1', ['0.0.0.0']], ['1.2.3', ['0.0.0.0']],
+      ['eth0', ['127.0.0.1']], ['999.1.1.1', ['127.0.0.1']], ['1.2.3', ['127.0.0.1']],
       [['127.0.0.1', '192.168.10.5'], ['127.0.0.1', '192.168.10.5']],
       [['192.168.10.5', 'localhost', '192.168.10.5'], ['192.168.10.5', '127.0.0.1']],
       [['127.0.0.1', '0.0.0.0'], ['0.0.0.0']],
       [['eth0', '10.0.0.1', '999.1.1.1'], ['10.0.0.1']],
-      [[], ['0.0.0.0']]
+      [[], ['127.0.0.1']]
     ];
     let bindBad = 0;
     for (const [inp, want] of bindCases) {
@@ -7765,7 +7791,7 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       const { AiClient } = require('../js/ai-llm.js');
       const ai1 = new AiClient({ baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'm', protocol: 'openai', connectTimeoutMs: 900 });
       const r1 = await ai1.listModels();
-      ok(r1.ok === false && /网络错误|超时/.test(String(r1.error)), 'AI 拉取模型：连接失败快速落定（不再抛 ReferenceError 永久挂起）');
+      ok(r1.ok === false && /网络错误|超时|无法连接到目标服务|域名无法解析|网络不可达/.test(String(r1.error)), 'AI 拉取模型：连接失败快速落定且错误文案已归一（不回显内网地址细节）');
     }
 
     // monitor OID 清洗：段值 > 2^32-1 拒绝（防 32 位编码静默截断成错误 OID）
@@ -8135,7 +8161,8 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       // 绝不能返回一个「成功」却带着 port=0 的假状态（旧用例的崩溃正是照 port=0 连接引发的）
       const dgramM = require('dgram');
       const occupy = dgramM.createSocket('udp4');
-      await new Promise((res) => occupy.bind(0, res));
+      // 占用 127.0.0.1（服务缺省回环绑定地址）：占用 0.0.0.0 时 Windows 允许再绑 127.0.0.1 同端口
+      await new Promise((res) => occupy.bind(0, '127.0.0.1', res));
       const busyPort = occupy.address().port;
       const sBusy = new SyslogServer({ baseDir: path.join(capBase, 'busy') });
       const rBusy = await sBusy.start(busyPort, true);
@@ -9274,6 +9301,10 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       ok(!cb.sameAfterIgnore(latestContent, 'hostname R9\ninterface Gi0/0', cb.DEFAULT_IGNORE_RULES), '跳过判定：真实变化不跳过');
       const args = cli.parseArgs(['backup', '--devs', 'h.csv', '--save-same']);
       ok(args['save-same'] === true, '参数：--save-same 解析为布尔开关');
+      // 回归：取值型参数无条件吃掉下一个 argv——以 -- 开头的口令（--pass --x9k）不能被误判成下一个开关
+      const argsPw = cli.parseArgs(['inspect', '--devs', 'h.csv', '--pass', '--x9kSecret']);
+      ok(argsPw.pass === '--x9kSecret', '参数：以 -- 开头的口令不被吞为开关');
+      ok(argsPw.devs === 'h.csv' && argsPw._[0] === 'inspect', '参数：常规取值与位置参数不受影响');
       fs.rmSync(dir, { recursive: true, force: true });
     }
 
@@ -9342,6 +9373,17 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(s2.dropped, 1, '上限：超出条目如实计数（摘要标注「另有 N 条」）');
       eq(agg2.stats().devices, 0, '统计：flush 后设备数为 0');
       eq(NM.NotifyAggregator && new NM.NotifyAggregator({}).windowMs, NM.DEFAULT_WINDOW_MS, '默认：窗口 60 秒');
+      // 窗口边界竞态（回归）：到期未 flush 的旧窗口被新开窗口顶替时，旧缓存挂起待取、绝不静默丢
+      const agg3 = new NM.NotifyAggregator({ windowMs: 60000 });
+      agg3.push('k', '软件 · 接口离线', 'a', 'critical', 0);
+      eq(agg3.push('k', '软件 · 指标告警', 'b', 'warning', 59000), 'hold', '竞态：窗口尾部 hold');
+      eq(agg3.push('k', '软件 · 设备离线', 'c', 'emergency', 61000), 'now', '竞态：越界开新窗（旧窗未及 flush 被顶替）');
+      eq(agg3.windowEndsIn('k', 62000), 59000, '窗口对齐：距新窗口到期剩余毫秒（宿主定时器对齐起点用）');
+      const s3 = agg3.flushOne('k');
+      eq(s3 && s3.count, 1, '竞态：被顶替的旧窗口 hold 条目可取回（不丢）');
+      ok(s3 && s3.byKind['指标告警'] === 1, '竞态：取回内容是旧窗口的（非新窗口）');
+      ok(agg3.flushOne('k') === null, '竞态：新窗口空缓存 flush 为 null');
+      eq(agg3.windowEndsIn('none'), 0, '窗口对齐：无窗口返回 0');
     }
 
     /* ================= 磁盘字节配额（js/disk-quota.js + 配置备份库全库配额） ================= */

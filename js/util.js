@@ -621,8 +621,9 @@ U.buildInteractiveHtml = (opt) => {
 /* 清洗 typeOverrides / customTypes：剔除非法颜色与图片，避免拼入 innerHTML/SVG 时注入 */
 U.sanitizeTypeData = (overrides, customTypes) => {
   const SAFE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
-  // 原型键名能通过「普通字符串」正则但会命中原型 setter（__proto__ 赋值改写对象原型而非自有属性）
-  const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+  // 原型键名能通过「普通字符串」正则但会命中原型 setter（__proto__ 赋值改写对象原型而非自有属性）；
+  // Object.prototype 的方法名一并拒绝：自定义类型 key='toString' 之类会撞图标查表的继承键
+  const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype', 'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf']);
   const ov = {};
   for (const [key, o] of Object.entries(overrides || {})) {
     if (!SAFE_KEY.test(key)) continue; // 非法 key 直接丢弃，避免拼入 HTML/SVG 属性
@@ -1057,7 +1058,8 @@ U.fillIcons = () => {
   if (typeof document === 'undefined') return;
   U.$$('.ic[data-ic]').forEach(el => {
     const n = el.getAttribute('data-ic');
-    if (I[n]) el.innerHTML = I[n];
+    // 限自有属性：继承键（toString 等）truthy 但不是 SVG，会往 DOM 写入函数串
+    if (Object.prototype.hasOwnProperty.call(I, n)) el.innerHTML = I[n];
   });
 };
 

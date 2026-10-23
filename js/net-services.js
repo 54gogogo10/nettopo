@@ -26,10 +26,11 @@ const NF_HOURLY_KEEP_HOURS = 24 * 30; // NetFlow 小时快照保留（30 天，7
 /** 默认配置（端口 69/21/514/162 为协议标准端口；Linux 非 root 绑定失败时面板会提示改高位端口） */
 function defaultConfig() {
   return {
-    // 五个服务共用的监听地址列表：默认全部网卡（历史行为）；多宿主机可在面板勾选本机若干地址
-    // （同端口按地址各绑一个套接字），避免在不可信网络（会议室 Wi-Fi/热点）暴露无认证的
-    // TFTP/Syslog/Trap/NetFlow。兼容旧配置的单地址字符串（清洗时转为数组）。
-    listen: ['0.0.0.0'],
+    // 五个服务共用的监听地址列表：默认仅回环（TFTP/Syslog/Trap/NetFlow 均无认证，默认全网卡
+    // 监听会把收件口暴露到会议室 Wi-Fi/热点等不可信网络）；多宿主机可在面板勾选本机若干地址
+    // （同端口按地址各绑一个套接字）或显式选择 0.0.0.0。兼容旧配置的单地址字符串（清洗时转为数组）；
+    // 旧版本保存过 listen:['0.0.0.0'] 的配置按显式选择保留（升级不改变用户已表达的意图）。
+    listen: ['127.0.0.1'],
     tftp: { enabled: false, port: 69 },
     ftp: { enabled: false, port: 21, username: 'nettopo', password: 'nettopo', pasvMin: 0, pasvMax: 0, overwrite: true },
     syslog: { enabled: false, port: 514, tcp: false, alert: { enabled: false, severity: 3, keywords: [], cooldownSec: 300 } },
@@ -53,9 +54,11 @@ function cleanCred(v, dft) {
   return s || dft;
 }
 
-/** 监听地址列表归一化：接受旧版单地址字符串或地址数组；'' / '*' / '0.0.0.0' 与其它地址互斥
- *  （出现即整体收敛为全部网卡）；localhost → 127.0.0.1；其余仅接受点分 IPv4 字面量（绑定
- *  主机名语义含糊），非法项剔除；去重后最多 8 个（面板只勾选本机地址，超限视为异常输入） */
+/** 监听地址列表归一化：接受旧版单地址字符串或地址数组；'*' / '0.0.0.0' 与其它地址互斥
+ *  （显式出现即整体收敛为全部网卡——是用户明确选择的暴露面，保留）；localhost → 127.0.0.1；
+ *  其余仅接受点分 IPv4 字面量（绑定主机名语义含糊），非法项剔除；去重后最多 8 个（面板只
+ *  勾选本机地址，超限视为异常输入）。未配置/全非法时回落**仅回环**：无认证服务不因输入
+ *  缺失而默认暴露全部网卡（旧版回落 0.0.0.0 属历史行为，显式选择仍可达成同样效果） */
 function cleanBindList(v) {
   const raw = Array.isArray(v) ? v : [v];
   const out = [];
@@ -63,13 +66,15 @@ function cleanBindList(v) {
   let all = false;
   for (let item of raw) {
     let s = String(item == null ? '' : item).trim();
-    if (!s || s === '*' || s === '0.0.0.0') { all = true; continue; }
+    if (s === '*' || s === '0.0.0.0') { all = true; continue; }
+    if (!s) continue; // 空串视为未设置（非法项），不再解读为「全部网卡」
     if (s.toLowerCase() === 'localhost') s = '127.0.0.1';
     const m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
     if (!(m && [m[1], m[2], m[3], m[4]].every(x => Number(x) <= 255))) continue; // 非法项剔除
     push(s);
   }
-  if (all || !out.length) return ['0.0.0.0'];
+  if (all) return ['0.0.0.0'];
+  if (!out.length) return ['127.0.0.1'];
   return out.slice(0, 8);
 }
 

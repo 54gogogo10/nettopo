@@ -361,26 +361,37 @@ class TftpServer extends EventEmitter {
     this.lastError = '';
     this.sessions = new Map(); // 'addr:port' -> TftpSession
     this.stats = { rxFiles: 0, rxBytes: 0, txFiles: 0, denied: 0, evicted: 0, quotaDenied: 0 };
+    // 全库扫描结果缓存（TTL 可配，默认 1 秒）：伪造源可用 WRQ 持续触发全库同步遍历拖慢主进程；
+    // 传 0 可完全关闭缓存（测试需要逐次即时口径时用）
+    this._quotaScanTtl = (opts && Number(opts.quotaScanTtlMs) >= 0) ? Number(opts.quotaScanTtlMs) : 1000;
+    this._quotaScan = { at: 0, bytes: 0 };
     try { fs.mkdirSync(this.rootDir, { recursive: true }); } catch (e) { /* start 时再报 */ }
   }
 
   /** 写入配额检查（WRQ 建立会话前调用）：单来源文件数 + 全库占用字节。
-   *  超限即拒绝（ERROR 3 磁盘满语义），计入 quotaDenied——不静默丢包，面板可见。 */
+   *  超限即拒绝（ERROR 3 磁盘满语义），计入 quotaDenied——不静默丢包，面板可见。
+   *  全库字节数走 TTL 缓存：每个 WRQ 一次全库 walk 会被伪造源当成节流阀拖慢主进程
+   *  （会话槽逐出让伪造 WRQ 可持续挤入）；单来源计数是单目录 readdir，保持实时。 */
   _quotaCheck(ipDir) {
-    let files = 0, bytes = 0;
-    const walk = (dir) => {
-      let names = [];
-      try { names = fs.readdirSync(dir); } catch (e) { return; }
-      for (const n of names) {
-        let st;
-        try { st = fs.lstatSync(path.join(dir, n)); } catch (e) { continue; }
-        if (st.isSymbolicLink()) continue;
-        if (st.isDirectory()) walk(path.join(dir, n));
-        else if (st.isFile()) { files++; bytes += st.size; }
-      }
-    };
-    walk(this.rootDir);
-    if (bytes >= this.maxTotalBytes) return { ok: false, why: 'TFTP 收件目录已达容量上限' };
+    const now = Date.now();
+    if (now - this._quotaScan.at > this._quotaScanTtl) {
+      let bytes = 0;
+      const walk = (dir) => {
+        let names = [];
+        try { names = fs.readdirSync(dir); } catch (e) { return; }
+        for (const n of names) {
+          let st;
+          try { st = fs.lstatSync(path.join(dir, n)); } catch (e) { continue; }
+          if (st.isSymbolicLink()) continue;
+          if (st.isDirectory()) walk(path.join(dir, n));
+          else if (st.isFile()) bytes += st.size;
+        }
+      };
+      walk(this.rootDir);
+      this._quotaScan = { at: now, bytes };
+    }
+    // 缓存最多滞后 1 秒：期间入库的文件不计入本轮判定，超限窗口被写入量封顶在单秒入库量内
+    if (this._quotaScan.bytes >= this.maxTotalBytes) return { ok: false, why: 'TFTP 收件目录已达容量上限' };
     let hostFiles = 0;
     try {
       for (const n of fs.readdirSync(ipDir)) {
@@ -434,7 +445,9 @@ class TftpServer extends EventEmitter {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     return new Promise((resolve) => {
       const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
-      const want = list.length ? list : ['0.0.0.0'];
+      // 未配置地址时缺省仅回环：TFTP 无认证，不默认暴露到全部网卡（net-services 管理路径
+      // 总会传入归一化后的地址列表，此回落只影响直接实例化）
+      const want = list.length ? list : ['127.0.0.1'];
       const failures = [];
       const socks = [];
       let realPort = 0;

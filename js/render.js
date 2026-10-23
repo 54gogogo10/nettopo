@@ -359,7 +359,8 @@ class Renderer {
       const ic = el('g', { transform: `translate(${ix + (dispH - isv) / 2} ${iy + (dispH - isv) / 2})` }, body);
       ic.setAttribute('color', '#ffffff');
       const sv = el('svg', { viewBox: '0 0 24 24', width: isv, height: isv }, ic);
-      sv.innerHTML = U.ICONS[iconKey || t.key] || U.ICONS.other;
+      // 查表限自有属性：ICONS 是普通对象，继承来的 'toString' 等键 truthy，误撞会把函数串写进 innerHTML
+      sv.innerHTML = Object.prototype.hasOwnProperty.call(U.ICONS, iconKey || t.key) ? U.ICONS[iconKey || t.key] : U.ICONS.other;
     }
     // 名称 / 类型 / 管理地址（有管理地址时节点加高，多个地址分行显示）。
     // 字号随 k 缩放须以 inline style 落（class 里的 font-size 优先级高于 SVG 属性）
@@ -472,9 +473,16 @@ class Renderer {
         if (mode === 'move') emit({ x: Math.round(o.x + (p.x - start.x)), y: Math.round(o.y + (p.y - start.y)) });
         else emit({ w: Math.max(40, Math.round(o.w + (p.x - start.x))), h: Math.max(40, Math.round(o.h + (p.y - start.y))) });
       };
-      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+      // pointercancel 与 up 同收尾：触控笔接管/系统手势打断时 pointerup 永不到来，
+      // 不清理的话 window 上的 pointermove 会持续泄漏、底图跟着鼠标漂移（同文件其余拖拽均为三件套配对）
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+      };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
     };
     img.addEventListener('pointerdown', (e) => startDrag(e, 'move'));
     handle.addEventListener('pointerdown', (e) => startDrag(e, 'resize'));

@@ -48,9 +48,10 @@ function buildSvgImage(graph, opts) {
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
   parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff"/>`);
 
-  // 底图先画（垫在所有元素之下）：透明度沿用画布设置，导出件与屏幕所见一致
+  // 底图先画（垫在所有元素之下）：透明度沿用画布设置，导出件与屏幕所见一致。
+  // dataUrl 属性值过 esc：正常 base64 载荷不含 XML 特殊字符属纵深防御，防上游白名单失守时属性逃逸
   if (underlay) {
-    parts.push(`<image x="${X(underlay.x)}" y="${Y(underlay.y)}" width="${underlay.w}" height="${underlay.h}" opacity="${Math.max(0.02, Math.min(1, underlay.opacity == null ? 1 : underlay.opacity))}" preserveAspectRatio="none" href="${underlay.dataUrl}" xlink:href="${underlay.dataUrl}"/>`);
+    parts.push(`<image x="${X(underlay.x)}" y="${Y(underlay.y)}" width="${underlay.w}" height="${underlay.h}" opacity="${Math.max(0.02, Math.min(1, underlay.opacity == null ? 1 : underlay.opacity))}" preserveAspectRatio="none" href="${esc(underlay.dataUrl)}" xlink:href="${esc(underlay.dataUrl)}"/>`);
   }
 
   // 区域分组容器（设备底层背景框：浅色填充 + 虚线边 + 左上角标题）

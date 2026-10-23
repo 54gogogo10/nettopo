@@ -158,7 +158,8 @@ class EvidenceStore {
       for (const n of fs.readdirSync(this.baseDir)) {
         if (!/^ev_\d{13}_[0-9a-f]{8}(?:_\d)?\.json$/.test(n)) continue;
         files++;
-        try { bytes += fs.statSync(path.join(this.baseDir, n)).size; } catch (e) { /* ignore */ }
+        // lstatSync 不跟随符号链接（与全库 lstatSync 拒链接口径一致）：链接本身不计入统计字节
+        try { bytes += fs.lstatSync(path.join(this.baseDir, n)).size; } catch (e) { /* ignore */ }
       }
     } catch (e) { /* 目录不存在按空库 */ }
     return { ok: true, files, bytes, maxFiles: this.maxFiles, stats: Object.assign({}, this.stats) };
@@ -172,7 +173,8 @@ class EvidenceStore {
     const withTs = [];
     for (const n of list) {
       try {
-        const st = fs.statSync(path.join(this.baseDir, n));
+        // lstatSync 不跟随符号链接（与 status/全库口径一致）：链接文件按自身大小计入，不采信链接目标
+        const st = fs.lstatSync(path.join(this.baseDir, n));
         const m = ID_RE.exec(n.slice(0, -5));
         withTs.push({ n, t: m ? Number(m[1]) : 0, size: st.size });
       } catch (e) { /* ignore */ }

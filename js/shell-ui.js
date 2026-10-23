@@ -236,10 +236,14 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
     ov.querySelector('[data-act=trust]').onclick = () => decide(true);
     function decide(trust) {
       if (trust) { try { localStorage.setItem(fpKeyOf(info.host, info.port), info.fp); } catch (e) { /* ignore */ } }
-      window.topoShell.trustFingerprint(info.host, trust);
+      // 按端口放行：主进程待确认队列以 host:port 为键，同主机其它端口的排队握手保持等待各自确认
+      window.topoShell.trustFingerprint(info.host, trust, info.port);
       close();
-      // 同主机的排队确认一并出队：trustFingerprint 已放行/拒绝该主机的全部待确认握手
-      for (let i = fpQueue.length - 1; i >= 0; i--) if (fpQueue[i].host === info.host) fpQueue.splice(i, 1);
+      // 同主机同端口的排队确认一并出队（键口径与 localStorage 记忆一致）；其它端口的排队
+      // 事件保留，等各自的确认框依次展示
+      for (let i = fpQueue.length - 1; i >= 0; i--) {
+        if (fpKeyOf(fpQueue[i].host, fpQueue[i].port) === fpKeyOf(info.host, info.port)) fpQueue.splice(i, 1);
+      }
       if (fpQueue.length) showFingerprintConfirm(fpQueue.shift());
     }
   }
@@ -1618,8 +1622,9 @@ function isDestructiveCmd(text) { return DESTRUCTIVE_CMD_RE.test(String(text == 
   const CMDH_KEY = 'topoShellCmdHistory';
   const CMDH_CAP = 60;
   // 凭据类命令不持久化：命令历史明文写 shell 窗 localStorage（Electron 下为 userData 明文 leveldb），
-  // 群发/AI/快捷按钮下发的 `password xxx` / `snmp-server community xxx` / `tacacs key xxx` 等会以明文长期驻留磁盘
-  const SENSITIVE_CMD_RE = /(?:^|[\s;"'])(?:password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key)[\s:=]+\S/i;
+  // 群发/AI/快捷按钮下发的 `password xxx` / `snmp-server community xxx` / `tacacs key xxx` 等会以明文长期驻留磁盘。
+  // 关键字表与 js/config-deploy.js 的 SECRET_RE 同口径（含 password-cipher 的 '-' 分隔、服务器 key/共享密钥形态）
+  const SENSITIVE_CMD_RE = /(?:^|[\s;"'])(?:password-cipher|password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key|authentication-key|shared-key|(?:tacacs-server|radius-server)\s+(?:host\s+\S+\s+)?key|crypto\s+isakmp\s+key)\b[\s:=]+\S/i;
   const isSensitiveCmd = (text) => SENSITIVE_CMD_RE.test(String(text == null ? '' : text));
   // 破坏性命令判定：定义见模块级 DESTRUCTIVE_CMD_RE / isDestructiveCmd（可单测）
   let cmdHistory = (() => {

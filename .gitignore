@@ -65,3 +65,6 @@ test/walk/
 
 # CLI 无头模式的本机数据目录（真机配置备份，不入库）
 /nettopo-cli-data/
+
+# CSS 走查截图等临时产物（test/_css-* 由界面调试生成，可随时删）
+test/_css-*/

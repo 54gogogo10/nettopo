@@ -505,9 +505,18 @@ class FtpConnection {
       rs.on('data', () => this._bumpIdle()); // 下载传输期同样不能被空闲超时掐断
       rs.on('error', () => { if (!failed) { failed = true; this.reply('451 读取文件失败。'); try { dataSock.destroy(); } catch (e) { /* ignore */ } this.busy = false; } });
       dataSock.on('error', () => { if (!failed) { failed = true; try { rs.destroy(); } catch (e) { /* ignore */ } this.reply(426, '数据连接异常，传输中止。'); this.busy = false; } });
-      dataSock.on('close', () => {
+      dataSock.on('close', (hadErr) => {
         if (failed) return;
-        if (this._dataAbort) { this._dataAbort = false; this.busy = false; return; } // ABOR 中止：不得回 226 传输完成
+        // rs 读尽才允许 226：客户端中途断开（半截下载）、服务端销毁（destroy/_closePasv 经
+        // _activeData 登记一并销毁数据连接）时 rs 未读完，必须销毁读流（否则文件 fd 悬挂到
+        // 进程退出）并如实回 426——此前 close 正常分支无条件 226，半截下载也误报「传输完成」
+        if (this._dataAbort) { this._dataAbort = false; try { rs.destroy(); } catch (e) { /* ignore */ } this.busy = false; return; } // ABOR 中止：不得回 226 传输完成
+        if (!rs.readableEnded || this.closed || hadErr) {
+          try { rs.destroy(); } catch (e) { /* ignore */ }
+          this.reply(426, '传输连接提前关闭，传输中止。'); // reply 对已断开的控制连接自动跳过
+          this.busy = false;
+          return;
+        }
         this.reply('226 传输完成。');
         this.busy = false;
         this.server.stats.txFiles++;
@@ -671,14 +680,16 @@ class FtpServer extends EventEmitter {
     return { min, count, next };
   }
 
-  /** 启动监听。hosts 为地址数组（同端口按地址各绑一个控制 server；缺省全部网卡）。部分地址
+  /** 启动监听。hosts 为地址数组（同端口按地址各绑一个控制 server；缺省仅回环 127.0.0.1）。部分地址
    *  绑定失败（接口已下线等）不影响其余地址：失败清单写入 lastError；全部失败才返回 ok:false。
    *  PASV 数据通道绑定控制连接的本端地址（多地址下天然与客户端到达路径一致） */
   start(port, hosts) {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     return new Promise((resolve) => {
       const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
-      const want = list.length ? list : ['0.0.0.0'];
+      // 未配置地址时缺省仅回环：FTP 明文口令 + 无加密传输，不默认暴露到全部网卡
+      //（net-services 管理路径总会传入归一化后的地址列表，此回落只影响直接实例化）
+      const want = list.length ? list : ['127.0.0.1'];
       const failures = [];
       const srvs = [];
       let realPort = 0;

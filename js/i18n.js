@@ -90,6 +90,15 @@
     '确定': 'OK', '取消': 'Cancel', '保存': 'Save', '关闭': 'Close', '删除': 'Delete', '知道了': 'Got it',
     '导入拓扑': 'Import Topology',
     '导入连线表格': 'Import Link Spreadsheet', '新建空白画布': 'New Blank Canvas', '载入示例拓扑': 'Load Sample Topology',
+    // ---- 空状态卡片 / 面板 tab / 占位符 / 底部提示（静态 HTML 文案，经 data-i18n / data-i18n-ph 走查） ----
+    '从一张连线关系表开始，或直接新建': 'Start from a link table, or create a new one',
+    '导入包含': 'Import a table containing',
+    '源设备 / 源接口 / 源IP / 目标设备 / 目标接口 / 目标IP': 'Source Device / Port / IP · Target Device / Port / IP',
+    ' 的表格可自动生成拓扑图；没有表格时也可以': ' to auto-generate the topology; without one you can also',
+    '，手动添加设备与连线。': ' and add devices and links manually.',
+    '搜索设备 / 接口 / IP…': 'Search devices / ports / IPs…',
+    '搜索设备 / 接口 / IP…（Enter 定位下一个）': 'Search devices / ports / IPs… (Enter to jump to next)',
+    '提示：滚轮缩放 · 拖拽空白平移 · 双击设备/连线编辑 · 拖设备角点缩放 · 右键更多操作': 'Tips: wheel = zoom · drag blank = pan · double-click device/link = edit · drag corner = resize · right-click for more',
     '切换明暗主题': 'Toggle Light/Dark Theme', '使用帮助': 'Usage Help', '关于': 'About',
     // ---- 命令面板 / 界面缩放 / 通用 ----
     '命令面板 (Ctrl+K)': 'Command Palette (Ctrl+K)', '命令面板': 'Command Palette',
@@ -298,6 +307,12 @@
       if (el.dataset.i18nOrig == null) el.dataset.i18nOrig = el.getAttribute('data-i18n');
       const v = lang === 'zh' ? el.dataset.i18nOrig : t(el.dataset.i18nOrig);
       if (v !== el.textContent) { el.textContent = v; n++; }
+    }
+    // 占位符（input placeholder 属性）走查：data-i18n-ph 存中文原文，切换时整体替换属性值
+    for (const el of d.querySelectorAll('[data-i18n-ph]')) {
+      if (el.dataset.i18nOrigPh == null) el.dataset.i18nOrigPh = el.getAttribute('data-i18n-ph');
+      const v = lang === 'zh' ? el.dataset.i18nOrigPh : t(el.dataset.i18nOrigPh);
+      if (v !== el.placeholder) { el.placeholder = v; n++; }
     }
     return n > 0;
   };

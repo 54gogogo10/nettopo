@@ -310,7 +310,9 @@ class TrapServer extends EventEmitter {
     if (this.running) return Promise.resolve({ ok: true, port: this.port });
     return new Promise((resolve) => {
       const list = (Array.isArray(hosts) ? hosts : [hosts]).map(h => String(h == null ? '' : h).trim()).filter(Boolean);
-      const want = list.length ? list : ['0.0.0.0'];
+      // 未配置地址时缺省仅回环：Trap 无认证，不默认暴露到全部网卡（net-services 管理路径
+      // 总会传入归一化后的地址列表，此回落只影响直接实例化）
+      const want = list.length ? list : ['127.0.0.1'];
       const failures = [];
       const socks = [];
       let realPort = 0;

@@ -787,6 +787,17 @@ class UptimeStore {
           if (Object.keys(clean).length) this.daily.set(String(k).slice(0, 128), clean);
         }
       }
+      // 恢复各键「最近一次采样」记录：没有它，重启后首个 record 落进重启前已计过的同桶时，
+      // 日汇总会把同一桶再计一次（SLA 高估）。旧格式文件无 last 字段则跳过（保持原行为）
+      const last = (raw && typeof raw === 'object' && raw.last && typeof raw.last === 'object' && !Array.isArray(raw.last)) ? raw.last : null;
+      if (last) {
+        for (const [k, v] of Object.entries(last)) {
+          if (!v || typeof v !== 'object') continue;
+          const bucket = Number(v.bucket);
+          if (!Number.isFinite(bucket) || bucket <= 0) continue;
+          this._last.set(String(k).slice(0, 128), { bucket, ok: v.ok ? 1 : 0 });
+        }
+      }
     } catch (e) { /* 无记录/损坏则从空开始 */ }
   }
   record(key, ok, t) {
@@ -837,12 +848,15 @@ class UptimeStore {
     return out;
   }
   /** 落盘（tmp+rename 原子写）。有变更才写；返回是否实际写入。
-   *  文件格式 v2：{v:2, series:{}, daily:{}}；读取兼容旧版扁平格式（旧文件无日汇总，累积后自然补齐）。 */
+   *  文件格式 v2：{v:2, series:{}, daily:{}, last:{}}；last 为 v2 增补字段（重启恢复同桶去重依据，
+   *  旧版代码读到多出的 last 不受影响）；读取兼容旧版扁平格式与无 last 的旧 v2（累积后自然补齐）。 */
   flush() {
     if (!this.file || !this._dirty) return false;
     const tmp = this.file + '.tmp-' + process.pid;
+    const lastObj = {};
+    for (const [k, v] of this._last) lastObj[k] = v;
     try {
-      fs.writeFileSync(tmp, JSON.stringify({ v: 2, series: this.snapshot(), daily: this.dailyOf() }), 'utf8');
+      fs.writeFileSync(tmp, JSON.stringify({ v: 2, series: this.snapshot(), daily: this.dailyOf(), last: lastObj }), 'utf8');
       fs.renameSync(tmp, this.file);
       this._dirty = false;
       return true;
@@ -1840,10 +1854,10 @@ class MonitorManager extends EventEmitter {
         this._runOnConnect(job, gen);
         if (job.readOnly || !job.commands.length) return; // 仅读取/仅探测模式：不进入周期循环
         if (!job.enabled || job.stopping || gen !== job.gen) return;
-        job.loopTimer = setTimeout(() => this._runCycle(job, gen), job.initDelayMs + 800);
+        job.loopTimer = setTimeout(() => { Promise.resolve(this._runCycle(job, gen)).catch(() => { /* 周期循环异常不中断监控 */ }); }, job.initDelayMs + 800);
       }, job.initDelayMs);
     } else if (job.commands.length) {
-      job.loopTimer = setTimeout(() => this._runCycle(job, gen), job.initDelayMs);
+      job.loopTimer = setTimeout(() => { Promise.resolve(this._runCycle(job, gen)).catch(() => { /* 周期循环异常不中断监控 */ }); }, job.initDelayMs);
     }
     // 无命令且无连接时命令（仅探测模式）：不调度周期循环
     // 配置自动备份：先于命令循环执行一次，之后按备份间隔调度（用当前 gen，避免快照过期）
@@ -1883,7 +1897,7 @@ class MonitorManager extends EventEmitter {
   /* ---------------- SSH 指标采集（复用监控会话执行 df/free/loadavg，超阈值告警） ---------------- */
   _startMetrics(job) {
     clearTimeout(job.metricTimer);
-    job.metricTimer = setTimeout(() => this._runMetrics(job), Math.max(job.initDelayMs, 1000) + 2000 + phaseOf(job.key, START_JITTER_MS));
+    job.metricTimer = setTimeout(() => { Promise.resolve(this._runMetrics(job)).catch(() => { /* 指标采集异常不中断监控 */ }); }, Math.max(job.initDelayMs, 1000) + 2000 + phaseOf(job.key, START_JITTER_MS));
   }
   async _runMetrics(job) {
     if (!job.enabled || job.stopping || !job.metrics || !job.metrics.enabled || job.readOnly) return;
@@ -1896,7 +1910,7 @@ class MonitorManager extends EventEmitter {
     }
     if (!job.enabled || job.stopping || gen !== job.gen) return;
     clearTimeout(job.metricTimer);
-    job.metricTimer = setTimeout(() => this._runMetrics(job), (job.metrics.intervalSec || 300) * 1000);
+    job.metricTimer = setTimeout(() => { Promise.resolve(this._runMetrics(job)).catch(() => { /* 指标采集异常不中断监控 */ }); }, (job.metrics.intervalSec || 300) * 1000);
   }
   /** 逐条执行指标命令（捕获窗口复用备份通道：与备份/命令循环已互斥，cleanBackupLines 过滤命令回显），
    *  按命令内容匹配解析器（df → 磁盘，free → 内存，loadavg/uptime → 负载），样本入历史并评估阈值。 */
@@ -2005,7 +2019,7 @@ class MonitorManager extends EventEmitter {
   _startSnmpPoll(job) {
     clearTimeout(job.snmpTimer);
     // 首轮带相位错峰：批量启动时各设备的 walk 不同刻开始（见 START_JITTER_MS 注释）
-    job.snmpTimer = setTimeout(() => this._pollSnmp(job), 3000 + phaseOf(job.key, START_JITTER_MS));
+    job.snmpTimer = setTimeout(() => { Promise.resolve(this._pollSnmp(job)).catch(() => { /* SNMP 轮询异常不中断监控 */ }); }, 3000 + phaseOf(job.key, START_JITTER_MS));
   }
 
   async _pollSnmp(job) {
@@ -2035,10 +2049,10 @@ class MonitorManager extends EventEmitter {
     const baseMs = (job.sysinfo.intervalSec || 60) * 1000;
     if (job._snmpPollFailed) {
       job._snmpFails = Math.min(8, (job._snmpFails || 0) + 1);
-      job.snmpTimer = setTimeout(() => this._pollSnmp(job), baseMs * backoffFactor(job._snmpFails));
+      job.snmpTimer = setTimeout(() => { Promise.resolve(this._pollSnmp(job)).catch(() => { /* SNMP 轮询异常不中断监控 */ }); }, baseMs * backoffFactor(job._snmpFails));
     } else {
       job._snmpFails = 0;
-      job.snmpTimer = setTimeout(() => this._pollSnmp(job), baseMs);
+      job.snmpTimer = setTimeout(() => { Promise.resolve(this._pollSnmp(job)).catch(() => { /* SNMP 轮询异常不中断监控 */ }); }, baseMs);
     }
   }
 
@@ -2307,7 +2321,7 @@ class MonitorManager extends EventEmitter {
     // 配置备份捕获期间暂停命令循环（避免输出互相污染），1 秒后再试
     if (job._cycleActive) {
       clearTimeout(job.loopTimer);
-      job.loopTimer = setTimeout(() => this._runCycle(job, gen), 1000);
+      job.loopTimer = setTimeout(() => { Promise.resolve(this._runCycle(job, gen)).catch(() => { /* 周期循环异常不中断监控 */ }); }, 1000);
       return;
     }
     const cycleStart = Date.now();
@@ -2331,7 +2345,7 @@ class MonitorManager extends EventEmitter {
     // 下一轮按「本轮开始时刻 + 间隔」调度：等命令全部执行完才计时会让实际周期持续
     // 正漂移（周期 = intervalSec + 每轮执行耗时），多命令大延迟任务采集间隔明显变长
     const nextDelay = Math.max(1000, job.intervalSec * 1000 - (Date.now() - cycleStart));
-    job.loopTimer = setTimeout(() => this._runCycle(job, job.gen), nextDelay);
+    job.loopTimer = setTimeout(() => { Promise.resolve(this._runCycle(job, job.gen)).catch(() => { /* 周期循环异常不中断监控 */ }); }, nextDelay);
   }
 
   /* ---------------- 连接时执行命令（每次连接成功仅执行一次，可多条依次执行） ---------------- */
@@ -2353,7 +2367,7 @@ class MonitorManager extends EventEmitter {
       } finally {
         job._cycleActive = false;
       }
-    })();
+    })().catch(() => { /* 连接时命令异常不中断监控（finally 已保证互斥位释放） */ });
   }
 
   /* ---------------- 底层事件路由 ---------------- */
@@ -2476,7 +2490,8 @@ class MonitorManager extends EventEmitter {
       // 首连自动信任属安全敏感事件：通知主进程弹出系统通知（后续指纹变化仍会拒连）
       this.emit('trust', { key: job.key, deviceId: job.deviceId, name: job.name, host, fp });
     }
-    try { this.shell.trustFingerprint(host, true, 'monitor'); } catch (e) { /* ignore */ }
+    // 第 4 参 port：只裁决该 host:port 的排队握手（与上面信任库键同粒度），不再全端口放行 monitor 归属的确认
+    try { this.shell.trustFingerprint(host, true, 'monitor', (info && info.port) || job.port); } catch (e) { /* ignore */ }
   }
 
   _onEnd(sid, reason) {
@@ -2494,13 +2509,12 @@ class MonitorManager extends EventEmitter {
     job._backupCap = null;
     job._cycleActive = false;
     const gen = job.gen;
-    job.state = 'reconnecting';
     job.statusText = '连接断开：' + (reason || '连接已关闭') + '，准备重连';
-    this._emit(job);
-    clearTimeout(job.retryTimer);
-    job.retryTimer = setTimeout(() => {
-      if (job.enabled && !job.stopping && !job.fatal && gen === job.gen) this._startConnect(job);
-    }, job.retrySec * 1000);
+    // 断开重连复用 _scheduleReconnect 的指数退避（1×→8× 封顶）：与连接失败重连同口径——设备
+    // 反复闪断时固定间隔重试等于对设备持续握手轰炸。正常断开前连接曾成功、connFails 已在
+    // _startConnect 连接成功时清零，退避从 1× 起步；连续断开逐级退避，重连成功即清零。
+    // 指纹变化等致命错误（fatal）在 _handleFingerprint 里走 _teardown（置 stopping 并清定时器），此处无需重复判断
+    this._scheduleReconnect(job, gen);
   }
 
   /* ---------------- 在线状态探测（TCP / ICMP） ---------------- */
@@ -2745,7 +2759,7 @@ class MonitorManager extends EventEmitter {
             this._saveTrust();
             this.emit('trust', { key: job.key, deviceId: job.deviceId, name: job.name, host, fp });
           }
-          try { this.shell.trustFingerprint(host, true, 'monitor'); } catch (e) { /* ignore */ }
+          try { this.shell.trustFingerprint(host, true, 'monitor', (info && info.port) || job.port); } catch (e) { /* ignore */ } // 按 host:port 精确放行（与监控会话同口径）
         } else if (info.state === 'error') {
           this.shell.removeListener('status', onStatus);
           fail(info.text || '备份连接失败');

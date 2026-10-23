@@ -18,7 +18,9 @@ contextBridge.exposeInMainWorld('topoShell', {
   sendData: (id, data) => ipcRenderer.send('shell:data', id, data),
   resize: (id, cols, rows) => ipcRenderer.send('shell:resize', id, cols, rows),
   close: (id) => ipcRenderer.send('shell:close', id),
-  trustFingerprint: (host, trust) => ipcRenderer.invoke('shell:trust', { host, trust }),
+  /* port 为指纹所在端口（host:port 粒度放行，与主进程待确认队列键同口径）；缺省回落旧版
+   *  「放行该主机全部端口」语义——主进程 shell:trust 在未透传 port 时按旧口径裁决 */
+  trustFingerprint: (host, trust, port) => ipcRenderer.invoke('shell:trust', { host, trust, port: Number(port) || undefined }),
   /* 一次性命令执行（采集邻居表 / MAC·ARP 定位等无人值守采集；独立会话，主进程内完成） */
   runOneShot: (p) => ipcRenderer.invoke('shell:oneshot', p),
   /* AI 命令闸门：把命令清单交主进程按配置变更下发同一套危险命令表裁决（forbidden/warn/selfLock）。

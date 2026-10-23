@@ -119,13 +119,14 @@ class CapacityStore {
             for (const [dk, arr] of Object.entries(it.d)) {
               if (!Array.isArray(arr) || arr.length < 8) continue;
               const nums = arr.map((v, i) => (i === 6 || i === 7) ? (Number.isFinite(Number(v)) ? Number(v) : null) : (Number(v) || 0));
-              if (dayStart(dk) === dayStart(dk)) iface.d[dk] = nums;
+              if (Number.isFinite(dayStart(dk))) iface.d[dk] = nums; // 显式日期合法性判定（dayStart 非法返回 NaN）
             }
           }
           if (it.h && typeof it.h === 'object') {
             for (const [dk, h] of Object.entries(it.h)) {
               if (!Array.isArray(h) || !Array.isArray(h[0]) || !Array.isArray(h[1])) continue;
               if (h[0].length !== HIST_BUCKETS || h[1].length !== HIST_BUCKETS) continue;
+              if (!Number.isFinite(dayStart(dk))) continue; // 日期键非法的直方图与日记录同口径剔除
               iface.h[dk] = [h[0].map(n => Number(n) || 0), h[1].map(n => Number(n) || 0)];
             }
           }

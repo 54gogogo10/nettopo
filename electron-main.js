@@ -307,16 +307,20 @@ function notifyForDevice(deviceId, title, body, level) {
   // 后续缓存到期合并为一条摘要——48 口交换机闪断不再弹 48 条「接口离线」。
   // 恢复与提示级不聚合直接放行；事件时间线不受影响（各调用点照常全量记录）
   if (deviceId && AL.rankOf(level) >= AL.rankOf('warning')) {
-    if (notifyAgg.push(deviceId, title, body, level) === 'hold') {
-      if (!notifyAggTimers.has(deviceId)) {
-        const t = setTimeout(() => {
-          notifyAggTimers.delete(deviceId);
-          try { flushDeviceAlerts(deviceId); } catch (e) { logCrash('notify-agg', e); }
-        }, notifyAgg.windowMs);
-        if (typeof t.unref === 'function') t.unref();
-        notifyAggTimers.set(deviceId, t);
-      }
-      return;
+    const r = notifyAgg.push(deviceId, title, body, level);
+    if (r === 'hold' || r === 'now') {
+      // 定时器对齐「当前窗口起点 + windowMs」（windowEndsIn）：从首条 hold 起算固定 60s 会与
+      // 窗口起点错开，边界竞态下开新窗口会覆盖未取走的缓存（模块侧已挂起防丢，对齐后摘要也不再延迟）。
+      // 'now'（开新窗口）时旧定时器若还挂着已不对齐新窗口，一并重置
+      const old = notifyAggTimers.get(deviceId);
+      if (old) clearTimeout(old);
+      const t = setTimeout(() => {
+        notifyAggTimers.delete(deviceId);
+        try { flushDeviceAlerts(deviceId); } catch (e) { logCrash('notify-agg', e); }
+      }, Math.max(notifyAgg.windowEndsIn(deviceId), 1));
+      if (typeof t.unref === 'function') t.unref();
+      notifyAggTimers.set(deviceId, t);
+      if (r === 'hold') return;
     }
   }
   notifyUser(title, body, level);
@@ -406,6 +410,9 @@ function createShellWindow() {
     shellReady = false;
     shellQueue.length = 0;
     pendingTabs.length = 0; // 丢弃未送达的标签消息，避免下次打开出现死标签
+    // 录制随窗口终止：owner 指向已销毁的 webContents，不清理的话重开窗口后 append 永远 forbidden，
+    // 录制会话僵死（录制文件保留在磁盘，可从「录制历史」继续查看）
+    if (shellRecOwner && shellRecOwner.isDestroyed()) { shellRecFile = null; shellRecOwner = null; }
     // 只收 UI 会话：后台监控/备份与 Web Shell 共用同一连接管理器，无差别 closeAll 会把
     // 进行中的监控连接与配置备份一并强断（监控任务随后引发一轮无谓的重连风暴）
     shell.closeAll('monitor');
@@ -536,7 +543,7 @@ function escalateTick() {
     escalateBusy = false;
   }
 }
-setInterval(escalateTick, 60000);
+setInterval(escalateTick, 60000).unref(); // 与本文件其余周期任务同口径：不阻止进程退出
 // 在线探测状态 → 主窗口；离线/恢复转换时弹系统通知（受 settings.monitorNotify 开关控制）
 const lastProbeOk = new Map();      // key -> 上次探测结果
 const lastAlertOn = new Map();      // key -> 上次告警状态
@@ -579,6 +586,32 @@ const liveNotifications = new Set();
 const ALERT_DEP_WINDOW_MS = 8000;
 const ALERT_FLAP_WINDOW_MS = 2000;
 const pendingOffline = new Map();   // key -> timer（等待窗口内是否出现上游失联）
+/* 离线通知被静默/维护窗口吞掉时记名：恢复时若仍带着这个标记，恢复通知一并不发——
+ * 否则用户会收到一条没有对应「离线」的凭空「设备恢复」。事件时间线两侧都如实记录 */
+const mutedOfflineNotified = new Map(); // key -> true
+function mutedNow(deviceId) {
+  try { return maintenance.isMuted(deviceId).muted; } catch (e) { return false; }
+}
+/* 停止监控任务时联动清理按 key 记账的状态：否则残留的归并窗口定时器仍会为已停止的
+ * 设备弹「设备离线」通知，Map 残留也会跨任务串状态（stopAll 全清，stop 清单键） */
+function forgetMonitorState(key) {
+  const pend = pendingOffline.get(key);
+  if (pend) clearTimeout(pend);
+  pendingOffline.delete(key);
+  mutedOfflineNotified.delete(key);
+  lastProbeOk.delete(key);
+  lastAlertOn.delete(key);
+  lastAlertPatterns.delete(key);
+  lastBackupErrAt.delete(key);
+  lastBackupChangeAt.delete(key);
+  lastHttpOk.delete(key);
+}
+function forgetMonitorStateAll() {
+  for (const t of pendingOffline.values()) clearTimeout(t);
+  pendingOffline.clear(); mutedOfflineNotified.clear();
+  lastProbeOk.clear(); lastAlertOn.clear(); lastAlertPatterns.clear();
+  lastBackupErrAt.clear(); lastBackupChangeAt.clear(); lastHttpOk.clear();
+}
 function fireOffline(info) {
   pendingOffline.delete(info.key);
   const dep = alertDeps.judgeOffline(info.key);
@@ -589,7 +622,13 @@ function fireOffline(info) {
     return;
   }
   recordMonitorEvent(info, 'offline', '探测失败，设备可能离线');
-  if (notifyEnabled()) notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线', levelOf('offline'));
+  if (notifyEnabled()) {
+    if (mutedNow(info.deviceId)) {
+      mutedOfflineNotified.set(info.key, true);
+      return; // 离线通知被静默吞掉：记名，恢复时不再单发一条凭空的「设备恢复」
+    }
+    notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备离线', info.name + '（' + info.host + '）探测失败，设备可能离线', levelOf('offline'));
+  }
 }
 monitor.on('probe', (info) => {
   sendMonitor('monitor:probe', info);
@@ -625,10 +664,15 @@ monitor.on('probe', (info) => {
           if (agg.stillDownNames.length) parts.push('仍不可达 ' + agg.stillDownNames.join('、'));
           tail = '；此前因其失联的 ' + agg.count + ' 台设备' + (parts.length ? '：' + parts.join('；') : '');
         }
-        recordMonitorEvent(info, 'recovery', '探测恢复在线' + tail);
+        // 离线通知曾在静默期内被吞：恢复通知一并不发（时间线写明两侧均被抑制），下游补发不受影响
+        const wasMutedOffline = mutedOfflineNotified.get(info.key);
+        if (wasMutedOffline) mutedOfflineNotified.delete(info.key);
+        recordMonitorEvent(info, 'recovery', '探测恢复在线' + tail + (wasMutedOffline ? '（离线与恢复通知均在静默期内抑制）' : ''));
         if (notifyEnabled()) {
-          notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备恢复',
-            info.name + '（' + info.host + '）已恢复在线' + tail, levelOf('recovery'));
+          if (!wasMutedOffline) {
+            notifyForDevice(info.deviceId, '网络拓扑管理软件 · 设备恢复',
+              info.name + '（' + info.host + '）已恢复在线' + tail, levelOf('recovery'));
+          }
           for (const k of ((agg && agg.stillDownKeys) || [])) {
             const i = k.lastIndexOf('@');
             const devId = i > 0 ? k.slice(0, i) : k;
@@ -637,6 +681,9 @@ monitor.on('probe', (info) => {
             // 该设备的离线通知此前被归并（从未发出），此处补发是第一条而非重复；同时记入时间线留痕
             recordMonitorEvent({ key: k, deviceId: devId, host, name: nm }, 'offline',
               '仍不可达（此前因 ' + (agg && agg.rootName) + ' 失联，离线通知已归并）');
+            // 补发同样受静默/维护窗口约束：被吞时记名（与 fireOffline 同口径），
+            // 否则该下游恢复时会发出一条没有对应「离线」的凭空「设备恢复」
+            if (mutedNow(devId)) { mutedOfflineNotified.set(k, true); continue; }
             notifyForDevice(devId, '网络拓扑管理软件 · 设备仍不可达',
               nm + (host ? '（' + host + '）' : '') + '仍未恢复在线（此前因 ' + (agg && agg.rootName) + ' 失联未单独通知）', levelOf('offline'));
           }
@@ -1208,7 +1255,8 @@ ipcMain.handle('shell:connect', (e, opts) => {
 });
 ipcMain.handle('shell:trust', (e, p) => {
   if (!shellWin || shellWin.isDestroyed() || e.sender !== shellWin.webContents) return { ok: false, error: 'forbidden' };
-  return { ok: shell.trustFingerprint(String((p && p.host) || ''), !!(p && p.trust)) };
+  // port 透传：指纹确认按 host:port 粒度放行（用户只核对过该端口的指纹，同主机其它端口的排队握手保持等待）
+  return { ok: shell.trustFingerprint(String((p && p.host) || ''), !!(p && p.trust), null, p && p.port) };
 });
 ipcMain.handle('shell:reconnect', (e, p) => {
   // 会话断开后原地重连：用保存的建连参数重建同一 sid 的会话（不新开标签，前端终端复用）
@@ -1381,8 +1429,19 @@ function monitorGuard(e) {
   return !!(mainWin && !mainWin.isDestroyed() && e && e.sender === mainWin.webContents);
 }
 ipcMain.handle('monitor:start', (e, opts) => monitorGuard(e) ? monitor.start(opts || {}) : { ok: false, error: 'forbidden' });
-ipcMain.handle('monitor:stop', (e, p) => monitorGuard(e) ? monitor.stop(String((p && p.key) || '')) : { ok: false, error: 'forbidden' });
-ipcMain.handle('monitor:stopAll', (e) => monitorGuard(e) ? monitor.stopAll() : { ok: false, error: 'forbidden' });
+ipcMain.handle('monitor:stop', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const key = String((p && p.key) || '');
+  const r = monitor.stop(key);
+  if (key) forgetMonitorState(key);
+  return r;
+});
+ipcMain.handle('monitor:stopAll', (e) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const r = monitor.stopAll();
+  forgetMonitorStateAll();
+  return r;
+});
 ipcMain.handle('monitor:status', (e) => monitorGuard(e) ? { ok: true, items: monitor.status() } : { ok: false, error: 'forbidden' });
 ipcMain.handle('monitor:open-logs', (e, p) => {
   if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };

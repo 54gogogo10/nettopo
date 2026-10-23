@@ -98,6 +98,7 @@ const renderer = new TopoRender($('#svg'), {
       fields: [{ name: 'name', label: '分组名称', value: state.subnetNames[key] || '', ph: '例如：核心区' }],
       submit: '确定',
       onSubmit: (v) => {
+        pushUndo(); // 分组命名是图数据变更（snapshot 含 subnetNames），须可撤销
         if (!String(v.name).trim()) delete state.subnetNames[key];
         else state.subnetNames[key] = String(v.name).trim();
         renderer.setSubnetView(state.showSubnets, state.subnetNames);
@@ -157,12 +158,16 @@ let qsIdx = -1;       // 当前定位序号（Enter 循环下一个）
 function openQuickSearch() {
   $('#quickSearch').classList.remove('hidden');
   const inp = $('#qsInput');
-  inp.value = '';
-  qsMatches = []; qsIdx = -1;
-  $('#qsCount').textContent = '';
-  $('#qsList').innerHTML = '';
+  // 记忆上次关键词并立即出结果（无记忆时空表）：反复按前缀搜同一批设备不用重输；全选便于直接覆盖
+  inp.value = qsLastQuery || '';
+  qsMatches = qsLastQuery ? U.searchTopology(state.nodes, state.links, qsLastQuery, 20) : [];
+  qsIdx = -1;
+  $('#qsCount').textContent = qsMatches.length ? qsMatches.length + ' 个匹配' : '';
+  renderQsList();
   inp.focus();
+  inp.select();
 }
+let qsLastQuery = ''; // 顶层记忆上次快速搜索关键词（input 回调与 openQuickSearch 共用）
 function closeQuickSearch() { $('#quickSearch').classList.add('hidden'); }
 function renderQsList() {
   const list = $('#qsList');
@@ -376,6 +381,10 @@ function restore(s) {
     refreshSheets();
     // 跨页撤销：底图跟随目标页（与 switchSheet 同口径）
     state.underlay = U.sanitizeUnderlay(state.sheets[state.sheetIdx].underlay);
+    // 撤销栈同步换到目标页的栈（纵深防御：正常流程本页栈内快照不会走此分支，
+    // 只有脏快照才会；不换栈的话后续编辑会写进 store 里原页的栈）
+    const st2 = sheetUndoStore.get(state.sheetIdx) || { undo: [], redo: [] };
+    state.undoStack = st2.undo; state.redoStack = st2.redo;
   }
   state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
   state.regions = s.regions || [];
@@ -421,6 +430,7 @@ function pushUndo(pre) {
   saveGraph(); // 任何修改都持久化
 }
 function undo() {
+  abortNudgeMerge(); // 有未入栈的方向键微调时先结算：随后 pop 到的正是它，Ctrl+Z 直觉上就是撤销本次微调
   const s = state.undoStack.pop();
   if (!s) return;
   state.redoStack.push(snapshot());
@@ -428,6 +438,7 @@ function undo() {
   updateUndoBtns();
 }
 function redo() {
+  abortNudgeMerge(); // 同上：先结算微调快照，避免随后的 redoStack 清空把它连带丢掉
   const s = state.redoStack.pop();
   if (!s) return;
   state.undoStack.push(snapshot());
@@ -2815,7 +2826,14 @@ function openIfTable() {
     </div>`;
   root.appendChild(ov);
   ov.tabIndex = -1; ov.focus();
-  const close = () => ov.remove();
+  // 未应用的修改先确认再丢弃（edits 为「应用修改」前的暂存表，非空即有未保存编辑）
+  const close = () => {
+    if (edits.size) {
+      confirmBox('接口总表有 ' + edits.size + ' 处未应用的修改，关闭将丢失。仍要关闭？').then(ok => { if (ok) ov.remove(); });
+      return;
+    }
+    ov.remove();
+  };
   ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
   ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   ov.querySelector('[data-act=cancel]').onclick = close;
@@ -2904,6 +2922,7 @@ function openIfTable() {
     renderer.setData(state.nodes, state.links, state.texts, state.regions);
     refreshAll();
     saveGraph();
+    edits.clear(); // 已全部写入：清空暂存表，下面走干净关闭（不再触发未保存确认）
     close();
     toast(`接口总表：已更新 ${applied} 个接口行（Ctrl+Z 可撤销）`);
   };
@@ -3741,7 +3760,8 @@ function openIpPlan() {
     const keys = Object.keys(rows[0] || {});
     ws['!cols'] = keys.map(k => ({ wch: Math.min(30, Math.max(8, U.spreadMinMax(rows.map(r => String(r[k] == null ? '' : r[k]).length))[1]) + 2) }));
     window.XLSX.utils.book_append_sheet(wb, ws, 'IP规划');
-    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(subnets.map(s => ({ 网段: s.cidr, 设备数: s.devices.length, 设备: s.devices.join(', ') }))), '子网统计');
+    // 子网统计 sheet 同样过 sanitizeCell：设备名/网段是用户可控值，未消毒会被 Excel 当公式执行（=HYPERLINK 等）
+    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(subnets.map(s => ({ 网段: U.sanitizeCell(s.cidr), 设备数: s.devices.length, 设备: U.sanitizeCell(s.devices.join(', ')) }))), '子网统计');
     const buf = window.XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
     U.download(`IP规划_${U.fmtDate()}.xlsx`, new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     toast('已导出 IP 规划 Excel（设备名已按设备合并单元格）');
@@ -4176,6 +4196,10 @@ function setupAutoBackup() {
 
 /* ================= 多图纸（多页拓扑） ================= */
 /** 当前页数据写回 sheets（nodes/links/texts 为活动数据本体，直接引用；视图随存） */
+/* 按图纸分撤销栈：切页不再清空编辑历史（误点页签不丢 Ctrl+Z）。
+ * 存独立 Map 而非挂在页对象上——saveGraph 会整体序列化 state.sheets，挂页上会把
+ * 60 步全量快照写进工程文件；Map 不在序列化白名单里。 */
+const sheetUndoStore = new Map(); // sheetIdx -> {undo:[], redo:[]}
 function sheetStash() {
   const s = state.sheets[state.sheetIdx];
   if (!s) return;
@@ -4183,6 +4207,7 @@ function sheetStash() {
   s.regions = state.regions || [];
   s.underlay = state.underlay || null;   // 底图同样写回：sheets 是每页数据的唯一权威副本
   s.pan = renderer.pan; s.zoom = renderer.zoom;
+  sheetUndoStore.set(state.sheetIdx, { undo: state.undoStack, redo: state.redoStack });
 }
 /** 全部页的节点合集（监控 reconcile 覆盖所有页，切页不打断后台任务） */
 function allSheetNodes() {
@@ -4200,9 +4225,9 @@ function refreshSheets() {
   tabs.innerHTML = state.sheets.map((s, i) => `
     <span class="sheet-tab${i === state.sheetIdx ? ' active' : ''}" data-idx="${i}" title="双击重命名 · 右键删除">${U.escHtml(s.name || ('页面 ' + (i + 1)))}</span>`).join('');
 }
-function switchSheet(idx, opts) {
-  opts = opts || {};
+function switchSheet(idx) {
   if (idx === state.sheetIdx || !state.sheets[idx]) return;
+  abortNudgeMerge(); // 微调合并定时器不能跨页存活：先在本页结算（入栈）再切页
   sheetStash();
   const s = state.sheets[idx];
   state.sheetIdx = idx;
@@ -4210,7 +4235,10 @@ function switchSheet(idx, opts) {
   state.regions = s.regions || [];
   state.underlay = U.sanitizeUnderlay(s.underlay);
   state.sel = { kind: null, id: null };
-  if (!opts.keepUndo) { state.undoStack = []; state.redoStack = []; }
+  // 载入目标页自己的撤销/重做栈：各页编辑历史互不干扰（快照里的 sheetIdx 与本页一致，
+  // restore 的跨页分支不会误跳）；未编辑过的新页从空栈开始
+  const saved = sheetUndoStore.get(idx) || { undo: [], redo: [] };
+  state.undoStack = saved.undo; state.redoStack = saved.redo;
   renderer.orthoLinks = state.orthoLinks;
   renderer.showLabels = state.showLabels; renderer.showSubnets = state.showSubnets; renderer.subnetNames = state.subnetNames;
   renderer.setDownLinks(state.downLinks);
@@ -4266,7 +4294,9 @@ async function removeSheet(idx) {
     delete state.monitorCfg[n.id];
   }
   saveMonitorCfg().catch(() => {});
+  abortNudgeMerge(); // 微调合并定时器不能跨删页存活（索引位移已让按页分栈作废）
   state.sheets.splice(idx, 1);
+  sheetUndoStore.clear(); // 页索引位移会让按页分栈错位：全部作废（与旧口径清全局栈一致保守）
   if (state.sheetIdx > idx) {
     state.sheetIdx--;
     // 前面的页被删后索引左移：撤销栈里旧快照的 sheetIdx 已指向别的页，跨页撤销会跳错页
@@ -4277,9 +4307,11 @@ async function removeSheet(idx) {
     const t = state.sheets[state.sheetIdx];
     state.nodes = t.nodes || []; state.links = t.links || []; state.texts = t.texts || [];
     state.regions = t.regions || []; // 漏切会让已删页的区域框串到新页并被 saveGraph 持久化
+    state.underlay = U.sanitizeUnderlay(t.underlay); // 底图同口径：漏切会让已删页底图写进替代页并覆盖其原底图
     state.sel = { kind: null, id: null };
     state.undoStack = []; state.redoStack = [];
     renderer.setData(state.nodes, state.links, state.texts, state.regions);
+    applyUnderlay(); // 重绘替代页底图（与 switchSheet 同口径）
     renderer.fit();
     refreshAll();
     reconcileMonitors();
@@ -4355,7 +4387,8 @@ async function exportVisio() {
   //    buildVSDX 是纯同步函数没有 canvas，无法自行光栅化——必须在这里包成带尺寸与颜色的
   //    SVG dataURL 再转 PNG（否则内置图标在 Visio 导出中恒丢失：画布优先级是 n.icon > 类型图）
   const iconSvgUrl = (key) => {
-    const raw = (U.ICONS && U.ICONS[key]) || '';
+    // 限自有属性：继承键（toString 等）truthy 但不是 SVG，会拼出损坏的 dataURL
+    const raw = (U.ICONS && Object.prototype.hasOwnProperty.call(U.ICONS, key)) ? U.ICONS[key] : '';
     if (!raw) return '';
     // currentColor 在独立 SVG 文档里没有继承源，必须显式给色，否则描边透明（导出空白图标）
     const colored = raw.replace(/currentColor/g, '#1e293b');
@@ -4379,7 +4412,8 @@ async function exportVisio() {
   const buf = TopoVsdx.buildVSDX({ nodes, links: state.links, texts: state.texts, regions: state.regions }, { showLabels: state.showLabels, ortho: state.orthoLinks });
   U.download(`网络拓扑图_${U.fmtDate()}.vsdx`,
     new Blob([buf], { type: 'application/vnd.ms-visio' }));
-  toast('已导出 Visio 文件（.vsdx，Visio 2013+ 可直接打开编辑）');
+  // 如实告知：VSDX 不携带机房平面图底图（vsdx.js 取景只含 regions/nodes/texts，与 PDF 口径不同）
+  toast('已导出 Visio 文件（.vsdx，Visio 2013+ 可直接打开编辑' + (state.underlay ? '；底图未包含' : '') + '）');
 }
 
 /* 导出 canvas 安全缩放：目标 2 倍像素，但总尺寸/单边受浏览器 canvas 上限（Blink 单边 16384）
@@ -5750,6 +5784,95 @@ function deleteLink(id) {
   saveGraph();
 }
 
+/* ================= 复制 / 粘贴 / 全选 / 方向键微调 ================= */
+let _topoCopyBuf = null; // 内部剪贴板：{nodes, links}（选中节点深拷贝 + 两端均在选中的内部连线）
+function copySelection() {
+  const ids = renderer.selectedNodes();
+  if (!ids.length) { toast('请先选中要复制的设备（可多选）'); return; }
+  const idSet = new Set(ids);
+  const nodes = state.nodes.filter(n => idSet.has(n.id)).map(n => U.clone(n));
+  const links = state.links.filter(l => idSet.has(l.a) && idSet.has(l.b)).map(l => U.clone(l));
+  _topoCopyBuf = { nodes, links };
+  toast('已复制 ' + nodes.length + ' 台设备' + (links.length ? '（含 ' + links.length + ' 条内部连线）' : '') + '，Ctrl+V 粘贴');
+}
+function pasteClipboard() {
+  if (!_topoCopyBuf || !_topoCopyBuf.nodes.length) { toast('剪贴板里没有设备（先选中设备按 Ctrl+C）'); return; }
+  pushUndo();
+  const idMap = new Map();
+  const names = new Set(state.nodes.map(n => String(n.name || '').toLowerCase()));
+  const newIds = [];
+  for (const n of _topoCopyBuf.nodes) {
+    const nid = 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    idMap.set(n.id, nid);
+    let nm = String(n.name || '');
+    if (names.has(nm.toLowerCase())) {
+      // 副本、副本2、副本3……顺序递增（i 从 1 起探测，首份不带编号）
+      let i = 1;
+      while (names.has((nm + ' 副本' + (i > 1 ? i : '')).toLowerCase())) i++;
+      nm = nm + ' 副本' + (i > 1 ? i : '');
+    }
+    names.add(nm.toLowerCase());
+    state.nodes.push(Object.assign(U.clone(n), { id: nid, name: nm, x: (Number(n.x) || 0) + 24, y: (Number(n.y) || 0) + 24 }));
+    newIds.push(nid);
+  }
+  for (const l of _topoCopyBuf.links) {
+    const a = idMap.get(l.a), b = idMap.get(l.b);
+    if (!a || !b) continue;
+    state.links.push(Object.assign(U.clone(l), { id: 'l' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), a, b }));
+  }
+  renderer.setData(state.nodes, state.links, state.texts, state.regions);
+  refreshAll();
+  saveGraph();
+  // 选中粘贴出来的那批（与多选框选同口径）：selIds 直接赋值不会触发高亮同步，
+  // 必须补 _syncSelClass；state.sel 也要同步，否则 Delete 走旧选中删错目标
+  renderer.selIds = new Set(newIds);
+  renderer.sel = { kind: 'node', id: newIds[newIds.length - 1] };
+  state.sel = { kind: 'node', id: newIds[newIds.length - 1] };
+  renderer.selLinkIds.clear();
+  renderer._syncSelClass();
+  renderSelCard();
+  refreshPanel();
+  toast('已粘贴 ' + newIds.length + ' 台设备（偏移 24px，名称重复已加「副本」）');
+}
+function selectAllNodes() {
+  if (!state.nodes.length) return;
+  renderer.selIds = new Set(state.nodes.map(n => n.id));
+  renderer.sel = { kind: 'node', id: state.nodes[state.nodes.length - 1].id };
+  state.sel = { kind: 'node', id: state.nodes[state.nodes.length - 1].id };
+  renderer.selLinkIds.clear(); // 清后仍需 _syncSelClass，否则旧连线高亮残留
+  renderer._syncSelClass();
+  renderSelCard();
+  refreshPanel();
+}
+/** 方向键微调选中设备：Arrow=1px、Shift+Arrow=10px；800ms 内的连续按键合并为一个撤销步骤 */
+function nudgeSelection(key, step) {
+  const ids = renderer.selectedNodes();
+  if (!ids.length) return;
+  const dx = key === 'ArrowLeft' ? -step : key === 'ArrowRight' ? step : 0;
+  const dy = key === 'ArrowUp' ? -step : key === 'ArrowDown' ? step : 0;
+  const now = Date.now();
+  if (!state._nudgePre || now - (state._nudgeAt || 0) > 800) state._nudgePre = snapshot();
+  state._nudgeAt = now;
+  const idSet = new Set(ids);
+  for (const n of state.nodes) if (idSet.has(n.id)) { n.x += dx; n.y += dy; }
+  renderer.updateSoon();
+  saveGraph();
+  clearTimeout(state._nudgeT);
+  state._nudgeT = setTimeout(() => {
+    const pre = state._nudgePre; state._nudgePre = null;
+    // 快照页号须与当前页一致才入栈：定时器跨过切页/删页时丢弃，防止旧页快照污染新页撤销栈
+    if (pre && pre.sheetIdx === state.sheetIdx) pushUndo(pre);
+  }, 800);
+}
+/** 结束方向键微调的合并等待（切页/删页/撤销重做前调用）：同页快照立即入栈（微调仍可撤销），跨页丢弃 */
+function abortNudgeMerge() {
+  clearTimeout(state._nudgeT);
+  state._nudgeT = null;
+  const pre = state._nudgePre;
+  state._nudgePre = null;
+  if (pre && pre.sheetIdx === state.sheetIdx) pushUndo(pre);
+}
+
 function deleteSelection() {
   const { kind, id } = state.sel;
   if (kind === 'node' && renderer.selIds.size > 1) {
@@ -5802,6 +5925,9 @@ function batchEditNodes() {
     fields: [
       { name: 'type', label: '设备类型', type: 'select', options: [['', '（保持不变）']].concat(U.typeList().map(t => [t.key, t.label])) },
       { name: 'mgmts', label: '管理地址', type: 'mgmts', value: [] },
+      { name: 'model', label: '型号', ph: '留空不修改（如 S5720-28X-SI）' },
+      { name: 'osver', label: '软件版本', ph: '留空不修改' },
+      { name: 'vendor', label: '配置厂家', type: 'select', options: [['', '（保持不变）']].concat(Object.keys(U.DEPLOY_VENDORS).map(k => [k, U.DEPLOY_VENDORS[k].label])) },
       { name: 'web', label: '管理Web页URL', ph: '留空不修改' },
       { name: 'note', label: '备注', type: 'textarea', ph: '留空不修改' }
     ],
@@ -5814,6 +5940,9 @@ function batchEditNodes() {
         if (!n) continue;
         if (v.type) n.type = v.type;
         if (ms.length) U.setNodeMgmts(n, ms);
+        if (String(v.model).trim()) n.model = String(v.model).trim().slice(0, 120);
+        if (String(v.osver).trim()) n.osver = String(v.osver).trim().slice(0, 120);
+        if (v.vendor) n.vendor = v.vendor;
         // 与单设备编辑同口径：过 normalizeWebUrl（自动补 http://、拒绝 javascript:/data: 等危险协议与限长）
         if (String(v.web).trim()) n.web = U.normalizeWebUrl(v.web) || '';
         if (String(v.note).trim()) n.note = String(v.note).trim();
@@ -6094,9 +6223,9 @@ function openDashboard() {
   refreshFeed();
   const clockTimer = setInterval(tick, 1000);
   const feedTimer = setInterval(refreshFeed, 30000);
-  // 多图纸轮播：每 15 秒切下一张并适应视图（单页不轮播）；keepUndo 防大屏翻页把撤销栈清掉
+  // 多图纸轮播：每 15 秒切下一张并适应视图（单页不轮播）；撤销栈按页独立，轮播切页天然不清栈
   const rotTimer = state.sheets.length > 1 ? setInterval(() => {
-    switchSheet((state.sheetIdx + 1) % state.sheets.length, { keepUndo: true });
+    switchSheet((state.sheetIdx + 1) % state.sheets.length);
     renderer.fit();
   }, 15000) : null;
   const escHandler = (e) => {
@@ -6571,11 +6700,20 @@ function openModal(opts) {
     if (e.target.classList) { e.target.classList.remove('invalid'); e.target.removeAttribute('aria-invalid'); }
   });
 
-  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
-  ov.querySelector('[data-act=cancel]').addEventListener('click', close);
+  // ---- dirty 保护：误点遮罩 / Esc / 取消时，已有修改的表单先确认再丢弃 ----
+  // 判定用 grab() 快照对比（打开时 vs 关闭请求时），天然覆盖管理口/VLAN/图标等动态行的增删
+  const initialGrab = JSON.stringify(grab());
+  const isDirty = () => { try { return JSON.stringify(grab()) !== initialGrab; } catch (e) { return false; } };
+  const closeGuarded = () => {
+    if (!isDirty()) { ov.remove(); return; }
+    confirmBox('表单已有修改，关闭后将丢失。仍要关闭？').then(ok => { if (ok && document.body.contains(ov)) ov.remove(); });
+  };
+
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) closeGuarded(); });
+  ov.querySelector('[data-act=cancel]').addEventListener('click', closeGuarded);
   form.addEventListener('submit', (e) => { e.preventDefault(); submit(); });
   ov.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.stopPropagation(); close(); }
+    if (e.key === 'Escape') { e.stopPropagation(); closeGuarded(); }
   });
   const first = [...form.querySelectorAll('input:not([type=hidden]), select, textarea')].find(el => el.getClientRects().length);
   // 弹窗动画（rise .2s）完成后再聚焦，避免个别环境下动画期间聚焦被重置
@@ -6583,23 +6721,33 @@ function openModal(opts) {
 }
 
 function toast(msg, type) {
-  let t = $('#toastTmp');
-  if (!t) {
-    t = document.createElement('div');
-    t.id = 'toastTmp';
-    t.setAttribute('role', 'status');
-    t.setAttribute('aria-live', 'polite');
-    document.body.appendChild(t);
-  }
+  // 堆叠队列（最多 3 条同时显示、各自计时淡出）：此前单元素复用，第二条提示直接覆盖第一条，
+  // 批量操作后只看得到最后一条。最新一条携带 id=toastTmp（兼容既有锚点/断言语义）
   const KIND = { ok: 'ok', success: 'ok', warn: 'warn', warning: 'warn', error: 'error', danger: 'error', info: 'info' };
   const ICON = { ok: 'ok', success: 'ok', warn: 'warn', warning: 'warn', error: 'close', danger: 'warn', info: 'info' };
   const kind = type && KIND[type] ? KIND[type] : '';
-  t.className = kind ? ('toast-' + kind) : '';
+  let stack = document.getElementById('toastStack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'toastStack';
+    stack.setAttribute('role', 'status');
+    stack.setAttribute('aria-live', 'polite');
+    document.body.appendChild(stack);
+  }
+  if (stack.children.length >= 3) { const oldest = stack.firstElementChild; if (oldest) oldest.remove(); } // 超限丢最旧
+  const t = document.createElement('div');
+  t.className = 'toast-item' + (kind ? ' toast-' + kind : '');
   t.innerHTML = (kind ? '<i class="ic" data-ic="' + ICON[type] + '"></i>' : '') + '<span>' + U.escHtml(T(msg)) + '</span>';
+  const prev = document.getElementById('toastTmp');
+  if (prev) prev.removeAttribute('id');
+  t.id = 'toastTmp';
+  stack.appendChild(t);
   U.fillIcons();
-  t.style.opacity = '1';
-  clearTimeout(t._h);
-  t._h = setTimeout(() => { t.style.opacity = '0'; }, 3200);
+  requestAnimationFrame(() => { t.classList.add('show'); });
+  t._h = setTimeout(() => {
+    t.classList.remove('show');
+    setTimeout(() => { if (t.parentNode) t.remove(); }, 350);
+  }, 3200);
 }
 
 /* ================= 应用内确认框（替代原生 confirm，避免 Electron 原生对话框后的焦点问题） ================= */
@@ -6727,12 +6875,13 @@ function openCtx(e, kind, id) {
     ];
   }
   menu.innerHTML = items.map(it => {
-    if (it.sep) return '<div style="height:1px;background:var(--border);margin:4px 8px"></div>';
+    if (it.sep) return '<div style="height:1px;background:var(--border);margin:4px 8px" role="separator"></div>';
     if (it.head) return `<div style="padding:5px 10px 3px;font-size:11px;color:var(--muted);font-weight:600">${U.escHtml(it.head)}</div>`;
-    return `<button class="ci ${it.danger ? 'danger' : ''}"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(T(it.label))}</button>`;
+    return `<button class="ci ${it.danger ? 'danger' : ''}" role="menuitem"><i class="ic" data-ic="${it.ic}"></i>${U.escHtml(T(it.label))}</button>`;
   }).join('');
   U.fillIcons();
   menu.classList.remove('hidden');
+  menu.setAttribute('role', 'menu');
   const mw = menu.offsetWidth, mh = menu.offsetHeight;
   menu.style.left = Math.min(e.clientX, innerWidth - mw - 8) + 'px';
   menu.style.top = Math.min(e.clientY, innerHeight - mh - 8) + 'px';
@@ -6744,6 +6893,18 @@ function openCtx(e, kind, id) {
     btns[bi].addEventListener('click', () => { closeCtx(); it.act && it.act(); });
     bi++;
   }
+  // 键盘可达：打开后首项聚焦，↑/↓ 在菜单项间移动（Enter/空格触发由按钮原生聚焦行为完成）。
+  // stopPropagation 必须有：否则 ↑/↓ 冒泡到 document 的画布快捷键，菜单导航与节点微调同时发生
+  if (btns.length) btns[0].focus();
+  menu.onkeydown = (ev) => {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const cur = menu.querySelector('.ci:focus');
+    let idx = cur ? [...btns].indexOf(cur) : -1;
+    idx = ev.key === 'ArrowDown' ? (idx + 1) % btns.length : (idx - 1 + btns.length) % btns.length;
+    btns[idx].focus();
+  };
 }
 function closeCtx() { $('#ctx').classList.add('hidden'); }
 
@@ -6929,7 +7090,7 @@ function refreshAll() {
 }
 
 function updateStats() {
-  $('#statGraph').innerHTML = `设备 <b>${state.nodes.length}</b> · 连线 <b>${state.links.length}</b>`;
+  $('#statGraph').innerHTML = `${U.escHtml(T('设备'))} <b>${state.nodes.length}</b> · ${U.escHtml(T('连线'))} <b>${state.links.length}</b>`;
   $('#cntNodes').textContent = state.nodes.length;
   $('#cntLinks').textContent = state.links.length;
 }
@@ -8132,6 +8293,7 @@ function wire() {
   // 画布快速搜索（Ctrl+F 呼出）：输入即搜，Enter/↑/↓ 循环定位，点击结果直接跳转
   $('#qsInput').addEventListener('input', () => {
     qsMatches = U.searchTopology(state.nodes, state.links, $('#qsInput').value, 20);
+    qsLastQuery = $('#qsInput').value;
     qsIdx = -1;
     renderQsList();
   });
@@ -8214,6 +8376,9 @@ function wire() {
       select(null, null);
       return;
     }
+    // 弹窗 / 右键菜单打开时不响应画布快捷键：焦点在其按钮上时 Delete/方向键/Ctrl+A
+    // 不得误删画布选中物或微调节点（Esc 在守卫之前处理——右键菜单开着时按 Esc 要能关菜单）
+    if (document.querySelector('.overlay:not(.hidden)') || !$('#ctx').classList.contains('hidden')) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') { e.preventDefault(); newGraph(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
@@ -8221,6 +8386,14 @@ function wire() {
       return;
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { e.preventDefault(); copySelection(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { e.preventDefault(); pasteClipboard(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); selectAllNodes(); return; }
+    if (e.key.indexOf('Arrow') === 0 && renderer.selectedNodes().length) {
+      e.preventDefault();
+      nudgeSelection(e.key, e.shiftKey ? 10 : 1);
+      return;
+    }
     if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelection(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveProject(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') { e.preventDefault(); $('#btnDropExport').click(); return; }
@@ -9215,9 +9388,12 @@ async function applyMonitor(id, cfg, enabled) {
         // 复用 Web Shell 已信任的指纹（若此前通过 Web Shell 信任过该主机，则直接严格校验）
         const expectFp = trustedFpOf(r.host, r.port);
         // 凭据库档案：只交 credId，账号/口令/私钥/协议端口由主进程按档案补齐（明文不经过渲染层）
+        // 跳板 expectFp：无人值守采集没有指纹确认弹窗，带上已信任的跳板指纹做严格比对
+        //（此前该字段在 connect 侧断链，跳板预钉扎永不生效；未信任过则为空串=首连 TOFU）
+        const jumpPart = r.jump ? Object.assign({}, r.jump, { expectFp: trustedFpOf(r.jump.host, r.jump.port) }) : null;
         const credPart = r.credId
           ? { credId: r.credId }
-          : { protocol: r.protocol, port: r.port, username: r.username, password: r.password, privateKey: r.privateKey || '', keyPassphrase: r.keyPass || '', jump: r.jump || null };
+          : { protocol: r.protocol, port: r.port, username: r.username, password: r.password, privateKey: r.privateKey || '', keyPassphrase: r.keyPass || '', jump: jumpPart };
         const res = await bridge.start(Object.assign(
           { key: monitorKey(id, r.host), deviceId: id, name: node ? node.name : '', expectFp, host: r.host },
           credPart,
@@ -10191,9 +10367,11 @@ async function reconcileMonitors() {
     perDev[node.id][row.host] = { state: 'connecting', text: '启动监控…', since: Date.now() };
     try {
       const expectFp = trustedFpOf(row.host, row.port);
+      // 跳板同样带已信任指纹严格比对（无人值守路径无指纹弹窗，见上方 jumpPart 注释）
+      const jumpRow = row.jump ? Object.assign({}, row.jump, { expectFp: trustedFpOf(row.jump.host, row.jump.port) }) : null;
       const res = await bridge.start(Object.assign(
         { key: hk, deviceId: node.id, name: node.name, expectFp, host: row.host },
-        { protocol: row.protocol, port: row.port, username: row.username, password: row.password, privateKey: row.privateKey || '', keyPassphrase: row.keyPass || '', jump: row.jump || null },
+        { protocol: row.protocol, port: row.port, username: row.username, password: row.password, privateKey: row.privateKey || '', keyPassphrase: row.keyPass || '', jump: jumpRow },
         { commands: row.readOnly ? [] : (Array.isArray(row.commands) ? row.commands : []), readOnly: !!row.readOnly, onConnect: row.onConnect || [], intervalSec: cfg.intervalSec, cmdDelayMs: cfg.cmdDelayMs },
         { probe: { enabled: row.probeEnabled, type: row.probeType, intervalSec: row.probeIntervalSec, port: row.probePort || 0 } },
         { alerts: row.alerts },

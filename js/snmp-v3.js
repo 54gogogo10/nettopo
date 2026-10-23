@@ -127,8 +127,11 @@ const _KDF_BASE_CACHE_MAX = 16;
 const MAX_ENGINE_ID_LEN = 64;   // engineID 上限：超限直接拒（防超长密钥与缓存键膨胀；RFC 3414 建议 5..32，取更宽松的 64 保互操作）
 
 /** 口令 → 本地化密钥 Kul（RFC 3414 A.1；SHA-2 档同样按 RFC 7860 §7.1 用该哈希做本地化）：
- *  口令按 UTF-8 反复填充至恰好 1MB，逐 64 字节块迭代 x = H(x‖chunk)（x0 = H(空串)），
- *  Kul = H(x‖engineID‖x)。algo 取 AUTH_ALGOS 的键（md5 / sha / sha2-224/256/384/512）。 */
+ *  口令按 UTF-8 反复填充至恰好 1MB 后做**一次连续哈希** H(1MB 缓冲)——这与 RFC 的
+ *  「16384 次 × 64 字节块 update 到同一哈希上下文」等价（分块 update 与一次 update 结果相同），
+ *  不是「逐块迭代 x = H(x‖chunk)」的链式结构，实现与 RFC 官方向量一致（勿按链式「修正」，
+ *  那会得到完全不同的密钥、全线断认证）。Kul = H(x‖engineID‖x)。algo 取 AUTH_ALGOS 的键
+ *  （md5 / sha / sha2-224/256/384/512）。 */
 function passwordToKey(password, engineID, algo) {
   const hashName = authAlgoInfo(algo).hash;
   const pwd = Buffer.from(String(password == null ? '' : password), 'utf8');

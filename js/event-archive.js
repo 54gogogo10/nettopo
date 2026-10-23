@@ -17,6 +17,8 @@ const fs = require('fs');
 
 const MAX_EVENTS = 500;  // 与主进程内存时间线同容量
 const MAX_FIELD = 2000;  // detail 限长（事件携带的匹配行/摘要远短于此，防异常 payload）
+const RETRY_MS = 5000;   // 落盘失败重试间隔（磁盘满/文件被占用多为短暂状态，稍候再试）
+const MAX_RETRY = 5;     // 连续重试上限：防止无限重试；放弃后 _dirty 保留，下一条事件 touch 再触发
 
 /** 字符串化并限长 */
 function clampStr(v, n) {
@@ -75,6 +77,7 @@ class EventArchive {
     this.events = [];
     this._dirty = false;
     this._timer = null;
+    this._retryFails = 0;
   }
 
   /** 绑定内存时间线（主进程的 monitorEvents 数组本体；入账/确认直接改它即可） */
@@ -86,6 +89,7 @@ class EventArchive {
   touch() {
     this._dirty = true;
     if (!this.file || this._timer != null) return;
+    this._retryFails = 0; // 新的保存周期：重试计数从头计（上一周期达上限放弃后由本事件重新触发）
     this._timer = setTimeout(() => {
       this._timer = null;
       this.saveNow();
@@ -93,7 +97,8 @@ class EventArchive {
     if (typeof this._timer.unref === 'function') this._timer.unref();
   }
 
-  /** 立即落盘（退出兜底；无变更不写）。tmp+rename 原子写，序列化前逐条清洗限长。 */
+  /** 立即落盘（退出兜底；无变更不写）。tmp+rename 原子写，序列化前逐条清洗限长。
+   *  失败时安排有限次重试（防抖定时器已触发，不重试这批事件就永远悬在内存里）。 */
   saveNow() {
     if (!this.file || !this._dirty) return false;
     const list = this.events.map(normalizeEvent).filter(Boolean).slice(-this.maxEvents);
@@ -102,11 +107,25 @@ class EventArchive {
       fs.writeFileSync(tmp, JSON.stringify({ v: 1, events: list }), 'utf8');
       fs.renameSync(tmp, this.file);
       this._dirty = false;
+      this._retryFails = 0;
       return true;
     } catch (e) {
       try { fs.unlinkSync(tmp); } catch (e2) { /* ignore */ }
+      this._scheduleRetry();
       return false;
     }
+  }
+
+  /** 落盘失败重试：RETRY_MS 后再试一次，连续 MAX_RETRY 次失败后放弃（_dirty 仍为 true，
+   *  下一条事件 touch 会重新走防抖触发，而不是这批事件永远不落盘） */
+  _scheduleRetry() {
+    if (!this.file || this._timer != null || this._retryFails >= MAX_RETRY) return;
+    this._retryFails++;
+    this._timer = setTimeout(() => {
+      this._timer = null;
+      this.saveNow();
+    }, RETRY_MS);
+    if (typeof this._timer.unref === 'function') this._timer.unref();
   }
 
   /** 停掉防抖定时器（不写盘；进程退出前由调用方 saveNow 兜底） */

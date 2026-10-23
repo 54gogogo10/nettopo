@@ -145,13 +145,16 @@ function usage() {
 }
 
 function parseArgs(argv) {
+  // 取值型参数无条件吃掉下一个 argv：口令本身以 -- 开头（如 --pass --x9k）不能被误判成下一个开关
+  const VALUE_KEYS = new Set(['devs', 'host', 'user', 'pass', 'proto', 'port', 'vendor', 'out', 'format', 'base', 'name', 'file', 'pack', 'timeout']);
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
       const key = a.slice(2);
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) out[key] = true;
+      if (VALUE_KEYS.has(key) && next !== undefined) { out[key] = next; i++; }
+      else if (next === undefined || next.startsWith('--')) out[key] = true;
       else { out[key] = next; i++; }
     } else out._.push(a);
   }

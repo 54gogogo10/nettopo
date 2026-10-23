@@ -16,7 +16,13 @@ const path = require('path');
 const MAX_KEEP = 500;                          // 记录总数上限（超出滚动清理最旧）
 const MAX_BYTES = 2 * 1024 * 1024;             // 单条记录上限 2MB
 const NAME_RE = /^deploy_\d{8}_\d{6}(?:_\d+)?_[a-z0-9]{4}\.json$/;
-const SECRET_RE = /((?:^|[^\w])(?:password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key|authentication-key)\b[\s:=]+).*/gi;
+/* 脱敏正则：打码「凭据类关键字 + 分隔符」之后的整行值。易漏形态已补齐——
+ * ① password-cipher <值>：显式关键字（华为 VRP 常见）；分隔符保持 [\s:=] 不放宽——
+ *    放宽到 '-' 会把「password-port」这类词内连字符误伤（词内连字符=标识符不是值分隔）
+ * ② 思科 tacacs-server key / radius-server host <ip> key <共享密钥>：裸 key 限定在服务器命令
+ *    语境（无条件加 \bkey\b 会误伤 description 里含「key」的普通行，打码过度反成噪音）
+ * ③ 华为 shared-key、crypto isakmp key：同属共享密钥形态 */
+const SECRET_RE = /((?:^|[^\w])(?:password-cipher|password|passwd|secret|community|passphrase|psk|token|api-?key|private-key|encryption-key|auth-key|authentication-key|shared-key|(?:tacacs-server|radius-server)\s+(?:host\s+\S+\s+)?key|crypto\s+isakmp\s+key)\b[\s:=]+).*/gi;
 
 /** 厂家配置模式口径（**主进程权威副本**）：渲染层只传一个厂家键，
  *  真正下发的「关分页/取配置/进配置模式/退出/保存」命令一律由主进程按此表决定——

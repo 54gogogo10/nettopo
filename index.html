@@ -58,12 +58,12 @@
     <div id="empty" class="hidden">
       <div class="empty-card">
         <svg viewBox="0 0 64 64" width="72" height="72"><circle cx="32" cy="32" r="9" fill="none" stroke="url(#eg1)" stroke-width="3.4"/><circle cx="16" cy="16" r="5" fill="none" stroke="url(#eg1)" stroke-width="3"/><circle cx="48" cy="16" r="5" fill="none" stroke="url(#eg1)" stroke-width="3"/><circle cx="16" cy="48" r="5" fill="none" stroke="url(#eg1)" stroke-width="3"/><circle cx="48" cy="48" r="5" fill="none" stroke="url(#eg1)" stroke-width="3"/><path d="M32 23v9M22 20l7.4 6.6M42 20l-7.4 6.6M22 44l7.4-6.6M42 44l-7.4-6.6" stroke="url(#eg1)" stroke-width="2.4" stroke-linecap="round"/><defs><linearGradient id="eg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#818cf8"/><stop offset="1" stop-color="#22d3ee"/></linearGradient></defs></svg>
-        <h2>从一张连线关系表开始，或直接新建</h2>
-        <p>导入包含 <b>源设备 / 源接口 / 源IP / 目标设备 / 目标接口 / 目标IP</b> 的表格可自动生成拓扑图；没有表格时也可以<b>直接新建空白画布</b>，手动添加设备与连线。</p>
+        <h2 data-i18n="从一张连线关系表开始，或直接新建">从一张连线关系表开始，或直接新建</h2>
+        <p><span data-i18n="导入包含">导入包含</span> <b data-i18n="源设备 / 源接口 / 源IP / 目标设备 / 目标接口 / 目标IP">源设备 / 源接口 / 源IP / 目标设备 / 目标接口 / 目标IP</b><span data-i18n=" 的表格可自动生成拓扑图；没有表格时也可以"> 的表格可自动生成拓扑图；没有表格时也可以</span><b data-i18n="直接新建空白画布">直接新建空白画布</b><span data-i18n="，手动添加设备与连线。">，手动添加设备与连线。</span></p>
         <div class="empty-actions">
-          <button class="tb primary big" id="btnEmptyImport"><i class="ic" data-ic="upload"></i><span>导入连线表格</span></button>
-          <button class="tb big" id="btnEmptyNew"><i class="ic" data-ic="fileplus"></i><span>新建空白画布</span></button>
-          <button class="tb big" id="btnEmptySample"><i class="ic" data-ic="wand"></i><span>载入示例拓扑</span></button>
+          <button class="tb primary big" id="btnEmptyImport"><i class="ic" data-ic="upload"></i><span data-i18n="导入连线表格">导入连线表格</span></button>
+          <button class="tb big" id="btnEmptyNew"><i class="ic" data-ic="fileplus"></i><span data-i18n="新建空白画布">新建空白画布</span></button>
+          <button class="tb big" id="btnEmptySample"><i class="ic" data-ic="wand"></i><span data-i18n="载入示例拓扑">载入示例拓扑</span></button>
         </div>
       </div>
     </div>
@@ -82,7 +82,7 @@
     <div id="quickSearch" class="quick-search hidden">
       <div class="qs-row">
         <i class="ic" data-ic="search"></i>
-        <input id="qsInput" type="text" placeholder="搜索设备 / 接口 / IP…（Enter 定位下一个）"/>
+        <input id="qsInput" type="text" placeholder="搜索设备 / 接口 / IP…（Enter 定位下一个）" data-i18n-ph="搜索设备 / 接口 / IP…（Enter 定位下一个）"/>
         <span id="qsCount" class="qs-count"></span>
         <button id="qsClose" class="qs-close" title="关闭 (Esc)">×</button>
       </div>
@@ -95,12 +95,12 @@
   <aside id="panel">
     <div class="panel-head">
       <div class="tabs">
-        <button class="tab active" data-tab="nodes">设备 <span id="cntNodes" class="cnt">0</span></button>
-        <button class="tab" data-tab="links">连线 <span id="cntLinks" class="cnt">0</span></button>
+        <button class="tab active" data-tab="nodes"><span data-i18n="设备">设备</span> <span id="cntNodes" class="cnt">0</span></button>
+        <button class="tab" data-tab="links"><span data-i18n="连线">连线</span> <span id="cntLinks" class="cnt">0</span></button>
       </div>
       <button class="tb icon" id="btnPanel" title="收起面板"><i class="ic" data-ic="panel"></i></button>
     </div>
-    <div class="search"><i class="ic" data-ic="search"></i><input id="searchInput" type="text" placeholder="搜索设备 / 接口 / IP…"/></div>
+    <div class="search"><i class="ic" data-ic="search"></i><input id="searchInput" type="text" placeholder="搜索设备 / 接口 / IP…" data-i18n-ph="搜索设备 / 接口 / IP…"/></div>
     <div id="listWrap"></div>
     <div id="legend"></div>
   </aside>
@@ -109,7 +109,7 @@
 
 <footer id="status">
   <span id="statGraph">设备 0 · 连线 0</span>
-  <span id="statHint">提示：滚轮缩放 · 拖拽空白平移 · 双击设备/连线编辑 · 拖设备角点缩放 · 右键更多操作</span>
+  <span id="statHint" data-i18n="提示：滚轮缩放 · 拖拽空白平移 · 双击设备/连线编辑 · 拖设备角点缩放 · 右键更多操作">提示：滚轮缩放 · 拖拽空白平移 · 双击设备/连线编辑 · 拖设备角点缩放 · 右键更多操作</span>
   <span id="statZoom"></span>
   <span id="statVer" title="当前版本">v20261018e</span>
 </footer>

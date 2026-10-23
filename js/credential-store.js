@@ -199,18 +199,27 @@ class CredentialStore {
     entry.preCmd = preCmd;
     entry.updatedAt = Date.now();
 
-    // 机密：undefined 保持不变；'' 清空；有值则必须能加密（加密不可用时拒存并告知，绝不退化成明文落盘）
+    // 机密：undefined 保持不变；'' 清空；有值则必须能加密（加密不可用/失败时拒存并告知，绝不退化成明文落盘）。
+    // 加密适配器抛异常与返回空密文同口径归入「加密失败」，不上抛；编辑场景（条目原本已有密文、
+    // 用户填了新口令）时跳过赋值意味着旧密文继续生效，文案必须如实说「口令保持为原来的值未更新」——
+    // 写「口令未保存」会让用户以为这条凭据没有口令，实际旧口令还在被监控/备份使用
     let warn = '';
     const secretFields = [['password', 'pwdEnc'], ['privateKey', 'keyEnc'], ['keyPassphrase', 'keyPassEnc']];
     for (const [inKey, storeKey] of secretFields) {
       if (!Object.prototype.hasOwnProperty.call(p, inKey) || p[inKey] === undefined || p[inKey] === null) continue;
       const val = String(p[inKey]);
       if (!val) { entry[storeKey] = ''; continue; }
-      if (!this.encrypt) { warn = '系统加密不可用：口令未保存（其余字段已保存）'; continue; }
-      const cipher = this.encrypt(val.slice(0, MAX_SECRET));
-      const c = String(cipher == null ? '' : cipher);
-      if (!c) { warn = '系统加密失败：口令未保存（其余字段已保存）'; continue; }
-      entry[storeKey] = c;
+      let c = '';
+      if (this.encrypt) {
+        try {
+          const cipher = this.encrypt(val.slice(0, MAX_SECRET));
+          c = String(cipher == null ? '' : cipher);
+        } catch (err) { c = ''; /* 适配器异常视同加密失败，不上抛 */ }
+      }
+      if (c) { entry[storeKey] = c; continue; }
+      const kept = !isNew && !!entry[storeKey]; // 编辑且原密文仍在：失败后旧口令保留生效
+      warn = (this.encrypt ? '系统加密失败：' : '系统加密不可用：')
+        + (kept ? '口令保持为原来的值未更新（其余字段已保存）' : '口令未保存（其余字段已保存）');
     }
     if (p.isDefault) {
       // 默认项唯一：新默认设定时清掉旧默认（否则「默认凭据」在界面上自相矛盾）

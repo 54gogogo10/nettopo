@@ -121,6 +121,15 @@ function sanitizeLogName(s) {
   return out;
 }
 const p2 = (n) => String(n).padStart(2, '0');
+/** 指纹待确认队列的键：host[:port]（与 monitor.js fpKeyOf 权威信任库、渲染层 fpKeyOf 同口径：
+ *  默认 22 端口省略后缀，非 22 端口带 :port 后缀）。SSH 主机密钥本就按「主机 + 端口」隔离——
+ *  同一 host 经不同端口可能是两台完全不同的设备，只按 host 排队/放行会把 A 端口的确认
+ *  误放行 B 端口的握手（用户核对的是 A 的指纹，B 的握手却被放行）。 */
+function fpQueueKeyOf(host, port) {
+  const h = String(host == null ? '' : host).trim();
+  const p = parseInt(port, 10);
+  return (p && p !== 22) ? h + ':' + p : h;
+}
 function logStamp(d) {
   d = d || new Date();
   return d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '_' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
@@ -189,7 +198,8 @@ class ShellManager extends EventEmitter {
     this.sessions = new Map();
     this._seq = 0;
     this._params = new Map(); // sid -> 建连参数副本（断线重连用；仅内存，不落盘）
-    this._pendingVerify = new Map(); // host -> [{verify, ...}]（SSH 首次连接待确认指纹；同一主机可有多个会话排队）
+    this._pendingVerify = new Map(); // host[:port] -> [{verify, ...}]（SSH 首次连接待确认指纹；键口径
+    // 见模块级 fpQueueKeyOf：同一主机不同端口各自排队，互不代放行）
     this.logDir = (typeof opts.logDir === 'string' && opts.logDir.trim()) ? opts.logDir.trim() : '';
     // 审计日志保留清理：构造时一次 + 每日一次（unref，不阻塞退出）。只删超期日期目录，
     // 活跃会话的写流始终落在当天目录（滚动也按当天），不会命中 cutoff
@@ -252,7 +262,10 @@ class ShellManager extends EventEmitter {
         username: cleanLog(opts.jump.username).trim() || 'admin',
         password: String(opts.jump.password || '').slice(0, 1024),
         privateKey: typeof opts.jump.privateKey === 'string' ? opts.jump.privateKey.trim() : '',
-        keyPassphrase: typeof opts.jump.keyPassphrase === 'string' ? opts.jump.keyPassphrase.slice(0, 1024) : ''
+        keyPassphrase: typeof opts.jump.keyPassphrase === 'string' ? opts.jump.keyPassphrase.slice(0, 1024) : '',
+        // 跳板预钉扎指纹透传：渲染层连接对话框传入已信任的跳板指纹时，跳板握手严格比对
+        //（_ssh 的 makeVerifier 消费 o.jump.expectFp；此前漏拷导致该值恒空、严格比对永不生效）
+        expectFp: String(opts.jump.expectFp || '').trim().slice(0, 256)
       };
     }
     const base = {
@@ -446,10 +459,6 @@ class ShellManager extends EventEmitter {
     }
   }
 
-  /** SSH 首次连接指纹确认：用户信任后放行该主机的全部待确认握手（TOFU）。
-   *  onlyOwner 提供时仅放行/拒绝该归属的握手，其余保持排队：后台（monitor/一次性采集）
-   *  的自动信任不得绕过 UI 会话正在等待的人工确认（用户还没点「信任」连接已建立、
-   *  点「取消」已无效果），反向的用户拒绝也不误杀后台采集 */
   /** 注入指纹信任裁决（由 electron-main 接到 MonitorManager.verifyFingerprint）。
    *  无人值守采集没有渲染层介入，必须由主进程的权威信任库裁决「已钉扎且变化 ⇒ 拒」。
    *  未注入时（纯 Node 单测/独立使用）保持 TOFU 放行语义。 */
@@ -457,28 +466,53 @@ class ShellManager extends EventEmitter {
     this._trustGate = typeof fn === 'function' ? fn : null;
   }
 
-  trustFingerprint(host, trust, onlyOwner) {
-    const arr = this._pendingVerify.get(host);
-    if (!arr || !arr.length) return false;
-    if (onlyOwner) {
-      let hit = false;
-      const rest = arr.filter((rec) => {
-        if (rec && rec.owner === onlyOwner) { hit = true; try { rec.verify(!!trust); } catch (e) { /* ignore */ } return false; }
-        return true;
-      });
-      if (rest.length) this._pendingVerify.set(host, rest);
-      else this._pendingVerify.delete(host);
-      return hit;
-    }
-    this._pendingVerify.delete(host);
-    for (const rec of arr) {
-      try { rec.verify(!!trust); } catch (e) { /* ignore */ }
-      // 用户显式信任 → 写入主进程权威信任库：下次交互式连接经只读 peek 静默放行（不再重复弹窗）
-      if (trust && rec && rec.fp && typeof this._trustGate === 'function') {
-        try { this._trustGate(host, rec.port, rec.fp); } catch (e) { /* ignore */ }
+  /** SSH 首次连接指纹确认：用户信任后放行待确认握手（TOFU）。队列按 host:port 粒度（键口径见
+   *  fpQueueKeyOf）：port 提供（渲染层指纹确认框带 info.port、runOneShot/runDeploy 的自动信任）
+   *  时只裁决该 host:port 的排队握手，同主机其它端口的记录保持排队等各自的确认；
+   *  port 未提供时保持旧版行为——裁决该主机**全部端口**的排队记录（过渡期兼容：老调用方
+   *  electron-main.js 的 shell:trust 尚未透传 port 时的语义回落）。
+   *  onlyOwner 提供时仅放行/拒绝该归属的握手，其余保持排队：后台（monitor/一次性采集）
+   *  的自动信任不得绕过 UI 会话正在等待的人工确认（用户还没点「信任」连接已建立、
+   *  点「取消」已无效果），反向的用户拒绝也不误杀后台采集 */
+  trustFingerprint(host, trust, onlyOwner, port) {
+    const h = String(host == null ? '' : host).trim();
+    if (!h) return false;
+    const pn = parseInt(port, 10);
+    // 命中的队列键集合：带端口 → 单键；不带端口 → 主机名精确匹配 + host:port 后缀形态一并命中
+    const keys = [];
+    if (pn >= 1 && pn <= 65535) {
+      keys.push(fpQueueKeyOf(h, pn));
+    } else {
+      for (const k of this._pendingVerify.keys()) {
+        if (k === h || k.indexOf(h + ':') === 0) keys.push(k);
       }
     }
-    return true;
+    let hitAny = false;
+    for (const k of keys) {
+      const arr = this._pendingVerify.get(k);
+      if (!arr || !arr.length) continue;
+      if (onlyOwner) {
+        let hit = false;
+        const rest = arr.filter((rec) => {
+          if (rec && rec.owner === onlyOwner) { hit = true; try { rec.verify(!!trust); } catch (e) { /* ignore */ } return false; }
+          return true;
+        });
+        if (rest.length) this._pendingVerify.set(k, rest);
+        else this._pendingVerify.delete(k);
+        hitAny = hitAny || hit;
+        continue;
+      }
+      this._pendingVerify.delete(k);
+      for (const rec of arr) {
+        try { rec.verify(!!trust); } catch (e) { /* ignore */ }
+        // 用户显式信任 → 写入主进程权威信任库：下次交互式连接经只读 peek 静默放行（不再重复弹窗）
+        if (trust && rec && rec.fp && typeof this._trustGate === 'function') {
+          try { this._trustGate(h, rec.port, rec.fp); } catch (e) { /* ignore */ }
+        }
+      }
+      hitAny = true;
+    }
+    return hitAny;
   }
 
   /* ---------- 一次性命令执行（采集邻居表 / MAC·ARP 定位等无人值守单次采集） ---------- */
@@ -622,10 +656,10 @@ class ShellManager extends EventEmitter {
             // 反过来的话，verify(false) 会同步触发 ssh2 的 error 事件，把结果写成它自己的
             // "Host denied (verification failed)"，用户看不到「可能为中间人攻击」这一关键提示
             finish(false, verdict.error || '主机指纹变化，已拒绝连接');
-            try { this.trustFingerprint(fh, false, 'monitor'); } catch (e) { /* ignore */ }
+            try { this.trustFingerprint(fh, false, 'monitor', info.port); } catch (e) { /* ignore */ }
             return;
           }
-          try { this.trustFingerprint(fh, true, 'monitor'); } catch (e) { /* ignore */ }
+          try { this.trustFingerprint(fh, true, 'monitor', info.port); } catch (e) { /* ignore */ }
         } else if (info.state === 'error') {
           if (!connectedOnce) { finish(false, info.text || '连接失败'); return; }
           errors.push(String(info.text || '会话错误'));
@@ -892,10 +926,10 @@ class ShellManager extends EventEmitter {
           }
           if (verdict && verdict.ok === false) {
             finish(false, verdict.error || '主机指纹变化，已拒绝连接');
-            try { this.trustFingerprint(fh, false, 'monitor'); } catch (e) { /* ignore */ }
+            try { this.trustFingerprint(fh, false, 'monitor', info.port); } catch (e) { /* ignore */ }
             return;
           }
-          try { this.trustFingerprint(fh, true, 'monitor'); } catch (e) { /* ignore */ }
+          try { this.trustFingerprint(fh, true, 'monitor', info.port); } catch (e) { /* ignore */ }
           return;
         }
         if (info.state === 'error') {
@@ -1229,19 +1263,20 @@ class ShellManager extends EventEmitter {
     const jumpRec = { verify: null, owner: recOwner };    // 跳板主机的指纹确认记录（独立排队）
     let jumpClient = null;
     let targetStarted = false; // 跳板通道建立后置位：此后跳板断开由目标会话收尾，避免双重 end
-    const removeFromPending = (host, rec) => {
-      const arr = this._pendingVerify.get(host);
+    const removeFromPending = (host, port, rec) => {
+      // 队列键与排队时同口径（host:port）：跳板与目标各自按自己的 host:port 移除
+      const arr = this._pendingVerify.get(fpQueueKeyOf(host, port));
       if (arr) {
         const i = arr.indexOf(rec);
         if (i >= 0) arr.splice(i, 1);
-        if (!arr.length) this._pendingVerify.delete(host);
+        if (!arr.length) this._pendingVerify.delete(fpQueueKeyOf(host, port));
       }
     };
     const finish = (reason) => {
       if (closed) return;
       closed = true;
-      removeFromPending(o.host, pendingRec); // 会话结束即移除本会话的指纹等待
-      if (o.jump && o.jump.host) removeFromPending(o.jump.host, jumpRec);
+      removeFromPending(o.host, o.port, pendingRec); // 会话结束即移除本会话的指纹等待
+      if (o.jump && o.jump.host) removeFromPending(o.jump.host, o.jump.port || 22, jumpRec);
       try { if (stream && !stream.destroyed) stream.end(); } catch (e) { /* ignore */ }
       try { client.end(); } catch (e) { /* ignore */ }
       try { if (jumpClient) jumpClient.end(); } catch (e) { /* ignore */ }
@@ -1308,9 +1343,12 @@ class ShellManager extends EventEmitter {
         rec.verify = verify;
         rec.fp = fp;
         rec.port = port;
-        const arr = this._pendingVerify.get(host);
+        // 注意不能命名为 key：本函数参数即 key，同作用域 const 遮蔽会让上方 String(key) 落入
+        // TDZ 抛 ReferenceError（被 catch 吞成 return false，表现为首连即「指纹校验失败」拒连）
+        const qKey = fpQueueKeyOf(host, port); // host:port 粒度排队：放行只作用于同一 host:port
+        const arr = this._pendingVerify.get(qKey);
         if (arr) arr.push(rec);
-        else this._pendingVerify.set(host, [rec]);
+        else this._pendingVerify.set(qKey, [rec]);
         em.emit('status', { state: 'fingerprint', host, port, fp, text: '首次连接，请核对主机指纹: ' + fp });
         return undefined; // 异步确认，不立即 verify
       } catch (e) {
