@@ -136,7 +136,7 @@
   - 支持**仅读取**与**仅探测**两种轻量模式；Telnet 监控在配置了密码时自动应答设备的 `Username:`/`Password:` 登录提示（认证失败在状态栏明确上报，Web Shell 交互式登录不受影响）
 - **厂商 SNMP 参数预设**：「设备监控」弹窗可按厂商一键套用 CPU 与内存 OID（华为 VRP/CE、华三 Comware、思科 IOS/IOS-XE、Linux net-snmp/UCD、Juniper、飞塔 FortiGate），并自动带上该厂商的**量纲换算方式**（直接百分比 / 100−空闲占比 / 已用+空闲 / 总量−可用）——各厂商 SNMP 量纲并不统一，这一步把差异收敛掉；SNMP 识别到厂商时（sysObjectID 企业号优先、sysDescr 关键词兜底）打开配置会自动预填仍为空的 OID；其余厂商（锐捷/中兴/Arista/HPE/Extreme/Palo Alto/MikroTik/F5 等）按企业号识别厂商、OID 需按设备手册填写。华为、思科、Linux UCD 三套预设已与真机 FRR 实验室逐项验证
 - **监控中心**：聚合全部监控状态、**近 7 天在线率**（10 分钟粒度，重启不丢），五个标签页切换：
-  - **事件时间线**：事件带设备徽标，点击设备名或管理地址筛选；未确认事件标橙条 + 未确认计数徽标，点「确认」可留备注（值班交接留痕），可撤销
+  - **事件时间线**：事件带设备徽标，点击设备名或管理地址筛选；未确认事件标橙条 + 未确认计数徽标，点「确认」可留备注（值班交接留痕），可撤销；事件与确认状态归档落盘（`monitor-events.json`，与内存时间线同容量 500 条），**重启不丢**——不再出现 SLA 报表有数据而事件时间线空白
   - **配置备份 / 接口流量 / 性能 / 链路**：CPU/内存/温度趋势线与开机时长；SSH 指标页展示各挂载点磁盘 / 内存 / 系统负载趋势；HTTP 探测状态与证书剩余天数；链路页签看逐段探测明细与断点；接口流量页错包列（开启错包监控的设备）非零接口置顶标红
   - **接口流量周期报表**：接口流量页「流量报表…」按窗口（近 1 小时 / 24 小时 / 7 天）聚合每接口收发均值 / 峰值与在线率，按峰值流量 TopN 排序，可导出 CSV（均值只计有效速率采样，首采样无差值不计入也不当 0）
 - **容量趋势与 95th 报表**：「监控 ▾ 巡检与报表 ▸ 容量趋势与 95th 报表…」把 ifTable 采样降采样后**跨重启落盘**（每台设备一个文件，日聚合保留 180 天）：近 7/30/90 天、本月 / 上月的接口均值 / 峰值 / P95 / 可用率 / 峰值利用率，点击行看日趋势图，可导出 CSV。P95 由日直方图合并计算并给出桶的上下界；直方图过期后按日 P95 加权估算并标 ≈，采样覆盖不足时如实标注，不把近似值当精确账单。
@@ -408,6 +408,7 @@ nettopo/
 │   ├── config-deploy.js # 配置变更下发（安全闸门/dry-run 预判/会话管道逐行下发/回滚单生成/审计历史，主进程，纯 Node）
 │   ├── snmp-v3.js       # SNMPv3 USM 引擎（密钥本地化、authPriv 验签解密、报文构造，主进程，纯 Node）
 │   ├── event-ack.js     # 事件时间线确认（确认留痕、备注清洗、未确认计数与撤销，主进程/渲染层共用，纯 Node）
+│   ├── event-archive.js # 事件时间线归档（重启不丢：加载清洗/防抖落盘/tmp+rename 原子写，主进程，纯 Node）
 │   ├── log-search.js / log-search-worker.js  # 监控日志全局搜索（工作线程内分块扫描，防大日志卡界面，主进程，纯 Node）
 │   ├── regex-lab.js / regex-lab-worker.js    # 告警/合规正则工作线程执行器（限时处决防灾难性回溯，主进程，纯 Node）
 │   ├── updater.js       # 在线升级器（GitHub Releases 检查/下载/SHA256 校验/便携版换入自升级，主进程，纯 Node）
@@ -428,7 +429,7 @@ nettopo/
 └── test/              # 单元测试、无头浏览器 e2e、Electron 冒烟、真机集成测试、VDX 校验样例
 ```
 
-> `js/shell.js`、`js/monitor.js`、`js/config-backup.js`、`js/config-search.js`、`js/capacity-store.js`、`js/evidence-store.js`、`js/port-ledger.js`、`js/config-deploy.js`、`js/credential-store.js`、`js/alert-deps.js`、`js/alert-level.js`、`js/webhook-notify.js`（告警外发 Webhook：企业微信/钉钉/飞书消息构造与 HMAC 加签、等级过滤与冷却调度）、`js/link-path.js`、`js/link-monitor.js`、`js/l2-topo.js`、`js/sla-report.js`、`js/event-ack.js`、`js/snmp-v3.js`、`js/backup-store.js`、`js/svc-tftp.js`、`js/svc-ftp.js`、`js/svc-syslog.js`、`js/svc-trap.js`、`js/svc-netflow.js`、`js/net-services.js`、`js/maintenance.js`、`js/diag.js`、`js/log-search.js`、`js/regex-lab.js`、`js/ai-llm.js`、`js/updater.js` 为**主进程纯 Node 模块**（不依赖 Electron），可在 Node 测试中直接调用，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
+> `js/shell.js`、`js/monitor.js`、`js/config-backup.js`、`js/config-search.js`、`js/capacity-store.js`、`js/evidence-store.js`、`js/port-ledger.js`、`js/config-deploy.js`、`js/credential-store.js`、`js/alert-deps.js`、`js/alert-level.js`、`js/webhook-notify.js`（告警外发 Webhook：企业微信/钉钉/飞书消息构造与 HMAC 加签、等级过滤与冷却调度）、`js/link-path.js`、`js/link-monitor.js`、`js/l2-topo.js`、`js/sla-report.js`、`js/event-ack.js`、`js/event-archive.js`、`js/snmp-v3.js`、`js/backup-store.js`、`js/svc-tftp.js`、`js/svc-ftp.js`、`js/svc-syslog.js`、`js/svc-trap.js`、`js/svc-netflow.js`、`js/net-services.js`、`js/maintenance.js`、`js/diag.js`、`js/log-search.js`、`js/regex-lab.js`、`js/ai-llm.js`、`js/updater.js` 为**主进程纯 Node 模块**（不依赖 Electron），可在 Node 测试中直接调用，仅由 `electron-main.js` 经 IPC 桥接给渲染层。
 
 ---
 
@@ -436,7 +437,7 @@ nettopo/
 
 ```bash
 npm start                          # 开发运行（Electron）
-node test/run-tests.js             # 2772 项单元测试（纯 Node，改动后必跑且须全绿）
+node test/run-tests.js             # 2801 项单元测试（纯 Node，改动后必跑且须全绿）
 cd test && npm i && node e2e.js    # 无头 Chrome 端到端集成测试（需本机 Chrome）
 node test/gen-e2e.js               # index.html 结构变化后再生 e2e 挂具 test/e2e.html
 NETTOPO_LAB_HOST=<实验机IP> node test/live.js      # 真机集成测试（未设变量则打印说明并跳过）
@@ -448,9 +449,9 @@ python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备�
 ```
 
 <details>
-<summary><b>单元测试覆盖</b>（2772 项，点击展开按模块清单）</summary>
+<summary><b>单元测试覆盖</b>（2801 项，点击展开按模块清单）</summary>
 
-**单元测试覆盖**（2772 项）：配置备份全文检索 · 容量趋势与 95th · 告警自动取证与复盘报告 · 端口台账与 VLAN/规划一致性 · 导出结构（VSDX/VDX/PDF）· Web Shell 会话 · 多管理口 · 数据清洗 · 布局 · 加载防重合 · 性能 · 回归 · 路径 · 单点故障 · 网段分析 · 链路聚合 · 邻居表解析 · 接口总表 · 备份库 · 子网计算 · 快速搜索 · 区域容器 · SNMP ifTable/性能采集与响应校验 · 合规模板 · 内置网络服务 TFTP/FTP/Syslog 协议级客户端与导入备份 · AI LLM（地址/提示词/SSE/历史库/模型列表/OpenAI 与 Claude 双协议本地假服务全链路/Shell AI 命令生成）· IP 地址管理 · 会话录像解析 · SFTP 文件管理 · SSH 指标采集解析与阈值 · HTTP 探测与证书到期 · GBK 编码解码 · 连接书签 · 告警静默与维护窗口 · 诊断工具箱 · 巡检数据导出 · 日报每日调度 · 标签恢复与命令面板 · MAC·ARP 表解析与终端定位 · 接口名跨厂家规范化 · 一次性命令执行 runOneShot · 网段存活扫描 · SNMP Trap v1·v2c 解析与接收器 · SNMP v3 USM 密钥本地化·三档安全·mock 代理全链路 · Syslog 日志告警规则 · 链路流量叠加 · 批量巡检只读白名单 · 统一凭据库 · 告警依赖抑制 · 配置变更易变行忽略规则与漂移摘要 · 团队基线包 · 可用性 SLA 报表 · 二层拓扑推断 · 底图清洗与导出取景 · 交互式 HTML 导出 · 事件确认 · 告警等级 · 链路连通性监测 · 节点手动缩放 · 跨设备配置漂移对比 · **环境传感器**（ENTITY-SENSOR 四列解析·precision/scale 换算·温度风扇阈值·配置归一钳制）· **恢复变更单**（块级删除与子命令补块头·同键覆盖不冗余 undo·思科 interface 与 banner 人工项）· **接口流量周期报表**（均值只计有效采样·峰值·在线率·TopN）· **接口错包监控**（错包速率差值口径·回绕 null·阈值 0 语义·变化沿告警与恢复·mock agent 端到端）· **告警外发 Webhook**（配置归一化·四格式 payload 与钉钉/飞书加签·本地假接收端 postJson 三分支·等级过滤与冷却调度）· **三层邻居持续监控**（去抖状态机连续 2 轮告警/恢复·瞬时翻动无事件·配置清洗钳制）· **NetFlow/IPFIX 收集器**（v5 字段映射与时长·v9 模板缓存按来源+sourceId 隔离与**分桶淘汰**（外部洪流不挤掉真实设备模板）·单包模板数封顶·IPFIX v10·畸形包安全·**零长度模板不死循环**·UDP 端到端 tail/会话聚合/过滤/清空·限速丢弃计数·net-services 配置钳制）· **下发闸门与前置命令**（do/sudo/分隔符/绝对路径包装口径归一·渲染层与主进程两份清单逐条一致·前置命令同闸门且触发确认即中止·拦截时不建会话·**告警类确认的主进程复核**（删除/关闭类、自断管理通道各需显式确认））· **导出件命名空间与字符集**（根元素 xmlns:xlink；U+FFFE/U+FFFF 剔除而 emoji 保留）· **底图撤销与刷新**（撤销不清空、刷新后仍在）· **运维链路健壮性**（升级下载失败复位状态机且不残留·发布缺清单拒绝·Syslog/Trap 名额回收只清过期文件·冷却表淘汰最旧而非清零·TFTP 写入配额与编目扫描上限·审计记录 error 字段打码·监控备份/指标命令控制字符剔除·AI 提示词分隔符中和与原型链键回落）· **真机（华为 S6700 / YunShan OS）回归**（Telnet 自动登录遇「设备要求先修改初始口令」如实上报且交互式不被中止·登录成功后即在提示符处停止接管（不再把设备的口令对话框误判为登录提示）·通用确认提示 [Y/N] 不被误报为初始口令·关键字告警在输出到达后即触发而非等下一周期·YunShan 配置时间戳并入默认忽略规则·**SNMP v3 SHA-2 认证档**（新固件禁用 SHA-1/MD5 时可用，真机 Trap 验签通过）·**回滚变更单真机可用性**（属性型子命令取反不带取值、删块前先退出子视图——真机实测这两条任缺其一都会让回滚中断、新建块删不掉）· **界面语言 i18n**（词典命中·未命中回落原文·语言持久化与重载沿用·关键词条覆盖校验）· **巡检报告**（自包含 HTML·无脚本·空数据降级）
+**单元测试覆盖**（2801 项）：配置备份全文检索 · 容量趋势与 95th · 告警自动取证与复盘报告 · 端口台账与 VLAN/规划一致性 · 导出结构（VSDX/VDX/PDF）· Web Shell 会话 · 多管理口 · 数据清洗 · 布局 · 加载防重合 · 性能 · 回归 · 路径 · 单点故障 · 网段分析 · 链路聚合 · 邻居表解析 · 接口总表 · 备份库 · 子网计算 · 快速搜索 · 区域容器 · SNMP ifTable/性能采集与响应校验 · 合规模板 · 内置网络服务 TFTP/FTP/Syslog 协议级客户端与导入备份 · AI LLM（地址/提示词/SSE/历史库/模型列表/OpenAI 与 Claude 双协议本地假服务全链路/Shell AI 命令生成）· IP 地址管理 · 会话录像解析 · SFTP 文件管理 · SSH 指标采集解析与阈值 · HTTP 探测与证书到期 · GBK 编码解码 · 连接书签 · 告警静默与维护窗口 · 诊断工具箱 · 巡检数据导出 · 日报每日调度 · 标签恢复与命令面板 · MAC·ARP 表解析与终端定位 · 接口名跨厂家规范化 · 一次性命令执行 runOneShot · 网段存活扫描 · SNMP Trap v1·v2c 解析与接收器 · SNMP v3 USM 密钥本地化·三档安全·mock 代理全链路 · Syslog 日志告警规则 · 链路流量叠加 · 批量巡检只读白名单 · 统一凭据库 · 告警依赖抑制 · 配置变更易变行忽略规则与漂移摘要 · 团队基线包 · 可用性 SLA 报表 · 二层拓扑推断 · 底图清洗与导出取景 · 交互式 HTML 导出 · 事件确认 · 告警等级 · 链路连通性监测 · 节点手动缩放 · 跨设备配置漂移对比 · **环境传感器**（ENTITY-SENSOR 四列解析·precision/scale 换算·温度风扇阈值·配置归一钳制）· **恢复变更单**（块级删除与子命令补块头·同键覆盖不冗余 undo·思科 interface 与 banner 人工项）· **接口流量周期报表**（均值只计有效采样·峰值·在线率·TopN）· **接口错包监控**（错包速率差值口径·回绕 null·阈值 0 语义·变化沿告警与恢复·mock agent 端到端）· **告警外发 Webhook**（配置归一化·四格式 payload 与钉钉/飞书加签·本地假接收端 postJson 三分支·等级过滤与冷却调度）· **三层邻居持续监控**（去抖状态机连续 2 轮告警/恢复·瞬时翻动无事件·配置清洗钳制）· **NetFlow/IPFIX 收集器**（v5 字段映射与时长·v9 模板缓存按来源+sourceId 隔离与**分桶淘汰**（外部洪流不挤掉真实设备模板）·单包模板数封顶·IPFIX v10·畸形包安全·**零长度模板不死循环**·UDP 端到端 tail/会话聚合/过滤/清空·限速丢弃计数·net-services 配置钳制）· **下发闸门与前置命令**（do/sudo/分隔符/绝对路径包装口径归一·渲染层与主进程两份清单逐条一致·前置命令同闸门且触发确认即中止·拦截时不建会话·**告警类确认的主进程复核**（删除/关闭类、自断管理通道各需显式确认））· **导出件命名空间与字符集**（根元素 xmlns:xlink；U+FFFE/U+FFFF 剔除而 emoji 保留）· **底图撤销与刷新**（撤销不清空、刷新后仍在）· **运维链路健壮性**（升级下载失败复位状态机且不残留·发布缺清单拒绝·Syslog/Trap 名额回收只清过期文件·冷却表淘汰最旧而非清零·TFTP 写入配额与编目扫描上限·审计记录 error 字段打码·监控备份/指标命令控制字符剔除·AI 提示词分隔符中和与原型链键回落）· **真机（华为 S6700 / YunShan OS）回归**（Telnet 自动登录遇「设备要求先修改初始口令」如实上报且交互式不被中止·登录成功后即在提示符处停止接管（不再把设备的口令对话框误判为登录提示）·通用确认提示 [Y/N] 不被误报为初始口令·关键字告警在输出到达后即触发而非等下一周期·YunShan 配置时间戳并入默认忽略规则·**SNMP v3 SHA-2 认证档**（新固件禁用 SHA-1/MD5 时可用，真机 Trap 验签通过）·**回滚变更单真机可用性**（属性型子命令取反不带取值、删块前先退出子视图——真机实测这两条任缺其一都会让回滚中断、新建块删不掉）· **界面语言 i18n**（词典命中·未命中回落原文·语言持久化与重载沿用·关键词条覆盖校验）· **巡检报告**（自包含 HTML·无脚本·空数据降级）· **事件时间线归档**（重启不丢·确认留痕与升级标记随归档落盘·坏文件回落空表不覆盖·容量 500 条与字段限长）· **CLI 备份口径**（易变行忽略规则与 GUI 同一份 settings.json·无变化不新增·`--save-same` 强制入库）
 
 </details>
 
@@ -462,7 +463,7 @@ python test/validate_vdx.py test/sample_topology.vdx   # 单独校验 VDX（备�
 
 ```bash
 node cli.js inspect    --devs hosts.csv --vendor huawei --out inspect.csv   # 批量只读巡检（CSV/JSON）
-node cli.js backup     --devs hosts.csv --base ./nettopo-cli-data --diff    # 运行配置入库 + 漂移提示
+node cli.js backup     --devs hosts.csv --base ./nettopo-cli-data --diff    # 运行配置入库 + 漂移提示（易变行口径与 GUI 同源；默认与上次一致不新增，`--save-same` 每次入库）
 node cli.js compliance --base ./nettopo-cli-data                            # 等保基线扫描（违规退出码 2）
 node cli.js compliance --file running.cfg --pack 最小基线                    # 单文件扫描
 ```

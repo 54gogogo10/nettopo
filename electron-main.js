@@ -18,6 +18,7 @@ const { WebhookSender, normalizeWebhookCfg } = require('./js/webhook-notify.js')
 const { LinkMonitor } = require('./js/link-monitor.js');
 const LP = require('./js/link-path.js');
 const { applyAck, clearAck, unackedCount } = require('./js/event-ack.js');
+const { EventArchive, loadEvents } = require('./js/event-archive.js');
 const { buildReport: buildSlaReport, rangeOf: slaRangeOf, fmtPct: slaFmtPct } = require('./js/sla-report.js');
 const { DeployStore, deployVendor } = require('./js/config-deploy.js');
 const { NetServices } = require('./js/net-services.js');
@@ -418,7 +419,15 @@ monitor.on('status', (info) => {
   if (n !== trayJobCount) { trayJobCount = n; if (tray) rebuildTrayMenu(); }
 });
 // 监控事件历史（供监控中心时间线；主进程保存最近 500 条）
-const monitorEvents = [];
+// 归档落盘 monitor-events.json：重启不丢——同链路的在线率(SLA)/容量趋势/取证库都持久化，
+// 事件时间线与「未确认」留痕不能独独清零；坏文件如实回落空表从零开始（不覆盖原文件）
+const eventArchive = new EventArchive(path.join(app.getPath('userData'), 'monitor-events.json'));
+const monitorEvents = (() => {
+  const ld = loadEvents(eventArchive.file);
+  if (ld.error) console.error('事件时间线归档读取失败（从空开始）：', ld.error);
+  return ld.events;
+})();
+eventArchive.bind(monitorEvents);
 /** 事件时间线入账：level 省略时按事件类型取默认等级（告警等级见 js/alert-level.js） */
 function recordMonitorEvent(info, type, detail, level) {
   let name = info.name || '';
@@ -432,6 +441,7 @@ function recordMonitorEvent(info, type, detail, level) {
   const ev = { ts: Date.now(), type: type, level: AL.normalizeLevel(level || levelOf(type)), key: info.key, deviceId: info.deviceId, host: info.host, name: name, detail: detail || '' };
   monitorEvents.push(ev);
   if (monitorEvents.length > 500) monitorEvents.splice(0, monitorEvents.length - 500);
+  try { eventArchive.touch(); } catch (e) { logCrash('event-archive', e); } // 防抖落盘（退出 saveNow 兜底）
   // 告警自动取证：只发请求（采集在渲染层，按只读白名单与设备监控凭据），主进程负责落盘与限流
   try { requestEvidence(ev); } catch (e) { logCrash('evidence-request', e); }
 }
@@ -1380,9 +1390,19 @@ ipcMain.handle('cred:pick', (e, p) => monitorGuard(e)
 /* 告警依赖抑制的拓扑邻接表（渲染层推送；键与监控任务一致 deviceId@host）：
  * 只用于「上游同时失联时归并下游离线通知」的判定，不落盘、不出网 */
 ipcMain.handle('monitor:topology', (e, p) => monitorGuard(e) ? alertDeps.setTopology(p || {}) : { ok: false, error: 'forbidden' });
-/* 事件时间线确认（值班交接用）：确认只落在事件对象上，随容量滚动一起淘汰，不额外占空间 */
-ipcMain.handle('monitor:event-ack', (e, p) => monitorGuard(e) ? applyAck(monitorEvents, p || {}) : { ok: false, error: 'forbidden' });
-ipcMain.handle('monitor:event-unack', (e, p) => monitorGuard(e) ? clearAck(monitorEvents, p || {}) : { ok: false, error: 'forbidden' });
+/* 事件时间线确认（值班交接用）：确认只落在事件对象上，随容量滚动一起淘汰，不额外占空间（确认状态随归档落盘） */
+ipcMain.handle('monitor:event-ack', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const r = applyAck(monitorEvents, p || {});
+  if (r.ok) eventArchive.touch();
+  return r;
+});
+ipcMain.handle('monitor:event-unack', (e, p) => {
+  if (!monitorGuard(e)) return { ok: false, error: 'forbidden' };
+  const r = clearAck(monitorEvents, p || {});
+  if (r.ok) eventArchive.touch();
+  return r;
+});
 ipcMain.handle('monitor:alert-deps', (e) => monitorGuard(e)
   ? { ok: true, pending: alertDeps.pending(), stats: alertDeps.stats(), debug: alertDeps.debugView() }
   : { ok: false, error: 'forbidden', pending: [], stats: null, debug: [] });
@@ -2696,6 +2716,7 @@ app.on('will-quit', () => {
   shell.closeAll();
   uptimeStore.flush();
   try { capacity.flush(); } catch (e) { /* ignore */ }
+  try { eventArchive.saveNow(); } catch (e) { /* ignore */ }
   netSvc.stopAll();
   if (tray) { try { tray.destroy(); } catch (e) { /* ignore */ } tray = null; }
 });

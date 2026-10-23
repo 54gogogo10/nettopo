@@ -9166,6 +9166,104 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       eq(A.normalizeNote(null), '', '备注清洗：null → 空串');
     }
 
+    /* ================= 事件时间线归档（js/event-archive.js）：重启不丢 ================= */
+    {
+      const EA = require('../js/event-archive.js');
+      const A = require('../js/event-ack.js');
+      const os = require('os');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-evt-'));
+      const file = path.join(dir, 'monitor-events.json');
+      // 入账 → 确认留痕 → 落盘 → 重新加载：重启后事件与确认状态都在
+      const arc = new EA.EventArchive(file, { debounceMs: 10 });
+      const evs = [
+        { ts: 1000, type: 'offline', level: 'emergency', key: 'k1', deviceId: 'd1', host: '10.0.0.1', name: 'SW1', detail: '探测失败' },
+        { ts: 2000, type: 'recovery', level: 'info', name: 'SW1', detail: '恢复在线' }
+      ];
+      arc.bind(evs);
+      A.applyAck(evs, { ts: 1000, note: '已联系机房' }, 5000);
+      arc.touch();
+      ok(arc.saveNow() === true, '归档：有变更时落盘返回 true');
+      const ld = EA.loadEvents(file);
+      eq(ld.events.length, 2, '归档：事件条数完整（重启不丢）');
+      ok(ld.events[0].ackAt === 5000 && ld.events[0].ackNote === '已联系机房', '归档：确认留痕随事件落盘（值班交接重启后仍在）');
+      ok(ld.events[0].level === 'emergency', '归档：等级字段保留（升级判定 pickEscalations 依赖 ackAt/等级）');
+      // 清洗：坏条目剔除、字段限长、未知字段不进归档
+      const ne = EA.normalizeEvent({ ts: 5, type: 'a', detail: 'y'.repeat(9999), hack: 'x', extra: { deep: 1 } });
+      ok(ne && !('hack' in ne) && !('extra' in ne), '清洗：未知字段不进归档（结构只认入账已知键）');
+      eq(ne.detail.length, EA.MAX_FIELD, '清洗：detail 限长 ' + EA.MAX_FIELD);
+      ok(EA.normalizeEvent({ ts: 'x' }) === null && EA.normalizeEvent(null) === null, '清洗：ts 非法/空对象剔除');
+      arc.bind([{ ts: 'bad' }, null, { ts: 3000, type: 'offline', detail: '' }]);
+      arc.touch();
+      arc.saveNow();
+      const ld2 = EA.loadEvents(file);
+      eq(ld2.events.length, 1, '清洗：坏条目落盘后再加载同样被剔除');
+      // 容量：与内存时间线同容量 500，超出保留最新
+      arc.bind(Array.from({ length: 600 }, (_, i) => ({ ts: i + 1, type: 'offline', detail: '' })));
+      arc.touch();
+      arc.saveNow();
+      const ld3 = EA.loadEvents(file);
+      eq(ld3.events.length, EA.MAX_EVENTS, '容量：超出归档上限只保留最新 500 条');
+      eq(ld3.events[0].ts, 101, '容量：保留的是最新一段（ts 从 101 起）');
+      // 坏文件：如实回落空表并带错误信息（只读不覆盖）
+      fs.writeFileSync(file, '{oops', 'utf8');
+      const ld4 = EA.loadEvents(file);
+      eq(ld4.events.length, 0, '容错：坏文件回落空表');
+      ok(!!ld4.error, '容错：坏文件如实带错误信息');
+      // 无变更不写盘 / 空路径不落盘 / dispose 停防抖
+      const arc2 = new EA.EventArchive(path.join(dir, 'none.json'));
+      ok(arc2.saveNow() === false, '落盘：无变更不写盘');
+      ok(!fs.existsSync(path.join(dir, 'none.json')), '落盘：未产生文件');
+      const arc3 = new EA.EventArchive('', { debounceMs: 5 });
+      arc3.touch();
+      arc3.dispose();
+      ok(true, '容错：空路径不落盘不抛异常');
+      // 防抖定时器确实会触发落盘（touch 后等待 debounceMs+缓冲）
+      const arc4 = new EA.EventArchive(file, { debounceMs: 10 });
+      arc4.bind([{ ts: 9000, type: 'trap', detail: 'x' }]);
+      arc4.touch();
+      await new Promise(res => setTimeout(res, 60));
+      ok(EA.loadEvents(file).events.length === 1 && EA.loadEvents(file).events[0].ts === 9000, '防抖：touch 后定时器自动落盘');
+      arc4.dispose();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+
+    /* ================= CLI 备份口径（cli.js）：易变行规则同源 + 无变化不新增 ================= */
+    {
+      const cli = require('../cli.js');
+      const cb = require('../js/config-backup.js');
+      const os = require('os');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nettopo-cli-'));
+      // 规则来源：与 GUI 同一份 settings.json configIgnoreRules（字符串正则数组）；缺失/损坏/非数组一律回落内置默认
+      fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ configIgnoreRules: ['^clock \\d{2}:\\d{2}'] }), 'utf8');
+      const r1 = cli.cliIgnoreRules({ settingsDir: dir });
+      eq(r1.length, 1, 'CLI 规则：读 settings.json 的自定义忽略规则（与 GUI 同源）');
+      fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ configIgnoreRules: 'bad' }), 'utf8');
+      eq(cli.cliIgnoreRules({ settingsDir: dir }).length, cb.DEFAULT_IGNORE_RULES.length, 'CLI 规则：非数组回落内置默认');
+      fs.writeFileSync(path.join(dir, 'settings.json'), '{broken', 'utf8');
+      eq(cli.cliIgnoreRules({ settingsDir: dir }).length, cb.DEFAULT_IGNORE_RULES.length, 'CLI 规则：坏 JSON 回落内置默认');
+      eq(cli.cliIgnoreRules({ settingsDir: path.join(dir, 'nope') }).length, cb.DEFAULT_IGNORE_RULES.length, 'CLI 规则：文件不存在回落内置默认');
+      // 漂移口径：必须带规则比较——时钟行变化在过滤后判等价（旧 CLI 不传规则必误报「有变化」）
+      const a = 'clock 10:00\nhostname SW1\nvlan 10', b = 'clock 11:30\nhostname SW1\nvlan 10';
+      ok(!cb.sameAfterIgnore(a, b), '口径：不传规则时时钟行判不等（旧 CLI 行为，每轮 cron 必误报）');
+      ok(cb.sameAfterIgnore(a, b, r1), '口径：传 GUI 同源规则后判等价（漂移=无）');
+      ok(!cb.sameAfterIgnore(a, 'clock 11:30\nhostname SW2\nvlan 10', r1), '口径：真实配置变化仍判有变化');
+      // 默认规则口径（CLI 回落态）：思科「Last configuration change」时间戳行不触发漂移
+      const c1 = '! Last configuration change at 10:00:00 by admin\nhostname R1\ninterface Gi0/0';
+      const c2 = '! Last configuration change at 23:59:59 by admin\nhostname R1\ninterface Gi0/0';
+      ok(cb.sameAfterIgnore(c1, c2, cb.DEFAULT_IGNORE_RULES), '默认规则：配置变更时间戳行不触发漂移');
+      ok(!cb.sameAfterIgnore(c1, '! Last configuration change at 10:00:00 by admin\nhostname R2\ninterface Gi0/0', cb.DEFAULT_IGNORE_RULES), '默认规则：真实配置变化仍判有变化');
+      // 无变化不新增（skipIfSame 同语义）：CLI 用 latest 内容 + 同源规则判等价后可安全不新增
+      const store = new cb.ConfigBackupStore(path.join(dir, 'base'));
+      const s1 = store.save('R1', '10.0.0.1', c1);
+      ok(s1.ok && s1.first === true, '备份：首份正常入库');
+      const latestContent = store.read('R1', '10.0.0.1', store.latest('R1', '10.0.0.1')).content;
+      ok(cb.sameAfterIgnore(latestContent, c2, cb.DEFAULT_IGNORE_RULES), '跳过判定：c2 与已存 latest 等价（可安全不新增）');
+      ok(!cb.sameAfterIgnore(latestContent, 'hostname R9\ninterface Gi0/0', cb.DEFAULT_IGNORE_RULES), '跳过判定：真实变化不跳过');
+      const args = cli.parseArgs(['backup', '--devs', 'h.csv', '--save-same']);
+      ok(args['save-same'] === true, '参数：--save-same 解析为布尔开关');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+
     /* ================= 告警等级与分级提示音（js/alert-level.js） ================= */
     {
       const A = require('../js/alert-level.js');

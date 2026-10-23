@@ -379,6 +379,15 @@ function restore(s) {
   }
   state.nodes = s.nodes; state.links = s.links; state.texts = s.texts || [];
   state.regions = s.regions || [];
+  // 删除自定义类型随快照带回的类型定义副本（undo 时还原——否则节点 type 指向已删类型成悬空 key）；
+  // 须在 setData 之前恢复：_buildDefs 只为现存类型生成渐变。副本同样走 sanitizeTypeData 白名单清洗
+  if (s.customTypesUndo && Array.isArray(s.customTypesUndo.customTypes)) {
+    const cleaned = U.sanitizeTypeData(s.customTypesUndo.overrides || {}, s.customTypesUndo.customTypes);
+    U.typeOverrides = cleaned.overrides;
+    U.customTypes = cleaned.customTypes;
+    U.saveCustomTypes();
+    U.saveTypeOverrides();
+  }
   // 底图不参与撤销（导入/调整底图本身不入撤销栈，snapshot() 里也没有 underlay）：
   // 若按快照回填（sanitizeUnderlay(undefined) → null），任意一次 Ctrl+Z 都会清空当前页底图。
   // 同页撤销保持当前底图不动；跨页撤销已在上方跟随目标页取回。
@@ -7283,6 +7292,11 @@ function openTypeManager() {
       if (del) del.addEventListener('click', () => {
         confirmBox(`删除类型「${U.customTypes.find(t => t.key === key).label}」？`).then(ok => {
           if (!ok) return;
+          // 节点 type 重写是图数据变更，必须可撤销；类型定义本身存本机（改色/改图同不入栈），
+          // 但撤销若只回节点 type 会指向已删类型（悬空 key）——快照额外携带类型定义副本一并还原
+          const snap = snapshot();
+          snap.customTypesUndo = { customTypes: U.clone(U.customTypes), overrides: U.clone(U.typeOverrides) };
+          pushUndo(snap);
           U.removeCustomType(key);
           // 跨全部页重写：只改当前页会让其他页节点的 type 悬空，切页后渐变引用失效
           // （_buildDefs 只为现存类型生成渐变）节点卡片无底色，且悬空 key 随 saveGraph 持久化

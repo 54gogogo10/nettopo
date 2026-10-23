@@ -17,7 +17,7 @@ const path = require('path');
 require('./js/util.js'); // util.js 挂 global.TopoUtil（无 module.exports，与渲染层同口径）
 const U = global.TopoUtil;
 const { ShellManager } = require('./js/shell.js');
-const { ConfigBackupStore } = require('./js/config-backup.js');
+const { ConfigBackupStore, DEFAULT_IGNORE_RULES, normalizeIgnoreRules, sameAfterIgnore } = require('./js/config-backup.js');
 
 const VERSION = '1';
 const PROG = 'nettopo-cli';
@@ -102,13 +102,39 @@ function complianceSummary(perHost) {
   return { hosts: perHost.length, violations, exitCode: violations > 0 ? 2 : 0 };
 }
 
+/** GUI 桌面版 settings.json 的默认位置（Electron userData，按 package.json name=nettopo）。
+ *  CLI 无 Electron 依赖，纯路径拼接；读不到一律回落内置默认规则，不影响 CLI 独立部署。 */
+function cliSettingsDir() {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'nettopo');
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'nettopo');
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'nettopo');
+}
+
+/** 「配置变更易变行忽略规则」：与 GUI 同一份口径（settings.json configIgnoreRules）。
+ *  此前 CLI 漂移判定不传规则，时钟/运行时长行每轮 cron 必报「有变化」；
+ *  文件缺失/损坏/非数组一律回落内置默认，绝不放空规则让漂移判定失效。 */
+function cliIgnoreRules(opts) {
+  const dir = (opts && typeof opts.settingsDir === 'string') ? opts.settingsDir : cliSettingsDir();
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    const list = Array.isArray(raw && raw.configIgnoreRules) ? raw.configIgnoreRules : DEFAULT_IGNORE_RULES;
+    const norm = normalizeIgnoreRules(list);
+    return norm.ok ? norm.rules : DEFAULT_IGNORE_RULES.slice();
+  } catch (e) {
+    return DEFAULT_IGNORE_RULES.slice();
+  }
+}
+
 /* ---------- 主流程 ---------- */
 
 function usage() {
   console.log(`${PROG} v${VERSION} —— NetTopo 无头模式（巡检 / 配置备份 / 合规扫描）
 用法：
   ${PROG} inspect    --devs <csv> [--vendor auto|huawei|h3c|cisco|ruijie|linux] [--out <file>] [--format csv|json]
-  ${PROG} backup     --devs <csv> [--base <dir>] [--name <设备名>] [--diff] [--vendor <v>]
+  ${PROG} backup     --devs <csv> [--base <dir>] [--name <设备名>] [--diff] [--vendor <v>] [--save-same]
+                                            （默认与上次一致（易变行忽略口径）不新增备份，防滚动窗被相同内容挤掉；
+                                              --save-same 每次都入库）
   ${PROG} compliance --base <dir> | --file <cfg> [--pack <基线名>] [--out <file>]
 通用：
   --host/--user/--pass/--proto/--port   单设备参数（等价一行 --devs；口令也可用环境变量 NETTOPO_CLI_PASS 传入，
@@ -188,6 +214,8 @@ async function cmdBackup(args) {
   if (!devs.length) throw new Error('设备清单为空');
   const store = new ConfigBackupStore(dataBase(args));
   const sm = new ShellManager({ logDir: null });
+  // 漂移与「无变化不新增」用同一套易变行忽略口径（与 GUI 同源，见 cliIgnoreRules）
+  const rules = cliIgnoreRules();
   let failed = 0;
   for (const d of devs) {
     process.stderr.write(`  备份 ${d.host} …\n`);
@@ -204,12 +232,21 @@ async function cmdBackup(args) {
     if (!r.ok || text.length < 50) { failed++; process.stderr.write(`  ✗ ${d.host}：${r.error || '未取得有效配置输出'}\n`); continue; }
     const name = args.name || d.host;
     const prevName = store.latest(name, d.host);
+    let same = false;
+    if (prevName) {
+      const prev = store.read(name, d.host, prevName);
+      same = !!(prev.ok && sameAfterIgnore(prev.content, text, rules));
+    }
+    // 默认与上次一致（易变行口径）不新增备份：cron 每小时一跑，备份库每主机只留 50 份，
+    // 相同内容照单全收会让滚动窗只剩约两天，把真实变更前的版本挤掉（GUI 的 skipIfSame 同语义）
+    if (same && !args.saveSame) {
+      process.stderr.write(`  = ${d.host}：与上次一致（已忽略 ${rules.length} 条易变行规则），未新增备份（${prevName}）\n`);
+      continue;
+    }
     const saved = store.save(name, d.host, text);
     if (!saved || !saved.ok) { failed++; process.stderr.write(`  ✗ ${d.host}：${(saved && saved.error) || '入库失败'}\n`); continue; }
     process.stderr.write(`  ✓ ${d.host} → ${saved.name}${saved.first ? '（首次）' : ''}\n`);
     if (args.diff && prevName) {
-      const prev = store.read(name, d.host, prevName);
-      const same = prev.ok && require('./js/config-backup.js').sameAfterIgnore(prev.content, text);
       process.stderr.write(`    漂移：${same ? '无（易变行忽略口径）' : '有变化'}\n`);
     }
     await new Promise(res => setTimeout(res, 600));
@@ -276,4 +313,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, parseDevsCsv, splitCsvLine, csvCell, formatInspectCsv, pickPack, complianceSummary, SAVE_COMMANDS };
+module.exports = { parseArgs, parseDevsCsv, splitCsvLine, csvCell, formatInspectCsv, pickPack, complianceSummary, SAVE_COMMANDS, cliSettingsDir, cliIgnoreRules };
