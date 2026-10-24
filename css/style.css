@@ -1541,6 +1541,8 @@ input[type="radio"]:focus-visible,
 
 /* ================= 规划态 ================= */
 .plan-hide { display: none !important; }
+/* 隐藏终端设备（显示 ▾ 终端设备开关）：pc 类型节点 + 任一端为终端的连线整体隐藏 */
+.node.term-hide, .link.term-hide { display: none !important; }
 .node.planned .shape { stroke: #f59e0b; stroke-width: 2; stroke-dasharray: 7 4; }
 .node.planned .nm { fill: #b45309; }
 .link.planned .ln { stroke: #f59e0b !important; stroke-dasharray: 8 5; }

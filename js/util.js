@@ -15,7 +15,7 @@ U.spreadMinMax = (arr) => {
 };
 
 /* 应用发布版本（唯一版本来源；index.html 中的静态版本仅作加载兜底） */
-U.APP_VERSION = 'v20261018e';
+U.APP_VERSION = 'v20261024d';
 
 /* ---------- DOM 快捷 ---------- */
 U.$ = (s, el) => (el || document).querySelector(s);
@@ -1109,8 +1109,11 @@ U.resolveLabelCollisions = (labels, opts) => {
     return m;
   })();
   const big = labels.length * (labels.length + obstacles.length) > 60000;
+  // 大规模时收敛轮数封顶：千标注级每轮都是全量扫描，200 轮上限最坏可达数百毫秒；
+  // 60 轮后残余的轻微重叠远好过把交互卡死（调用方已把求解挪出交互帧，这里是求解本身的保险）
+  const MAX_ITER = labels.length > 500 ? 60 : 200;
   if (!big) {
-    for (let iter = 0; iter < 200; iter++) {
+    for (let iter = 0; iter < MAX_ITER; iter++) {
       let moved = false;
       for (let i = 0; i < labels.length; i++) {
         for (let j = i + 1; j < labels.length; j++) {
@@ -1148,7 +1151,7 @@ U.resolveLabelCollisions = (labels, opts) => {
     }
     return out;
   };
-  for (let iter = 0; iter < 200; iter++) {
+  for (let iter = 0; iter < MAX_ITER; iter++) {
     let moved = false;
     for (let i = 0; i < labels.length; i++) {
       const it = { lb: labels[i] };

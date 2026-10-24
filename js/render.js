@@ -60,6 +60,7 @@ class Renderer {
     this.uiLayer = el('g', { id: 'uiLayer' }, this.world);
     this._rsHandle = el('rect', { class: 'node-resize-handle', display: 'none' }, this.uiLayer);
     this._rsNodeId = null;
+    this.hideTerminals = false; // 隐藏终端设备（内置 pc 类型叶子）：纯显示层过滤，数据/导出不受影响
 
     this._bind();
     this.applyView();
@@ -103,9 +104,13 @@ class Renderer {
     this.pan.y = py - (py - this.pan.y) * k;
     this.zoom = nz;
     this.applyView();
-    // 滚轮为指针级高频事件（触控板单帧可多次）：视图变换即时生效，全量重绘合并到下一帧
-    if (soon) this.updateSoon();
-    else this.update();
+    // 滚轮为指针级高频事件：视图变换即时生效，重绘合并到下一帧的几何档；
+    // 停滚 240ms 后跑一次全量档（区域层描边/标题随缩放重建等收尾；标注已与缩放解耦无需重排）
+    if (soon) {
+      this.updateSoon('geom');
+      clearTimeout(this._zoomSettle);
+      this._zoomSettle = setTimeout(() => { this._zoomSettle = null; this.updateSoon(); }, 240);
+    } else this.update();
   }
 
   fit() {
@@ -126,6 +131,7 @@ class Renderer {
     // 区域容器与文本框纳入外框（适应视图 / 导出取景都包含区域；文本框与导出链同口径）
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of this.nodes) {
+      if (this.isNodeHidden(n)) continue; // 隐藏终端不参与取景：适应视图不应为不可见节点缩出去
       x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y);
       x1 = Math.max(x1, n.x + n.w); y1 = Math.max(y1, n.y + n.h);
     }
@@ -190,6 +196,7 @@ class Renderer {
     for (const n of nodes) this._buildNode(n);
     for (const l of links) this._buildLink(l);
     for (const t of this.texts) this._buildText(t);
+    this._labelDirty = true; // 数据整体替换：标注缓存（防碰撞解）全部失效，下次 update 必须重排
     this.update();
   }
 
@@ -219,6 +226,15 @@ class Renderer {
   setShowLabels(v) {
     this.showLabels = !!v;
     this.update();
+  }
+  /** 隐藏/显示终端设备（pc 类型）：连带隐藏其连线（端点隐藏的连线悬空无意义）。
+   *  显示层过滤（term-hide class → display:none）：不可点选/不进框选/适应视图不含其范围 */
+  setHideTerminals(v) {
+    this.hideTerminals = !!v;
+    this.update();
+  }
+  isNodeHidden(n) {
+    return this.hideTerminals && !!n && n.type === 'pc';
   }
   setSubnetView(show, names) {
     this.showSubnets = !!show;
@@ -488,63 +504,94 @@ class Renderer {
     handle.addEventListener('pointerdown', (e) => startDrag(e, 'resize'));
   }
 
-  update() {
+  update(mode) {
+    // mode='geom'：交互帧专用（拖拽移动/滚轮缩放）——只刷几何与样式，跳过区域层重建与
+    // 标注防碰撞求解（千节点级求解一次可达上百毫秒，交互每帧跑必卡）；默认全量
+    const geomOnly = mode === 'geom';
     this._renderUnderlay();
-    this._buildRegions();
-    this._buildGroups();
+    if (!geomOnly) {
+      this._buildRegions();
+      this._buildGroups();
+    }
     for (const n of this.nodes) {
       const g = this.nodeEls.get(n.id);
       if (!g) continue;
-      // 规划态：琥珀色虚线；planView 为 plan/actual 时隐藏另一类（类切换很轻，每帧做无妨）
-      g.classList.toggle('planned', !!n.plan);
-      g.classList.toggle('plan-hide', this.planView === 'plan' ? !n.plan : (this.planView === 'actual' ? !!n.plan : false));
+      // 规划态：琥珀色虚线；planView 为 plan/actual 时隐藏另一类；终端隐藏开关。签名缓存：
+      // 交互帧跳过上千次无状态变化的 classList 调用（新元素 _psig 为 undefined 必写一次）
+      const psig = (n.plan ? 1 : 0)
+        | (this.planView === 'plan' ? (n.plan ? 0 : 2) : this.planView === 'actual' ? (n.plan ? 2 : 0) : 0)
+        | (this.hideTerminals && n.type === 'pc' ? 4 : 0);
+      if (g._psig !== psig) {
+        g._psig = psig;
+        g.classList.toggle('planned', !!n.plan);
+        g.classList.toggle('plan-hide', (psig & 2) !== 0);
+        g.classList.toggle('term-hide', (psig & 4) !== 0);
+      }
       // 位置未变不重写 transform（纯缩放/平移视图时节点世界坐标不变；元素重建后 _tx 为 undefined 必写一次）
       if (g._tx === n.x && g._ty === n.y) continue;
       g._tx = n.x; g._ty = n.y;
       g.setAttribute('transform', `translate(${n.x} ${n.y})`);
     }
     const tz = 1 / this.zoom;
+    // 终端隐藏时收集被隐藏节点 id：连线任一端隐藏则整条隐藏（悬空连线无意义）
+    const hiddenIds = this.hideTerminals ? new Set() : null;
+    if (hiddenIds) for (const n of this.nodes) if (n.type === 'pc') hiddenIds.add(n.id);
     for (const t of this.texts) {
       const g = this.textEls.get(t.id);
       if (g) g.setAttribute('transform', `translate(${t.x} ${t.y}) scale(${tz})`);
     }
     const geom = U.linkGeom(this.nodes, this.links, { ortho: !!this.orthoLinks });
-    // 标注：三行合一，先收集位置与尺寸，防碰撞（标注互不重叠、不压节点）后渲染
+    // ---- 标注布局（量宽 + 防碰撞求解）：重活按需执行，结果缓存供渲染段复用 ----
     const SIZE = 11;
-    const labelBoxes = [];
-    const labelData = [];
-    const nodeById = new Map();
-    for (const n of this.nodes) nodeById.set(n.id, n);
-    for (const l of this.links) {
-      const q = geom[l.id];
-      if (!q) continue;
-      let lines = this.showLabels ? U.labelLines(l) : [];
-      if (!lines.length) { labelBoxes.push(null); labelData.push(null); continue; }
-      // 标记排列跟随设备在画布上的上下方位（orders 约定 [a端行, b端行]，见 U.orderLabelLines）
-      if (lines.length === 2) {
-        lines = U.orderLabelLines(lines, nodeById.get(l.a), nodeById.get(l.b));
+    // 标注与节点同口径「随画布等比缩放」（世界坐标固定尺寸）：缩放时标注与节点同比
+    // 缩小/放大，不再出现全景下标注不缩小而遮挡成片小节点；布局因此与 zoom 完全
+    // 无关（仅数据变化触发重解），缩放过程零重排。
+    // LOD：zoom < 0.5 时标注隐藏——等比缩放后 11px 标注在 0.5 以下不足 5.5px，不可读且成噪点
+    const lodHide = this.zoom < 0.5;
+    if (this._llLOD !== lodHide) { this._labelDirty = true; this._llLOD = lodHide; }
+    if (this._llOn !== !!this.showLabels || this._llOrtho !== !!this.orthoLinks) this._labelDirty = true;
+    if (this.showLabels && !lodHide && !geomOnly && (this._labelDirty || !this._labelData)) {
+      this._labelDirty = false;
+      this._llOn = !!this.showLabels; this._llOrtho = !!this.orthoLinks; this._labelZoom = this.zoom;
+      const labelBoxes = [];
+      const labelData = [];
+      const nodeById = new Map();
+      for (const n of this.nodes) nodeById.set(n.id, n);
+      for (const l of this.links) {
+        const q = geom[l.id];
+        if (!q) { labelBoxes.push(null); labelData.push(null); continue; }
+        let lines = this.showLabels ? U.labelLines(l) : [];
+        if (!lines.length) { labelBoxes.push(null); labelData.push(null); continue; }
+        // 标记排列跟随设备在画布上的上下方位（orders 约定 [a端行, b端行]，见 U.orderLabelLines）
+        if (lines.length === 2) {
+          lines = U.orderLabelLines(lines, nodeById.get(l.a), nodeById.get(l.b));
+        }
+        const mx = (q.x1 + q.x2) / 2, my = (q.y1 + q.y2) / 2;
+        const dx = q.x2 - q.x1, dy = q.y2 - q.y1;
+        const len = Math.hypot(dx, dy) || 1;
+        const pairOff = (this._pairIdx.get(l.id) || 0) * 50;
+        const cx = mx + dx / len * 10;
+        const cy = my + dy / len * 10 - 30 - pairOff;
+        const maxLine = lines.reduce((a, b) => a.length > b.length ? a : b, '');
+        // 框为世界坐标固定尺寸（与节点同口径），随画布等比缩放
+        labelBoxes.push({
+          x: cx, y: cy,
+          w: U.measureText(maxLine, SIZE) + 12,
+          h: lines.length * SIZE * 1.25 + 4
+        });
+        labelData.push({ lines, cx, cy });
       }
-      const mx = (q.x1 + q.x2) / 2, my = (q.y1 + q.y2) / 2;
-      const dx = q.x2 - q.x1, dy = q.y2 - q.y1;
-      const len = Math.hypot(dx, dy) || 1;
-      const pairOff = (this._pairIdx.get(l.id) || 0) * 50;
-      const cx = mx + dx / len * 10;
-      const cy = my + dy / len * 10 - 30 - pairOff;
-      const maxLine = lines.reduce((a, b) => a.length > b.length ? a : b, '');
-      // 框尺寸按屏幕等效（标注以 1/zoom 放大显示，世界坐标尺寸需除以 zoom）
-      labelBoxes.push({
-        x: cx, y: cy,
-        w: (U.measureText(maxLine, SIZE) + 12) / this.zoom,
-        h: (lines.length * SIZE * 1.25 + 4) / this.zoom
+      U.resolveLabelCollisions(labelBoxes.filter(Boolean), {
+        pad: 8, // 世界坐标固定间距
+        obstacles: this.nodes.map(n => ({ x: n.x, y: n.y, w: n.w, h: n.h }))
       });
-      labelData.push({ lines, cx, cy });
+      this._labelBoxes = labelBoxes;
+      this._labelData = labelData;
     }
-    U.resolveLabelCollisions(labelBoxes.filter(Boolean), {
-      pad: 8 / this.zoom, // 屏幕等效 8px 间距（标注以 1/zoom 放大显示）
-      obstacles: this.nodes.map(n => ({ x: n.x, y: n.y, w: n.w, h: n.h }))
-    });
+    const labelBoxes = this._labelBoxes || [];
+    const labelData = this._labelData || [];
+    const showL = this.showLabels && !lodHide;
     let bi = 0;
-    const z = 1 / this.zoom;
     for (const l of this.links) {
       const g = this.linkEls.get(l.id);
       const parts = this._linkParts.get(l.id);
@@ -552,32 +599,52 @@ class Renderer {
       const q = geom[l.id];
       if (!q) continue;
       const ln = parts.ln, hit = parts.hit;
-      g.classList.toggle('down', this.downLinks.has(l.id));
-      // 端到端链路连通性监测结果（监控 ▾ 链路连通性监测）：按状态给连线上色，
-      // 手动「故障标记」（.down）优先——用户显式标的断链不该被监测结论覆盖
+      // 端到端链路连通性监测结果（监控 ▾ 链路连通性监测）：按状态给连线上色，手动「故障标记」
+      // （.down）优先——用户显式标的断链不该被监测结论覆盖。6 个状态类做签名缓存：
+      // 交互帧上千条链路的状态几乎全部未变，命中缓存时整组 classList 调用都省掉
       const lk = this.linkStates.get(l.id) || '';
-      g.classList.toggle('lk-up', lk === 'up');
-      g.classList.toggle('lk-down', lk === 'down');
-      g.classList.toggle('lk-unknown', lk === 'unknown' || lk === 'degraded');
-      // SNMP 转发表推断出来的链路：虚线显示，与实测（LLDP/CDP）链路一眼可分（绝不冒充实测结果）
-      g.classList.toggle('inferred', !!l.inferred);
-      g.classList.toggle('planned', !!l.plan);
-      g.classList.toggle('plan-hide', this.planView === 'plan' ? !l.plan : (this.planView === 'actual' ? !!l.plan : false));
+      const pv = this.planView;
+      const csig = (this.downLinks.has(l.id) ? 1 : 0)
+        | (lk === 'up' ? 2 : lk === 'down' ? 4 : (lk === 'unknown' || lk === 'degraded') ? 8 : 0)
+        | (l.inferred ? 16 : 0) | (l.plan ? 32 : 0)
+        | (pv === 'plan' ? (l.plan ? 0 : 64) : pv === 'actual' ? (l.plan ? 64 : 0) : 0)
+        | ((hiddenIds && (hiddenIds.has(l.a) || hiddenIds.has(l.b))) ? 128 : 0);
+      if (parts.csig !== csig) {
+        parts.csig = csig;
+        g.classList.toggle('down', this.downLinks.has(l.id));
+        g.classList.toggle('lk-up', lk === 'up');
+        g.classList.toggle('lk-down', lk === 'down');
+        g.classList.toggle('lk-unknown', lk === 'unknown' || lk === 'degraded');
+        // SNMP 转发表推断出来的链路：虚线显示，与实测（LLDP/CDP）链路一眼可分（绝不冒充实测结果）
+        g.classList.toggle('inferred', !!l.inferred);
+        g.classList.toggle('planned', !!l.plan);
+        g.classList.toggle('plan-hide', (csig & 64) !== 0);
+        g.classList.toggle('term-hide', (csig & 128) !== 0);
+      }
       // 带宽颜色（图上不显示带宽文字）：带宽值只在编辑链路时变化，命中缓存时跳过 6 个正则的规格化
       if (parts.bw !== l.bw) { parts.bw = l.bw; g.style.setProperty('--bw-c', U.bwColor(l.bw)); }
-      // 直角模式走 pts 折线，直线模式退化为两段式 path（元素统一为 path，命中/样式不变）
+      // 直角模式走 pts 折线，直线模式退化为两段式 path（元素统一为 path，命中/样式不变）。
+      // 同值不重写：纯视图帧几何不变，省掉每帧数千次 setAttribute 触发的样式失效
       const d = q.pts
         ? 'M' + q.pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' L')
         : 'M' + q.x1.toFixed(1) + ' ' + q.y1.toFixed(1) + ' L' + q.x2.toFixed(1) + ' ' + q.y2.toFixed(1);
-      ln.setAttribute('d', d);
-      hit.setAttribute('d', d);
+      if (parts.d !== d) {
+        parts.d = d;
+        ln.setAttribute('d', d);
+        hit.setAttribute('d', d);
+      }
       const box = labelBoxes[bi];
       const ld = labelData[bi];
       bi++;
       const lab = parts.lab;
-      if (!this.showLabels || !box || !ld || !lab) { lab.setAttribute('display', 'none'); continue; }
-      lab.setAttribute('display', '');
-      lab.setAttribute('transform', `translate(${box.x} ${box.y}) scale(${z})`);
+      if (!showL || !box || !ld || !lab) {
+        if (parts.labOn) { lab.setAttribute('display', 'none'); parts.labOn = false; }
+        continue;
+      }
+      if (!parts.labOn) { lab.setAttribute('display', ''); parts.labOn = true; }
+      // 标注等比缩放：不做 1/zoom 反向补偿（transform 只定位，尺寸随画布缩放）
+      const ltr = `translate(${box.x} ${box.y})`;
+      if (parts.labT !== ltr) { parts.labT = ltr; lab.setAttribute('transform', ltr); }
       const texts = parts.texts;
       ld.lines.forEach((ln2, i) => {
         const t = texts[i];
@@ -595,11 +662,17 @@ class Renderer {
   }
 
   /** 帧合并刷新：指针级高频路径（拖拽移动/滚轮缩放）用，同一帧内多次请求只做一次全量 update。
-   *  其余调用方仍走同步 update()（导出/适配视图等依赖更新后立即可读的 DOM 状态） */
-  updateSoon() {
+   *  mode='geom' 请求几何帧（跳过区域层重建与标注防碰撞求解）；同帧内 geom 与 full 并存按 full 执行 */
+  updateSoon(mode) {
+    if (mode !== 'geom') this._soonFull = true;
     if (this._updateRaf) return;
     this._updateRaf = true;
-    requestAnimationFrame(() => { this._updateRaf = false; this.update(); });
+    requestAnimationFrame(() => {
+      this._updateRaf = false;
+      const m = this._soonFull ? undefined : 'geom';
+      this._soonFull = false;
+      this.update(m);
+    });
   }
 
   /* 更新 pdf/vsdx 风格三行标注不再需要 _setLabel，删除 */
@@ -835,7 +908,7 @@ class Renderer {
       }
       const f0 = byId.get(id);
       if (f0 && (Math.abs(f0.x - this._drag.orig[id].x) > 2 || Math.abs(f0.y - this._drag.orig[id].y) > 2)) this._drag.moved = true;
-      this.updateSoon();
+      this.updateSoon('geom'); // 拖拽帧走几何档：标注防碰撞在大规模下是百毫秒级重活，松手再精排
       this.cb.onDrag && this.cb.onDrag(id, f0 && f0.x, f0 && f0.y);
     };
     const up = (ev) => {
@@ -844,7 +917,7 @@ class Renderer {
       svgElRemove(this.svg, 'pointercancel', cancel);
       const d = this._drag;
       this._drag = null;
-      if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+      if (d && d.moved) { this.updateSoon(); this.cb.onDragEnd && this.cb.onDragEnd(id, true); } // 全量档：标注重排/区域计数
     };
     // 系统取消指针（触控笔接管/窗口失焦等）：同 up 收尾但不带点击语义，防 _drag 悬挂
     const cancel = () => {
@@ -853,7 +926,7 @@ class Renderer {
       svgElRemove(this.svg, 'pointercancel', cancel);
       const d = this._drag;
       this._drag = null;
-      if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+      if (d && d.moved) { this.updateSoon(); this.cb.onDragEnd && this.cb.onDragEnd(id, true); }
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);
@@ -873,7 +946,7 @@ class Renderer {
       t.x = w2.x - this._drag.dx;
       t.y = w2.y - this._drag.dy;
       if (Math.abs(t.x - orig.x) > 2 || Math.abs(t.y - orig.y) > 2) this._drag.moved = true;
-      this.updateSoon();
+      this.updateSoon('geom');
     };
     const up = (ev) => {
       svgElRemove(this.svg, 'pointermove', move);
@@ -881,6 +954,7 @@ class Renderer {
       svgElRemove(this.svg, 'pointercancel', cancel);
       const d = this._drag;
       this._drag = null;
+      if (d && d.moved) this.updateSoon();
       if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
     };
     const cancel = () => {
@@ -889,6 +963,7 @@ class Renderer {
       svgElRemove(this.svg, 'pointercancel', cancel);
       const d = this._drag;
       this._drag = null;
+      if (d && d.moved) this.updateSoon();
       if (d && d.moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
     };
     svgElAdd(this.svg, 'pointermove', move);
@@ -956,14 +1031,14 @@ class Renderer {
       n.sized = true; // 手动尺寸：此后改名/管理地址变化不再自动改写宽高
       moved = true;
       this._rebuildNode(n);
-      this.updateSoon(); // 链路端点按节点矩形边计算，须随尺寸刷新
+      this.updateSoon('geom'); // 链路端点按节点矩形边计算，须随尺寸刷新（几何档；松手全量精排标注）
       this.cb.onNodeResize && this.cb.onNodeResize(id, w, h);
     };
     const finish = () => {
       svgElRemove(this.svg, 'pointermove', move);
       svgElRemove(this.svg, 'pointerup', finish);
       svgElRemove(this.svg, 'pointercancel', finish);
-      if (moved) this.cb.onNodeResizeEnd && this.cb.onNodeResizeEnd(id, true);
+      if (moved) { this.updateSoon(); this.cb.onNodeResizeEnd && this.cb.onNodeResizeEnd(id, true); }
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', finish);
@@ -992,7 +1067,10 @@ class Renderer {
       r.x = nx; r.y = ny;
       for (const it of insideN) { it.n.x = nx + it.dx; it.n.y = ny + it.dy; }
       for (const it of insideT) { it.t.x = nx + it.dx; it.t.y = ny + it.dy; }
-      this.updateSoon();
+      // 区域框本体直接改 transform 跟随（几何档跳过区域层重建，避免每帧 O(区域×节点) 的内点重算）
+      const rel = this.regionEls.get(id);
+      if (rel) rel.setAttribute('transform', `translate(${nx} ${ny})`);
+      this.updateSoon('geom');
       this.cb.onDrag && this.cb.onDrag(id, r.x, r.y);
     };
     const up = (ev) => {
@@ -1000,6 +1078,7 @@ class Renderer {
       svgElRemove(this.svg, 'pointerup', up);
       svgElRemove(this.svg, 'pointercancel', cancel);
       if (moved) {
+        this.updateSoon(); // 全量档：区域层重建（内点计数/描边随缩放）与标注重排
         this.cb.onDragEnd && this.cb.onDragEnd(id, true);
       } else {
         // 单击区域（未拖动）：等同点击空白，取消选中
@@ -1011,7 +1090,7 @@ class Renderer {
       svgElRemove(this.svg, 'pointermove', move);
       svgElRemove(this.svg, 'pointerup', up);
       svgElRemove(this.svg, 'pointercancel', cancel);
-      if (moved) this.cb.onDragEnd && this.cb.onDragEnd(id, true);
+      if (moved) { this.updateSoon(); this.cb.onDragEnd && this.cb.onDragEnd(id, true); }
     };
     svgElAdd(this.svg, 'pointermove', move);
     svgElAdd(this.svg, 'pointerup', up);
@@ -1047,7 +1126,7 @@ class Renderer {
       const x1 = Math.max(w0.x, w1.x), y1 = Math.max(w0.y, w1.y);
       if (Math.hypot(w1.x - w0.x, w1.y - w0.y) < 4) { this.cb.onBgClick && this.cb.onBgClick(w1, ev); return; }
       const ids = this.nodes
-        .filter(n => n.x < x1 && n.x + n.w > x0 && n.y < y1 && n.y + n.h > y0)
+        .filter(n => !this.isNodeHidden(n) && n.x < x1 && n.x + n.w > x0 && n.y < y1 && n.y + n.h > y0)
         .map(n => n.id);
       if (!ids.length) { this.select(null, null); this.cb.onBoxSelect && this.cb.onBoxSelect([]); return; }
       this.selLinkIds.clear(); // 与 select('node') 同口径：框选设备后旧连线高亮须清（否则高亮集与 Delete 目标不符）

@@ -2127,6 +2127,61 @@ function findChrome() {
     if (themeBack !== 'light') errors.push('[theme] 集成场景未把主题复位为浅色: ' + themeBack);
   }
 
+  // ---- 集成 11：显示 ▾ 终端设备开关——pc 类型节点及其连线整体隐藏/恢复，选中与持久化一致 ----
+  {
+    // 画布非空时 loadSample 会弹「导入将替换」确认框：自动点「确定」，等示例就位再继续
+    await page.evaluate(() => {
+      window.__autoYes = setInterval(() => { const b = document.querySelector('.overlay [data-act=yes]'); if (b) b.click(); }, 120);
+      window.__topo.loadSample();
+    });
+    await page.waitForFunction(() => document.querySelectorAll('.node').length > 3, { timeout: 8000 });
+    await page.evaluate(() => clearInterval(window.__autoYes));
+    await new Promise(r => setTimeout(r, 800));
+    const before = await page.evaluate(() => ({
+      total: document.querySelectorAll('.node').length,
+      pc: [...window.__topo.state.nodes].filter(n => n.type === 'pc').length,
+      pcLinks: window.__topo.state.links.filter(l => {
+        const by = Object.fromEntries(window.__topo.state.nodes.map(n => [n.id, n]));
+        return (by[l.a] && by[l.a].type === 'pc') || (by[l.b] && by[l.b].type === 'pc');
+      }).length
+    }));
+    await clickMenuItem('btnDropView', '终端设备');
+    await new Promise(r => setTimeout(r, 300));
+    const hidden = await page.evaluate(() => ({
+      nodeHidden: document.querySelectorAll('.node.term-hide').length,
+      nodeVisible: document.querySelectorAll('.node:not(.term-hide)').length,
+      linkHidden: document.querySelectorAll('.link.term-hide').length,
+      flag: window.__topo.state.hideTerminals,
+      ls: localStorage.getItem('nettopo.hideTerminals')
+    }));
+    // 全选不含隐藏终端（防 Delete 作用于不可见节点）
+    await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control');
+    await new Promise(r => setTimeout(r, 300));
+    const selCount = await page.evaluate(() => window.__topo.renderer.selIds.size);
+    await page.keyboard.press('Escape');
+    // 刷新后开关状态保持（localStorage → restoreGraph → renderer）
+    await page.reload({ waitUntil: 'load' });
+    await new Promise(r => setTimeout(r, 600));
+    const afterReload = await page.evaluate(() => ({
+      hidden: document.querySelectorAll('.node.term-hide').length,
+      flag: window.__topo.state.hideTerminals
+    }));
+    // 恢复显示
+    await clickMenuItem('btnDropView', '终端设备');
+    await new Promise(r => setTimeout(r, 300));
+    const restored = await page.evaluate(() => ({
+      hidden: document.querySelectorAll('.node.term-hide').length,
+      total: document.querySelectorAll('.node').length
+    }));
+    const hideOk = before.pc > 0 && hidden.flag === true && hidden.ls === '1'
+      && hidden.nodeHidden === before.pc && hidden.nodeVisible === before.total - before.pc
+      && hidden.linkHidden === before.pcLinks && selCount === before.total - before.pc
+      && afterReload.flag === true && afterReload.hidden === before.pc
+      && restored.hidden === 0 && restored.total === before.total;
+    console.log('集成11 隐藏终端设备:', hideOk ? 'OK' : 'FAIL', JSON.stringify({ before, hidden, selCount, afterReload, restored }));
+    if (!hideOk) errors.push('[hideTerminals] 终端隐藏/恢复/全选过滤/持久化不符: ' + JSON.stringify({ before, hidden, selCount, afterReload, restored }));
+  }
+
   // ---- 配置变更下发 UI（注入 mock 主进程桥）：菜单入口 → dry-run 预览/闸门 → 下发结果 → 回滚生成 → 记录 ----
   {
     await page.evaluate(() => {

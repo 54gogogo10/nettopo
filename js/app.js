@@ -27,6 +27,7 @@ const state = {
   tab: 'nodes',
   blank: false,   // 用户主动新建空白画布（无表格也能直接画）
   showLabels: lsGet('nettopo.showLabels', '1') !== '0',   // 链路标注显示开关
+  hideTerminals: lsGet('nettopo.hideTerminals', '0') === '1', // 终端设备（pc）隐藏开关：画布聚焦网络层
   showSubnets: lsGet('nettopo.showSubnets', '0') === '1', // 子网分组显示开关
   planView: (function () { const v = lsGet('nettopo.planView', 'all'); return (v === 'plan' || v === 'actual') ? v : 'all'; })(), // 规划态视图：all | plan | actual
   orthoLinks: lsGet('nettopo.orthoLinks', '0') === '1',   // 直角（正交）布线开关
@@ -108,12 +109,14 @@ const renderer = new TopoRender($('#svg'), {
   },
   onView(z) {
     $('#zVal').textContent = Math.round(z * 100) + '%';
-    // 视图平移/缩放也持久化（saveGraph 自带防抖，高频滚轮不逐帧落盘）
-    saveGraph();
+    // 视图平移/缩放写独立的轻量键（几十字节）：此前走 saveGraph 会把整图（大规模时 MB 级）
+    // 重新序列化落盘，每次平移/缩放手势结束都卡一下
+    saveView();
   }
 });
 // 显示开关初始状态
 renderer.showLabels = state.showLabels;
+renderer.hideTerminals = state.hideTerminals;
 renderer.showSubnets = state.showSubnets;
 renderer.subnetNames = state.subnetNames;
 renderer.planView = state.planView;
@@ -4698,6 +4701,7 @@ async function buildProjectData() {
     customTypes: U.customTypes,
     typeOverrides: U.typeOverrides,
     showLabels: state.showLabels,
+    hideTerminals: !!state.hideTerminals,
     showSubnets: state.showSubnets,
     subnetNames: state.subnetNames,
     downLinks: [...state.downLinks],
@@ -4810,6 +4814,7 @@ async function applyProjectData(data) {
   if (typeof data.showLabels === 'boolean') state.showLabels = data.showLabels;
   if (typeof data.showSubnets === 'boolean') state.showSubnets = data.showSubnets;
   if (typeof data.orthoLinks === 'boolean') { state.orthoLinks = data.orthoLinks; try { localStorage.setItem('nettopo.orthoLinks', state.orthoLinks ? '1' : '0'); } catch (e) { /* ignore */ } }
+  if (typeof data.hideTerminals === 'boolean') { state.hideTerminals = data.hideTerminals; try { localStorage.setItem('nettopo.hideTerminals', state.hideTerminals ? '1' : '0'); } catch (e) { /* ignore */ } }
   renderer.orthoLinks = state.orthoLinks;
   if (data.subnetNames && typeof data.subnetNames === 'object') state.subnetNames = U.sanitizeSubnetNames(data.subnetNames);
   state.downLinks = new Set(Array.isArray(data.downLinks) ? data.downLinks : []);
@@ -4843,6 +4848,7 @@ async function applyProjectData(data) {
     refreshSheets();
   }
   renderer.showLabels = state.showLabels;
+  renderer.hideTerminals = state.hideTerminals;
   renderer.showSubnets = state.showSubnets;
   renderer.subnetNames = state.subnetNames;
   renderer.setDownLinks(state.downLinks);
@@ -5836,9 +5842,12 @@ function pasteClipboard() {
 }
 function selectAllNodes() {
   if (!state.nodes.length) return;
-  renderer.selIds = new Set(state.nodes.map(n => n.id));
-  renderer.sel = { kind: 'node', id: state.nodes[state.nodes.length - 1].id };
-  state.sel = { kind: 'node', id: state.nodes[state.nodes.length - 1].id };
+  // 隐藏的终端不进全选（不可见的选中会成为 Delete/批量编辑的暗目标）
+  const vis = state.nodes.filter(n => !renderer.isNodeHidden(n));
+  if (!vis.length) return;
+  renderer.selIds = new Set(vis.map(n => n.id));
+  renderer.sel = { kind: 'node', id: vis[vis.length - 1].id };
+  state.sel = { kind: 'node', id: vis[vis.length - 1].id };
   renderer.selLinkIds.clear(); // 清后仍需 _syncSelClass，否则旧连线高亮残留
   renderer._syncSelClass();
   renderSelCard();
@@ -5855,13 +5864,14 @@ function nudgeSelection(key, step) {
   state._nudgeAt = now;
   const idSet = new Set(ids);
   for (const n of state.nodes) if (idSet.has(n.id)) { n.x += dx; n.y += dy; }
-  renderer.updateSoon();
+  renderer.updateSoon('geom'); // 连按微调走几何档（防碰撞求解不随每次按键跑），结算时全量精排
   saveGraph();
   clearTimeout(state._nudgeT);
   state._nudgeT = setTimeout(() => {
     const pre = state._nudgePre; state._nudgePre = null;
     // 快照页号须与当前页一致才入栈：定时器跨过切页/删页时丢弃，防止旧页快照污染新页撤销栈
     if (pre && pre.sheetIdx === state.sheetIdx) pushUndo(pre);
+    renderer.update(); // 全量：连续微调期间的标注位置与区域计数在此一次性精排
   }, 800);
 }
 /** 结束方向键微调的合并等待（切页/删页/撤销重做前调用）：同页快照立即入栈（微调仍可撤销），跨页丢弃 */
@@ -6126,6 +6136,29 @@ function toggleLabels() {
   localStorage.setItem('nettopo.showLabels', state.showLabels ? '1' : '0');
   saveGraph();
   toast(state.showLabels ? '已显示链路标注' : '已隐藏链路标注');
+}
+/** 隐藏/显示终端设备（pc 类型叶子及其连线）：只作用于画布显示（不可点选/框选/不进适应视图），
+ *  数据、面板列表与导出保持完整拓扑。开启时清掉选中中的终端，防 Delete 作用于不可见节点 */
+function toggleHideTerminals() {
+  state.hideTerminals = !state.hideTerminals;
+  renderer.setHideTerminals(state.hideTerminals);
+  localStorage.setItem('nettopo.hideTerminals', state.hideTerminals ? '1' : '0');
+  if (state.hideTerminals) {
+    let dropped = 0;
+    for (const id of [...renderer.selIds]) {
+      const n = state.nodes.find(x => x.id === id);
+      if (renderer.isNodeHidden(n)) { renderer.selIds.delete(id); dropped++; }
+    }
+    if (dropped) {
+      if (!renderer.selIds.size) { renderer.sel = { kind: null, id: null }; state.sel = { kind: null, id: null }; }
+      renderer._syncSelClass();
+      renderSelCard();
+      refreshPanel();
+    }
+  }
+  saveGraph();
+  const cnt = state.nodes.filter(n => n.type === 'pc').length;
+  toast(state.hideTerminals ? ('已隐藏终端设备 ' + cnt + ' 台（画布聚焦网络层，数据不受影响）') : '已显示终端设备');
 }
 function toggleSubnets() {
   state.showSubnets = !state.showSubnets;
@@ -7228,6 +7261,18 @@ function updateLegend() {
 
 /* ================= 持久化（刷新自动恢复） ================= */
 const GRAPH_KEY = 'nettopo.graph';
+const VIEW_KEY = 'nettopo.view';
+
+/** 视图（pan/zoom）单独轻量持久化：平移/缩放高频发生，若随 saveGraph 落盘，
+ *  每次手势结束都要把整图（大规模时 MB 级）重新序列化——独立键只写几十字节。
+ *  恢复时（restoreGraph）ts 较新者胜；图数据落盘时也会带上当时的 pan/zoom 作旧版兼容 */
+function saveView() {
+  if (saveView._dt) return;
+  saveView._dt = setTimeout(() => {
+    saveView._dt = null;
+    try { localStorage.setItem(VIEW_KEY, JSON.stringify({ pan: { x: renderer.pan.x, y: renderer.pan.y }, zoom: renderer.zoom, ts: Date.now() })); } catch (e) { /* 视图丢失可接受 */ }
+  }, 250);
+}
 
 function saveGraph() {
   // 落盘防抖：大工程（多页 + MB 级底图）的同步 stringify 可达数十 ms，拖拽结束/连续编辑
@@ -7249,11 +7294,17 @@ saveGraph.flush = () => {
       underlay: state.underlay,
       pan: renderer.pan,
       zoom: renderer.zoom,
-      sheets: state.sheets,
+      // 活动页在 sheets 里的 nodes/links/texts/regions 用占位数组：顶层已是同一份数据的本体，
+      // 原样写入会把整页数据序列化两遍（千节点级多页工程单次落盘多出约一倍字节）；
+      // restoreGraph 恢复时会把顶层活动数据回填到活动页（act.nodes = state.nodes），语义等价
+      sheets: state.sheets.map((sp, i) => i === state.sheetIdx
+        ? Object.assign({}, sp, { nodes: [], links: [], texts: [], regions: [] })
+        : sp),
       sheetIdx: state.sheetIdx,
       sheetSeq: state.sheetSeq,
       orthoLinks: state.orthoLinks,
       showLabels: state.showLabels,
+      hideTerminals: state.hideTerminals,
       showSubnets: state.showSubnets,
       subnetNames: state.subnetNames,
       downLinks: [...state.downLinks],
@@ -7293,6 +7344,13 @@ function restoreGraph() {
     const raw = localStorage.getItem(GRAPH_KEY);
     if (!raw) return false;
     const d = JSON.parse(raw);
+    // 视图合并：nettopo.view 是平移/缩放的轻量独立键（saveView），比图数据新则以它为准
+    try {
+      const v = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null');
+      const vz = Number(v && v.zoom);
+      if (v && v.pan && Number.isFinite(vz) && vz > 0 && Number.isFinite(Number(v.pan.x)) && Number.isFinite(Number(v.pan.y))
+        && (!d.ts || Number(v.ts) >= d.ts)) { d.pan = v.pan; d.zoom = vz; }
+    } catch (e) { /* 视图键损坏则用图数据自带的 pan/zoom */ }
     // 顶层 nodes 是「当前活动页」本体（可为空数组），其他页数据只在 sheets 里：
     // 活动页为空但其他页有数据时必须照常恢复——否则 state.sheets 保持 []，刷新后的第一次
     // saveGraph（滚轮缩放的 500ms 节流保存即触发）会以空 sheets 覆盖 localStorage，他页数据永久丢失
@@ -7315,6 +7373,7 @@ function restoreGraph() {
     state.undoStack = []; // 初始状态无需撤销
     state.redoStack = [];
     if (typeof d.showLabels === 'boolean') state.showLabels = d.showLabels;
+    if (typeof d.hideTerminals === 'boolean') state.hideTerminals = d.hideTerminals;
     if (typeof d.showSubnets === 'boolean') state.showSubnets = d.showSubnets;
     if (typeof d.orthoLinks === 'boolean') state.orthoLinks = d.orthoLinks;
     renderer.orthoLinks = state.orthoLinks;
@@ -7352,6 +7411,7 @@ function restoreGraph() {
       state.underlay = U.sanitizeUnderlay(d.underlay);   // 单图纸：取顶层（saveGraph 已写入）
     }
     renderer.showLabels = state.showLabels;
+    renderer.hideTerminals = state.hideTerminals;
     renderer.showSubnets = state.showSubnets;
     renderer.subnetNames = state.subnetNames;
     renderer.setDownLinks(state.downLinks);
@@ -8151,6 +8211,7 @@ function wire() {
   ];
   const menuView = () => [
     { ic: 'eye', label: '链路标注', active: state.showLabels, act: toggleLabels },
+    { ic: 'monitor', label: '终端设备', active: !state.hideTerminals, act: toggleHideTerminals },
     { ic: 'layers', label: '子网分组', active: state.showSubnets, act: toggleSubnets },
     { ic: 'image', label: state.underlay ? ('底图：' + (state.underlay.name || '已导入')) : '机房平面图底图…', act: () => openUnderlayPanel() },
     { ic: 'layers', label: '规划态视图', sub: [

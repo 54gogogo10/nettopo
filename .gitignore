@@ -68,3 +68,6 @@ test/walk/
 
 # CSS 走查截图等临时产物（test/_css-* 由界面调试生成，可随时删）
 test/_css-*/
+
+# 大型拓扑生成物（由 test/gen-bigtopo.js 随时再生，不入库）
+test/fixtures/
