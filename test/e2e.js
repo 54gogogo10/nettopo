@@ -152,7 +152,7 @@ function findChrome() {
   await page.evaluate(() => document.querySelector('#modalRoot .overlay').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
   await new Promise(r => setTimeout(r, 150));
 
-  // 导出 CSV / VDX 冒烟（拦截下载）
+  // 导出 CSV / Visio(VSDX) 冒烟（拦截下载）
   await page.evaluate(() => {
     window.__topo.exportCSV();
     window.__topo.exportVisio();
@@ -323,13 +323,13 @@ function findChrome() {
   console.log('添加自定义类型设备:', addRes, '| 图片渲染:', imgRendered, '| 图标尺寸:', imgSize);
   await page.screenshot({ path: 'shot_customnode.png' });
 
-  // 导出 VDX 含自定义类型颜色（不再有 <t> 元素）
-  const vdxCheck = await page.evaluate(() => {
+  // 导出 VSDX 含自定义类型颜色（图标位图嵌入）
+  const vsdxCheck = await page.evaluate(() => {
     window.__topo.exportVisio();
     return true;
   });
   await new Promise(r => setTimeout(r, 200));
-  console.log('含自定义类型导出 VDX 无异常:', vdxCheck);
+  console.log('含自定义类型导出 VSDX 无异常:', vsdxCheck);
 
   // ================= 集成场景补充 =================
   // 关闭当前最上层弹窗（兼容表单弹窗：cancel/close/提交按钮）

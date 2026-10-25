@@ -11,11 +11,11 @@ const root = path.join(__dirname, '..');
 const sandbox = { console, Uint8Array, TextEncoder, TextDecoder, structuredClone, Map, Set, Promise, Math, requestAnimationFrame: (fn) => setTimeout(fn, 0), localStorage: { getItem: () => null, setItem: () => {} }, crypto: require('crypto').webcrypto, btoa: (s) => Buffer.from(s, 'binary').toString('base64'), atob: (s) => Buffer.from(s, 'base64').toString('binary') };
 vmx.createContext(sandbox);
 
-for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/visio.js', 'js/pdf.js', 'js/port-ledger.js']) {
+for (const f of ['js/util.js', 'js/model.js', 'js/layout.js', 'js/pdf.js', 'js/port-ledger.js']) {
   const code = fs.readFileSync(path.join(root, f), 'utf8');
   vmx.runInContext(code, sandbox, { filename: f });
 }
-const U = sandbox.TopoUtil, M = sandbox.TopoModel, Layout = sandbox.TopoLayout, V = sandbox.TopoVisio;
+const U = sandbox.TopoUtil, M = sandbox.TopoModel, Layout = sandbox.TopoLayout;
 const PL = sandbox.TopoPortLedger;
 
 let pass = 0, fail = 0, skipped = 0;
@@ -1730,57 +1730,6 @@ console.log('== PDF 导出 ==');
   } catch (e) {
     ok(false, 'PDF 二进制验证：' + String(e.stderr || e.message).slice(0, 120));
   }
-}
-
-console.log('== Visio VDX 导出（2003 格式，备用） ==');
-const xml = V.buildVDX({ nodes: nodes2, links: links2 }, {});
-ok(xml.startsWith('<?xml'), 'VDX XML 声明');
-ok(xml.includes('VisioDocument') && xml.includes('http://schemas.microsoft.com/visio/2003/core'), 'VDX 根元素与 2003 命名空间');
-ok(!/<t>/.test(xml), 'VDX 不使用 <t> 元素（文本为混合内容）');
-ok(xml.includes('MoveTo') && xml.includes('LineTo'), 'VDX 连线几何');
-ok((xml.match(/<Geom IX=/g) || []).length === 6, 'VDX 几何节（2 设备 + 2 连线 + 2 文本框）');
-ok((xml.match(/NameU='Label/g) || []).length === 2, 'VDX 独立水平文本框（2 个）');
-ok(!/<TextXForm>/.test(xml.slice(xml.indexOf('<XForm1D>'), xml.lastIndexOf('</Shape>'))), 'VDX 连线不再依赖 TextXForm（文本用 2D 形状）');
-ok(xml.includes("<pp IX='1'/>"), 'VDX 文本段落间用 <pp> 换行');
-ok(xml.includes('<XForm>') && /<PinX[^>]*>[^<]+<\/PinX>/.test(xml), 'VDX cell 为文本内容形式（Visio 兼容关键）');
-ok(!/<PinX V=/.test(xml), 'VDX 无 V 属性形式 cell（会被 Visio 忽略）');
-ok(xml.includes('FaceName') && !xml.includes('FontEntry'), 'VDX 字体使用 FaceNames');
-ok(xml.includes("F='Width*0.5'"), 'VDX 公式型 XForm（LocPinX）');
-ok(xml.includes('SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)'), 'VDX 1-D 形状公式宽度');
-ok(xml.includes('<Connects>') && (xml.match(/<Connect /g) || []).length === 4, 'VDX 两端粘合（2 链路 × 2 端点）');
-ok(xml.includes('<Prop Name='), 'VDX 属性（Shape Data）');
-ok(xml.includes('GE0/0/1') === false, 'VDX 文本转义（无原始字符）');
-ok(xml.includes('G0') && xml.includes('1.1.1.1'), 'VDX 连线文本内容');
-ok(xml.includes('<pp IX=') && xml.indexOf('<pp ') < xml.indexOf('<cp '), 'VDX 文本 pp 在 cp 前');
-ok(xml.includes("<pp IX='1'/>"), 'VDX 文本段落间用 <pp> 换行');
-ok(xml.includes('Microsoft YaHei'), 'VDX 中文字体');
-ok(xml.includes('<Desc>') && !xml.includes('<Description>'), 'VDX 属性名 Desc');
-const wmatch = xml.match(/<PageWidth[^>]*>([^<]+)</);
-ok(wmatch && parseFloat(wmatch[1]) > 5, 'VDX 页面宽度合理（' + (wmatch && wmatch[1]) + ' 英寸）');
-// R8 遗留收尾：区域分组与画布文本框进 VDX（此前只导出设备与连线）
-{
-  const xml2 = V.buildVDX({
-    nodes: nodes2, links: links2,
-    regions: [{ id: 'r1', name: '核心区', x: 0, y: 0, w: 400, h: 300, color: '#6366f1' }],
-    texts: [{ id: 't1', x: 500, y: 500, w: 200, h: 60, text: '说明文字第一行\n第二行', size: 18, color: '#0f172a' }]
-  }, {});
-  ok(xml2.includes("Name='区域-核心区'") && xml2.includes('<LinePattern>2</LinePattern>'), 'VDX 区域分组：背景矩形 + 名称');
-  ok(xml2.indexOf('区域-核心区') < xml2.indexOf("NameU='Label"), 'VDX 区域形状先于设备/连线压入（z 序垫底）');
-  ok(xml2.includes('说明文字第一行') && xml2.includes('第二行'), 'VDX 画布文本框：多行内容导出');
-  const pw2 = parseFloat(/<PageWidth[^>]*>([\d.]+)</.exec(xml2)[1]);
-  ok(pw2 > 5, 'VDX 页宽含区域与文本框范围');
-}
-
-// 官方 2003 schema 校验（需要 python + lxml，不可用则跳过）
-if (!pythonHas('lxml')) { okSkip('VDX 通过官方 visio2003.xsd 校验', 'lxml'); }
-else try {
-  const tmp = path.join(root, 'test', '_test.vdx');
-  fs.writeFileSync(tmp, xml, 'utf8');
-  const out = execFileSync('python', ['test/validate_vdx.py', tmp], { cwd: root, encoding: 'utf8' });
-  fs.unlinkSync(tmp);
-  ok(out.includes('PASS'), 'VDX 通过官方 visio2003.xsd 校验');
-} catch (e) {
-  ok(false, 'VDX 通过官方 visio2003.xsd 校验：' + String(e.stderr || e.message).slice(0, 120));
 }
 
 console.log('== 力导向布局（原样） / 拓扑分层布局（最少交叉） ==');
@@ -8186,30 +8135,27 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
       rmTmp(capBase);
 
       // L17：导出转义必须有「真对抗」用例——旧断言 ok(xml.includes('GE0/0/1') === false)
-      // 的夹具里根本没有该字符串，把三套导出器的转义整体换成恒等函数仍然全绿，等于没有护栏
+      // 的夹具里根本没有该字符串，把两套导出器（SVG/VSDX）的转义整体换成恒等函数仍然全绿，等于没有护栏
       const Q = String.fromCharCode(34), SQ = String.fromCharCode(39);
       const nasty = 'A<x>&q' + Q + SQ + String.fromCharCode(1) + String.fromCharCode(11);
       const scN = { id: 'n1', name: nasty, type: 'router', x: 100, y: 100, w: 120, h: 60, mgmt: nasty, note: nasty, mgmts: [nasty], vendor: '' };
       const scT = { id: 't1', x: 10, y: 10, w: 200, h: 40, text: nasty };
-      const vdxN = V.buildVDX({ nodes: [scN], links: [], texts: [scT] }, {});
       const svgN = sandbox.TopoPdf.buildSvgImage({ nodes: [scN], links: [], texts: [scT] }, { showLabels: true });
       // 裸控制字符（XML 1.0 非法）+ 未转义的 <x> 都算失败；合法实体不误报
       const badRaw = (t) => t.indexOf('<x>') >= 0 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(t);
-      ok(!badRaw(vdxN) && vdxN.indexOf('&lt;x&gt;') >= 0, 'L17：VDX 真转义（元字符转实体、控制字符剔除；原断言为空断言）');
-      ok(!badRaw(svgN) && svgN.indexOf('&lt;x&gt;') >= 0, 'L17：SVG 真转义（同上）');
+      ok(!badRaw(svgN) && svgN.indexOf('&lt;x&gt;') >= 0, 'L17：SVG 真转义（元字符转实体、控制字符剔除；原断言为空断言）');
       const vsdxRaw = Buffer.from(sandbox.TopoVsdx.buildVSDX({ nodes: [scN], links: [], texts: [scT] }, {})).toString('latin1');
       ok(vsdxRaw.indexOf('<x>') < 0 && vsdxRaw.indexOf('&lt;x&gt;') >= 0, 'L17：VSDX 部件 XML 真转义（裸 <x> 不出现在包内）');
-      // XML 1.0 禁止的 U+FFFE/U+FFFF：CSV 里塞一个就能让 .vsdx/.vdx 非良构（Visio 拒开整包）
+      // XML 1.0 禁止的 U+FFFE/U+FFFF：CSV 里塞一个就能让 .vsdx 非良构（Visio 拒开整包）
       {
         const bad2 = 'R1\uFFFE\uFFFF';
         const n2 = { id: 'n1', name: bad2, type: 'router', x: 10, y: 10, w: 120, h: 60 };
         const t2 = { id: 't1', x: 0, y: 0, w: 100, h: 30, text: bad2 };
-        const vdx2 = V.buildVDX({ nodes: [n2], links: [], texts: [t2] }, {});
         const svg2 = sandbox.TopoPdf.buildSvgImage({ nodes: [n2], links: [], texts: [t2] }, { showLabels: true });
         const vsdx2 = Buffer.from(sandbox.TopoVsdx.buildVSDX({ nodes: [n2], links: [], texts: [t2] }, {})).toString('latin1');
         const hasBad = (t) => /[\uFFFE\uFFFF]/.test(t);
-        ok(!hasBad(vdx2) && !hasBad(svg2) && !hasBad(vsdx2), 'L17：U+FFFE/U+FFFF 从三套导出件中剔除（否则 XML 非良构、Visio 拒开）');
-        ok(vsdx2.indexOf('R1') >= 0 && vdx2.indexOf('R1') >= 0, 'L17：剔非法字符后名字其余部分保留（不整串丢弃）');
+        ok(!hasBad(svg2) && !hasBad(vsdx2), 'L17：U+FFFE/U+FFFF 从两套导出件中剔除（否则 XML 非良构、Visio 拒开）');
+        ok(vsdx2.indexOf('R1') >= 0, 'L17：剔非法字符后名字其余部分保留（不整串丢弃）');
         // emoji（合法代理对）不得被误删
         const emo = 'R1-😀-核心';
         const svg3 = sandbox.TopoPdf.buildSvgImage({ nodes: [{ id: 'n1', name: emo, type: 'router', x: 0, y: 0, w: 120, h: 60 }], links: [], texts: [] }, { showLabels: true });
@@ -8225,10 +8171,6 @@ console.log('== Web Shell（SSH/Telnet 会话） ==');
         const yA = (ys.find(x => x.t.indexOf('GE-A1') >= 0) || {}).y;
         const yB = (ys.find(x => x.t.indexOf('GE-B1') >= 0) || {}).y;
         ok(Number.isFinite(yA) && Number.isFinite(yB) && yA < yB, '导出：A 端在上时其标注画在上方（PDF，与画布同口径）');
-        const vdxL = V.buildVDX({ nodes: [nUp, nDown], links: [lk], texts: [] }, {});
-        const iA = vdxL.indexOf('GE-A1'), iB = vdxL.indexOf('GE-B1');
-        // VDX 段落首段在上：A 端在上时 A 必须先出现（排序后反转）
-        ok(iA >= 0 && iB >= 0 && iA < iB, '导出：VDX 两行标注顺序与画布一致（首段在上）');
         const vsdxL = Buffer.from(sandbox.TopoVsdx.buildVSDX({ nodes: [nUp, nDown], links: [lk], texts: [] }, {})).toString('latin1');
         const jA = vsdxL.indexOf('GE-A1'), jB = vsdxL.indexOf('GE-B1');
         ok(jA >= 0 && jB >= 0 && jA < jB, '导出：VSDX 两行标注顺序与画布一致（Visio 文本框首段在上）');

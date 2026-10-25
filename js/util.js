@@ -58,7 +58,7 @@ U.escXml = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/\n/g, '&#10;').replace(/\r/g, '')
   // XML 1.0 非法字符剔除，防导出文件被 Visio / lxml 判非良构而拒开整包：
-  // 控制字符 + U+FFFE/U+FFFF（CSV 里塞一个 \uFFFF 就能让 .vsdx/.vdx 报废）。
+  // 控制字符 + U+FFFE/U+FFFF（CSV 里塞一个 \uFFFF 就能让 .vsdx 报废）。
   // 注意：**不能**整段剔除 \uD800-\uDFFF——那会把正常 emoji 的代理对两半都删掉；
   // 落单代理项已由下游 TextEncoder / Buffer 的 UTF-8 编码替换为 U+FFFD，无需在此处理。
   .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, '');
