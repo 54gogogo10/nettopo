@@ -374,7 +374,8 @@ class TftpServer extends EventEmitter {
    *  （会话槽逐出让伪造 WRQ 可持续挤入）；单来源计数是单目录 readdir，保持实时。 */
   _quotaCheck(ipDir) {
     const now = Date.now();
-    if (now - this._quotaScan.at > this._quotaScanTtl) {
+    // >=：TTL 传 0 表示「每次重扫」，用 > 会在同一毫秒内连续调用时复用缓存（快速机器上偶发放行超限写入）
+    if (now - this._quotaScan.at >= this._quotaScanTtl) {
       let bytes = 0;
       const walk = (dir) => {
         let names = [];
