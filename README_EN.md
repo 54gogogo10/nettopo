@@ -4,7 +4,7 @@ English | [简体中文](README.md)
 
 > **Fully local · Zero install · Zero backend** — Generate topology from link spreadsheets or device neighbor tables in one click, edit and validate on canvas, deliver via PDF / image / Visio / Excel; the desktop edition further provides Web Shell, silent device monitoring, config backup with compliance baselines, an alerting system and AI analysis. **All data stays on your machine.**
 
-![Release](https://img.shields.io/github/v/release/54gogogo10/nettopo) ![License](https://img.shields.io/badge/License-AGPL--3.0_+_additional_terms-blue) ![Platform](https://img.shields.io/badge/Platform-Windows_·_Linux-lightgrey) ![Tests](https://img.shields.io/badge/Unit_tests-2589_passing-brightgreen) ![Tech](https://img.shields.io/badge/Stack-Electron_+_native_SVG-informational)
+![Release](https://img.shields.io/github/v/release/54gogogo10/nettopo) ![License](https://img.shields.io/badge/License-AGPL--3.0_+_additional_terms-blue) ![Platform](https://img.shields.io/badge/Platform-Windows_·_Linux-lightgrey) ![Tests](https://img.shields.io/badge/Unit_tests-2901_passing-brightgreen) ![Tech](https://img.shields.io/badge/Stack-Electron_+_native_SVG-informational)
 
 Opening `index.html` in a browser also works (core features available; desktop-only capabilities degrade gracefully).
 
@@ -445,9 +445,89 @@ node bump-version.js --dry-run     # Preview the version bump without writing
 ```
 
 <details>
-<summary><b>Unit test coverage</b> (2901 tests, click to expand the per-module list)</summary>
+<summary><b>Unit test coverage</b> (2901 tests, click to expand the grouped list)</summary>
 
-Export structures (VSDX/PDF) · Web Shell sessions · multi-mgmt · sanitization · layout · load anti-overlap · performance · regression · paths · SPOF · subnet analysis · LAG · neighbor parsing · interface table · backup library · subnet calc · quick search · region containers · SNMP ifTable/performance collection with response validation · compliance templates · built-in services TFTP/FTP/Syslog protocol clients & backup import · AI LLM (addresses/prompts/SSE/history/model lists, OpenAI & Claude dual-protocol local fake servers end-to-end / Shell AI command generation) · IPAM · session recording parsing · SFTP file management · SSH metric parsing & thresholds · HTTP probe & certificate expiry · GBK decoding · connection bookmarks · alert silence & maintenance windows · diagnostics toolbox · inspection data export · daily-report scheduling · tab restore & command palette · MAC·ARP table parsing & endpoint location · cross-vendor interface normalization · one-shot command execution · subnet liveness scan · SNMP Trap v1·v2c parsing & receiver · SNMP v3 USM key localization·three security tiers·mock proxy end-to-end · Syslog log alert rules · link utilization overlay · batch inspection read-only whitelist · credential vault · alert dependency suppression · config-change volatile-line ignore rules & drift summary · team baseline packs · SLA report · L2 inference · underlay sanitization & export framing · interactive HTML export · event acknowledgment · alert levels · link connectivity monitoring · manual node resize · cross-device drift compare · **environment sensors** (ENTITY-SENSOR four-column parsing·precision/scale·temp/fan thresholds·config clamps) · **restore change sets** (block deletes with context headers·same-key overwrite without redundant undo·Cisco interface/banner manual items) · **interface traffic period report** (valid-sample averages·peaks·uptime·TopN) · **interface error monitoring** (delta rate semantics·wraparound null·threshold-0 semantics·change-edge alerts & recovery·mock agent end-to-end) · **alert webhook** (config normalization·four payload formats with DingTalk/Feishu signing·local fake receiver postJson branches·level filter & cooldown) · **L3 neighbor continuous monitoring** (debounce 2-round alert/recover·transient flaps silent·config clamps) · **NetFlow/IPFIX collector** (v5 field mapping & duration·v9 template cache isolation per source+sourceId with **bucketed eviction**·per-packet template caps·IPFIX v10·malformed packet safety·**zero-length template no-hang**·UDP end-to-end tail/session aggregation/filter/clear·rate-limit drop counters·net-services config clamps) · **deployment gates & pre-commands** (do/sudo/separator/absolute-path wrapper normalization·renderer & main process list parity·pre-commands through the same gate with confirmation abort·no session on block·**main-process recheck of alert-class confirmations**) · **export namespaces & charsets** (root xmlns:xlink; U+FFFE/U+FFFF stripped, emoji kept) · **underlay undo & refresh** · **ops-chain robustness** (updater download failure resets the state machine·missing manifest refuses publish·Syslog/Trap quota reclaim only expires old files·cooldown table evicts oldest·TFTP write quotas & catalog caps·audit error-field masking·monitor backup/metric command control-char stripping·AI prompt delimiter neutralization & prototype-key fallback) · **real-device (Huawei S6700 / YunShan OS) regression** (Telnet auto-login with "initial password must change" reported honestly·login takeover stops at the prompt·generic [Y/N] prompts not mistaken for password change·keyword alerts fire on arrival not next cycle·YunShan config timestamps in default ignore rules·**SNMP v3 SHA-2 auth profile**·**rollback change-set real-device viability** — attribute subcommand inverses carry no value and block deletes exit the sub-view first) · **UI language i18n** (dictionary hits / fallback to source text / language persistence & reload / key-entry coverage) · **inspection report** (self-contained HTML·no scripts·empty-data degradation) · **event timeline archive** (survives restarts·acknowledgment & escalation marks persisted·corrupt file falls back to empty without overwriting·500-entry cap & field clamps) · **CLI backup semantics** (volatile-line ignore rules from the same settings.json as the GUI·skip identical content by default·`--save-same` forces a save) · **monitoring via credential vault** (credId resolved in main·explicit fields win·unavailable entry reported honestly·manual path unchanged) · **per-device alert aggregation** (first fires immediately·rest merged at the highest level·recovery bypasses·per-device cap counted honestly) · **disk byte quota** (disk-quota accounting/rescan/symlinks excluded·backup library evicts oldest globally·single-save over quota rejected·delete credits back) · **scheduler jitter & failure backoff** (phaseOf stable per-key hashing·first-round jitter for own-mode backup/SNMP/HTTP/metrics·reconnect and SNMP polling back off 1× first then 2×–8×·liveness probes never back off to keep SLA sampling) · **vendor coverage** (Ruijie OID prefill·Juniper/FortiGate inspection & evidence presets·get read-only whitelisted while execute/config/set still rejected·seven device-side ping syntaxes) · **metric history archive** (performance samples restored across restarts·teardown stash keeps history on task restart·corrupt file falls back) · **NetFlow hourly snapshots** (session TopN appended hourly to JSONL·30-day rolling·time-window query) · **oversized-canvas PDF paging** (multi-page assembly·per-page MediaBox·JPEG bytes embedded) · **subnet grouping cache** (subnetPartition/subnetGroupsFrom split equivalence·moving nodes keeps partition)
+**Canvas, editing & core model**
+
+- layout, load anti-overlap, performance, regression, quick search, region containers, manual node resize, interface table, multi-mgmt, subnet calc, backup library, sanitization
+- underlay: sanitization & export framing; undo & refresh (undo keeps content, survives refresh)
+- **subnet grouping cache** (subnetPartition/subnetGroupsFrom split equivalence·moving nodes keeps partition)
+
+**Analysis & validation**
+
+- paths, SPOF, subnet analysis, LAG, IPAM
+
+**Import & delivery**
+
+- neighbor parsing, export structures (VSDX/PDF), interactive HTML export
+- **export namespaces & charsets** (root xmlns:xlink; U+FFFE/U+FFFF stripped, emoji kept)
+- **oversized-canvas PDF paging** (multi-page assembly·per-page MediaBox·JPEG bytes embedded)
+
+**Web Shell & connections**
+
+- Web Shell sessions, SFTP file management, session recording parsing, connection bookmarks, tab restore & command palette, one-shot command execution, GBK decoding
+
+**Monitoring collection & scheduling**
+
+- SNMP ifTable/performance collection with response validation, SSH metric parsing & thresholds, HTTP probe & certificate expiry, link utilization overlay, link connectivity monitoring
+- **environment sensors** (ENTITY-SENSOR four-column parsing·precision/scale·temp/fan thresholds·config clamps)
+- **interface error monitoring** (delta rate semantics·wraparound null·threshold-0 semantics·change-edge alerts & recovery·mock agent end-to-end)
+- **scheduler jitter & failure backoff** (phaseOf stable per-key hashing·first-round jitter for own-mode backup/SNMP/HTTP/metrics·reconnect and SNMP polling back off 1× first then 2×–8×·liveness probes never back off to keep SLA sampling)
+- **metric history archive** (performance samples restored across restarts·teardown stash keeps history on task restart·corrupt file falls back)
+- **monitoring via credential vault** (credId resolved in main·explicit fields win·unavailable entry reported honestly·manual path unchanged)
+
+**Alerting**
+
+- alert silence & maintenance windows, event acknowledgment, alert levels, alert dependency suppression, alert-time evidence capture & post-mortem reports
+- **event timeline archive** (survives restarts·acknowledgment & escalation marks persisted·corrupt file falls back to empty without overwriting·500-entry cap & field clamps)
+- **per-device alert aggregation** (first fires immediately·rest merged at the highest level·recovery bypasses·per-device cap counted honestly)
+- **alert webhook** (config normalization·four payload formats with DingTalk/Feishu signing·local fake receiver postJson branches·level filter & cooldown)
+
+**Config backup, diff & deployment**
+
+- config backup full-text search, config-change volatile-line ignore rules & drift summary, cross-device drift compare
+- **restore change sets** (block deletes with context headers·same-key overwrite without redundant undo·Cisco interface/banner manual items)
+- **deployment gates & pre-commands** (do/sudo/separator/absolute-path wrapper normalization·renderer & main process list parity·pre-commands through the same gate with confirmation abort·no session on block·**main-process recheck of alert-class confirmations**)
+
+**Compliance baselines**
+
+- compliance templates, team baseline packs
+
+**Diagnostics, protocols & inspection**
+
+- diagnostics toolbox, subnet liveness scan, MAC·ARP table parsing & endpoint location, cross-vendor interface normalization, L2 inference, batch inspection read-only whitelist, port / cable ledger + VLAN consistency
+- **L3 neighbor continuous monitoring** (debounce 2-round alert/recover·transient flaps silent·config clamps)
+
+**Reports**
+
+- SLA report, capacity trend & 95th percentile, inspection data export
+- **interface traffic period report** (valid-sample averages·peaks·uptime·TopN)
+- **inspection report** (self-contained HTML·no scripts·empty-data degradation)
+
+**Built-in network services**
+
+- built-in services TFTP/FTP/Syslog protocol clients & backup import, Syslog log alert rules
+- SNMP Trap v1·v2c parsing & receiver, **SNMP v3 USM** (key localization·three security tiers·mock proxy end-to-end)
+- **NetFlow/IPFIX collector** (v5 field mapping & duration·v9 template cache isolation per source+sourceId with **bucketed eviction**·per-packet template caps·IPFIX v10·malformed packet safety·**zero-length template no-hang**·UDP end-to-end tail/session aggregation/filter/clear·rate-limit drop counters·net-services config clamps)
+- **NetFlow hourly snapshots** (session TopN appended hourly to JSONL·30-day rolling·time-window query)
+
+**AI**
+
+- **AI LLM** (addresses/prompts/SSE/history/model lists, OpenAI & Claude dual-protocol local fake servers end-to-end / Shell AI command generation)
+- daily-report scheduling
+
+**Credentials, storage & robustness**
+
+- credential vault
+- **disk byte quota** (disk-quota accounting/rescan/symlinks excluded·backup library evicts oldest globally·single-save over quota rejected·delete credits back)
+- **ops-chain robustness** (updater download failure resets the state machine·missing manifest refuses publish·Syslog/Trap quota reclaim only expires old files·cooldown table evicts oldest·TFTP write quotas & catalog caps·audit error-field masking·monitor backup/metric command control-char stripping·AI prompt delimiter neutralization & prototype-key fallback)
+
+**UI, CLI & vendor coverage**
+
+- **UI language i18n** (dictionary hits / fallback to source text / language persistence & reload / key-entry coverage)
+- **CLI backup semantics** (volatile-line ignore rules from the same settings.json as the GUI·skip identical content by default·`--save-same` forces a save)
+- **vendor coverage** (Ruijie OID prefill·Juniper/FortiGate inspection & evidence presets·get read-only whitelisted while execute/config/set still rejected·seven device-side ping syntaxes)
+- **real-device (Huawei S6700 / YunShan OS) regression** (Telnet auto-login with "initial password must change" reported honestly·login takeover stops at the prompt·generic [Y/N] prompts not mistaken for password change·keyword alerts fire on arrival not next cycle·YunShan config timestamps in default ignore rules·**SNMP v3 SHA-2 auth profile**·**rollback change-set real-device viability** — attribute subcommand inverses carry no value and block deletes exit the sub-view first)
 
 </details>
 
