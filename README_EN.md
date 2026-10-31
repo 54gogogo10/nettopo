@@ -147,6 +147,8 @@ Opening `index.html` in a browser also works (core features available; desktop-o
 
 > The **Monitor ▾** menu is grouped into submenus: **Monitor Center** is a top-level entry; everything else lives under **Monitor Views / Collection & Alerts / Config & Logs / Inspection & Reports / Diagnostics & Protocols / Services & Credentials**. Paths below read "Monitor ▾ Group ▸ Item…".
 
+#### Ops Workbench & Remote Access
+
 - **Ops workbench (today's to-dos)**: "Monitor ▾ Ops Workbench (Today's To-Dos)…" aggregates **offline devices / alerting / link-down / unacknowledged events / certificate & warranty expiry / failed or stale backups** onto one screen, sorted by urgency
   - Each item offers one-click locate, jump to the link panel or direct acknowledgment; all data comes from existing monitoring APIs, no new collection
   - With nothing pending it honestly shows "nothing needs attention right now"
@@ -163,6 +165,7 @@ Opening `index.html` in a browser also works (core features available; desktop-o
     - **Execution modes** (confirm-before-run — default / fill-only / run directly), **output types** (single commands / config block)
     - Optional recent terminal output as context, stoppable mid-generation
   - **Record / replay**: top bar "⏺ Record / ▶ Replay" captures terminal output into JSONL sessions and replays read-only at 0.5–8×; session content is also written to the local audit log, browsable and searchable in "Monitor Logs…"
+- **Serial console**: Web Shell adds a "Serial Console" protocol (USB debug cable — pick the port on Connect, the "Port" box is the baud rate, default 9600; GBK decoding supported) for out-of-band scenarios like first-time provisioning and password recovery; multi-tab / recording / quick buttons all apply
 - **Unified credential vault**: "Monitor ▾ Services & Credentials ▸ Credential Vault…" centralizes device credentials — name, username, password / private key, protocol & port, **vendor match**, **pre-command** (e.g. Cisco user-mode `enable`), notes, default flag, up to 50 entries
   - All collection/deployment panels (**the device monitoring dialog** / neighbor collection / MAC·ARP locator / batch inspection / L3 neighbors / IPAM live audit / auto-discovery / config deployment) upgraded from "fallback account" to **vault dropdown + manual fallback**
     - Only the entry ID goes to the main process — **username, password and pre-command are injected inside the session pipe in the main process, plaintext never passes through the renderer**
@@ -170,6 +173,9 @@ Opening `index.html` in a browser also works (core features available; desktop-o
   - Auto-discovery matches vault entries by vendor command set (explicit selection → vendor match → default fallback; it does **not** brute-force the whole vault against a device — that locks accounts)
   - Passwords are encrypted by the OS (Windows DPAPI) into `userData/credentials/credentials.json`: when encryption is unavailable the store **refuses to save and says so** (never falls back to plaintext); a corrupted file enters read-only protection without overwriting
 - **Device management web pages**: configure a "Management Web URL" and right-click to open in an independent multi-tab window; HTTPS self-signed certs raise a security warning (confirmable, rememberable); standard Chrome UA, popups become tabs, zoom remembered per page
+
+#### Device Monitoring & Background Presence
+
 - **Silent background monitoring**: right-click a device to configure SSH/Telnet accounts and commands (credentials can come **directly from a vault entry** — only the management address is left to fill in); the background collects output into local daily-archived logs, per management address
   - **Batch Monitoring…**: select multiple devices and hit it on the selection card to apply one monitoring template (one task per management address of every device, credentials via vault entry or one shared account; devices without management addresses are honestly skipped — enabling monitoring for dozens of devices no longer means dozens of dialogs)
   - **On-connect commands** (once per connection), **liveness probe** (TCP/ICMP, offline notification), **output keyword alerts** (all keywords must match to raise, all must clear to resolve; events carry the matching lines)
@@ -191,13 +197,7 @@ Opening `index.html` in a browser also works (core features available; desktop-o
     - Events and acknowledgment state are archived to `monitor-events.json` (same 500-entry cap as the in-memory timeline) and **survive restarts**
   - **Config backups / Interfaces / Performance / Links**: CPU/memory/temperature trends and uptime; SSH metrics page shows per-mount disk / memory / load trends; HTTP probe status and certificate days; the Links tab shows per-segment results and break points; error column pins non-zero interfaces in red
   - **Interface traffic period report**: the Interfaces page "Traffic Report…" aggregates per-interface averages / peaks and uptime over a window (1h / 24h / 7d), TopN by peak, CSV export (averages count only valid rate samples — the first sample has no delta and counts as neither zero nor data)
-- **Capacity trend & 95th percentile report**: "Monitor ▾ Inspection & Reports ▸ Capacity Trend & 95th…" downsamples ifTable samples into **per-device files that survive restarts** (daily aggregates kept 180 days)
-  - Per-interface average / peak / P95 / availability / peak utilization over the last 7/30/90 days and this/last month; click a row for the daily trend; CSV export
-  - P95 comes from merged daily histograms with bucket bounds; expired histograms fall back to weighted daily-P95 estimates marked ≈; insufficient sample coverage is labeled honestly — approximations never pose as billing-grade numbers
-  - "Export Inspection Data" exports all devices' SSH metric samples and HTTP/certificate history to CSV; "Monitor Logs…" supports global cross-file search with click-to-line
-- **One-click inspection report**: "Monitor ▾ Inspection & Reports ▸ Inspection Report (One-Click)…" summarizes topology overview, device monitoring status (incl. temperature), 7-day availability, config backup overview, rack occupancy and recent events into a **self-contained, printable HTML report**
-  - Preview in a dialog, system print (save as PDF) or download
-  - All data is local, nothing sent anywhere (browser mode keeps the topology overview with monitoring sections degraded)
+- **History replay**: "Monitor ▾ Monitor Views ▸ History Replay…" scrubs a timeline over the last 7 days showing per-time device up/down coloring (from 10-minute uptime samples with a 30-minute lookback) — failure review without digging through logs; exiting restores live monitoring
 - **Floor plan underlay**: "View ▾ Floor Plan Underlay…" places a machine-room/floor image (PNG / JPG / GIF / WebP / SVG) as the bottom canvas layer to position devices by real location; **one image per sheet**, saved with the project
   - Opacity, show/hide, position lock; check "Adjust underlay" to **drag and resize directly on canvas** (unchecked, the underlay never intercepts pointer events), or position precisely via X/Y/W/H, "Align to content" or reset to original aspect
   - The underlay **participates in export framing**: PDF / image / SVG include it (as seen; hidden = not exported), Visio excludes it
@@ -205,13 +205,35 @@ Opening `index.html` in a browser also works (core features available; desktop-o
 - **NOC dashboard mode**: "View ▾ NOC Dashboard Mode" full-screens for a wall display — tool UI hidden, topology auto-fit
   - A translucent top bar shows sheet name (multi-sheet **auto-rotates every 15 s**), a large clock and **offline / alerting / link-down / unacked** counters; recent events scroll at the bottom (level-colored, hover pauses)
   - Link coloring and device badges follow canvas state; Esc or button exits; works in the browser too (fullscreen + topology; monitoring data needs desktop)
+- **Tray icon**: enabled, closing the main window minimizes to the system tray while background monitoring continues
+
+#### Diagnostics & Protocol Views
+
 - **L2 topology inference (SNMP FDB)**: "Monitor ▾ Diagnostics & Protocols ▸ L2 Topology Inference (SNMP FDB)…" reads switches' bridge forwarding tables (`dot1dTpFdbTable` + `dot1dBasePortIfIndex` + `dot1dBaseBridgeAddress`, v2c / v3) and infers switch-to-switch links from "**the same set of MACs seen only on this pair of ports**" — **purpose-built for legacy devices without LLDP/CDP and SNMP-read-only scenarios**
   - Evidence graded strongest to weakest: ① each side sees the **other's bridge MAC** on a unique port (strongest; switches rarely learn their own bridge MAC, FDB intersection alone misses exactly these clearest links); ② the **exclusive** intersection of both FDBs. MACs in the intersection appearing on **other** ports on either side ⇒ **no link** (likely shared segment/loop — the classic false-positive source); disagreeing ports or ties are reported as "suspected (not judged)" with reasons
   - The result table shows A/B devices and ports, exclusive/shared MAC counts, confidence (strong/medium/weak) and evidence; row-cap truncation degrades the whole run with a note; CSV export; "Merge into topology" only adds new links, idempotent; **inferred links carry an `inferred` flag in the project, render dashed on canvas and count in the legend (Inferred N)** — clearly distinct from discovered links
-- **Availability report (SLA)**: "Monitor ▾ Inspection & Reports ▸ Availability Report (SLA)…" aggregates probe samples into a deliverable report — **availability / outage count / cumulative outage / MTTR / longest outage / sample coverage** per device (mgmt address) with weighted totals; rows below target (default 99.9%, editable) in red
-  - Windows: last 7 days / 30 days / this month / last month / custom; export **CSV / Excel** or a **self-contained, print-to-PDF HTML report** (with methodology notes, fits acceptance packages)
-  - Two-tier retention: **10-minute detail for 7 days** (outage spans need it) + **daily rollups for 400 days** (long-run availability; negligible size); windows beyond detail retention **degrade honestly and say so** — availability falls back to daily rollups, outage detail covers only the detailed span (marked `*` with a footnote); partial data never poses as a full window
-  - Methodology is fixed in UI and exports: availability by 10-minute buckets (not per-second probing), outage duration = consecutive offline buckets × bucket width with the last one truncated to "now"; sub-bucket flaps invisible
+- **L3 neighbor collection & continuous monitoring (BGP / OSPF)**: "Monitor ▾ Diagnostics & Protocols ▸ L3 Neighbors & Protocol View (BGP / OSPF)…" concurrently logs into devices running read-only commands (Huawei `display ospf peer brief` / `display bgp peer`, Cisco `show ip ospf neighbor` / `show ip bgp summary`; vendor set selectable or auto), matches adjacencies onto the topology and overlays **status badges** on canvas links
+  - The anomaly list distinguishes **neighbor-state anomalies** (not established / below Full), **out-of-topology neighbors** (unidentifiable) and **out-of-plan adjacencies** (adjacency without a topology link); CSV export and one-click write into the event timeline
+  - **Continuous monitoring**: polls selected devices on interval (default 5 min) — OSPF neighbor flaps are the most common LAN failure and invisible to interface up/down
+    - **State anomalies alert after 2 consecutive bad rounds and recover after 2 good rounds** (debounce against flapping), recorded along changes with graded notifications (L3 recovery = Info)
+    - Out-of-topology / out-of-plan are planning-scope items excluded from alerting (still visible in panel & CSV); the timer keeps running with the panel closed and auto-restores from local save (credentials re-resolved per credId, no plaintext at rest)
+- **MAC/ARP endpoint locator**: "Monitor ▾ Diagnostics & Protocols ▸ MAC/ARP Endpoint Locator…" takes an IP or MAC, concurrently collects ARP / MAC tables across devices in scope (Huawei/H3C/Cisco/Linux auto-tried; credentials from monitoring configs or a fallback account)
+  - **Traces hop-by-hop to the access port** and highlights on canvas (cross-vendor interface normalization: GE/Gi/GigabitEthernet, TE/XGE, Eth-Trunk/Po are the same)
+  - A target that is itself a device mgmt address hits directly; unqueried downstream devices offer one-click continue
+- **Diagnostics toolbox**: "Monitor ▾ Diagnostics & Protocols ▸ Diagnostics Toolbox…" from this machine:
+  - **Ping** (sent/lost/rtt parsing, Chinese & Windows/Linux outputs), **traceroute** (tracert / traceroute / tracepath auto-fallback)
+  - **TCP port batch scan** (ranges + presets, capped concurrency), **DNS lookup** (A + PTR)
+  - **Subnet liveness scan** (CIDR / range / mixed, per-host concurrent ping with local-ARP MACs and optional PTR, capped 4096)
+  - **SNMP Walk** (v2c community or v3 USM over any OID subtree with system / ifDescr / ARP presets, empty walk falls back to single GET)
+  - Host and OID whitelisted; external commands invoked with controlled argument lists
+- **Batch inspection (read-only)**: "Monitor ▾ Inspection & Reports ▸ Batch Inspection (Read-Only)…" runs vendor read-only command sets concurrently on selected devices
+  - Eight built-in sets (auto / Huawei / H3C / Cisco / Ruijie / Juniper Junos / FortiGate / Linux; version / clock / CPU / memory / interface overview, first command closes paging), credentials from monitoring configs or fallback
+  - Per-device output viewable per command with one-click copy; the result table has status/protocol/command count/duration and CSV export
+  - Commands pass a **read-only whitelist** (display/show/get (FortiGate read-only queries) / paging-off / Linux read-only prefixes; system-view, conf t, undo, execute and other config/execution commands blocked) — devices are never modified
+- **SNMP failure diagnostics**: on SNMP Walk failure the diagnostics toolbox appends an ICMP reachability verdict with Chinese remediation advice (timeout vs authorization error vs view permission, calibrated against real firmware behavior)
+
+#### Alerting
+
 - **Alert dependency suppression (upstream loss merges downstream)**: when a core dies and dozens of downstream probes fail at once, the notification area no longer floods with "device offline" — downstream offline notifications are **merged into the root cause** by topology adjacency
   - The root-cause rule is deterministic: within the same "failure-connected component" (devices connected via links and currently offline) the winner is chosen by **earliest failure start → upstream-ness (router/firewall > switch > other > endpoint, only when timing ties) → degree → key order**, independent of event arrival order
     - Never "first reporter becomes upstream" — that silences the core and can even deadlock merging
@@ -245,24 +267,27 @@ Opening `index.html` in a browser also works (core features available; desktop-o
   - Default "first round establishes baseline only, no alerts"; alerts only on state flips
   - **Task persistence**: the task list (without credentials) is stored locally and restored on restart; down/up events enter the timeline with **graded alerts** (link down defaults Major)
   - Canvas links colored by verdict (green up / red down flashing dashed / gray unknown; manual fault marks win; globally toggleable), sidebar devices get square link markers
-- **L3 neighbor collection & continuous monitoring (BGP / OSPF)**: "Monitor ▾ Diagnostics & Protocols ▸ L3 Neighbors & Protocol View (BGP / OSPF)…" concurrently logs into devices running read-only commands (Huawei `display ospf peer brief` / `display bgp peer`, Cisco `show ip ospf neighbor` / `show ip bgp summary`; vendor set selectable or auto), matches adjacencies onto the topology and overlays **status badges** on canvas links
-  - The anomaly list distinguishes **neighbor-state anomalies** (not established / below Full), **out-of-topology neighbors** (unidentifiable) and **out-of-plan adjacencies** (adjacency without a topology link); CSV export and one-click write into the event timeline
-  - **Continuous monitoring**: polls selected devices on interval (default 5 min) — OSPF neighbor flaps are the most common LAN failure and invisible to interface up/down
-    - **State anomalies alert after 2 consecutive bad rounds and recover after 2 good rounds** (debounce against flapping), recorded along changes with graded notifications (L3 recovery = Info)
-    - Out-of-topology / out-of-plan are planning-scope items excluded from alerting (still visible in panel & CSV); the timer keeps running with the panel closed and auto-restores from local save (credentials re-resolved per credId, no plaintext at rest)
-- **MAC/ARP endpoint locator**: "Monitor ▾ Diagnostics & Protocols ▸ MAC/ARP Endpoint Locator…" takes an IP or MAC, concurrently collects ARP / MAC tables across devices in scope (Huawei/H3C/Cisco/Linux auto-tried; credentials from monitoring configs or a fallback account)
-  - **Traces hop-by-hop to the access port** and highlights on canvas (cross-vendor interface normalization: GE/Gi/GigabitEthernet, TE/XGE, Eth-Trunk/Po are the same)
-  - A target that is itself a device mgmt address hits directly; unqueried downstream devices offer one-click continue
-- **Diagnostics toolbox**: "Monitor ▾ Diagnostics & Protocols ▸ Diagnostics Toolbox…" from this machine:
-  - **Ping** (sent/lost/rtt parsing, Chinese & Windows/Linux outputs), **traceroute** (tracert / traceroute / tracepath auto-fallback)
-  - **TCP port batch scan** (ranges + presets, capped concurrency), **DNS lookup** (A + PTR)
-  - **Subnet liveness scan** (CIDR / range / mixed, per-host concurrent ping with local-ARP MACs and optional PTR, capped 4096)
-  - **SNMP Walk** (v2c community or v3 USM over any OID subtree with system / ifDescr / ARP presets, empty walk falls back to single GET)
-  - Host and OID whitelisted; external commands invoked with controlled argument lists
-- **Batch inspection (read-only)**: "Monitor ▾ Inspection & Reports ▸ Batch Inspection (Read-Only)…" runs vendor read-only command sets concurrently on selected devices
-  - Eight built-in sets (auto / Huawei / H3C / Cisco / Ruijie / Juniper Junos / FortiGate / Linux; version / clock / CPU / memory / interface overview, first command closes paging), credentials from monitoring configs or fallback
-  - Per-device output viewable per command with one-click copy; the result table has status/protocol/command count/duration and CSV export
-  - Commands pass a **read-only whitelist** (display/show/get (FortiGate read-only queries) / paging-off / Linux read-only prefixes; system-view, conf t, undo, execute and other config/execution commands blocked) — devices are never modified
+- **Alert escalation**: "Alert Levels & Sounds…" accepts an unacknowledged-escalation timeout (off by default) — warnings and above unacknowledged past the deadline escalate one level and re-notify (system notification + sound + webhook from one source), once per event, capped at 5 per sweep
+
+#### Inspection & Reports
+
+- **Capacity trend & 95th percentile report**: "Monitor ▾ Inspection & Reports ▸ Capacity Trend & 95th…" downsamples ifTable samples into **per-device files that survive restarts** (daily aggregates kept 180 days)
+  - Per-interface average / peak / P95 / availability / peak utilization over the last 7/30/90 days and this/last month; click a row for the daily trend; CSV export
+  - P95 comes from merged daily histograms with bucket bounds; expired histograms fall back to weighted daily-P95 estimates marked ≈; insufficient sample coverage is labeled honestly — approximations never pose as billing-grade numbers
+  - "Export Inspection Data" exports all devices' SSH metric samples and HTTP/certificate history to CSV; "Monitor Logs…" supports global cross-file search with click-to-line
+- **One-click inspection report**: "Monitor ▾ Inspection & Reports ▸ Inspection Report (One-Click)…" summarizes topology overview, device monitoring status (incl. temperature), 7-day availability, config backup overview, rack occupancy and recent events into a **self-contained, printable HTML report**
+  - Preview in a dialog, system print (save as PDF) or download
+  - All data is local, nothing sent anywhere (browser mode keeps the topology overview with monitoring sections degraded)
+- **Availability report (SLA)**: "Monitor ▾ Inspection & Reports ▸ Availability Report (SLA)…" aggregates probe samples into a deliverable report — **availability / outage count / cumulative outage / MTTR / longest outage / sample coverage** per device (mgmt address) with weighted totals; rows below target (default 99.9%, editable) in red
+  - Windows: last 7 days / 30 days / this month / last month / custom; export **CSV / Excel** or a **self-contained, print-to-PDF HTML report** (with methodology notes, fits acceptance packages)
+  - Two-tier retention: **10-minute detail for 7 days** (outage spans need it) + **daily rollups for 400 days** (long-run availability; negligible size); windows beyond detail retention **degrade honestly and say so** — availability falls back to daily rollups, outage detail covers only the detailed span (marked `*` with a footnote); partial data never poses as a full window
+  - Methodology is fixed in UI and exports: availability by 10-minute buckets (not per-second probing), outage duration = consecutive offline buckets × bucket width with the last one truncated to "now"; sub-bucket flaps invisible
+- **Alert evidence capture + post-mortem**: "Monitor ▾ Inspection & Reports ▸ Evidence & Post-Mortem…" after an alert enters the timeline, automatically runs a **read-only command set** via device monitoring credentials (interfaces / routing / logs / LLDP, same read-only whitelist as batch inspection; 10 min per device, 6 per hour globally) and stores device output as evidence packs (64KB per entry, 512KB per pack, up to 1000 packs, truncated and labeled)
+  - Unreachable devices are recorded honestly as "capture failed"
+  - One click turns a selected window into a **self-contained, printable post-mortem HTML**: event timeline + evidence excerpts + affected devices/links + config changes in the window + blank root-cause / handling / improvement sections; all data is local
+
+#### Config Backup & Change Management
+
 - **Config change deployment**: "Monitor ▾ Config & Logs ▸ Config Change Deployment…" **safely deploys** config-generator output or hand-written snippets to devices, designed "look before you leap":
   1. **Safety gates**: reload/erase/format/factory-reset/file-delete commands (`reload`, `erase`, `format`, `factory-reset`, `write erase`, `delete`, `boot`…) are always refused, non-overridable; delete/disable commands (`undo`/`no`/`clear`/`reset`/`shutdown`) and "may cut management access" changes each require explicit checkboxes, invalidated when the change set is edited
   2. **Dry-run**: line-by-line diff against the latest config backup marking add/overwrite/delete/idempotent, with **self-disconnection** warnings for "mgmt address rewritten" and "management protocol (SSH/Telnet/SNMP/HTTP) disabled"; comment lines, blanks and terminal prompt prefixes (`[SW1]`/`<SW1>`/`SW1#`) auto-stripped; `system-view`/`save` mode-control lines handled by the pipe
@@ -290,6 +315,12 @@ Opening `index.html` in a browser also works (core features available; desktop-o
   - **Team baseline packs**: "Export baseline pack…" bundles the rule set + custom compliance templates + custom config templates into a versioned (`format`/`formatVersion`) JSON for colleagues; "Import baseline pack…" supports **merge** (same-name templates / same-id rules overwrite, rest kept) or **full replace**
     - Per-item whitelist cleaning before import — **bad regexes are dropped and counted** (never invalidating the whole pack), template keys pass a prototype-pollution whitelist (`__proto__`/`constructor` dropped), packs over 512 KB or from newer format versions are refused
     - The preview shows exactly what will import and what was dropped
+- **Backup manager**: auto-backups and "Back up now" live in the local backup library — browse / restore / delete / clear, rolling "keep last N"
+  - Plus a **2GB whole-library byte quota** as a hard floor (over quota the oldest backups across devices are evicted first; a single backup larger than the quota is honestly rejected — a full disk is a harder constraint than a backup count)
+  - Monitor logs (incl. Web Shell audit) get a **1GB quota** beyond the 90-day retention (oldest date directories removed over quota) — 24/7 high-output devices can no longer fill the disk
+
+#### Built-in Services & AI
+
 - **Built-in network services (TFTP / FTP / Syslog / Trap / NetFlow)**: "Monitor ▾ Services & Credentials ▸ Network Services…" turns this machine into an on-net ops server:
   - **TFTP / FTP**: receives device-pushed config files (Cisco `copy running-config tftp://`, Huawei/H3C `tftp … put`; FTP with account)
     - Files land **in per-source-IP directories** with notifications; view / delete and **one-click import into the config backup library** (source IP auto-matched to topology devices, entering the backup / compare / compliance system)
@@ -315,17 +346,6 @@ Opening `index.html` in a browser also works (core features available; desktop-o
 - **Scheduled AI daily report**: "AI ▾ Schedule Daily Report…" sets a daily generation time (off by default; requires AI configured)
   - At the time, the main process summarizes monitoring status, disk/memory/load metrics, HTTP probes and certificate days, recent events and 7-day uptime, calls the AI for a Chinese daily report, **saves it into "Analysis History"** and notifies; the next run time is visible in the dialog
 - **Onboarding prep wizard**: "Monitor ▾ Services & Credentials ▸ Onboarding Prep…" generates vendor-specific (Huawei / H3C / Cisco) command lists to enable SNMP v3 / Stelnet / LLDP — non-interactive lines go through the deployment safety gates in one click; interactive lines (usm-user password prompts) copy to the device console with annotated passwords. Vendor dialects carry real-device adaptations (Huawei disables v2c/SHA-1, usm-user needs a separate group attach)
-- **Serial console**: Web Shell adds a "Serial Console" protocol (USB debug cable — pick the port on Connect, the "Port" box is the baud rate, default 9600; GBK decoding supported) for out-of-band scenarios like first-time provisioning and password recovery; multi-tab / recording / quick buttons all apply
-- **Alert evidence capture + post-mortem**: "Monitor ▾ Inspection & Reports ▸ Evidence & Post-Mortem…" after an alert enters the timeline, automatically runs a **read-only command set** via device monitoring credentials (interfaces / routing / logs / LLDP, same read-only whitelist as batch inspection; 10 min per device, 6 per hour globally) and stores device output as evidence packs (64KB per entry, 512KB per pack, up to 1000 packs, truncated and labeled)
-  - Unreachable devices are recorded honestly as "capture failed"
-  - One click turns a selected window into a **self-contained, printable post-mortem HTML**: event timeline + evidence excerpts + affected devices/links + config changes in the window + blank root-cause / handling / improvement sections; all data is local
-- **Alert escalation**: "Alert Levels & Sounds…" accepts an unacknowledged-escalation timeout (off by default) — warnings and above unacknowledged past the deadline escalate one level and re-notify (system notification + sound + webhook from one source), once per event, capped at 5 per sweep
-- **History replay**: "Monitor ▾ Monitor Views ▸ History Replay…" scrubs a timeline over the last 7 days showing per-time device up/down coloring (from 10-minute uptime samples with a 30-minute lookback) — failure review without digging through logs; exiting restores live monitoring
-- **SNMP failure diagnostics**: on SNMP Walk failure the diagnostics toolbox appends an ICMP reachability verdict with Chinese remediation advice (timeout vs authorization error vs view permission, calibrated against real firmware behavior)
-- **Backup manager**: auto-backups and "Back up now" live in the local backup library — browse / restore / delete / clear, rolling "keep last N"
-  - Plus a **2GB whole-library byte quota** as a hard floor (over quota the oldest backups across devices are evicted first; a single backup larger than the quota is honestly rejected — a full disk is a harder constraint than a backup count)
-  - Monitor logs (incl. Web Shell audit) get a **1GB quota** beyond the 90-day retention (oldest date directories removed over quota) — 24/7 high-output devices can no longer fill the disk
-- **Tray icon**: enabled, closing the main window minimizes to the system tray while background monitoring continues
 
 ---
 
@@ -764,24 +784,39 @@ On a **4-device Huawei S6700 chain (YunShan OS V600R025C10SPC500)** (s1–s4, LL
 
 ### Data storage
 
-- All data stays local: monitoring logs (`userData/monitor-logs`), config backups (`userData/config-backups`), credential vault (`userData/credentials`), files & Syslog logs received by network services (`userData/net-services`), AI analysis records (`userData/ai-analysis`), uptime samples (`userData/monitor-uptime.json`: 10-minute detail 7 days + daily rollups 400 days) and monitoring configs (incl. passwords); passwords are OS-encrypted (Windows DPAPI safeStorage) at rest; monitoring fingerprints are also local
-- Excel parsing uses the bundled local SheetJS, **fully offline**; browsers cannot overwrite original files on disk so "save back to spreadsheet" is provided as an export; custom types and images live in browser localStorage — clearing browser data loses them, so keep "Save Project" backups
-- Desktop Web Shell supports SSH (password / keyboard-interactive), Telnet (RFC854 negotiation + NAWS) and a serial console (Web Serial, local USB debug cable); SSH host keys show a SHA256 fingerprint on first connect and are remembered (explicit trust writes the main-process authority store), pinned-and-matching hosts connect silently without re-prompting, changed fingerprints refuse connection
+- All data stays local:
+  - monitoring logs (`userData/monitor-logs`), config backups (`userData/config-backups`), credential vault (`userData/credentials`)
+  - files & Syslog logs received by network services (`userData/net-services`), AI analysis records (`userData/ai-analysis`)
+  - uptime samples (`userData/monitor-uptime.json`: 10-minute detail 7 days + daily rollups 400 days) and monitoring configs (incl. passwords)
+  - passwords are OS-encrypted (Windows DPAPI safeStorage) at rest; monitoring fingerprints are also local
+- Excel parsing uses the bundled local SheetJS, **fully offline**; browsers cannot overwrite original files on disk so "save back to spreadsheet" is provided as an export
+- Custom types and images live in browser localStorage — clearing browser data loses them, so keep "Save Project" backups
+- Desktop Web Shell supports SSH (password / keyboard-interactive), Telnet (RFC854 negotiation + NAWS) and a serial console (Web Serial, local USB debug cable)
+  - SSH host keys show a SHA256 fingerprint on first connect and are remembered (explicit trust writes the main-process authority store), pinned-and-matching hosts connect silently without re-prompting, changed fingerprints refuse connection
 
 ### AI & the internet
 
 - Exactly two features generate outbound traffic, both only after **explicit user configuration**: **AI analysis** and **alert webhook delivery**; unconfigured, there is zero outbound traffic
 - AI analysis: selected config/log content goes to the user-configured service (OpenAI-compatible); API keys are OS-encrypted locally and never echoed to the UI; analyzed content is delimiter-wrapped and declared untrusted (anti prompt-injection)
-- Alert webhook: alert title & detail (device name / address / content) POST to the user-configured bot (WeCom / DingTalk / Feishu or generic) — messages relay via those platforms' servers, **do not put highly sensitive information in alert bodies**; signing secrets are OS-encrypted, never echoed, used only inside the main process
-- The Web Shell "AI assistant" also calls AI services via the main process: it sends the requirement text plus, when "include terminal output" is checked, the last ~60 lines of the active tab (for command-syntax fit); generated commands default to confirm-before-run, destructive commands are prompted against at the prompt level, and in "run directly" mode config-deleting/disk-wiping/reboot commands auto-downgrade to manual confirmation — always review before executing
+- Alert webhook: alert title & detail (device name / address / content) POST to the user-configured bot (WeCom / DingTalk / Feishu or generic) — messages relay via those platforms' servers, **do not put highly sensitive information in alert bodies**
+  - Signing secrets are OS-encrypted, never echoed, used only inside the main process
+- The Web Shell "AI assistant" also calls AI services via the main process: it sends the requirement text plus, when "include terminal output" is checked, the last ~60 lines of the active tab (for command-syntax fit)
+  - Generated commands default to confirm-before-run, destructive commands are prompted against at the prompt level, and in "run directly" mode config-deleting/disk-wiping/reboot commands auto-downgrade to manual confirmation — always review before executing
 
 ### Security posture & boundaries
 
-- **CSP**: all three pages ship CSP (script-src 'self' only, no 'unsafe-eval' — bundled SheetJS and all app code are eval-free; other sources restricted to local/data/blob); all local file/log/backup paths go through whitelist sanitization against path traversal; host navigation allows only the app's own index/shell/webview pages
-- **Encryption boundary**: device password encryption strength ties to the OS account (Windows DPAPI keyed to the login password; Linux without a keyring degrades to weak obfuscation with a startup notice); **when OS encryption is entirely unavailable, password-class settings (FTP / Trap v3 / webhook signing keys / AI keys) are refused with an honest notice — never plaintext at rest**; DPAPI ciphertext is protected by the current OS account, and a compromised local renderer can still decrypt local project credentials via IPC (architecturally required, not an isolation boundary)
+- **CSP**: all three pages ship CSP (script-src 'self' only, no 'unsafe-eval' — bundled SheetJS and all app code are eval-free; other sources restricted to local/data/blob)
+  - All local file/log/backup paths go through whitelist sanitization against path traversal; host navigation allows only the app's own index/shell/webview pages
+- **Encryption boundary**: device password encryption strength ties to the OS account (Windows DPAPI keyed to the login password; Linux without a keyring degrades to weak obfuscation with a startup notice)
+  - **When OS encryption is entirely unavailable, password-class settings (FTP / Trap v3 / webhook signing keys / AI keys) are refused with an honest notice — never plaintext at rest**
+  - DPAPI ciphertext is protected by the current OS account, and a compromised local renderer can still decrypt local project credentials via IPC (architecturally required, not an isolation boundary)
 - **Plaintext protocol notice**: Telnet/FTP/SNMP v2c are plaintext protocols — credentials and configs are sniffable on-segment; use only on trusted internal networks and avoid reusing high-privilege passwords
-- **SLA/audit trail**: deployment audit records **mask `password`/`community`/`key` values together with device error echoes** before persisting; SNMP v3 reception requires user + auth password pairs (user-only is refused, avoiding silent downgrade to unauthenticated spoofable Traps)
-- **Built-in service hardening**: TFTP/FTP/Syslog/Trap face the LAN (FTP single-account auth + lockout + source & data-channel checks, default passwords force-replaced with random ones; **TFTP write quotas: per-source file count and total bytes**; Trap optional community whitelist, SNMP v3 forced verify/decrypt); per-source quota reclaim **only expires old files, never touching retained logs**; monitoring/compliance regexes run in workers with time limits — catastrophically backtracking rules are auto-disabled
+- **SLA/audit trail**: deployment audit records **mask `password`/`community`/`key` values together with device error echoes** before persisting
+  - SNMP v3 reception requires user + auth password pairs (user-only is refused, avoiding silent downgrade to unauthenticated spoofable Traps)
+- **Built-in service hardening**: TFTP/FTP/Syslog/Trap face the LAN
+  - FTP single-account auth + lockout + source & data-channel checks, default passwords force-replaced with random ones; **TFTP write quotas: per-source file count and total bytes**
+  - Trap optional community whitelist, SNMP v3 forced verify/decrypt; per-source quota reclaim **only expires old files, never touching retained logs**
+  - Monitoring/compliance regexes run in workers with time limits — catastrophically backtracking rules are auto-disabled
 - **Upgrade verification**: the online upgrade's SHA256 check protects against transfer corruption, not against a poisoned release source (for stronger guarantees verify hashes on the release page manually)
 - The single source of the version string is `U.APP_VERSION` in `js/util.js` (format `v<YYYYMMDD><letter>`), shown in the title/status bar; `npm run build` bumps and rebuilds automatically; the package.json semver exists only for Electron packaging
 
